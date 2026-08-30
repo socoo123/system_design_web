@@ -1,0 +1,464 @@
+import { writeChapter } from "./write-chapter.mjs";
+
+const d2 = (src) => {
+  const body = src.trim();
+  const sized = /style\.font-size/.test(body) ? body : `style.font-size: 12\n${body}`;
+  return "```d2\n" + sized + "\n```";
+};
+
+writeChapter({
+  id: "ch40",
+  num: "40",
+  title: "协议选型",
+  kind: "foundation",
+  relatedChapters: ["ch12", "ch17", "ch29", "ch32"],
+  sections: [
+    {
+      id: "intro",
+      heading: "",
+      secNum: null,
+      related: ["ch12", "ch29", "ch32", "ch39"],
+      body: [
+        "> **预计**：90–120 分钟 ｜ **前置**：Ch12 WS；Ch29/32 SSE 流",
+        "> **目标**：REST / gRPC / WS / SSE / QUIC 怎么选。SSE 只打地基，深讲回 Ch29/32。",
+        "",
+        "这是 **M6 第五块基础芯片**，不是又一道 4 步设计题。主线里网关对外暴露 HTTP、聊天钉长连接、LLM 往外吐 token——本章把 **公开面、服务间、推送、传输层各选哪一种**讲透。设计题里只引用，不在白板上开协议课。Ch12 已经把聊天做成产品；Ch29 / Ch32 已经把流式和网关透传说完。这里只打地基：**SSE 是什么、为什么常被 LLM 用**，不重讲 TTFT、GPU、token 记账。",
+        "",
+        "**一句话：** 对外默认 **REST + JSON**；对内默认 **gRPC**（protobuf + HTTP/2）；要双向推用 **WebSocket**；只要服务端往外推（含 LLM token 流）用 **SSE**；HTTP/3 / QUIC 面试一句 **0-RTT + 没有 TCP 队头阻塞**。",
+        "",
+        "三个 hard part（最该挖的那块）：",
+        "",
+        "1. **REST vs gRPC 何时换** —— 公开面 vs 服务间；浏览器仍常 REST/JSON",
+        "2. **WS vs SSE** —— 双向 vs 服务端→客户端；LLM 流默认 SSE（深讲 Ch29/32）",
+        "3. **HTTP/3 / QUIC 面试讲哪一句** —— 0-RTT；流独立，不像 TCP 一条丢包卡住整连接",
+        "",
+        "本章**不讲**：OSI 七层全书、云 API Gateway SKU、把 Ch12 聊天当产品再设计一遍、把 Ch32 TPM/RPM 再讲一遍、HTTP/2 vs 1.1 骂战当脊柱、QUIC RFC 逐节、GraphQL / tRPC / MQTT / WebRTC 目录。东西向 mTLS / Mesh 丢给 **Ch44**。L4 vs L7 已经在 **Ch39**。",
+      ].join("\n"),
+    },
+    {
+      id: "sec-pitch",
+      heading: "一句话定义 · 面试 20 秒开口",
+      secNum: "40.1",
+      related: ["ch12", "ch17", "ch29"],
+      body: [
+        "先把评分信号打出来：你会按场景选，有白板默认，不会从七层背起。",
+        "",
+        "> 「协议先问场景再选。公开 API 默认 **REST + JSON**：无状态、统一接口，中间层能缓存。服务间默认 **gRPC**：protobuf + HTTP/2，有 schema、能流。浏览器当面仍常是 REST；gRPC-Web 要代理，不当公开第一答案。要双向（聊天、协同）用 **WebSocket**；只要服务端往外推（通知、**LLM token 流**）用 **SSE**——流式产品深讲回 Ch29/32。HTTP/3 / QUIC 一句：握手可 **0-RTT**，流独立，没有 TCP 那种队头阻塞。白板默认：对外 REST、对内 gRPC、通知/聊天 WS、LLM 流 SSE。」",
+        "",
+        "整章按这一条链走。上场 20 秒念完就停，让面试官决定要挖 REST/gRPC、WS/SSE 还是 QUIC。",
+        "",
+        d2(`
+direction: right
+rest.class: go
+rest: "REST"
+grpc.class: step
+grpc: "gRPC"
+push.class: warn
+push: "WS / SSE"
+quic.class: ok
+quic: "QUIC"
+rest -> grpc -> push -> quic
+`),
+        "",
+        "本图引用：Ch12 聊天 WS · Ch17 网关 REST · Ch29/32 LLM SSE（地基在这，深讲在那边）",
+        "",
+        "| 面试官问法 | 你落在哪一截 |",
+        "|---|---|",
+        "| 「对外和对内协议一样吗？」 | 对外 REST；对内常换 gRPC |",
+        "| 「实时推送用 WS 还是 SSE？」 | 双向 WS；单向（含 LLM 流）SSE |",
+        "| 「HTTP/3 要画进架构吗？」 | 一句 QUIC；弱网再点连接迁移 |",
+        "",
+        "**red flag：** 一上来背 OSI；公开 API 强上 gRPC 还说浏览器原生；聊天用 SSE + 另开 POST 当默认；LLM 流第一句 WebSocket；把 HTTP/2 vs 1.1 讲成整章。",
+      ].join("\n"),
+    },
+    {
+      id: "sec-rest-grpc",
+      heading: "机制 · REST vs gRPC（何时换）",
+      secNum: "40.2",
+      related: ["ch17", "ch39", "ch44"],
+      body: [
+        "第一个 hard part。**2026 面试里，会背 HTTP 动词不如会说「哪条边界换协议」。** REST 不是「用了 GET/POST」；gRPC 不是「Google 内部同款所以加分」。",
+        "",
+        "REST（Representational State Transfer）是 **Fielding 2000** 论文里的架构**约束**，常和 HTTP + JSON 搭配。面试记两句就够：**stateless**（每次请求自带理解它所需的全部信息，服务端不把会话钉在某次 TCP 上）和 **uniform interface**（资源用同一套方法操作：标识资源、用 representation 改、消息自描述）。这样 CDN、网关、缓存才能当中间层——客户端只看见入口。HATEOAS 知道名字即可，白板上 CRUD JSON **不是**没 REST。",
+        "",
+        d2(`
+grid-columns: 2
+rest: {
+  label: "REST"
+  class: group
+  grid-columns: 2
+  a.class: step
+  a: "JSON HTTP"
+  b.class: step
+  b: "公开 API"
+}
+grpc: {
+  label: "gRPC"
+  class: groupOk
+  grid-columns: 2
+  c.class: ok
+  c: "protobuf"
+  d.class: ok
+  d: "服务间"
+}
+`),
+        "",
+        "| | **REST + JSON** | **gRPC** |",
+        "|---|---|---|",
+        "| 合同 | URL + HTTP 动词 + 可选 OpenAPI | **`.proto`**，生成 stub |",
+        "| 编码 | 文本 JSON，人可读 | **protobuf** 二进制 |",
+        "| 传输 | HTTP/1.1 或 HTTP/2 都行 | 原生在 **HTTP/2** 上（多路 RPC） |",
+        "| 缓存 | GET 可进 CDN / 共享缓存 | 默认不可当 HTTP 缓存键 |",
+        "| 浏览器 | **第一公民**（fetch / curl） | 浏览器没有完整 HTTP/2 帧 API；要 **gRPC-Web + 代理** |",
+        "| 流 | 靠 SSE / chunk；不是 RPC 一等公民 | unary / server-stream / client-stream / bidi |",
+        "| 何时开口 | **公开 API、第三方、可缓存读** | **服务间、强类型、内部 fan-out** |",
+        "",
+        "公开请求就三条叶子，不要扇出微服务全家桶。",
+        "",
+        d2(`
+direction: right
+cli.class: go
+cli: "Client"
+api.class: step
+api: "REST"
+app.class: ok
+app: "App"
+cli -> api -> app
+`),
+        "",
+        "本图引用：Ch17 API 网关（对外 REST，对内可转 gRPC）· Ch39 L7（gRPC 必须按 RPC 拆，不要 L4 钉死一条连接）",
+        "",
+        "**何时换（主动讲 trade-off，不要等追问）：**",
+        "",
+        "1. **还停在 REST：** 给浏览器 / 移动 App / 合作方；要用 curl 排障；GET 希望被 CDN 或 Cache-Aside 当 HTTP 响应缓存；错误码和文档跟 HTTP 语义走。",
+        "2. **换到 gRPC：** 集群内部调用密度高、要 schema 演进（字段号、兼容）、要在一条连接上 multiplex 很多 RPC、要服务端流或双向流、多语言 stub 比手写 JSON 便宜。延迟敏感的内部 fan-out 也常在这换。",
+        "3. **不要换的借口：** 「内部已经 gRPC 了，公开也必须 gRPC」。2026 公开面 **仍然常常 REST/JSON**。gRPC-Web 要 Envoy 一类代理翻帧，当加分项可以，不当白板默认公开协议。",
+        "",
+        "网关是换协议的自然边界（Ch17）：对外一套 REST，对内 stub 打 gRPC。不要每个 BFF 手写两套 DTO 还声称「统一」。东西向加密、重试、超时是 **Ch44**，本章只选协议。",
+        "",
+        "gRPC 骑 HTTP/2：一条 TCP 上很多 stream。**L4 只看见这一条连接**——Ch39 已经说过，这里只回收那一句：题里出现 gRPC，负载均衡要 L7 awareness。不要把 Maglev 填表再讲一遍。",
+        "",
+        "protobuf 点到：字段号是合同；加 optional 字段兼容旧客户端；**不要改号、不要复用删掉的号**。不当 protobuf 教程。",
+        "",
+        "面试怎么说：",
+        "",
+        "> 「对外 REST：无状态 + 统一接口，缓存和网关好做。对内 gRPC：protobuf + HTTP/2。浏览器我仍给 JSON。要换的信号是内部密度和 schema，不是『REST 过时了』。」",
+        "",
+        "**red flag：** 把 REST 讲成「四个动词」；公开 API 强制 gRPC 还说 fetch 原生能打；把 GraphQL 当 REST 的升级补丁却讲不清缓存；为「像大厂」把所有 CRUD 画成 bidi stream。",
+      ].join("\n"),
+    },
+    {
+      id: "sec-ws-sse",
+      heading: "机制 · WS vs SSE",
+      secNum: "40.3",
+      related: ["ch12", "ch29", "ch32", "ch10"],
+      body: [
+        "第二个 hard part。**方向比品牌重要。** WebSocket 是全双工；SSE 是服务端→客户端的 HTTP 事件流。选错不是性能微调，是把连接模型画反。",
+        "",
+        d2(`
+grid-columns: 2
+ws: {
+  label: "WebSocket"
+  class: group
+  grid-columns: 2
+  a.class: step
+  a: "双向"
+  b.class: step
+  b: "聊天 Ch12"
+}
+sse: {
+  label: "SSE"
+  class: groupOk
+  grid-columns: 2
+  c.class: ok
+  c: "单向推"
+  d.class: ok
+  d: "LLM 流"
+}
+`),
+        "",
+        "| | **WebSocket** | **SSE** |",
+        "|---|---|---|",
+        "| 方向 | **全双工**：连上之后两边随时发 | **单向**：只有服务器往外推 |",
+        "| 承载 | HTTP **101** 升级后的帧（RFC 6455） | 仍是 HTTP：`text/event-stream` |",
+        "| 重连 | 自己做心跳 / 指数退避 | 浏览器 **EventSource** 自带重连 + `Last-Event-ID` |",
+        "| 代理 / 防火墙 | 有的旧中间盒不喜欢 Upgrade | 更像普通 GET，好穿过 |",
+        "| 白板默认 | 聊天、协同、要上行的实时 | 通知、行情、**LLM token 流** |",
+        "",
+        "聊天为什么默认 WS：要发也要收，presence 和输入状态都在同一条连接上。Ch12 已经把有状态网关、消息三态、群聊分片讲完——**本章禁止再设计一遍 IM**。这里只回收：SSE + 另开 POST 等于两条通道，不当聊天默认。poll / long-poll 是演进史各一句。",
+        "",
+        "SSE 地基（只到这里，深讲回 Ch29 / Ch32）：",
+        "",
+        "- 客户端 `GET`，响应一直开着，按行推 `data:` 事件。",
+        "- **自动重连**是它相对 WS 的产品优势；事件 id 用来续。",
+        "- LLM 聊天只要服务器往外吐 token，**不需要**客户端在同一条连接上推二进制帧。公开 OpenAI-compatible 流式就是 SSE（或 fetch + 可读流，语义仍是服务端推）。",
+        "- 网关 **禁止攒完再发**——那等于毁掉 TTFT。透传、取消要 abort 上游。计费、TPM、语义缓存是 **Ch32**，GPU / KV 是 **Ch29**，这里不重讲。",
+        "",
+        d2(`
+direction: right
+cli.class: go
+cli: "Client"
+sse.class: step
+sse: "SSE"
+eng.class: ok
+eng: "Engine"
+cli -> sse -> eng
+`),
+        "",
+        "本图引用：Ch29 推理流式（TTFT）· Ch32 网关透传（不要缓冲）· Ch12 聊天才用 WS",
+        "",
+        "LLM 路径就这三片叶子：Client 订流，网关/API 当 SSE，引擎出 token。不要把 GPU 集群画进来。",
+        "",
+        "**不要用 WS 的信号：** 客户端几乎不在这条连接上说话；你只是喜欢「实时」两个字。单向通知（Ch10 点过推送通道）也可以 SSE；移动端省电推送另说 MQTT，一句丢回去，不要开 IoT 课。",
+        "",
+        "**不要用 SSE 的信号：** 客户端必须频繁上行（操作、ack、协同光标）；要传二进制帧。SSE 是 UTF-8 文本事件。双向就 WS（或内部 gRPC bidi，那是服务间，不是浏览器聊天）。",
+        "",
+        "面试怎么说：",
+        "",
+        "> 「要双向用 WebSocket，要单向推用 SSE。LLM token 流我默认 SSE，深挖引擎和网关回 Ch29/32。聊天我默认 WS，不在这里重做 Ch12。」",
+        "",
+        "**red flag：** 所有实时都画 WS；用 SSE 做聊天默认；在本章展开 PagedAttention 或 token 单价；把 EventSource 的 header 限制讲成整节浏览器课。",
+      ].join("\n"),
+    },
+    {
+      id: "sec-quic",
+      heading: "机制 · HTTP/3 / QUIC（面试讲哪一句）",
+      secNum: "40.4",
+      related: ["ch14", "ch39"],
+      body: [
+        "第三个 hard part。**白板不靠你实现传输层。** 面试要的是一句能接弱网、队头阻塞、0-RTT 的话，不是 RFC 朗读。",
+        "",
+        "**就这一句：**",
+        "",
+        "> 「HTTP/3 把 HTTP 语义跑在 **QUIC** 上。QUIC 在 **UDP** 上做多路流和加密。好处两句就够：**0-RTT**（见过面的连接可以立刻带数据）和 **没有 TCP 那种队头阻塞**（一条流丢包，别的流还能走）。切 Wi-Fi / 蜂窝可以靠 connection ID **迁移**，不必重握手整条 TCP。」",
+        "",
+        d2(`
+direction: right
+cli.class: go
+cli: "Client"
+h3.class: step
+h3: "HTTP/3"
+ori.class: ok
+ori: "Origin"
+cli -> h3 -> ori
+`),
+        "",
+        "本图引用：Ch39 入口仍是 Client → LB → App；传输是 HTTP/3 还是 HTTP/2 不改你画的框。视频切片在 Ch14，不在这里开 CDN 课。",
+        "",
+        "为什么不是「HTTP/2 vs 1.1 全书」：HTTP/2 已经在**一条 TCP** 上 multiplex 了。TCP 只保证字节流有序——**一个包丢了，后面所有 stream 都等**，这叫 TCP head-of-line blocking。HTTP/3 把 multiplex 下放到 QUIC，流之间独立。面试对比停在这里，不要默写帧类型。",
+        "",
+        "| 点 | 开口 | 不要展开 |",
+        "|---|---|---|",
+        "| **0-RTT** | 重连可带 early data，弱网/短会话体感快 | TLS 1.3 握手状态机、session ticket 实现 |",
+        "| **replay** | 0-RTT **不是**给非幂等 POST 随便开的 | 密码学论文 |",
+        "| **HOL** | TCP 丢包卡住整连接；QUIC 流独立 | 拥塞控制公式 |",
+        "| **迁移** | connection ID ≠ 4-tuple，IP 变了连接还在 | 多路径调度算法 |",
+        "| **UDP 被墙** | 回退 HTTP/2 over TCP | 中盒分类百科 |",
+        "",
+        "架构图默认仍画 Client → 入口 → 服务。CDN / 浏览器 2026 已经大量走 HTTP/3，你**不必**把每个框改成「QUIC 终结」。被问移动弱网、直播卡顿、短连接握手贵，再点这一层。不要第一张图就替换掉 REST/gRPC 选型。",
+        "",
+        "gRPC 今天多数实现仍在 HTTP/2/TCP 上；「gRPC 自动等于 HTTP/3」是错的。公开 Web 流量和内部 RPC 不是同一条升级单。",
+        "",
+        "面试怎么说：",
+        "",
+        "> 「HTTP/3 是 HTTP over QUIC。我记 0-RTT 和没有 TCP HOL。非幂等慎用 0-RTT。UDP 不通就回退。我不会在订单题里画 QUIC 状态机。」",
+        "",
+        "**red flag：** 用 OSI 七层解释 QUIC；声称 HTTP/3 让 gRPC 过时；把 0-RTT 说成绝对安全；整章对比 HTTP/1.1 队头阻塞却不提 TCP vs QUIC。",
+      ].join("\n"),
+    },
+    {
+      id: "sec-choose",
+      heading: "选型表",
+      secNum: "40.5",
+      related: ["ch12", "ch17", "ch29", "ch10"],
+      body: [
+        "白板先填四格，再谈传输层。五种协议都画上是 over-engineering。",
+        "",
+        "| 场景 | 默认 | 不要 |",
+        "|---|---|---|",
+        "| 公开 HTTP API、第三方集成 | **REST + JSON** | 浏览器直打原生 gRPC |",
+        "| 服务间、强类型、内部 fan-out | **gRPC** | 内部也全走无 schema 的巨型 JSON |",
+        "| 对外 REST、对内 RPC | 网关做协议转换（Ch17） | 每个服务公开两套互不相干的合同 |",
+        "| 聊天 / 协同 / 要上行的实时 | **WebSocket** | SSE 当 IM 默认 |",
+        "| 通知、行情、只要服务器推 | **SSE** | 为「酷」上 WS |",
+        "| LLM token 流 | **SSE**（地基）；引擎/网关 **Ch29/32** | 第一句 WS；在网关缓冲整段 |",
+        "| 可缓存的 GET | REST，好进 CDN | 把读做成必须握手的 RPC |",
+        "| 弱网、切网、短连接握手 | 点 **HTTP/3 / QUIC** 一句 | 把传输层画成主架构 |",
+        "| 音视频实时 | 另一道题（WebRTC） | 塞进本章当第五种默认 |",
+        "",
+        "默认口播再收一次：",
+        "",
+        "> 「公开 REST；内部 gRPC；通知/聊天 WS；LLM 流 SSE。QUIC 是传输加分句，不是第五个应用协议要你实现。」",
+        "",
+        "GraphQL / tRPC：客户端要按需裁字段、或全栈同一份 TS 类型时再谈，**不是** 2026 公开 API 默认。MQTT：IoT / 移动长连接省电，点到 Ch12 那句即可。SOAP：遗留企业。全部不要占脊柱。",
+      ].join("\n"),
+    },
+    {
+      id: "sec-papers",
+      heading: "论文与经典系统",
+      secNum: "40.6",
+      related: [],
+      body: [
+        "M6 要能点名。下面 2 篇必读、2 篇选读。**面试用哪一句**写在表里；不背页码，不把 RFC 当白板作业。",
+        "",
+        d2(`
+direction: right
+fld.class: go
+fld: "Fielding 00"
+lng.class: step
+lng: "Langley 17"
+rfc.class: ok
+rfc: "RFC 9000"
+fld -> lng -> rfc
+`),
+        "",
+        "时间线只帮助记忆：先有 Web 的 REST 约束，再有 Google 在 UDP 上把 QUIC 跑到互联网规模，再有 IETF 把 QUIC / HTTP/3 写成标准。不是说你要实现三套。",
+        "",
+        d2(`
+direction: right
+cs.class: go
+cs: "C/S"
+st.class: step
+st: "无状态"
+ui.class: ok
+ui: "统一接口"
+cs -> st -> ui
+`),
+        "",
+        "Fielding 约束面试只走这一短链：**client-server → stateless → uniform interface**。可缓存、分层、可选 code-on-demand 知道即可，不要默写第六章。",
+        "",
+        "| | 文献 | 必读 / 选读 | 面试用哪一句 |",
+        "|---|---|---|---|",
+        "| 1 | **Fielding**，UC Irvine 博士论文 2000，*Architectural Styles and the Design of Network-based Software Architectures*（第 5 章 REST） | 必读 | REST 是约束不是动词表。面试抓 **stateless** 和 **uniform interface**（资源标识、representation、自描述消息）。中间层能缓存、能演进，是约束换来的，不是「用了 JSON」 |",
+        "| 2 | **Iyengar & Thomson**（编），IETF **RFC 9000**，2021-05，*QUIC: A UDP-Based Multiplexed and Secure Transport* | 必读 | QUIC = UDP 上的多路安全传输；流独立；可 0-RTT；连接用 ID 而不是死钉 4-tuple。概述到此，不要背帧 |",
+        "| 3 | **Bishop**（编），IETF **RFC 9114**，2022-06，*HTTP/3* | 选读 | HTTP 语义映射到 QUIC。面试说「HTTP/3 = HTTP over QUIC」即可，和 RFC 9000 绑在一起记 |",
+        "| 4 | **Langley et al.**，SIGCOMM 2017，*The QUIC Transport Protocol: Design and Internet-Scale Deployment* | 选读 | IETF 标准化之前，Google 已在 Chrome / YouTube 规模部署。用来证明 QUIC 不是 2022 才发明的缩写。数字（当时流量占比、搜索延迟）当故事，不背成你的 SLO |",
+        "",
+        "WebSocket 规范是 **RFC 6455**（2011，Fette & Melnikov）：101 Upgrade。SSE 是 HTML / WHATWG 的 `EventSource`，没有同等重量的系统设计论文——面试讲机制，不要编一篇「SSE NSDI」。gRPC 是 2015 开源的 RPC 框架（protobuf + HTTP/2），同样靠工程事实，不捏造会议论文。",
+        "",
+        "**Fielding 再收两拳（不要第三拳去写 HATEOAS 学位论文）：**",
+        "",
+        "1. **无状态：** 每个请求可被任意副本处理——和 Ch39 无状态 App 是同一精神，协议层先写进约束。",
+        "2. **统一接口：** 牺牲一点「为这个 RPC 特化的效率」，换可演进和中间层。gRPC 走另一头：特化、高效、合同紧。",
+      ].join("\n"),
+    },
+    {
+      id: "sec-used",
+      heading: "哪些设计题会用到",
+      secNum: "40.7",
+      related: ["ch12", "ch17", "ch29", "ch32", "ch10"],
+      body: [
+        "主线先做题，卡壳再跳进本章。回链不是把 M6 读完再开写。",
+        "",
+        "| 章 | 会用到哪一句 |",
+        "|---|---|",
+        "| **Ch10** 通知 | 浏览器内推可用 SSE；真正到达设备仍是厂商 Push。不要把 APNS 当 WS |",
+        "| **Ch12** 聊天 | **WebSocket 默认**；SSE 单向不当 IM。QUIC 弱网一句，不开展 |",
+        "| **Ch17** 网关 | 对外 REST；对内可 gRPC。鉴权限流在 L7，协议转换也在这层 |",
+        "| **Ch14** 视频 | 播放是 HLS/DASH；传输可能是 HTTP/3。不要把本章画成转码 |",
+        "| **Ch18 / Ch24** 订单支付 | 公开 REST；幂等键在合同里。0-RTT 别用在扣款 POST 上装快 |",
+        "| **Ch27** 配送 | 位置上报双向倾向 WS；只看司机→用户的状态流可以 SSE |",
+        "| **Ch28** 配置 | 监听推送：长轮询 / SSE / WS 都能做，选简单的单向就 SSE |",
+        "| **Ch29** LLM 推理 | 对用户 **流式**；协议地基是 SSE。引擎侧 TTFT / KV **在那边** |",
+        "| **Ch32** LLM 网关 | SSE **透传**，禁止缓冲；为什么不是 WS 回本章。记账不在这章 |",
+        "| **Ch33** Agent 工具 | 双向会话可以 WS；模型输出仍常 SSE |",
+        "| **Ch39** LB | gRPC / HTTP2 要 L7。本章选协议，那边选连接 vs 请求 |",
+        "| **Ch44** 微服务 | 东西向默认 gRPC + mTLS 心智；公开面仍 REST |",
+        "",
+        "Feed / 短链 / 评论：读路径是 REST GET，能缓存就缓存（Ch38），不要做成必须升级的 WS。",
+      ].join("\n"),
+    },
+    {
+      id: "sec-2026",
+      heading: "2026 vs 笔记 / 原书",
+      secNum: null,
+      related: [],
+      body: [
+        "<details>",
+        "<summary>原书 / 笔记当时怎么讲 · OSI 全书和协议目录进这里</summary>",
+        "",
+        "笔记对应 AWS 书通信章：OSI 七层、TCP 握手、SMTP/XMPP/MQTT、轮询全家桶、GraphQL、WebRTC、再补云网络。**那不是本章正文。** 2026 上场只带 REST/gRPC 边界、WS vs SSE、QUIC 一句。",
+        "",
+        "| 原书 / 笔记 | 现在怎么答 |",
+        "|---|---|",
+        "| OSI 七层必背当开场 | **禁止当脊柱。** L4/L7 决策在 Ch39；本章选应用协议 |",
+        "| HTTP/2 vs 1.1 讲很细 | 点到 gRPC 骑 HTTP/2；队头阻塞留给 QUIC 那一句 |",
+        "| SSE 当备选 | **LLM 流默认 SSE**；单向推优先 SSE |",
+        "| 实时 = WebSocket | 先问要不要上行 |",
+        "| gRPC vs REST 没矩阵 | 对外 REST、对内 gRPC；浏览器仍 JSON |",
+        "| GraphQL / tRPC 当 2026 默认 | 按需字段 / 全栈 TS 再谈，不是公开 API 默认 |",
+        "| QUIC 只写「用 UDP」 | **0-RTT + 无 TCP HOL + 连接迁移** 三词 |",
+        "| API Gateway 云 SKU | 机制用网关（Ch17），不报型号 |",
+        "| mTLS / Mesh 写进本章 | **Ch44** |",
+        "| WebRTC / SFU | 音视频另一道题 |",
+        "| XMPP / SMTP 巡礼 | 遗留或邮件；新 IM 不从 XMPP 开场 |",
+        "",
+        "正文第一答案用现在这套。折叠只防止你把七层和邮件协议搬上白板。",
+        "",
+        "</details>",
+      ].join("\n"),
+    },
+    {
+      id: "sec-traps",
+      heading: "追问陷阱",
+      secNum: null,
+      related: ["ch12", "ch29", "ch32", "ch39"],
+      body: [
+        "1. **对外和对内用同一协议？** → 常常不。公开 REST，内部 gRPC。",
+        "2. **REST 是什么？** → 约束：无状态 + 统一接口。不是四个 HTTP 动词。",
+        "3. **Fielding 面试一句？** → 2000 博士论文第 5 章；中间层能缓存，是约束换来的。",
+        "4. **何时换 gRPC？** → 服务间、schema、内部流、fan-out。不是「REST 过时」。",
+        "5. **浏览器为什么还 REST？** → 没有完整 gRPC-over-HTTP/2 帧 API；gRPC-Web 要代理。",
+        "6. **gRPC 和 L4？** → HTTP/2 多路。L4 钉死一条连接。回 Ch39。",
+        "7. **WS 和 SSE 一句话？** → 双向 vs 服务端→客户端。",
+        "8. **聊天为什么不用 SSE？** → 要发也要收。SSE + POST 是两条通道。",
+        "9. **LLM 为什么常用 SSE？** → 只往外吐 token；走 HTTP；自动重连。深讲 Ch29/32。",
+        "10. **SSE 能在网关攒一下吗？** → 不能。毁掉 TTFT。Ch32。",
+        "11. **HTTP/3 面试哪一句？** → HTTP over QUIC；0-RTT；没有 TCP HOL。",
+        "12. **0-RTT 随便用？** → 非幂等有 replay。扣款 POST 不要装快。",
+        "13. **QUIC 为什么是 UDP？** → 用户态演进、多路、握手和加密绑在一起；被墙则回退 TCP。",
+        "14. **要不要把架构全改成 HTTP/3？** → 不必。弱网/握手再点。",
+        "15. **Langley 2017 是什么？** → SIGCOMM：Google 规模部署 QUIC。选读。",
+        "16. **RFC 9000 / 9114？** → 2021 QUIC 传输；2022 HTTP/3 映射。",
+        "17. **下一步为什么是复制分片？** → 协议选完，数据怎么放、事务怎么拆在 **Ch41**。",
+      ].join("\n"),
+    },
+    {
+      id: "sec-next",
+      heading: "下一步",
+      secNum: null,
+      related: ["ch41"],
+      body: [
+        "合上页，用 20 秒口播走一遍：对外 REST、对内 gRPC；双向 WS、单向 SSE；LLM 流 SSE 只打地基，深挖回 Ch29/32；QUIC 一句 0-RTT 和无 TCP HOL。能把聊天、网关、推理流分别放回 Ch12 / Ch17 / Ch29，这一章就过关。",
+        "",
+        "下一章 **Ch41 · 复制、分片、事务**：主从、分片键、Saga / Outbox / CDC；2PC 为何常被否。协议不再展开。Raft / Sagas 在那边点名。",
+        "",
+        "自测：左列 REST vs gRPC 何时换，中列 WS vs SSE，右列 HTTP/3 那一句。不要把 OSI 和云网关 SKU 默写回去。",
+      ].join("\n"),
+    },
+  ],
+  reviewMd: `# Ch40 · 记忆闪卡
+
+| # | 正面 | 背面 |
+|---|---|---|
+| 1 | 20 秒怎么开口？ | 对外 REST+JSON；对内 gRPC。双向 WS；单向/LLM 流 SSE。QUIC：0-RTT + 无 TCP HOL。 |
+| 2 | 三个 hard part？ | ① REST vs gRPC 何时换 ② WS vs SSE ③ HTTP/3/QUIC 面试哪一句。 |
+| 3 | REST 面试记哪两条约束？ | **stateless** 和 **uniform interface**。不是动词表。 |
+| 4 | Fielding 是哪篇？ | 2000 博士论文 *Architectural Styles and the Design of Network-based Software Architectures*，第 5 章 REST。 |
+| 5 | 何时换 gRPC？ | 服务间、protobuf schema、内部流、fan-out。公开面常仍 REST。 |
+| 6 | 浏览器为什么不默认 gRPC？ | 没有完整 HTTP/2 帧 API；gRPC-Web 要代理。 |
+| 7 | gRPC 搭什么？ | **protobuf + HTTP/2**。一条连接多路 RPC → LB 要 L7（Ch39）。 |
+| 8 | WS vs SSE？ | WS 全双工（101 升级）；SSE 服务端→客户端的 HTTP 事件流。 |
+| 9 | 聊天默认？ | **WebSocket**（Ch12）。SSE 不当 IM 默认。 |
+| 10 | LLM token 流默认？ | **SSE**。引擎/TTFT → Ch29；网关透传、勿缓冲 → Ch32。 |
+| 11 | SSE 相对 WS 的产品点？ | 仍是 HTTP；EventSource 自动重连 + Last-Event-ID。 |
+| 12 | HTTP/3 面试一句？ | HTTP 语义跑在 QUIC（UDP）上；0-RTT；流独立，无 TCP HOL。 |
+| 13 | 0-RTT 坑？ | early data 有 replay。非幂等（扣款）不要靠它装快。 |
+| 14 | QUIC 连接迁移？ | connection ID，不钉死 4-tuple。切网不必重来一条 TCP。 |
+| 15 | RFC 9000？ | Iyengar & Thomson，**2021-05**，*QUIC: A UDP-Based Multiplexed and Secure Transport*。 |
+| 16 | RFC 9114？ | Bishop，**2022-06**，*HTTP/3*。HTTP over QUIC。 |
+| 17 | Langley 2017？ | SIGCOMM：*The QUIC Transport Protocol: Design and Internet-Scale Deployment*。选读。 |
+| 18 | 白板四格默认？ | 公开 REST；内部 gRPC；通知/聊天 WS；LLM 流 SSE。 |
+| 19 | 公开+内部两套？ | 网关转换（Ch17）。不要每个服务两套互不相干合同。 |
+| 20 | 下一步？ | **Ch41 复制、分片、事务**。Mesh/mTLS → Ch44。 |`,
+});

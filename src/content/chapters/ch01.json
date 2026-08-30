@@ -1,0 +1,179 @@
+{
+  "id": "ch01",
+  "num": "01",
+  "title": "世界地图与 4 步法",
+  "kind": "method",
+  "interleaved": true,
+  "relatedChapters": [],
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "",
+      "secNum": null,
+      "related": [],
+      "body": "> **预计**：60–70 分钟 ｜ **前置**：无\n> **目标**：会用这个学习站；能按时间盒打完一场 45 分钟系统设计面试；卡住会自救。\n\n> 原书原话：*The final design is less important compared to the work you put in the design process.*\n\n你可能写过很多服务，但没在白板上被追问过「流量翻 10 倍怎么办」。这门课不是再教一遍 Spring，而是：**把你已经会的积木，按面试官听得懂的顺序拼出来，并讲清 trade-off。**\n\n很多人系统知识够，但面试挂，是因为没有框架：抢答、钻细节、中途死寂。本章一次讲完两件事——**这个站怎么读**，以及 **45 分钟怎么打**。后面每道题都往这个骨架上填，不必再开一章重复「面试是协作」。",
+      "headingEn": "",
+      "bodyEn": "> **Time**: 60–70 min ｜ **Prereq**: none\n> **Goal**: know how to use this site; run a 45-minute system design interview on a time-box; recover when you get stuck.\n\n> From the book: *The final design is less important compared to the work you put in the design process.*\n\nYou may have shipped a lot of services and still never been asked on a whiteboard: “what if traffic ×10?” This course is not Spring again. It is: **take bricks you already know, assemble them in an order the interviewer can follow, and say the trade-off out loud.**\n\nPlenty of people have the knowledge and still fail because they have no frame: they jump to an answer, rabbit-hole, then go silent. This chapter does two jobs once—**how to read this site**, and **how to play 45 minutes**. Every later problem fills this skeleton. We will not open another chapter to repeat “this interview is collaboration.”"
+    },
+    {
+      "id": "sec-essence",
+      "heading": "面试本质与评分",
+      "secNum": null,
+      "related": [],
+      "body": "它不是让你 45 分钟造出微信，也不是知识竞赛。它是：**两个工程师协作，把一个模糊问题收成可落地的设计**。开放、没标准答案。**过程 > 终图。**\n\n面试官看的是：\n\n- 你会不会先问清楚再画图\n- 你会不会估算数量级（不是精确到字节）\n- 你会不会在两个合理方案里做 trade-off\n- 卡住时会不会出声、会不会要提示\n\n终图漂亮但过程沉默 = 低分。过程清楚、终图有意简化 = 高分。\n\n```d2\nstyle.font-size: 12\ngrid-columns: 2\nsignals: {\n  label: \"plus\"\n  class: groupOk\n  grid-columns: 3\n  tech.class: ok\n  tech: \"trade-off\"\n  collab.class: ok\n  collab: \"当队友\"\n  stress.class: ok\n  stress: \"卡住不慌\"\n  ambiguity.class: ok\n  ambiguity: \"先澄清\"\n  ask.class: ok\n  ask: \"问对问题\"\n}\nreds: {\n  label: \"red flag\"\n  class: groupBad\n  grid-columns: 3\n  over.class: bad\n  over: \"over-engineering\"\n  jimmy.class: bad\n  jimmy: \"抢答\"\n  rabbit.class: bad\n  rabbit: \"rabbit hole\"\n  silent.class: bad\n  silent: \"沉默\"\n  stubborn.class: bad\n  stubborn: \"不听反馈\"\n}\n```\n\n**最大的 red flag = over-engineering。** 面试官最怕你为「设计纯净」忽略 trade-off。主动说「这里我简化了，因为 X；生产要考虑 Y」，比堆砌高级组件得分高。\n\n**最大的 DON'T = 沉默思考。** 算法面试可以安静 5 分钟；系统设计绝对不行——面试官看不到思路 = 没信号 = 低分。画图时也要自言自语。",
+      "headingEn": "What the interview actually scores",
+      "bodyEn": "It is not “build WeChat in 45 minutes,” and it is not a trivia contest. It is: **two engineers collaborating to turn a fuzzy prompt into a design you could start building.** Open-ended. No golden diagram. **Process > final picture.**\n\nThe interviewer is watching whether you:\n\n- clarify before you draw\n- estimate order of magnitude (not bytes)\n- pick between two reasonable designs and name the trade-off\n- speak when you stall, and ask for a hint if you need one\n\nA pretty final diagram with a silent process = low score. A clear process with an intentionally simplified diagram = high score.\n\n```d2\nstyle.font-size: 12\ngrid-columns: 2\nsignals: {\n  label: \"plus\"\n  class: groupOk\n  grid-columns: 3\n  tech.class: ok\n  tech: \"trade-off\"\n  collab.class: ok\n  collab: \"当队友\"\n  stress.class: ok\n  stress: \"卡住不慌\"\n  ambiguity.class: ok\n  ambiguity: \"先澄清\"\n  ask.class: ok\n  ask: \"问对问题\"\n}\nreds: {\n  label: \"red flag\"\n  class: groupBad\n  grid-columns: 3\n  over.class: bad\n  over: \"over-engineering\"\n  jimmy.class: bad\n  jimmy: \"抢答\"\n  rabbit.class: bad\n  rabbit: \"rabbit hole\"\n  silent.class: bad\n  silent: \"沉默\"\n  stubborn.class: bad\n  stubborn: \"不听反馈\"\n}\n```\n\n**The biggest red flag = over-engineering.** Interviewers fear you chasing a “pure” design and skipping trade-offs. Saying “I simplified here because X; production would also consider Y” scores higher than stacking fancy boxes.\n\n**The biggest DON'T = thinking in silence.** Algorithm interviews can take a quiet 5 minutes. System design cannot—if they cannot see the thought, there is no signal, and that is a low score. Talk while you draw."
+    },
+    {
+      "id": "sec-site",
+      "heading": "这个站怎么读",
+      "secNum": null,
+      "related": [],
+      "body": "六大模块。主线是 **M1–M5**；**M6 后置**，不是开胃菜。\n\n```d2\nstyle.font-size: 12\ndirection: right\nm1: \"M1 方法\"\nm2: \"M2 构件\"\nm3: \"M3 经典题\"\nm4: \"M4 进阶\"\nm5: \"M5 Agent\"\nm6: \"M6 基础\"\nm1 -> m2 -> m3\nm4 -> m5 -> m6\nm3 -> m4\n```\n\n**第一次学的推荐路径：**\n\n1. 本章（地图 + 4 步法）\n2. **Ch02** 从零扩到百万 → **Ch03** 粗略估算\n3. M2 用小题目把 4 步法跑熟（限流、哈希、KV、ID、锁）\n4. M3 → M4 后端设计题（短链、Feed、搜索、订单、支付、调度……）\n5. **M5** 大模型推理 / RAG / Agent 基建（**不做推荐系统**）\n6. **M6 基础深读放最后**：机制 + 论文。设计题里出现「缓存 / 分片 / 微服务」可点引用芯片跳进去，也可以整段留到主线结束后再专心学。\n\n设计题**不唯那几本面试书**。书里没有的（订单、网关、红包、Agent 编排、DDD）按现在面试怎么问来写。",
+      "headingEn": "How to read this site",
+      "bodyEn": "Six modules. The spine is **M1–M5**. **M6 is last**, not an appetizer.\n\n```d2\nstyle.font-size: 12\ndirection: right\nm1: \"M1 方法\"\nm2: \"M2 构件\"\nm3: \"M3 经典题\"\nm4: \"M4 进阶\"\nm5: \"M5 Agent\"\nm6: \"M6 基础\"\nm1 -> m2 -> m3\nm4 -> m5 -> m6\nm3 -> m4\n```\n\n**Recommended first pass:**\n\n1. This chapter (map + 4-step method)\n2. **Ch02** zero → a million users → **Ch03** back-of-the-envelope\n3. M2: run the 4 steps on small problems (rate limit, hashing, KV, IDs, locks)\n4. M3 → M4 backend problems (short URL, Feed, search, orders, payments, schedulers…)\n5. **M5** LLM inference / RAG / Agent infra (**no recommender systems**)\n6. **M6 foundations last**: mechanisms + papers. When a design problem hits “cache / shard / microservice,” tap a chip and jump in—or save the whole module until the spine is done.\n\nDesign problems are **not locked to those interview books**. Topics the books skip (orders, gateways, red packets, Agent orchestration, DDD) are written the way interviews ask them now."
+    },
+    {
+      "id": "sec-chips",
+      "heading": "引用芯片、D2 图、闪卡",
+      "secNum": null,
+      "related": [],
+      "body": "- **引用芯片**：多数链到 **M6 基础深读**（偶尔链到相关设计题）。可以先不点；想打透再读，里面有论文节。\n- **D2 图**：横排最多 5 个框；超过就折行或竖排。主题切换图会跟着变。\n- **闪卡**：章末折叠。正面是面试官可能问的，背面 ≤ 3 行。能讲出来才算会。\n- **2026 vs 原书**：折叠里。正文是现在该怎么答；书里过时的（HDD 很慢、APNS 当主通道、向量时钟当生产默认）不要当第一答案。\n\n本课**没有**浏览器里写代码。系统设计面试是讲和画。",
+      "headingEn": "Chips, D2, flashcards",
+      "bodyEn": "- **Reference chips**: most of them jump to **M6 foundations** (sometimes a related design problem). Skip them on the first pass; open them when you want depth—there is a papers section inside.\n- **D2 diagrams**: at most 5 boxes in a row; wrap or stack after that. Theme switch recolors the diagram.\n- **Flashcards**: folded at the end of the chapter. Front = a question an interviewer might ask. Back ≤ 3 lines. If you can say it, you know it.\n- **2026 vs the book**: in a fold. The body is how you should answer now. Do not lead with outdated book defaults (HDD is slow, APNS as the main channel, vector clocks as a production default).\n\nThere is **no in-browser coding**. A system design interview is talking and drawing."
+    },
+    {
+      "id": "sec-overview",
+      "heading": "4 步总览与时间盒",
+      "secNum": null,
+      "related": [],
+      "body": "读完你要能：按 3–10 / 10–15 / 10–25 / 3–5 分钟走完四步；认出 red flag；卡住时用「退回高层 / 要提示 / 换方案」而不是沉默。\n\n```d2\nstyle.font-size: 12\ndirection: right\ns1: \"1 定范围\\n3-10 min\"\ns2: \"2 高层图\\n10-15 min\"\ns3: \"3 deep dive\\n10-25 min\"\ns4: \"4 wrap-up\\n3-5 min\"\ns1 -> s2 -> s3 -> s4\n```\n\nCh02 教架构怎么长，Ch03 教怎么算，后面各章教具体题。**45 分钟怎么组织，就是这四步。** 估算公式在 Ch03，本章只要求你在 Step 2 前留出 back-of-envelope 的位置。",
+      "headingEn": "The 4 steps and the time-box",
+      "bodyEn": "When you leave this page you should be able to: walk the four steps in 3–10 / 10–15 / 10–25 / 3–5 minutes; spot a red flag; and when stuck, “zoom out / ask for a hint / switch designs” instead of going silent.\n\n```d2\nstyle.font-size: 12\ndirection: right\ns1: \"1 定范围\\n3-10 min\"\ns2: \"2 高层图\\n10-15 min\"\ns3: \"3 deep dive\\n10-25 min\"\ns4: \"4 wrap-up\\n3-5 min\"\ns1 -> s2 -> s3 -> s4\n```\n\nCh02 is how architecture grows. Ch03 is how you estimate. Later chapters are concrete problems. **How you spend 45 minutes is these four steps.** The formulas live in Ch03. This chapter only asks you to leave a slot for back-of-the-envelope before Step 2."
+    },
+    {
+      "id": "sec-step1",
+      "heading": "Step 1 · 理解问题，定范围（3–10 分钟）",
+      "secNum": "1.1",
+      "related": [
+        "ch03"
+      ],
+      "body": "### 别当 Jimmy\n\n原书故事：班里有个叫 Jimmy 的孩子，问题一出就抢答。系统设计里**抢答零加分**。没搞清需求就给方案 = 巨大 red flag。\n\n### 问 4 类问题\n\n```d2\nstyle.font-size: 12\ndirection: right\nask: \"先问清楚\"\nq1: \"① 功能\"\nq2: \"② 规模\"\nq3: \"③ 约束\"\nq4: \"④ 特殊\"\nask -> q1 -> q2 -> q3 -> q4\n```\n\n以「设计 News Feed」为例：\n\n| 你 | 面试官（典型） |\n|---|---|\n| 是 mobile、web 还是都要？ | 都要 |\n| 最重要的功能？ | 发帖 + 看 feed |\n| 按时间还是有权重排序？ | 简化，按时间倒序 |\n| 一个用户最多多少好友？ | 5000 |\n| 流量规模？ | 1000 万 DAU |\n\n目标：把「设计 X」收敛成**具体、可设计的边界**。问完后双方对「做什么、多大、约束」达成一致。\n\n面试官反问「你觉得呢？」时：**给出假设并写在白板上**，不要追问到烦。\n\n**必问清单（大约 5–7 个就停）：** 用户量级、核心功能、读:写比、延迟、一致性、可用性、是否多区域。\n\n问太少 → 设计跑偏（没问读:写比，缓存层会画错）。问太多超过 10 分钟 → 面试官烦。黄金线：**问关键问题 → 自己给假设 → 写白板 → 继续**。",
+      "headingEn": "Step 1 · Understand the problem, set scope (3–10 min)",
+      "bodyEn": "### Don't be Jimmy\n\nThe book’s story: a kid named Jimmy who blurts the answer the instant the question lands. In system design, **jumping in scores zero**. A design before requirements is a huge red flag.\n\n### Ask four kinds of questions\n\n```d2\nstyle.font-size: 12\ndirection: right\nask: \"先问清楚\"\nq1: \"① 功能\"\nq2: \"② 规模\"\nq3: \"③ 约束\"\nq4: \"④ 特殊\"\nask -> q1 -> q2 -> q3 -> q4\n```\n\nExample: “Design a News Feed.”\n\n| You | Interviewer (typical) |\n|---|---|\n| Mobile, web, or both? | Both |\n| Most important features? | Post + read the feed |\n| Time order or a ranking model? | Keep it simple, reverse chronological |\n| Max friends per user? | 5000 |\n| Traffic? | 10M DAU |\n\nGoal: turn “design X” into a **concrete, designable boundary**. After the questions, both of you agree on what you are building, how big it is, and the constraints.\n\nIf they bounce it back—“what do you think?”—**state an assumption and write it on the board.** Do not interrogate until they get annoyed.\n\n**Must-ask list (stop around 5–7):** user scale, core features, read:write ratio, latency, consistency, availability, multi-region or not.\n\nAsk too few → the design drifts (skip read:write and the cache layer is wrong). Ask too many past 10 minutes → they get bored. The golden line: **ask the key questions → state your own assumptions → write the board → move.**"
+    },
+    {
+      "id": "sec-step2",
+      "heading": "Step 2 · 高层设计，获得 buy-in（10–15 分钟）",
+      "secNum": "1.2",
+      "related": [
+        "ch39",
+        "ch38",
+        "ch37"
+      ],
+      "body": "四个动作：画初始蓝图 → 边画边问反馈 → 用 Ch03 back-of-envelope 验证撑得住 → 走 1–2 个用例。\n\n```d2\nstyle.font-size: 12\ndirection: right\nyou: \"你 · 先画高层\"\nsketch: \"client → LB → 服务 → 存储\"\niv: \"面试官 · 方向 OK?\"\nyou -> sketch -> iv\n```\n\n话术：\n\n> 「我先用 5 分钟画个高层图，确认方向对了再深入。client 这里……这层用 LB + 无状态 web……这一步方向 OK 吗？」\n\n这一步结束时**必须达成共识**。别自顾自往下走。\n\n要不要定义 API 和 schema？大题（「设计搜索」）可以先不写；中小题要写。拿不准就问：「要不要我先列 API？」2026 的虚拟面试里，**主动列 3–5 个 endpoint** 通常是加分。",
+      "headingEn": "Step 2 · High-level design, get buy-in (10–15 min)",
+      "bodyEn": "Four moves: sketch the first blueprint → ask for feedback while you draw → use Ch03 back-of-the-envelope to check it holds → walk 1–2 use cases.\n\n```d2\nstyle.font-size: 12\ndirection: right\nyou: \"你 · 先画高层\"\nsketch: \"client → LB → 服务 → 存储\"\niv: \"面试官 · 方向 OK?\"\nyou -> sketch -> iv\n```\n\nTalk track:\n\n> “I’ll spend about 5 minutes on a high-level sketch so we agree on direction before I go deep. Clients here… this layer is LB + stateless web… does this direction look OK?”\n\nYou **must have consensus** before you leave this step. Do not steamroll into the next one.\n\nDo you define APIs and schema here? On a huge prompt (“design search”) you can skip it; on a medium/small one you should write them. If you are unsure, ask: “Want me to list APIs first?” In 2026 virtual interviews, **volunteering 3–5 endpoints** is usually extra credit."
+    },
+    {
+      "id": "sec-step3",
+      "heading": "Step 3 · Deep dive（10–25 分钟）",
+      "secNum": "1.3",
+      "related": [
+        "ch36"
+      ],
+      "body": "全场最关键。此时你已经：范围共识、高层蓝图、知道面试官想挖哪块。\n\n怎么选要挖哪块：① **hard part**（这题最难、最该讲透的那块：短链 → 编码与跳转；聊天 → 连接与 fan-out）；② 面试官刚问的；③ 岗位级别（高级岗聊 bottleneck 和容错）。\n\n```d2\nstyle.font-size: 12\ngrid-columns: 2\nchoose: {\n  label: \"怎么选\"\n  class: group\n  grid-columns: 3\n  a.class: step\n  a: \"hard part\"\n  b.class: step\n  b: \"面试官\"\n  c.class: step\n  c: \"级别\"\n}\ndepth: {\n  label: \"挖多深\"\n  class: group\n  grid-columns: 3\n  junior.class: warn\n  junior: \"Junior · API\"\n  senior.class: warn\n  senior: \"Senior · bottleneck\"\n  staff.class: warn\n  staff: \"Staff · trade-off\"\n}\n```\n\n**深度 > 广度。** 最隐蔽的失败是「大而全」：每个组件点名一遍，哪块都不深。限流器这题就应该把令牌桶 vs 滑动窗口挖透，而不是再画一遍 CDN。\n\n时间管理是命门。每 5 分钟看一次表。别花 15 分钟讲某个排序公式——那不证明设计能力。",
+      "headingEn": "Step 3 · Deep dive (10–25 min)",
+      "bodyEn": "This is the whole interview. By now you have: agreed scope, a high-level sketch, and a sense of what they want to dig.\n\nHow to pick what to dig: ① the **hard part** (the piece this problem lives or dies on: short URL → encoding and redirect; chat → connections and fan-out); ② whatever they just asked; ③ the level (senior talks bottleneck and failure).\n\n```d2\nstyle.font-size: 12\ngrid-columns: 2\nchoose: {\n  label: \"怎么选\"\n  class: group\n  grid-columns: 3\n  a.class: step\n  a: \"hard part\"\n  b.class: step\n  b: \"面试官\"\n  c.class: step\n  c: \"级别\"\n}\ndepth: {\n  label: \"挖多深\"\n  class: group\n  grid-columns: 3\n  junior.class: warn\n  junior: \"Junior · API\"\n  senior.class: warn\n  senior: \"Senior · bottleneck\"\n  staff.class: warn\n  staff: \"Staff · trade-off\"\n}\n```\n\n**Depth > breadth.** The quiet failure mode is “a little of everything”: you name every box and go deep on none. A rate limiter should be token bucket vs sliding window, not another tour of the CDN.\n\nTime is the kill switch. Glance at the clock every 5 minutes. Do not spend 15 minutes on a ranking formula—that does not prove design skill."
+    },
+    {
+      "id": "sec-stuck",
+      "heading": "卡住时怎么自救",
+      "secNum": "1.4",
+      "related": [],
+      "body": "这决定你能不能 hold 住现场。原书几乎没写成清单，但面试里经常用到。\n\n```d2\nstyle.font-size: 12\ndirection: right\nstuck: \"卡住了\"\ns1: \"① 说出来\"\ns2: \"② 退回高层\"\ns3: \"③ 要提示\"\ns4: \"④ 换方案\"\nstuck -> s1 -> s2 -> s3 -> s4\n```\n\n铁律：**卡住最忌讳沉默。** 「我理一下，目前卡在消息 fan-out」比安静 40 秒强。要提示不丢人——面试官期待协作，不是单打独斗。",
+      "headingEn": "How to recover when you stall",
+      "bodyEn": "This is what decides whether you can hold the room. The book barely writes it as a list; interviews use it constantly.\n\n```d2\nstyle.font-size: 12\ndirection: right\nstuck: \"卡住了\"\ns1: \"① 说出来\"\ns2: \"② 退回高层\"\ns3: \"③ 要提示\"\ns4: \"④ 换方案\"\nstuck -> s1 -> s2 -> s3 -> s4\n```\n\nIron rule: **silence is the worst stall.** “Let me think out loud—I’m stuck on message fan-out” beats 40 quiet seconds. Asking for a hint is not weakness. They want a teammate, not a solo hero."
+    },
+    {
+      "id": "sec-step4",
+      "heading": "Step 4 · Wrap-up（3–5 分钟）",
+      "secNum": "1.5",
+      "related": [
+        "ch42"
+      ],
+      "body": "永远别说「我的设计完美」。挑 2–3 个方向讲：\n\n1. 找 bottleneck + 改进\n2. 错误处理（进程挂、网络分区）\n3. 可观测性（延迟、流量、错误、饱和）\n4. 下一曲线（1M → 10M 怎么改）\n5. 成本\n\n永远准备好 3 个 bottleneck 口播：\n\n| bottleneck | 改进 |\n|---|---|\n| 单点 | 副本 / failover |\n| 热点 key | 分片 / 本地缓存 |\n| 缓存与库不一致 | 过期 + 失效；或 CDC |\n\n白板建议三区：**左**需求与假设 / 估算；**中**架构与数据流；**右** deep dive 与 trade-off。虚拟面试用 Excalidraw / 共享文档同理——字写大，结构一眼能看清。",
+      "headingEn": "Step 4 · Wrap-up (3–5 min)",
+      "bodyEn": "Never say “my design is perfect.” Pick 2–3 of these:\n\n1. Find the bottleneck + how you’d improve it\n2. Failure handling (process death, network partition)\n3. Observability (latency, traffic, errors, saturation)\n4. The next curve (1M → 10M, what changes)\n5. Cost\n\nAlways have 3 bottleneck lines ready:\n\n| bottleneck | fix |\n|---|---|\n| Single point | replicas / failover |\n| Hot key | shard / local cache |\n| Cache vs DB drift | TTL + invalidation; or CDC |\n\nWhiteboard in three zones: **left** requirements, assumptions, estimates; **center** architecture and data flow; **right** deep dive and trade-off. Virtual loops on Excalidraw / a shared doc are the same idea—write large, structure that reads in one glance."
+    },
+    {
+      "id": "sec-script",
+      "heading": "45 分钟剧本（可背）",
+      "secNum": "1.6",
+      "related": [
+        "ch03"
+      ],
+      "body": "```d2\nstyle.font-size: 12\ndirection: right\nt1: \"0-1 复述\"\nt2: \"1-8 问需求\"\nt3: \"8-10 estimate\"\nt4: \"10-22 高层\"\nt5: \"22-40 deep dive\"\nt6: \"40-45 wrap-up\"\nt1 -> t2 -> t3\nt4 -> t5 -> t6\nt3 -> t4\n```\n\n| 时间 | 动作 | 话术 |\n|---|---|---|\n| 0–1 | 复述 | 「我复述一下，你要的是……」 |\n| 1–8 | 问需求 | 「功能？规模？读:写？延迟？」 |\n| 8–10 | estimate | 「DAU × 次数 / 86400 × 峰值 ≈ QPS」 |\n| 10–22 | 高层图 | 「我画高层，你看方向对不对」 |\n| 22–40 | deep dive | 「这块是 hard part。方案 A……方案 B……我选 A 因为……」 |\n| 40–45 | wrap-up | 「三个 bottleneck：单点、热点、一致性。若有时间我会……」 |\n\n开场先确认时长。虚拟 onsite 常见 45–50 分钟，倒推时间盒。",
+      "headingEn": "A 45-minute script (worth memorizing)",
+      "bodyEn": "```d2\nstyle.font-size: 12\ndirection: right\nt1: \"0-1 复述\"\nt2: \"1-8 问需求\"\nt3: \"8-10 estimate\"\nt4: \"10-22 高层\"\nt5: \"22-40 deep dive\"\nt6: \"40-45 wrap-up\"\nt1 -> t2 -> t3\nt4 -> t5 -> t6\nt3 -> t4\n```\n\n| Time | Move | Line |\n|---|---|---|\n| 0–1 | Restate | “Let me restate—you want…” |\n| 1–8 | Requirements | “Features? Scale? Read:write? Latency?” |\n| 8–10 | Estimate | “DAU × actions / 86400 × peak ≈ QPS” |\n| 10–22 | High-level | “I’ll sketch high-level; tell me if the direction is wrong” |\n| 22–40 | Deep dive | “This is the hard part. Option A… option B… I pick A because…” |\n| 40–45 | Wrap-up | “Three bottlenecks: single point, hot key, consistency. If we had more time I’d…” |\n\nConfirm the length up front. Virtual onsites are often 45–50 minutes; work the time-box backwards from that."
+    },
+    {
+      "id": "sec-dodont",
+      "heading": "DO / DON'T 与失败模式",
+      "secNum": null,
+      "related": [],
+      "body": "**做：** 先澄清；出声思考；给多个方案再做 trade-off；高层达成共识再 deep dive；把面试官当队友；永不放弃。\n\n**不要：** 没问需求就画图；一开始钻单个组件；沉默；交完图就以为结束——面试官说完事才算完。\n\n| 失败模式 | 症状 | 解药 |\n|---|---|---|\n| 抢答 | Step 1 跳过 | 强制问 5–7 个问题 |\n| 钻牛角尖 | 一个细节 30 分钟 | 每 5 分钟看表 |\n| 大而全 | 每组件都浅 | 选 1–2 个核心挖到底 |\n| 沉默 | 思考不出声 | 全程自言自语 |\n| over-engineering | 堆组件不讲 trade-off | 每个组件说为什么用 / 不用 |",
+      "headingEn": "DO / DON'T and failure modes",
+      "bodyEn": "**Do:** clarify first; think out loud; offer more than one design then take a trade-off; get buy-in on the high-level before the deep dive; treat the interviewer as a teammate; never quit.\n\n**Don't:** draw before requirements; dive into one component at minute one; go silent; treat “I finished the diagram” as the end—it ends when they say it ends.\n\n| Failure mode | Symptom | Fix |\n|---|---|---|\n| Jumping in | Skip Step 1 | Force 5–7 questions |\n| Rabbit hole | One detail for 30 minutes | Clock every 5 minutes |\n| A little of everything | Every box, no depth | Pick 1–2 cores and go to the bottom |\n| Silence | Thinking with no words | Narrate the whole way |\n| over-engineering | Stack boxes, skip trade-off | For each box, say why / why not |"
+    },
+    {
+      "id": "sec-level",
+      "heading": "岗位差异",
+      "secNum": null,
+      "related": [
+        "ch44",
+        "ch45"
+      ],
+      "body": "同一道题，级别不同，Step 3 挖的深度不同。别用资深岗的词堆给初级岗，也别用「能跑就行」打发高级岗。\n\n| 级别 | Step 3 偏向 | wrap-up 多提 |\n|---|---|---|\n| Junior | 组件、API、schema 能讲清 | 基本 bottleneck |\n| Senior | bottleneck、扩展、容错 | 观测、失败模式 |\n| Staff | trade-off、多区域、成本、组织边界 | 微服务怎么拆、领域怎么划（点到即可，深读在 M6） |\n\n后端岗被追问 LLM / Agent 时：先给传统方案，再给「如果加检索 / 工具调用怎么嵌」。细节在 M5，本章只要你知道**可能被问到，不要空白**。",
+      "headingEn": "How level changes the answer",
+      "bodyEn": "Same prompt, different level, different Step 3 depth. Do not dump staff vocabulary on a junior loop, and do not wave off a senior loop with “it would work.”\n\n| Level | Step 3 leans toward | Wrap-up should mention |\n|---|---|---|\n| Junior | Components, APIs, schema, clearly | Basic bottlenecks |\n| Senior | Bottleneck, scale, failure | Observability, failure modes |\n| Staff | Trade-off, multi-region, cost, org boundaries | How you’d split services / domains (point at it; depth is M6) |\n\nIf a backend loop asks about LLM / Agent: give the traditional design first, then “if we add retrieval / tool calls, here’s where it plugs in.” Details live in M5. This chapter only needs you to know **you might get asked—don’t go blank.**"
+    },
+    {
+      "id": "sec-2026",
+      "heading": "2026 vs 原书",
+      "secNum": null,
+      "related": [],
+      "body": "<details>\n<summary>原书怎么讲 / 为什么现在要补几句</summary>\n\n| 原书（2020） | 现在怎么答 |\n|---|---|\n| 默认物理白板 | 虚拟白板（Excalidraw / 共享文档）是主流，提前练 |\n| 不太强调 API-first | 中小题在 Step 2 主动列 endpoint |\n| 评分五维 | 还看画图清晰度、时间把控、成本、可观测性 |\n| 几乎不提 AI | 可能追问「向量检索 / Agent 工具怎么嵌」——传统方案 + 增强方案两手准备，细节在 M5（不做推荐系统） |\n\n高级岗会问月成本量级、某组件挂了怎样、怎么观测。wrap-up 里主动提，显得 senior。\n\n</details>",
+      "headingEn": "2026 vs the book",
+      "bodyEn": "<details>\n<summary>What the book said / why we add a few lines now</summary>\n\n| Book (2020) | How you answer now |\n|---|---|\n| Physical whiteboard by default | Virtual boards (Excalidraw / shared docs) are the default—practice them |\n| Weak on API-first | On medium/small problems, volunteer endpoints in Step 2 |\n| Five scoring axes | They also watch drawing clarity, time control, cost, observability |\n| Almost no AI | You may get “how would vector search / Agent tools plug in”—traditional design + an enhancement path. Details in M5 (no recommenders) |\n\nSenior loops will ask monthly cost order-of-magnitude, what happens when a box dies, and how you observe. Bring those up in wrap-up. It reads senior.\n\n</details>"
+    },
+    {
+      "id": "sec-traps",
+      "heading": "追问陷阱",
+      "secNum": null,
+      "related": [
+        "ch36",
+        "ch42",
+        "ch02"
+      ],
+      "body": "1. 「还有什么问题？」→ 2–3 个 bottleneck + 改进，永远不要说完美。\n2. 「流量翻 10 倍？」→ 分片、读写分离、缓存、CDN（回到 Ch02 第 8 集）。\n3. 「一个机房挂了？」→ 多区域 + CAP/PACELC trade-off（机制在 M6 Ch36，面试开口用本章 wrap-up）。\n4. 「怎么监控？」→ 四个黄金信号 + 追踪。\n5. 「为什么选 A 不选 B？」→ 必须有 trade-off 理由。\n6. 「画一下数据流？」→ 用时序图走一条写路径、一条读路径。",
+      "headingEn": "Follow-up traps",
+      "bodyEn": "1. “Anything else?” → 2–3 bottlenecks + fixes. Never say perfect.\n2. “Traffic ×10?” → shard, read/write split, cache, CDN (back to Ch02, episode 8).\n3. “One DC dies?” → multi-region + CAP/PACELC trade-off (mechanism in M6 Ch36; the interview line is this chapter’s wrap-up).\n4. “How do you monitor?” → four golden signals + traces.\n5. “Why A not B?” → you need a trade-off reason.\n6. “Walk the data flow?” → sequence diagram, one write path, one read path."
+    },
+    {
+      "id": "sec-next",
+      "heading": "下一步",
+      "secNum": null,
+      "related": [
+        "ch02"
+      ],
+      "body": "直接进 **Ch02 · 从零扩展到百万用户**。那是一条「痛点 → 方案 → 新痛点」的故事。Ch03 把估算练熟。第一道具体设计题是 **Ch04 限流器**，范围小，正好把 4 步法跑通一遍。\n\n自测：合上这一页，对着空气把 45 分钟剧本走一遍。哪一步说不利索，就回哪一节。",
+      "headingEn": "What’s next",
+      "bodyEn": "Go straight to **Ch02 · Scale from zero to a million users.** It is a “pain → fix → new pain” story. Ch03 drills estimates. The first concrete design problem is **Ch04 rate limiter**—small scope, a clean run of the 4 steps.\n\nSelf-check: close this page and walk the 45-minute script out loud. Wherever you stumble, come back to that section."
+    }
+  ],
+  "reviewMd": "# Ch01 · 记忆闪卡\n\n| # | 正面 | 背面 |\n|---|---|---|\n| 1 | 系统设计面试主要考终图吗？ | 不是。考澄清、估算、trade-off、协作过程。 |\n| 2 | 第一次学的推荐顺序？ | Ch01 → Ch02 → Ch03 → M2–M5。M6 后置，可芯片跳转。 |\n| 3 | M5 学什么、不学什么？ | LLM 推理 / RAG / Agent 基建。不做推荐系统。 |\n| 4 | M6 是什么？ | 基础深读（机制 + 论文，含大数据、微服务、DDD）。不是开胃菜。 |\n| 5 | 4 步时间盒？ | 定范围 3–10；高层 10–15；deep dive 10–25；wrap-up 3–5。 |\n| 6 | 最大 red flag 是哪两个？ | over-engineering；沉默思考。抢答（Jimmy）紧随其后。 |\n| 7 | Step 1 问太多或太少怎么办？ | 5–7 个关键问题，其余自己假设写白板。 |\n| 8 | Step 2 结束的标志？ | 面试官对高层图 buy-in，不是你自己画完。 |\n| 9 | Step 3 深度还是广度？ | 深度。选 1–2 个 hard part 挖到底。 |\n| 10 | 卡住第一件事？ | 把卡点说出来，禁止沉默。然后退回高层 / 要提示 / 换方案。 |\n| 11 | wrap-up 能不能说设计完美？ | 永远不能。准备 3 个 bottleneck：单点、热点、一致性。 |\n| 12 | 白板怎么分区？ | 左需求假设估算；中架构；右 deep dive 与 trade-off。 |\n| 13 | 「流量 ×10」怎么接？ | 分片、缓存、CDN、读写分离，不要只加机器。 |\n| 14 | 正文和「原书怎么讲」哪个当面试第一答案？ | 正文（2026）。折叠里是过时方案。 |",
+  "tutorialMd": "# Ch01 · 世界地图与 4 步法\n\n> **预计**：60–70 分钟 ｜ **前置**：无\n> **目标**：会用这个学习站；能按时间盒打完一场 45 分钟系统设计面试；卡住会自救。\n\n> 原书原话：*The final design is less important compared to the work you put in the design process.*\n\n你可能写过很多服务，但没在白板上被追问过「流量翻 10 倍怎么办」。这门课不是再教一遍 Spring，而是：**把你已经会的积木，按面试官听得懂的顺序拼出来，并讲清 trade-off。**\n\n很多人系统知识够，但面试挂，是因为没有框架：抢答、钻细节、中途死寂。本章一次讲完两件事——**这个站怎么读**，以及 **45 分钟怎么打**。后面每道题都往这个骨架上填，不必再开一章重复「面试是协作」。\n\n## 面试本质与评分\n\n它不是让你 45 分钟造出微信，也不是知识竞赛。它是：**两个工程师协作，把一个模糊问题收成可落地的设计**。开放、没标准答案。**过程 > 终图。**\n\n面试官看的是：\n\n- 你会不会先问清楚再画图\n- 你会不会估算数量级（不是精确到字节）\n- 你会不会在两个合理方案里做 trade-off\n- 卡住时会不会出声、会不会要提示\n\n终图漂亮但过程沉默 = 低分。过程清楚、终图有意简化 = 高分。\n\n```d2\nstyle.font-size: 12\ngrid-columns: 2\nsignals: {\n  label: \"plus\"\n  class: groupOk\n  grid-columns: 3\n  tech.class: ok\n  tech: \"trade-off\"\n  collab.class: ok\n  collab: \"当队友\"\n  stress.class: ok\n  stress: \"卡住不慌\"\n  ambiguity.class: ok\n  ambiguity: \"先澄清\"\n  ask.class: ok\n  ask: \"问对问题\"\n}\nreds: {\n  label: \"red flag\"\n  class: groupBad\n  grid-columns: 3\n  over.class: bad\n  over: \"over-engineering\"\n  jimmy.class: bad\n  jimmy: \"抢答\"\n  rabbit.class: bad\n  rabbit: \"rabbit hole\"\n  silent.class: bad\n  silent: \"沉默\"\n  stubborn.class: bad\n  stubborn: \"不听反馈\"\n}\n```\n\n**最大的 red flag = over-engineering。** 面试官最怕你为「设计纯净」忽略 trade-off。主动说「这里我简化了，因为 X；生产要考虑 Y」，比堆砌高级组件得分高。\n\n**最大的 DON'T = 沉默思考。** 算法面试可以安静 5 分钟；系统设计绝对不行——面试官看不到思路 = 没信号 = 低分。画图时也要自言自语。\n\n## 这个站怎么读\n\n六大模块。主线是 **M1–M5**；**M6 后置**，不是开胃菜。\n\n```d2\nstyle.font-size: 12\ndirection: right\nm1: \"M1 方法\"\nm2: \"M2 构件\"\nm3: \"M3 经典题\"\nm4: \"M4 进阶\"\nm5: \"M5 Agent\"\nm6: \"M6 基础\"\nm1 -> m2 -> m3\nm4 -> m5 -> m6\nm3 -> m4\n```\n\n**第一次学的推荐路径：**\n\n1. 本章（地图 + 4 步法）\n2. **Ch02** 从零扩到百万 → **Ch03** 粗略估算\n3. M2 用小题目把 4 步法跑熟（限流、哈希、KV、ID、锁）\n4. M3 → M4 后端设计题（短链、Feed、搜索、订单、支付、调度……）\n5. **M5** 大模型推理 / RAG / Agent 基建（**不做推荐系统**）\n6. **M6 基础深读放最后**：机制 + 论文。设计题里出现「缓存 / 分片 / 微服务」可点引用芯片跳进去，也可以整段留到主线结束后再专心学。\n\n设计题**不唯那几本面试书**。书里没有的（订单、网关、红包、Agent 编排、DDD）按现在面试怎么问来写。\n\n## 引用芯片、D2 图、闪卡\n\n- **引用芯片**：多数链到 **M6 基础深读**（偶尔链到相关设计题）。可以先不点；想打透再读，里面有论文节。\n- **D2 图**：横排最多 5 个框；超过就折行或竖排。主题切换图会跟着变。\n- **闪卡**：章末折叠。正面是面试官可能问的，背面 ≤ 3 行。能讲出来才算会。\n- **2026 vs 原书**：折叠里。正文是现在该怎么答；书里过时的（HDD 很慢、APNS 当主通道、向量时钟当生产默认）不要当第一答案。\n\n本课**没有**浏览器里写代码。系统设计面试是讲和画。\n\n## 4 步总览与时间盒\n\n读完你要能：按 3–10 / 10–15 / 10–25 / 3–5 分钟走完四步；认出 red flag；卡住时用「退回高层 / 要提示 / 换方案」而不是沉默。\n\n```d2\nstyle.font-size: 12\ndirection: right\ns1: \"1 定范围\\n3-10 min\"\ns2: \"2 高层图\\n10-15 min\"\ns3: \"3 deep dive\\n10-25 min\"\ns4: \"4 wrap-up\\n3-5 min\"\ns1 -> s2 -> s3 -> s4\n```\n\nCh02 教架构怎么长，Ch03 教怎么算，后面各章教具体题。**45 分钟怎么组织，就是这四步。** 估算公式在 Ch03，本章只要求你在 Step 2 前留出 back-of-envelope 的位置。\n\n## Step 1 · 理解问题，定范围（3–10 分钟）\n\n### 别当 Jimmy\n\n原书故事：班里有个叫 Jimmy 的孩子，问题一出就抢答。系统设计里**抢答零加分**。没搞清需求就给方案 = 巨大 red flag。\n\n### 问 4 类问题\n\n```d2\nstyle.font-size: 12\ndirection: right\nask: \"先问清楚\"\nq1: \"① 功能\"\nq2: \"② 规模\"\nq3: \"③ 约束\"\nq4: \"④ 特殊\"\nask -> q1 -> q2 -> q3 -> q4\n```\n\n以「设计 News Feed」为例：\n\n| 你 | 面试官（典型） |\n|---|---|\n| 是 mobile、web 还是都要？ | 都要 |\n| 最重要的功能？ | 发帖 + 看 feed |\n| 按时间还是有权重排序？ | 简化，按时间倒序 |\n| 一个用户最多多少好友？ | 5000 |\n| 流量规模？ | 1000 万 DAU |\n\n目标：把「设计 X」收敛成**具体、可设计的边界**。问完后双方对「做什么、多大、约束」达成一致。\n\n面试官反问「你觉得呢？」时：**给出假设并写在白板上**，不要追问到烦。\n\n**必问清单（大约 5–7 个就停）：** 用户量级、核心功能、读:写比、延迟、一致性、可用性、是否多区域。\n\n问太少 → 设计跑偏（没问读:写比，缓存层会画错）。问太多超过 10 分钟 → 面试官烦。黄金线：**问关键问题 → 自己给假设 → 写白板 → 继续**。\n\n## Step 2 · 高层设计，获得 buy-in（10–15 分钟）\n\n四个动作：画初始蓝图 → 边画边问反馈 → 用 Ch03 back-of-envelope 验证撑得住 → 走 1–2 个用例。\n\n```d2\nstyle.font-size: 12\ndirection: right\nyou: \"你 · 先画高层\"\nsketch: \"client → LB → 服务 → 存储\"\niv: \"面试官 · 方向 OK?\"\nyou -> sketch -> iv\n```\n\n话术：\n\n> 「我先用 5 分钟画个高层图，确认方向对了再深入。client 这里……这层用 LB + 无状态 web……这一步方向 OK 吗？」\n\n这一步结束时**必须达成共识**。别自顾自往下走。\n\n要不要定义 API 和 schema？大题（「设计搜索」）可以先不写；中小题要写。拿不准就问：「要不要我先列 API？」2026 的虚拟面试里，**主动列 3–5 个 endpoint** 通常是加分。\n\n## Step 3 · Deep dive（10–25 分钟）\n\n全场最关键。此时你已经：范围共识、高层蓝图、知道面试官想挖哪块。\n\n怎么选要挖哪块：① **hard part**（这题最难、最该讲透的那块：短链 → 编码与跳转；聊天 → 连接与 fan-out）；② 面试官刚问的；③ 岗位级别（高级岗聊 bottleneck 和容错）。\n\n```d2\nstyle.font-size: 12\ngrid-columns: 2\nchoose: {\n  label: \"怎么选\"\n  class: group\n  grid-columns: 3\n  a.class: step\n  a: \"hard part\"\n  b.class: step\n  b: \"面试官\"\n  c.class: step\n  c: \"级别\"\n}\ndepth: {\n  label: \"挖多深\"\n  class: group\n  grid-columns: 3\n  junior.class: warn\n  junior: \"Junior · API\"\n  senior.class: warn\n  senior: \"Senior · bottleneck\"\n  staff.class: warn\n  staff: \"Staff · trade-off\"\n}\n```\n\n**深度 > 广度。** 最隐蔽的失败是「大而全」：每个组件点名一遍，哪块都不深。限流器这题就应该把令牌桶 vs 滑动窗口挖透，而不是再画一遍 CDN。\n\n时间管理是命门。每 5 分钟看一次表。别花 15 分钟讲某个排序公式——那不证明设计能力。\n\n## 卡住时怎么自救\n\n这决定你能不能 hold 住现场。原书几乎没写成清单，但面试里经常用到。\n\n```d2\nstyle.font-size: 12\ndirection: right\nstuck: \"卡住了\"\ns1: \"① 说出来\"\ns2: \"② 退回高层\"\ns3: \"③ 要提示\"\ns4: \"④ 换方案\"\nstuck -> s1 -> s2 -> s3 -> s4\n```\n\n铁律：**卡住最忌讳沉默。** 「我理一下，目前卡在消息 fan-out」比安静 40 秒强。要提示不丢人——面试官期待协作，不是单打独斗。\n\n## Step 4 · Wrap-up（3–5 分钟）\n\n永远别说「我的设计完美」。挑 2–3 个方向讲：\n\n1. 找 bottleneck + 改进\n2. 错误处理（进程挂、网络分区）\n3. 可观测性（延迟、流量、错误、饱和）\n4. 下一曲线（1M → 10M 怎么改）\n5. 成本\n\n永远准备好 3 个 bottleneck 口播：\n\n| bottleneck | 改进 |\n|---|---|\n| 单点 | 副本 / failover |\n| 热点 key | 分片 / 本地缓存 |\n| 缓存与库不一致 | 过期 + 失效；或 CDC |\n\n白板建议三区：**左**需求与假设 / 估算；**中**架构与数据流；**右** deep dive 与 trade-off。虚拟面试用 Excalidraw / 共享文档同理——字写大，结构一眼能看清。\n\n## 45 分钟剧本（可背）\n\n```d2\nstyle.font-size: 12\ndirection: right\nt1: \"0-1 复述\"\nt2: \"1-8 问需求\"\nt3: \"8-10 estimate\"\nt4: \"10-22 高层\"\nt5: \"22-40 deep dive\"\nt6: \"40-45 wrap-up\"\nt1 -> t2 -> t3\nt4 -> t5 -> t6\nt3 -> t4\n```\n\n| 时间 | 动作 | 话术 |\n|---|---|---|\n| 0–1 | 复述 | 「我复述一下，你要的是……」 |\n| 1–8 | 问需求 | 「功能？规模？读:写？延迟？」 |\n| 8–10 | estimate | 「DAU × 次数 / 86400 × 峰值 ≈ QPS」 |\n| 10–22 | 高层图 | 「我画高层，你看方向对不对」 |\n| 22–40 | deep dive | 「这块是 hard part。方案 A……方案 B……我选 A 因为……」 |\n| 40–45 | wrap-up | 「三个 bottleneck：单点、热点、一致性。若有时间我会……」 |\n\n开场先确认时长。虚拟 onsite 常见 45–50 分钟，倒推时间盒。\n\n## DO / DON'T 与失败模式\n\n**做：** 先澄清；出声思考；给多个方案再做 trade-off；高层达成共识再 deep dive；把面试官当队友；永不放弃。\n\n**不要：** 没问需求就画图；一开始钻单个组件；沉默；交完图就以为结束——面试官说完事才算完。\n\n| 失败模式 | 症状 | 解药 |\n|---|---|---|\n| 抢答 | Step 1 跳过 | 强制问 5–7 个问题 |\n| 钻牛角尖 | 一个细节 30 分钟 | 每 5 分钟看表 |\n| 大而全 | 每组件都浅 | 选 1–2 个核心挖到底 |\n| 沉默 | 思考不出声 | 全程自言自语 |\n| over-engineering | 堆组件不讲 trade-off | 每个组件说为什么用 / 不用 |\n\n## 岗位差异\n\n同一道题，级别不同，Step 3 挖的深度不同。别用资深岗的词堆给初级岗，也别用「能跑就行」打发高级岗。\n\n| 级别 | Step 3 偏向 | wrap-up 多提 |\n|---|---|---|\n| Junior | 组件、API、schema 能讲清 | 基本 bottleneck |\n| Senior | bottleneck、扩展、容错 | 观测、失败模式 |\n| Staff | trade-off、多区域、成本、组织边界 | 微服务怎么拆、领域怎么划（点到即可，深读在 M6） |\n\n后端岗被追问 LLM / Agent 时：先给传统方案，再给「如果加检索 / 工具调用怎么嵌」。细节在 M5，本章只要你知道**可能被问到，不要空白**。\n\n## 2026 vs 原书\n\n<details>\n<summary>原书怎么讲 / 为什么现在要补几句</summary>\n\n| 原书（2020） | 现在怎么答 |\n|---|---|\n| 默认物理白板 | 虚拟白板（Excalidraw / 共享文档）是主流，提前练 |\n| 不太强调 API-first | 中小题在 Step 2 主动列 endpoint |\n| 评分五维 | 还看画图清晰度、时间把控、成本、可观测性 |\n| 几乎不提 AI | 可能追问「向量检索 / Agent 工具怎么嵌」——传统方案 + 增强方案两手准备，细节在 M5（不做推荐系统） |\n\n高级岗会问月成本量级、某组件挂了怎样、怎么观测。wrap-up 里主动提，显得 senior。\n\n</details>\n\n## 追问陷阱\n\n1. 「还有什么问题？」→ 2–3 个 bottleneck + 改进，永远不要说完美。\n2. 「流量翻 10 倍？」→ 分片、读写分离、缓存、CDN（回到 Ch02 第 8 集）。\n3. 「一个机房挂了？」→ 多区域 + CAP/PACELC trade-off（机制在 M6 Ch36，面试开口用本章 wrap-up）。\n4. 「怎么监控？」→ 四个黄金信号 + 追踪。\n5. 「为什么选 A 不选 B？」→ 必须有 trade-off 理由。\n6. 「画一下数据流？」→ 用时序图走一条写路径、一条读路径。\n\n## 下一步\n\n直接进 **Ch02 · 从零扩展到百万用户**。那是一条「痛点 → 方案 → 新痛点」的故事。Ch03 把估算练熟。第一道具体设计题是 **Ch04 限流器**，范围小，正好把 4 步法跑通一遍。\n\n自测：合上这一页，对着空气把 45 分钟剧本走一遍。哪一步说不利索，就回哪一节。",
+  "titleEn": "World map & the 4-step method",
+  "reviewMdEn": "# Ch01 · Flashcards\n\n| # | Front | Back |\n|---|---|---|\n| 1 | Does system design mainly score the final diagram? | No. It scores clarifying, estimating, trade-off, and the collaboration. |\n| 2 | Recommended first-pass order? | Ch01 → Ch02 → Ch03 → M2–M5. M6 last; chips can jump. |\n| 3 | What does M5 cover / skip? | LLM inference / RAG / Agent infra. No recommender systems. |\n| 4 | What is M6? | Foundations (mechanisms + papers, including big data, microservices, DDD). Not an appetizer. |\n| 5 | 4-step time-box? | Scope 3–10; high-level 10–15; deep dive 10–25; wrap-up 3–5. |\n| 6 | Two biggest red flags? | over-engineering; silent thinking. Jumping in (Jimmy) is right behind. |\n| 7 | Step 1: too many or too few questions? | 5–7 key questions; assume the rest and write the board. |\n| 8 | When is Step 2 done? | When they buy in on the high-level sketch—not when you finished drawing. |\n| 9 | Step 3: depth or breadth? | Depth. Pick 1–2 hard parts and go to the bottom. |\n| 10 | First move when you stall? | Say the stall out loud. No silence. Then zoom out / hint / switch designs. |\n| 11 | Can wrap-up say the design is perfect? | Never. Keep 3 bottlenecks: single point, hot key, consistency. |\n| 12 | How to zone the board? | Left: requirements, assumptions, estimates. Center: architecture. Right: deep dive and trade-off. |\n| 13 | How to take “traffic ×10”? | Shard, cache, CDN, read/write split—not just more boxes. |\n| 14 | Body vs “what the book said”—which is the first answer? | The body (2026). The fold is the outdated path. |"
+}

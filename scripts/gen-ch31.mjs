@@ -1,0 +1,498 @@
+import { writeChapter } from "./write-chapter.mjs";
+
+const d2 = (src) => {
+  const body = src.trim();
+  const sized = /style\.font-size/.test(body) ? body : `style.font-size: 12\n${body}`;
+  return "```d2\n" + sized + "\n```";
+};
+
+writeChapter({
+  id: "ch31",
+  num: "31",
+  title: "设计向量检索服务",
+  kind: "ai",
+  relatedChapters: ["ch30", "ch37", "ch41", "ch38"],
+  sections: [
+    {
+      id: "intro",
+      heading: "",
+      secNum: null,
+      related: [],
+      body: [
+        "> **预计**：50–70 分钟 ｜ **前置**：Ch30 RAG 当调用方；Ch03 估算",
+        "> **目标**：讲清向量**存储引擎**：HNSW / IVF / PQ、过滤、复制分片。不讲 RAG 切分/生成。",
+        "",
+        "面试官说「设计一个向量库 / ANN 服务」，不是让你背 Milvus / Qdrant / Pinecone 的 SKU，也不是让你把 Ch30 的 RAG 管道再画一遍。",
+        "",
+        "**谁调这个 API：** RAG 后端（Ch30）送来**已经算好的 query 向量**和 metadata filter，本章返回 top-k id + score。切分、hybrid 融合、rerank、citation、LLM 生成都不在这张白板上。",
+        "",
+        "**hard part** 是三块：**索引选型**（HNSW vs IVF-PQ / DiskANN-class）、**filtered ANN**（metadata 和近似图怎么一起走）、**replica / shard / ingest 一致性**（WAL 之后何时可搜）。画完一个「向量 DB」框却讲不清这三块，是 red flag。",
+        "",
+        "本章边界：",
+        "",
+        "- **RAG 切分 / hybrid / 生成** → 已在 Ch30；这里当调用方点一句",
+        "- **多模型路由、语义缓存、计费** → 预告 Ch32",
+        "- **不做** 推荐、双塔、精排",
+        "",
+        "M5 铁律：**只做 LLM + Agent 基建，禁止推荐漏斗。** 厂商名最多当机制的例子，架构用 **HNSW 图 / IVF list / PQ code** 讲。",
+      ].join("\n"),
+    },
+    {
+      id: "sec-pitch",
+      heading: "面试怎么答（30 秒）",
+      secNum: "31.1",
+      related: [],
+      body: [
+        "开场不要画 20 个框，也不要报一家托管向量库的报价单。先把评分信号打出来：这是 **ANN 存储引擎**，hard part 不在 logo。",
+        "",
+        "> 「这是向量**检索服务**，不是 RAG。调用方把 embedding 和 filter 打进来，我做 **ANN + payload 过滤**，返回 top-k。千万级、内存够 → 默认 **HNSW**；内存是 bottleneck → **IVF+PQ 或 DiskANN-class**。过滤是生产里真正难的部分。QPS 靠 **replica**，数据量靠 **shard**。写入先 WAL，ANN 是近似，可见性还可以是 eventual——两件事不要混。」",
+        "",
+        "四步怎么填：",
+        "",
+        d2(`
+direction: right
+s1.class: go
+s1: "Step 1 澄清"
+s2.class: step
+s2: "Step 2 架构"
+s3.class: store
+s3: "Step 3 深入"
+s4.class: ok
+s4: "Step 4 wrap-up"
+s1 -> s2 -> s3 -> s4
+`),
+        "",
+        "| 步 | 这题落在哪 |",
+        "|---|---|",
+        "| Step 1 澄清 | 向量条数/维度、p95、filter 严不严、流式写入还是批建、是否立刻可搜、多租户 |",
+        "| Step 2 高层 | query：client → query svc → index replica（filter + ANN）；ingest 另画 |",
+        "| Step 3 deep dive | ① HNSW vs IVF-PQ ② filtered ANN ③ replica / shard / WAL |",
+        "| Step 4 wrap-up | recall@k vs 延迟、内存打满、过滤把召回打穿、副本滞后、观测 ingest lag |",
+        "",
+        "**red flag：** 把 RAG 切分/生成再讲一遍；上双塔推荐；说「先 SQL 过滤再精确 kNN」当亿级方案；绑死一家 vendor；报某厂内部 QPS。",
+      ].join("\n"),
+    },
+    {
+      id: "sec-clarify",
+      heading: "澄清问题",
+      secNum: "31.2",
+      related: [],
+      body: [
+        "没问规模和过滤就画 HNSW 集群 = Jimmy。大约 6–8 个问题，其余自己假设写白板。",
+        "",
+        "| 你问 | 为什么问 | 典型假设（面试官说「你定」时） |",
+        "|---|---|---|",
+        "| 多少条向量？维度？ | 直接决定能不能把 float32 + 图塞进 RAM | **1 千万～1 亿** 条，**768-dim** |",
+        "| 延迟 SLO？p95 几毫秒？ | 定 ef / nprobe、要不要量化后再 rescore | 交互检索 **p95 < 20–50 ms**（不含 embedding） |",
+        "| 几乎每次 query 都带 **metadata filter** 吗？严不严？ | filtered ANN 是这题真正的 hard part | 要；常见 tenant / 时间窗，有时很严 |",
+        "| 写入：流式增量，还是日批重建？ | HNSW 能吃 insert；IVF 质心会漂；经典 DiskANN 偏静态 | **流式 upsert**，删除要能搜不到 |",
+        "| insert 之后要立刻可搜吗？ | WAL 持久 ≠ 立刻出现在 ANN | 默认 **秒级可见**（bounded），不是跨副本线性 |",
+        "| 多租户：分 collection 还是 payload filter？ | 隔离更安全更贵；filter 省机器、有漏扫风险 | 先 **tenant_id filter**；强隔离再拆 collection |",
+        "| 调用方是谁？ | 钉死边界，避免画成 RAG | **RAG 后端（Ch30）**；向量已算好 |",
+        "",
+        "话术：",
+        "",
+        "> 「我假设 768 维、千万到亿级、每次带 tenant 过滤、流式写入、秒级可见、调用方是 RAG。内存够先 HNSW；不够再量化或 DiskANN-class。方向 OK 吗？」",
+      ].join("\n"),
+    },
+    {
+      id: "sec-estimate",
+      heading: "粗估（不要假装精确）",
+      secNum: "31.3",
+      related: ["ch37"],
+      body: [
+        "这题的 back-of-envelope 是让面试官听见：**内存才是第一瓶颈**，不是「向量库 QPS 口号」。禁止编造某厂内部数字。",
+        "",
+        "教学假设（写白板）：**1 亿条 × 768-dim × float32**。",
+        "",
+        "> 100M × 768 × 4 B ≈ **300 GB** 原始向量。HNSW 还要存图边，常见再乘一个小系数（看 M）。一台「内存盒子」装不下，这就是为什么面试默认会分叉。",
+        "",
+        "| 规模（768-dim，教学） | float32 向量 | 面试怎么开口 |",
+        "|---|---|---|",
+        "| 1M | ~3 GB | 单机 HNSW 很轻松；甚至 pgvector 也常够 |",
+        "| 10M | ~30 GB | 肥盒子 + HNSW；或 SQ8 再降一截 |",
+        "| **100M** | **~300 GB** | RAM 是 bottleneck；PQ / DiskANN-class / shard |",
+        "| 1B | ~3 TB | 必须压缩 + 落盘图 + 分片，别谈纯内存 HNSW |",
+        "",
+        "量化数量级（同一 100M × 768）：",
+        "",
+        "| 编码 | 大约体积 | 面试用哪一句 |",
+        "|---|---|---|",
+        "| float32 | ~300 GB | 上限，当对照 |",
+        "| **SQ8 / int8** | ~75 GB | **约 4×**，recall 掉得少，常当第一刀 |",
+        "| PQ（激进 code） | 数 GB 量级 code | 8–32× 常见；要训练 codebook，recall 掉得多 |",
+        "",
+        "HNSW 图边、ID mapping、payload 倒排都要另算。面试说「先把 300 GB 写上，再决定量化还是换索引」，比空谈「亿级没问题」加分。",
+        "",
+        "### QPS 在哪分叉",
+        "",
+        "自己假设：**读 100–500 QPS**、写远小于读（写清是假设）。",
+        "",
+        "- **replica** 摊读 QPS、做 failover",
+        "- **shard** 摊**数据体积**；query 是 scatter-gather，分片太多 p95 可能更差，不是免费加速",
+        "- 无 filter 的 HNSW 往往不是 bottleneck；**严过滤 + 高 recall@k** 才把延迟打爆",
+        "",
+        "热点 query 的结果可以短 TTL 缓存（心智见 Ch38），和「语义缓存整段 LLM 答案」（Ch32）不是一回事。点到即可。",
+        "",
+        "话术：",
+        "",
+        "> 「1 亿 × 768 float32 大约 300 GB。内存够就 HNSW；不够先 SQ8，再不够 IVF-PQ 或 DiskANN-class。QPS 我假设几百读；加副本，不要靠盲目加 shard。」",
+      ].join("\n"),
+    },
+    {
+      id: "sec-arch",
+      heading: "高层架构",
+      secNum: "31.4",
+      related: ["ch37", "ch41", "ch30", "ch38"],
+      body: [
+        "要 buy-in：**query 和 ingest 分开画**。禁止一张图把切分、GPU、LangChain、HNSW 参数全塞进去。",
+        "",
+        "调用方（Ch30 RAG 或别的检索服务）已经做完 embedding。本章只看到：vector、top_k、filter、consistency。",
+        "",
+        "### query 路径",
+        "",
+        d2(`
+direction: right
+cli.class: go
+cli: "client"
+qs.class: step
+qs: "query svc"
+idx.class: store
+idx: "index replica"
+out.class: ok
+out: "top-k"
+cli -> qs -> idx -> out
+`),
+        "",
+        "**本图引用**：存储选型（Ch37）、复制与分片（Ch41）。client 是 RAG 后端（Ch30），不是浏览器用户。replica 上同时做 **payload filter + ANN**，不要画成先精确扫全库。热点结果缓存点到 Ch38。",
+        "",
+        "query svc 无状态：鉴权、选 collection、选 consistency、scatter-gather 合并。**有状态的是 index replica**（图或 IVF list 在内存 / mmap / SSD）。",
+        "",
+        "Step 2 可以主动列 endpoint（加分，不必写 schema）：",
+        "",
+        "- `POST /v1/vectors/search`（vector、top_k、filter、consistency）",
+        "- `POST /v1/vectors/upsert`",
+        "- `POST /v1/vectors/delete`",
+        "- 可选 `GET /metrics`（抽样 recall@k、p95、ingest lag、过滤命中率）",
+        "",
+        "话术：",
+        "",
+        "> 「读路径就是 query svc 打到 index replica，过滤和 ANN 在引擎里一起做。写入另走 WAL。方向 OK 的话我挖索引、过滤、复制。」",
+      ].join("\n"),
+    },
+    {
+      id: "sec-index",
+      heading: "Deep dive ①：HNSW vs IVF-PQ",
+      secNum: "31.5",
+      related: ["ch37"],
+      body: [
+        "2026 面试默认（先说结论，再讲机制）：",
+        "",
+        "- **HNSW**：大约 **< 1 千万～5 千万** 向量、图还能放进 RAM → **第一答案**。延迟低，增量 insert 自然。",
+        "- **IVF+PQ / DiskANN-class**：内存是 bottleneck、或到亿级以上 → 换压缩或把图放到 SSD。不要在 100M float32 还坚持「纯内存 HNSW 一台搞定」。",
+        "",
+        "数字是量级不是法律。RAM 特别肥可以 HNSW 更大；过滤特别严时 IVF 有时更好走。用估算说话。",
+        "",
+        d2(`
+grid-columns: 2
+hnsw: {
+  label: "HNSW"
+  class: groupOk
+  grid-columns: 3
+  a.class: ok
+  a: "RAM 多层图"
+  b.class: ok
+  b: "增量 insert"
+  c.class: ok
+  c: "千万级默认"
+}
+disk: {
+  label: "IVF-PQ / DiskANN"
+  class: group
+  grid-columns: 3
+  d.class: warn
+  d: "省内存"
+  e.class: warn
+  e: "可落 SSD"
+  f.class: warn
+  f: "亿级常用"
+}
+`),
+        "",
+        "### 机制各一句",
+        "",
+        "**HNSW**：多层小世界图。上层稀疏跳远，下层密、局部精搜。query 从上往下贪心走。调参面试只记三个：**M**（每节点边数，常从 16 起）、**ef_construction**（建图时的候选宽度）、**ef_search**（查询宽度——**先调这个**换 recall vs 延迟）。图几乎要热在 RAM；冷页上跳 HNSW 会很疼。",
+        "",
+        "**IVF**：k-means 把空间切成 list（倒排文件）。query 先找最近的若干质心，只扫这些 list。**nlist** 建时定，**nprobe** 查时定——nprobe 就是 recall vs 延迟旋钮。建索引需要一批数据算质心；数据分布漂了要 **rebuild**，这是和 HNSW 最大的运维差。",
+        "",
+        "**PQ**：向量切成 m 段子向量，每段用 codebook 编成短 code。距离用查表近。**OPQ** 先学一个旋转，让各段方差更匀，同样压缩下 recall 通常更好。生产常 **粗搜用 PQ，对短名单用原向量 rescore**。",
+        "",
+        "**SQ8 / int8**：每维独立量化，大约 **4×** 压缩，recall 掉得少，比一上来 PQ 更安全。**DiskANN-class**（Vamana 图 + SSD）：RAM 里放 PQ code 导航，全精度向量在盘上。经典实现偏静态；**FreshDiskANN** 一类补了流式 insert/delete。",
+        "",
+        "| | HNSW | IVF-PQ | DiskANN-class |",
+        "|---|---|---|---|",
+        "| 内存 | 高（图+向量） | 低（code + 少量 list） | RAM 小、SSD 扛量 |",
+        "| 延迟 | 通常最低（全热） | 中；看 nprobe | 低～中，吃 NVMe |",
+        "| insert | 图上加点，友好 | 质心会漂，要重建 | 经典要重建；Fresh 可流式 |",
+        "| 规模直觉 | 千万级 RAM | 内存紧的中大规模 | 内存装不下的亿级 |",
+        "",
+        "起步调参（公开默认当起点，不是魔法）：HNSW `M=16`，先动 **ef_search**。IVF 的 nlist 常跟 **sqrt(N)** 一个量级，先动 **nprobe**。没有 golden set 的 recall@k，不要空吹「调过了」。",
+        "",
+        "厂商只作对照，**不要当架构**：",
+        "",
+        "| 机制 | 你可能在哪见到（例子） |",
+        "|---|---|",
+        "| RAM HNSW | Qdrant / Weaviate 默认；pgvector HNSW；Milvus 也有 |",
+        "| IVF-PQ | FAISS 系、Milvus IVF_PQ |",
+        "| DiskANN-class | Milvus DiskANN；Postgres 生态有 StreamingDiskANN 一类 |",
+        "| 和行数据同事务 | **pgvector**（百万级常够；再大别硬撑） |",
+        "",
+        "面试怎么说：",
+        "",
+        "> 「内存装得下就 HNSW，ef_search 换 recall。装不下先 SQ8，再 IVF-PQ 或 DiskANN-class。IVF 要接受质心重建。别把精确 kNN 当亿级默认。」",
+      ].join("\n"),
+    },
+    {
+      id: "sec-filter",
+      heading: "Deep dive ②：metadata filter + ANN",
+      secNum: "31.6",
+      related: ["ch37"],
+      body: [
+        "无过滤的 ANN 是作业题。生产几乎每次都带 **tenant / 时间 / 状态 / ACL**。**filtered ANN** 是这题在规模上真正的 hard part：过滤会剪断图的连通，也会让 IVF list 里「该探的桶」变空。",
+        "",
+        d2(`
+grid-columns: 3
+pre: {
+  label: "pre-filter"
+  class: group
+  grid-columns: 2
+  a.class: step
+  a: "先筛再搜"
+  b.class: warn
+  b: "子集大变扫"
+}
+post: {
+  label: "post-filter"
+  class: groupBad
+  grid-columns: 2
+  c.class: step
+  c: "先 ANN 再丢"
+  d.class: bad
+  d: "严过滤漏召回"
+}
+ing: {
+  label: "in-graph"
+  class: groupOk
+  grid-columns: 2
+  e.class: ok
+  e: "遍历时过滤"
+  f.class: ok
+  f: "ACORN 类"
+}
+`),
+        "",
+        "三种机制（用选择性说话，别背产品名）：",
+        "",
+        "| | 做什么 | 何时还行 | 翻车 |",
+        "|---|---|---|---|",
+        "| **pre-filter** | 先用倒排/bitset 得到允许集，再只在集合里搜 | 允许集**很小** → 对子集 brute force 很香 | 允许集仍上百万 → 退化成扫盘 |",
+        "| **post-filter** | 先 ANN 拿 top-(k×N)，再丢不匹配的 | 过滤**很松**（大部分都过） | 过滤**很严** → top-k 里一个都不剩，recall 穿 |",
+        "| **in-graph / hybrid** | 走 HNSW 时跳过不合格点，或两跳扩邻居；planner 按选择率在 brute 和走图之间切 | 生产默认要往这靠 | 当「过滤=WHERE 完事」不谈连通性 |",
+        "",
+        "**严过滤**（过的人很少，比如某租户 0.1%）：post-filter 必须 **oversample**（把 k 乘大），延迟和 recall 一起烂；此时 pre-filter 后对小集合精确扫往往更干净。",
+        "",
+        "**松过滤**（大部分都过）：pre-filter 几乎没减小搜索空间，白付一次标量检索。",
+        "",
+        "图索引还有结构问题：HNSW 边是按向量邻居连的，**不是按 tenant 连的**。过滤掉路上的点，贪心会走进死胡同。公开方向：",
+        "",
+        "- **ACORN** 一类（论文 *ACORN: Performant and Predicate-Agnostic Search…*；Weaviate 从某版本把 ACORN 当默认 filter strategy）：谓词无关，用 **两跳邻居** 维持可走性，低相关、较严的过滤上更稳。",
+        "- **Filterable HNSW**（Qdrant 一类）：payload 倒排 + 图上带约束，planner 按选择率在 brute 和走图之间切。",
+        "- IVF：过滤后某些 list 几乎空，要加大 nprobe 或接受召回洞。高过滤比时 IVF 有时比纯图更好说话，但仍要测。",
+        "",
+        "payload 必须建 **标量索引**（倒排 / 列存 / bitset），不要每次全表扫 metadata。多租户若用 filter 而不是物理隔离：默认假设引擎**不会**把别的 tenant 漏进 top-k——这是正确性，不是优化。",
+        "",
+        "带过滤的一次搜索：",
+        "",
+        d2(`
+shape: sequence_diagram
+cli: "client"
+qs: "query svc"
+idx: "replica"
+cli -> qs: "vec+filter"
+qs -> idx: "ANN+payload"
+idx -> qs: "top-k"
+qs -> cli: "ids+score"
+`),
+        "",
+        "**本图引用**：存储选型（Ch37）——向量索引和标量倒排是两份结构，打在一次查询里。",
+        "",
+        "面试怎么说：",
+        "",
+        "> 「过滤不是搜完再 WHERE。严过滤 post-filter 会漏；松过滤 pre-filter 会白扫。默认讲 planner：小允许集就 brute，否则走带约束的图（ACORN / filterable HNSW 一类）。召回要在带真实 filter 的集合上测 recall@k。」",
+      ].join("\n"),
+    },
+    {
+      id: "sec-scale",
+      heading: "Deep dive ③：复制、分片、ingest",
+      secNum: "31.7",
+      related: ["ch41", "ch37"],
+      body: [
+        "分布式向量引擎不要发明新 CAP。**replica 加读 QPS 和 failover；shard 切数据体积。** 过早分片是 over-engineering。",
+        "",
+        d2(`
+grid-columns: 2
+rep: {
+  label: "replica"
+  class: groupOk
+  grid-columns: 2
+  a.class: ok
+  a: "摊 QPS"
+  b.class: ok
+  b: "failover"
+}
+shd: {
+  label: "shard"
+  class: group
+  grid-columns: 2
+  c.class: warn
+  c: "切数据量"
+  d.class: warn
+  d: "scatter-gather"
+}
+`),
+        "",
+        "| | replica | shard |",
+        "|---|---|---|",
+        "| 解决什么 | 读吞吐、可用性 | 单机内存/盘装不下 |",
+        "| query | 打一个副本即可 | **广播**到相关 shard，各回 local top-k，coordinator **归并** |",
+        "| 代价 | 多一份内存；同步还是异步 | 网络 fan-out；分片过多 p95 变差 |",
+        "| red flag | 用加副本冒充「数据扩容」 | 用加 shard 冒充「QPS 扩容」 |",
+        "",
+        "shard key 用 **hash(id)** 一类，让各分片向量空间仍是全局的一份随机子集。**按语义/类目分片** 会让近邻落在别的 shard，ANN 直接错——除非 query 能精确路由且你接受跨类不可达。",
+        "",
+        "归并便宜（比较 `k × shard数` 条），贵的是**每个 shard 都做一次 ANN**。分片数跟内存预算走（单 shard 热数据 + 图 < ~70% RAM），不要先切 64 片装门面。",
+        "",
+        "### ingest：WAL → growing → sealed",
+        "",
+        "embedding **已经在上游算完**（Ch30 ingest）。本章从「一条带向量的 upsert」开始。",
+        "",
+        d2(`
+direction: right
+emb.class: go
+emb: "已 embedding"
+wal.class: step
+wal: "WAL"
+grow.class: store
+grow: "growing"
+seal.class: ok
+seal: "sealed"
+emb -> wal -> grow -> seal
+`),
+        "",
+        "**本图引用**：复制、分片、日志（Ch41）。WAL 保证崩溃不丢；**可搜索**是下一阶段的事。",
+        "",
+        "公开引擎（Milvus 一类 shared-storage、Qdrant/Weaviate 一类 worker 扛完整生命周期）细节不同，机制可共用：",
+        "",
+        "1. **先 append WAL**（本地盘、或 Kafka/Pulsar、或对象存储 WAL）——持久化",
+        "2. **growing segment**：新数据在内存缓冲；可搜，常用 brute 或很小的临时索引",
+        "3. 体积/条数到阈值 → **seal**，后台建 HNSW / IVF / DiskANN，再让 query 走只读段",
+        "4. **delete** = WAL 里 tombstone，搜时跳过，稍后 compact。只 upsert 不删是正确性 bug",
+        "",
+        "| 你承诺的可见性 | 含义 | trade-off |",
+        "|---|---|---|",
+        "| **Strong** | 读等到这条 WAL 被 ingest 进可搜结构（或同步副本 ack） | 写延迟高；「insert 返回即可搜」贵 |",
+        "| **Bounded / eventual** | 允许秒级滞后 | 吞吐好；RAG 知识库常见默认 |",
+        "",
+        "两件不要混：**ANN 的 recall@k**（近似邻居）和 **一致性**（读是否看到最新写）。可以「强一致地返回一个近似 top-k」。面试里主动拆开是加分。",
+        "",
+        "流式 vs 重建：",
+        "",
+        "- HNSW：点可以持续加；删除先墓碑，图要 compact 才瘦",
+        "- IVF：insert 还能塞进 list，**质心过时** → 定期 rebuild",
+        "- 静态 DiskANN：大批增量往往重建；FreshDiskANN 一类才把流式当一等公民",
+        "",
+        "换 embedding 模型 = 换坐标系，必须新 collection / 新 named vector，**禁止**两套维度混在一个 ANN 里——这点 Ch30 讲过，引擎侧只负责别让 upsert 进错索引。",
+        "",
+        "面试怎么说：",
+        "",
+        "> 「副本打 QPS，分片打体积，query 是 scatter-gather。写入 WAL → growing → sealed。默认 bounded 可见。ANN 近似和『读到最新写』分开讲。删除要有 tombstone。」",
+      ].join("\n"),
+    },
+    {
+      id: "sec-2026",
+      heading: "2026 vs 早期「纯 FAISS 单机」",
+      secNum: null,
+      related: [],
+      body: [
+        "<details>",
+        "<summary>单机 FAISS 离线建完再搜 —— 现在默认怎么答</summary>",
+        "",
+        "Xu 那一代书**没有**向量检索服务专章。早期工程默认常常是：Python 里 FAISS IVF-PQ 建一次、pickle 到盘上、进程里 load、无过滤、无副本。那是实验室检索，**不能当 2026 正文**。",
+        "",
+        "| 当时 / 早期工程 | 现在上场 |",
+        "|---|---|",
+        "| 单机 FAISS，全量 rebuild | 在线服务：WAL + growing/sealed；HNSW 增量 |",
+        "| 不谈过滤 | **filtered ANN** 是 hard part；pre / post / in-graph |",
+        "| 精确 kNN 或「反正近似就行」 | 声明 **recall@k SLO**，用带 filter 的 golden set 测 |",
+        "| 内存不够就加机器跑 HNSW | 先 **SQ8 / PQ**，再 DiskANN-class，再 shard |",
+        "| 一个 vendor logo = 架构 | 机制：图、IVF list、PQ code、replica vs shard |",
+        "| insert 返回 = 立刻可搜 | 持久和可见性分开；默认 bounded |",
+        "| 和 RAG 画在一张 20 节点图 | 本章只做存储引擎；调用方是 Ch30 |",
+        "",
+        "正文第一答案用现在这套。折叠只防止你把「import faiss」讲成终稿。",
+        "",
+        "</details>",
+      ].join("\n"),
+    },
+    {
+      id: "sec-traps",
+      heading: "追问陷阱",
+      secNum: null,
+      related: ["ch30", "ch37", "ch41"],
+      body: [
+        "1. **为什么不是精确 kNN？** → 亿级 O(n) 扫不动。ANN 用 recall@k 换延迟；要声明 SLO，不是口头「差不多」。",
+        "2. **HNSW 能不能一直加机器？** → 先算 100M × 768 float32 ≈ 300 GB。内存是 bottleneck 就量化或 DiskANN-class，不是无脑堆 RAM。",
+        "3. **IVF 为什么要重建？** → 质心是老数据上的 k-means，分布漂了 list 不再代表空间。HNSW 没有这层全局质心。",
+        "4. **PQ 是免费压缩吗？** → 要训练 codebook；recall 掉；常用 PQ 粗搜 + 原向量 rescore。SQ8 往往是更稳的第一刀。",
+        "5. **过滤为什么难？** → 图边不按 predicate 长。post-filter 严了漏召回；pre-filter 松了等于白做。要 in-graph / planner。",
+        "6. **多租户 filter 会不会漏数据？** → 必须当正确性：引擎侧约束，不能「搜完再在应用里丢」。强隔离再拆 collection。",
+        "7. **加 shard 能提高 QPS 吗？** → 不一定。scatter-gather 每个 shard 都算一遍。QPS 先加 **replica**。",
+        "8. **写入成功为什么搜不到？** → WAL 已持久，growing 还没可见，或副本异步。问的是 consistency，不是磁盘坏了。",
+        "9. **删除为什么还能命中？** → 没有 tombstone / 没 compact。upsert-only 是 red flag。",
+        "10. **这不就是 RAG 吗？** → 否。切分和生成在 Ch30。本章是 ANN 引擎。下一步网关是 Ch32，别把题做飘。",
+      ].join("\n"),
+    },
+    {
+      id: "sec-next",
+      heading: "下一步",
+      secNum: null,
+      related: ["ch32", "ch30", "ch38"],
+      body: [
+        "合上页，用 30 秒口播 + 两张图（query replica、WAL ingest）走一遍。能讲清 **何时 HNSW、何时 IVF-PQ/DiskANN、过滤为什么难、副本 vs 分片、WAL 可见性**，这题就过关。",
+        "",
+        "下一题预告：**LLM API 网关**（多模型路由、限流计费、语义缓存、降级）。本章是检索引擎；调用方 RAG 已在 Ch30。",
+        "",
+        "自测：白板左列假设（条数、维、SLO、filter、可见性），中列读/写两条链，右列三个 deep dive 的 trade-off。",
+      ].join("\n"),
+    },
+  ],
+  reviewMd: `# Ch31 · 记忆闪卡
+
+| # | 正面 | 背面 |
+|---|---|---|
+| 1 | 设计向量检索服务，30 秒怎么开口？ | ANN 存储引擎，不是 RAG。HNSW 当 RAM 够的默认；内存紧则 IVF-PQ / DiskANN-class。hard part：过滤 + replica/shard + 可见性。 |
+| 2 | 这题 hard part 是什么？ | ① HNSW vs IVF-PQ ② filtered ANN ③ 复制/分片/WAL 一致性。不是切分，不是双塔。 |
+| 3 | 该澄清哪几件事？ | 条数与维度、p95、filter 严不严、流式还是重建、是否立刻可搜、多租户、调用方。 |
+| 4 | 100M × 768 float32 多大？ | 约 300 GB 原始向量。HNSW 图还要再加一截。这是内存 bottleneck 的教学锚点。 |
+| 5 | 何时 HNSW，何时 IVF-PQ？ | 大约千万级、RAM 够 → HNSW。内存紧或亿级 → IVF-PQ 或 DiskANN-class。 |
+| 6 | HNSW 先调哪个参数？ | **ef_search** 换 recall vs 延迟。M / ef_construction 是建图成本。 |
+| 7 | IVF 的 nprobe 干什么？ | 查询时探多少 list。加大 nprobe 抬 recall、加延迟。质心漂了要 rebuild。 |
+| 8 | SQ8 vs PQ？ | SQ8 约 4×，掉 recall 少，当第一刀。PQ 更狠，要 codebook，常配 rescore。OPQ 先旋转。 |
+| 9 | DiskANN-class 解决什么？ | 图按 SSD 设计：RAM 放 PQ code，全精度在盘。FreshDiskANN 补流式更新。 |
+| 10 | pre-filter vs post-filter？ | 先筛：允许集小则 brute 好，大则变扫。先 ANN 再丢：松过滤行，严过滤漏召回。 |
+| 11 | ACORN / in-graph 过滤？ | 遍历时跳过不合格点，两跳维持连通；谓词无关。生产不要只靠 post-filter。 |
+| 12 | replica vs shard？ | replica 摊 QPS 和 failover。shard 切体积，query scatter-gather。别用错。 |
+| 13 | 为什么不要按语义分片？ | 近邻可能在别的 shard，ANN 召不回。用 hash(id)，让每片都是随机子集。 |
+| 14 | WAL 之后为何还搜不到？ | 持久 ≠ 可见。growing 未追上或副本异步。Strong vs bounded 是 trade-off。 |
+| 15 | 和 Ch30 边界？ | Ch30 切分/hybrid/生成并调用本 API。本章不讲 RAG 管道。下一章 Ch32 网关。 |`,
+});

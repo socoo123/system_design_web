@@ -1,0 +1,288 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ===== 主题变量:护眼米色(默认) / 德古拉深色 ===== */
+:root,
+[data-theme="parchment"] {
+  color-scheme: light;
+  --bg-base: 233 226 212; /* #e9e2d4 羊皮纸 */
+  --bg-card: 244 239 228; /* #f4efe4 */
+  --bg-elev: 227 219 204; /* #e3dbcc */
+  --border-subtle: 212 203 184; /* #d4cbb8 */
+  --border-strong: 168 158 136; /* #a89e88 */
+  --accent: 139 90 107; /* #8b5a6b 哑光粉 */
+  --drac-bg: 233 226 212;
+  --drac-line: 212 203 184;
+  --drac-fg: 47 43 38; /* #2f2b26 深墨 */
+  --drac-comment: 122 114 104; /* #7a7268 */
+  --drac-cyan: 58 107 124; /* #3a6b7c */
+  --drac-green: 63 107 60; /* #3f6b3c */
+  --drac-orange: 160 95 40; /* #a05f28 */
+  --drac-pink: 139 90 107; /* #8b5a6b */
+  --drac-purple: 74 107 92; /* #4a6b5c */
+  --drac-red: 168 90 82; /* #a85a52 */
+  --drac-yellow: 154 123 46; /* #9a7b2e */
+  --scroll-thumb: 201 191 169;
+  --scroll-thumb-hover: 168 158 136;
+  /* typography 插件浅色兜底(prose-invert 只反转变量,这里注入浅色值) */
+  --tw-prose-invert-body: #3d3830;
+  --tw-prose-invert-headings: #2f2b26;
+  --tw-prose-invert-lead: #57534a;
+  --tw-prose-invert-links: #2f2b26;
+  --tw-prose-invert-bold: #2f2b26;
+  --tw-prose-invert-counters: #7a7268;
+  --tw-prose-invert-bullets: #c9bfa9;
+  --tw-prose-invert-hr: #d4cbb8;
+  --tw-prose-invert-quotes: #3d3830;
+  --tw-prose-invert-quote-borders: #d4cbb8;
+  --tw-prose-invert-captions: #7a7268;
+  --tw-prose-invert-kbd: #2f2b26;
+  --tw-prose-invert-code: #164826; /* 切勿沿用 invert 默认白字,米色底上看不见 */
+  --tw-prose-invert-th-borders: #8a7f6a;
+  --tw-prose-invert-td-borders: #b5aa94;
+  --code-chip-bg: 214 226 204; /* #d6e2cc 偏绿芯片,和羊皮纸底拉开 */
+  --code-chip-fg: 22 72 38; /* #164826 */
+  --code-chip-border: 176 196 160;
+}
+
+[data-theme="dracula"] {
+  color-scheme: dark;
+  --bg-base: 13 14 19; /* #0d0e13 */
+  --bg-card: 24 26 34; /* #181a22 */
+  --bg-elev: 35 38 47; /* #23262f */
+  --border-subtle: 54 58 72; /* #363a48 */
+  --border-strong: 139 144 184; /* #8b90b8 */
+  --accent: 255 79 163; /* #ff4fa3 */
+  --drac-bg: 13 14 19;
+  --drac-line: 68 71 90;
+  --drac-fg: 255 255 255;
+  --drac-comment: 125 131 168;
+  --drac-cyan: 139 233 253;
+  --drac-green: 80 250 123;
+  --drac-orange: 255 184 108;
+  --drac-pink: 255 79 163;
+  --drac-purple: 189 147 249;
+  --drac-red: 255 85 85;
+  --drac-yellow: 241 250 140;
+  --scroll-thumb: 68 71 90;
+  --scroll-thumb-hover: 98 114 164;
+  --code-chip-bg: 68 71 90;
+  --code-chip-fg: 80 250 123;
+  --code-chip-border: 68 71 90;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: rgb(var(--bg-base));
+  color: rgb(var(--drac-fg));
+  -webkit-font-smoothing: antialiased;
+  transition:
+    background-color 0.25s ease,
+    color 0.25s ease;
+}
+
+/* 滚动条 */
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-track {
+  background: rgb(var(--bg-base));
+}
+*::-webkit-scrollbar-thumb {
+  background: rgb(var(--scroll-thumb));
+  border-radius: 6px;
+  border: 2px solid rgb(var(--bg-base));
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: rgb(var(--scroll-thumb-hover));
+}
+
+/* ===== Markdown 教程排版(实色,无半透明雾)===== */
+.tutorial {
+  @apply prose prose-invert max-w-none;
+  @apply prose-headings:scroll-mt-20 prose-headings:font-semibold;
+  @apply prose-h1:text-2xl prose-h1:border-b prose-h1:border-border-subtle prose-h1:pb-3 prose-h1:mb-6 prose-h1:text-drac-fg;
+  @apply prose-h2:text-xl prose-h2:mt-10 prose-h2:mb-3 prose-h2:text-drac-purple;
+  @apply prose-h3:text-lg prose-h3:mt-6 prose-h3:mb-2 prose-h3:text-drac-cyan;
+  @apply prose-p:leading-7 prose-p:text-drac-fg;
+  @apply prose-a:text-drac-pink prose-a:font-medium prose-a:no-underline hover:prose-a:underline;
+  @apply prose-strong:text-drac-fg prose-strong:font-semibold;
+  @apply prose-code:rounded prose-code:px-1.5 prose-code:py-0.5 prose-code:text-[0.85em] prose-code:before:content-[""] prose-code:after:content-[""];
+  @apply prose-pre:bg-night-bg prose-pre:border prose-pre:border-night-line prose-pre:rounded-lg;
+  @apply prose-blockquote:border-l-drac-pink prose-blockquote:bg-bg-card prose-blockquote:py-1 prose-blockquote:not-italic;
+  @apply prose-table:text-sm prose-table:text-drac-fg;
+  @apply prose-th:text-drac-fg prose-th:bg-bg-elev;
+  @apply prose-td:text-drac-fg;
+  @apply prose-li:text-drac-fg prose-li:marker:text-drac-comment;
+  @apply prose-hr:border-border-subtle;
+}
+
+.tutorial .sd-fold {
+  margin: 0.6rem 0;
+  padding: 0 0 0 0.75rem;
+  border: none;
+  border-left: 2px solid rgb(var(--border-subtle));
+  background: transparent;
+  border-radius: 0;
+}
+.tutorial .sd-fold summary {
+  cursor: pointer;
+  font-weight: 500;
+  font-size: 0.9rem;
+  color: rgb(var(--drac-comment));
+}
+.tutorial .sd-fold summary::-webkit-details-marker {
+  color: rgb(var(--drac-comment));
+}
+.tutorial .sd-fold-body {
+  margin-top: 0.5rem;
+}
+.tutorial .d2-wrap {
+  width: 100%;
+}
+.tutorial .d2-busy {
+  margin-bottom: 0.5rem;
+}
+.tutorial .d2-error-box summary {
+  color: rgb(var(--drac-comment));
+}
+.tutorial .d2-block {
+  background: rgb(var(--bg-card));
+  border: 1px solid rgb(var(--border-subtle));
+  border-radius: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  color: rgb(var(--drac-fg));
+  width: fit-content;
+  max-width: 100%;
+  margin-inline: auto;
+  overflow: visible;
+}
+.tutorial .d2-block svg {
+  display: block;
+  margin-inline: auto;
+  width: auto;
+  max-width: 100%;
+  height: auto;
+  background: transparent;
+}
+/* D2 会在 .d2-svg 下铺一张 N7 画布（浅色主题是纯白）。
+   卡片是米色/深色，图又居中，就会「中间一块白、两边色差」。 */
+.tutorial .d2-block .d2-svg > rect.fill-N7,
+.tutorial .d2-block .d2-svg > rect:first-of-type {
+  fill: none !important;
+}
+/* 容器（B4）主题默认也太淡。叶子由渲染器上色；这里只抬容器和箭头。 */
+[data-theme="parchment"] .tutorial .d2-block .fill-B4 {
+  fill: #90caf9 !important;
+}
+[data-theme="parchment"] .tutorial .d2-block .stroke-B1 {
+  stroke: #1565c0 !important;
+}
+[data-theme="parchment"] .tutorial .d2-block .fill-B1 {
+  fill: #1565c0 !important;
+}
+[data-theme="dracula"] .tutorial .d2-block .fill-B4 {
+  fill: #3949ab !important;
+}
+[data-theme="dracula"] .tutorial .d2-block .stroke-B1 {
+  stroke: #89b4fa !important;
+}
+[data-theme="dracula"] .tutorial .d2-block .fill-B1 {
+  fill: #89b4fa !important;
+}
+.tutorial .d2-error {
+  color: rgb(var(--drac-red));
+  font-size: 0.8rem;
+  white-space: pre-wrap;
+  margin: 0;
+  background: rgb(var(--bg-card));
+  border: 1px solid rgb(var(--border-subtle));
+  border-radius: 0.5rem;
+  padding: 0.75rem 1rem;
+}
+
+/* 行内 code:主题自适应高对比(护眼下绝不用白字)。代码块仍走 night 底 */
+.tutorial :not(pre) > code {
+  color: rgb(var(--code-chip-fg));
+  background-color: rgb(var(--code-chip-bg));
+  border: 1px solid rgb(var(--code-chip-border));
+  font-weight: 600;
+}
+
+/* 作业↔教程对应表等:表体墨色 + 斑马纹,护眼底上扫得清 */
+.tutorial table {
+  background: rgb(var(--bg-card));
+  border: 1px solid rgb(var(--border-subtle));
+}
+.tutorial th,
+.tutorial td {
+  color: rgb(var(--drac-fg));
+  padding: 0.55rem 0.75rem;
+}
+.tutorial thead th {
+  color: rgb(var(--drac-fg));
+  background: rgb(var(--bg-elev));
+  font-weight: 600;
+  border-bottom: 1px solid rgb(var(--border-strong));
+}
+.tutorial tbody tr:nth-child(even) {
+  background: rgb(var(--bg-elev) / 0.55);
+}
+.tutorial tbody td code,
+.tutorial thead th code {
+  color: rgb(var(--code-chip-fg));
+  background-color: rgb(var(--code-chip-bg));
+  border: 1px solid rgb(var(--code-chip-border));
+}
+
+.tutorial pre code.hljs {
+  background: transparent;
+  padding: 0;
+  border: 0;
+  color: inherit;
+}
+/* hljs token 只作用在深色代码块里,避免漏到米色正文/表格 */
+.tutorial pre .hljs-comment,
+.tutorial pre .hljs-quote { color: #7d83a8; font-style: italic; }
+.tutorial pre .hljs-keyword,
+.tutorial pre .hljs-selector-tag,
+.tutorial pre .hljs-built_in,
+.tutorial pre .hljs-name { color: #ff4fa3; }
+.tutorial pre .hljs-string,
+.tutorial pre .hljs-attr,
+.tutorial pre .hljs-addition,
+.tutorial pre .hljs-regexp { color: #f1fa8c; }
+.tutorial pre .hljs-number,
+.tutorial pre .hljs-literal,
+.tutorial pre .hljs-bullet { color: #bd93f9; }
+.tutorial pre .hljs-title,
+.tutorial pre .hljs-function .hljs-title,
+.tutorial pre .hljs-section,
+.tutorial pre .hljs-selector-id { color: #50fa7b; }
+.tutorial pre .hljs-type,
+.tutorial pre .hljs-class .hljs-title,
+.tutorial pre .hljs-params { color: #8be9fd; }
+.tutorial pre .hljs-variable,
+.tutorial pre .hljs-template-variable { color: #ffb86c; }
+.tutorial pre .hljs-meta { color: #8be9fd; }
+.tutorial pre .hljs-deletion { color: #ff5555; }
+.tutorial pre .hljs-symbol,
+.tutorial pre .hljs-link { color: #ff4fa3; }
+
+/* 终端区(固定深色,不随主题变) */
+.terminal-output {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, monospace;
+  font-size: 12.5px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: #f8f8f2;
+}

@@ -1,0 +1,103 @@
+{
+  "id": "ch07",
+  "num": "07",
+  "title": "分布式唯一 ID",
+  "kind": "brick",
+  "interleaved": true,
+  "relatedChapters": [
+    "ch09"
+  ],
+  "sections": [
+    {
+      "id": "intro",
+      "heading": "",
+      "secNum": null,
+      "related": [],
+      "body": "> **预计**：40–50 分钟 ｜ **前置**：Ch09 短码不要用雪花\n> **目标**：默认 **Snowflake**；对比 UUID / 号段；主动讲时钟回拨。\n\n分布式唯一 ID 是 M2 第四块砖：订单号、消息号、trace_id、主键都要一个不撞号的整数。面试官要的不是四种方案平均默写，而是三句能手算的话：**有序 64 位默认 Snowflake；UUID v4 无序、号段给 DB 友好自增；主动讲时钟回拨。**\n\nhard part（最该挖的那块）就是这三块。Ticket Server / 多主 auto_increment 只当 why-not，不要和 Snowflake 并列成「四个等价答案」。Sonyflake / ULID 进折叠。**不要把 Snowflake 喂给 6 位短码**——Ch09 已经算过：雪花量级 ~10^18，base62 约 11 位。"
+    },
+    {
+      "id": "sec-answer",
+      "heading": "面试怎么答",
+      "secNum": null,
+      "related": [],
+      "body": "### 开场 30 秒\n\n> 「全局唯一、64 位整数、趋势递增、万级以上 QPS。UUID v4 本地就能发，但无序，不当聚簇主键。要严格递增、B+ 树友好就号段（Leaf）。其余默认 Snowflake：1 符号 + 41 时间 + 10 机器 + 12 序列，单机每毫秒 4096 个。hard part 是时钟回拨——NTP、VM 迁移都会把墙钟往回拨：小就等待，大就拒绝。短码别用雪花，那是号段的活。」\n\n说完按这条链走，别一上来默写 Ticket / 多主 / Sonyflake / ULID 全家桶。\n\n```d2\nstyle.font-size: 12\ndirection: right\ns1.class: go\ns1: \"定 64 位有序\"\ns2.class: step\ns2: \"否掉 UUID\"\ns3.class: ok\ns3: \"Snowflake\"\ns4.class: warn\ns4: \"讲回拨\"\ns1 -> s2 -> s3 -> s4\n```\n\n| 时间盒 | 你在做什么 |\n|---|---|\n| 3–5 min | 澄清：64 位还是 128；趋势 vs 严格 +1；要不要连续；QPS |\n| 2 min | 粗估：发号 QPS；单机 4096/ms；41 位还能用多少年 |\n| 8–12 min | 高层：三方案对照；Snowflake 热路径无中心 |\n| 10–15 min | deep dive：位布局手算、号段领段、时钟回拨三档 |\n| 2–3 min | wrap-up：worker 撞号、序列打满、短码不要雪花 |\n\n**red flag：** 四种方案当等价实现；不提回拨；把 Snowflake 截断成 6 位短码；一上来画 Ticket 集群。"
+    },
+    {
+      "id": "sec-clarify",
+      "heading": "澄清问题清单",
+      "secNum": "7.1",
+      "related": [
+        "ch09"
+      ],
+      "body": "没问清「多长、要不要有序」，后面的 Snowflake 和号段都是空的。问 5–7 个就停，其余写假设。短码长度的数学丢给 **Ch09**，本章只定 ID 形态。\n\n| 你问 | 为什么问 | 写到白板上的默认假设 |\n|---|---|---|\n| 64 位整数，还是 128 位字符串？ | 64 位才走 Snowflake；接受 128 才能提 UUID | 「64 位 long，趋势递增」 |\n| 趋势递增就行，还是必须严格 +1？ | 严格连续 = 号段；Snowflake 只保证晚的更大 | 「趋势即可，允许空洞」 |\n| 要不要连续？能不能暴露业务量？ | 连续自增会漏单量；有序不等于无空洞 | 「不要求连续」 |\n| 大概多少 QPS？突发吗？ | 万级 Snowflake 轻松；号段要按 step 反推 DB | 「峰值 1 万 ID/s」 |\n| 当 DB 主键吗？InnoDB 聚簇？ | 无序 UUID 会打散 B+ 树页 | 「会当主键 → 不要 UUID v4」 |\n| 是短码 / 对外可见码吗？ | 6 位短码不是这题的 Snowflake | 「内部 ID；短码见 Ch09」 |\n\n面试官说「你来假设」时写上去：\n\n> 「假设：全局唯一、64 位整数、趋势递增、不要求连续。峰值约 1 万 QPS。默认 Snowflake。要严格递增再改号段。不是 6 位短码。」\n\n对方一说「6 位短链码」，**立刻改口号段**，不要把本章改写成 Ch09。"
+    },
+    {
+      "id": "sec-estimate",
+      "heading": "粗估：发号 QPS 与位数余量",
+      "secNum": "7.2",
+      "related": [],
+      "body": "这章的 back-of-envelope 要证明两件事：**发号本身通常不是 bottleneck**；以及 **位宽决定寿命和单机上限，要会手算余量**。数字是教学用，不是某厂容量规划。\n\n教学假设：峰值 **1 万 ID/s**（原书量级）；Snowflake 经典布局 1 + 41 + 10 + 12。\n\n| 项 | 口算 | 面试怎么用 |\n|---|---|---|\n| 单机序列 | 2^12 = **4096 / ms** | ×1000 ≈ **410 万 / 秒 / worker** |\n| 相对 1 万 QPS | 4e6 / 1e4 = **400 倍** | 一台 worker 就够；别为发号画集群 |\n| 时间寿命 | 2^41 ms ≈ 2.2e12 ms | / 1000 / 86400 / 365 ≈ **69 年** |\n| 机器位 | 2^10 = **1024** worker | 5 机房 + 5 机器，或合成 10 bit |\n| 号段 DB | step = 1000 | DB QPS ≈ 1 万 / 1000 = **10** |\n\n余量怎么说：41 位用自定义 epoch（不要从 1970 起算，高位会浪费）。到期换 epoch 或扩时间位。同毫秒序列打满 → 等到下一毫秒，这是吞吐的硬顶，不是再加 Ticket。机器不够 1024：从序列挪几位，trade-off 是单机突发下降。\n\n**面试怎么说：**\n\n> 「一万 QPS，Snowflake 单机每秒四百万，余量两个数量级。41 位大约 69 年。号段的话步长一千，DB 大约十次/秒。发号不是这题的 bottleneck。」\n\n不要从 4e6 反推成「所以要上 200 台 ID 服务」——那是 over-engineering。"
+    },
+    {
+      "id": "sec-arch",
+      "heading": "高层：三方案对照",
+      "secNum": "7.3",
+      "related": [
+        "ch09"
+      ],
+      "body": "白板先摆三格，**Snowflake 打钩当默认**。UUID v4 和号段是对照，不是和它平级的「也都要实现」。Ticket / 多主 auto_increment 放 why-not 一句，不要第四列。\n\n```d2\nstyle.font-size: 12\ngrid-columns: 2\nmain: {\n  label: \"白板默认\"\n  class: groupOk\n  grid-columns: 2\n  sf.class: ok\n  sf: \"Snowflake\"\n  seg.class: ok\n  seg: \"号段/Leaf\"\n}\nother: {\n  label: \"无序 / why-not\"\n  class: groupBad\n  grid-columns: 2\n  uuid.class: warn\n  uuid: \"UUID v4\"\n  ticket.class: bad\n  ticket: \"Ticket 单点\"\n}\n```\n\n热路径：Snowflake 的 worker **本地**拼 64 位，发号不打 DB、不打 ZK。号段才有「先领一段再内存自增」。UUID v4 也是本地，但无序。\n\n| | Snowflake（默认） | 号段 / Leaf | UUID v4 |\n|---|---|---|---|\n| 长度 | 64 位整数 | 64 位整数 | 128 位 |\n| 有序 | 趋势递增 | 严格递增（段内） | 无 |\n| 热路径 | 无协调 | 偶发打 DB 领段 | 无协调 |\n| 时钟 | 依赖墙钟 | 不依赖 | 无 |\n| 适合 | 订单 / 消息 / 主键 | DB 友好、短码 | 文档 / 资源 ID |\n\nwhy-not 两句就停：\n\n1. **多主 auto_increment + 步长 k**：加机器要改步长，ID 还不跟时间走。\n2. **Ticket Server**（Flickr 一台自增表）：数值简单，但是单点；拆多台又变回方案 1。\n\n**面试怎么说：**\n\n> 「默认雪花，本地发、趋势递增。要严格递增或短码就号段。UUID v4 不当主键。Ticket 和多主当 why-not。」\n\n高层到这里停，问一句：「三格 OK 吗？下面先讲为什么这么选，再手算位，最后主动讲回拨。」"
+    },
+    {
+      "id": "sec-why",
+      "heading": "深入 · 为什么 Snowflake / UUID / 号段",
+      "secNum": "7.4",
+      "related": [
+        "ch09"
+      ],
+      "body": "第一个 hard part：**不是谁都能当默认，是需求把另外两个否掉。**\n\nUUID v4：本地随机 128 位，冲突概率可忽略，**零协调**。代价是无序——InnoDB 聚簇主键会随机插页，页分裂、缓存命中都差。索引和存储也比 8 字节 long 贵一截。所以白板说「简单但不排序，不当这题主键」。\n\n号段（Leaf-segment）：DB 里一行 `biz_tag / max_id / step`。应用一次领 `[max_id, max_id+step)`，内存里发完再领。DB 压力按 step 下降；段内严格 +1，B+ 树顺序写友好。**不依赖时钟**，所以也没有回拨。代价是依赖 DB、段与段之间可能空洞（进程挂了段没发完）、多实例领相邻段所以可猜。\n\n```d2\nstyle.font-size: 12\ndirection: right\napp.class: go\napp: \"App\"\ndb.class: store\ndb: \"号段表\"\nmem.class: ok\nmem: \"内存发号\"\nnext.class: step\nnext: \"快完再领\"\napp -> db -> mem -> next\n```\n\n本图引用：Ch09 短链（6 位短码用号段，不用雪花）\n\n生产常 **双 buffer**：当前段还没用完就异步领下一段，避免领段抖动打在热路径上。白板提一句即可。\n\nSnowflake：时间在高位 → 晚生成的 ID 更大；机器位保证跨机不撞；序列保证同毫秒不撞。热路径零网络。这就是 2026 白板对「有序唯一 64 位」的主方案。\n\n短码指针（不在这题展开）：6 位 base62 要求 ID < 62^6 ≈ 568 亿。Snowflake 约 10^18，编出来大约 11 位。**截断会丢唯一性。** 短码用号段或 DB 自增，见 **Ch09**。\n\n**面试怎么说：**\n\n> 「UUID 无序，否掉主键。号段给严格递增和短码。有序 64 位我用雪花。别把雪花截成 6 位。」"
+    },
+    {
+      "id": "sec-bits",
+      "heading": "深入 · 位布局与吞吐",
+      "secNum": "7.5",
+      "related": [],
+      "body": "第二个 hard part：把 64 位画成 **4–5 段粗框**，会手算，不要画 64 个小格子。\n\nTwitter 经典（正数 long）：\n\n`1 符号 | 41 时间(ms) | 5 机房 | 5 机器 | 12 序列`\n\n机房 + 机器常合成 **10 bit worker**。符号位恒 0，保证有符号 64 位是正数。\n\n```d2\nstyle.font-size: 12\ndirection: right\nsign.class: box\nsign: \"1 符号\"\nts.class: go\nts: \"41 时间\"\ndc.class: step\ndc: \"5 机房\"\nwk.class: step\nwk: \"5 机器\"\nseq.class: store\nseq: \"12 序列\"\nsign -> ts -> dc -> wk -> seq\n```\n\n时间戳在**最高有效段**（符号之后）：比较 ID 大小 ≈ 比生成时间。这是趋势递增的来源，也是回拨会乱序 / 撞号的来源。\n\n同毫秒：序列 +1，到 4095 再加就溢出 → **等到下一毫秒**，seq 归零。不是换一台 Ticket。\n\nworker_id 必须全局唯一。撞号 = 两台在同一毫秒发出相同序列 → 重复 ID。分配三选一，点到即停：配置手填（易错）；启动时 etcd / ZK 领号（原版这条）；DB `INSERT … RETURNING`。生产别靠人填。\n\n自定义 epoch：从业务上线日算起，41 位才有满满 69 年。从 Unix 1970 起算，等于把高位浪费在「你还没上线」的那几十年。\n\n**面试怎么说：**\n\n> 「1+41+5+5+12。时间在高位所以趋势递增。单机每毫秒 4096，打满等下一毫秒。worker 启动领号，别两台填成一样。」"
+    },
+    {
+      "id": "sec-clock",
+      "heading": "深入 · 时钟回拨",
+      "secNum": "7.6",
+      "related": [],
+      "body": "第三个 hard part：**Snowflake 依赖这台机器的墙钟单调向前。** NTP 回拨、虚拟机迁移、闰秒，都可能让 `now < last_ts`。若仍按新时间从 seq=0 发，可能和历史 ID 撞，或比已经发出的还小。\n\n原书只说「用 NTP」。2026 白板要**主动讲检测 + 三档处理**——这是区分度。\n\n```d2\nstyle.font-size: 12\ngrid-columns: 3\nwait.class: ok\nwait: \"小 等待\"\nrefuse.class: bad\nrefuse: \"大 拒绝\"\nextra.class: step\nextra: \"预留位\"\n```\n\n| 档 | 做法 | 什么时候 |\n|---|---|---|\n| **等待** | `sleep` 到 `now >= last_ts` | 回拨很小（几 ms） |\n| **拒绝** | 报错、告警、这台停发 | 回拨大，机器时钟已经不可信 |\n| **预留位** | 回拨期间改走备用序列空间，或钉住 last_ts 继续加 seq | 不想停机、又能保证 (时间, 序列) 不撞 |\n\n等待是最常见的面试默认：小抖动用延迟换正确性。大回拨不能死循环等——可能永远等不回来，要失败并告警。Twitter 原版对任何回拨都 `InvalidSystemClock` 拒绝，偏严；生产常拆成小等大拒。\n\n预留位 / 挪用位：从 12 位序列里划出一段，或额外 1 bit 标记「这段是回拨逻辑时钟」。回拨时不跟墙钟走，继续在已发出的最大戳上加。ID 仍唯一、仍单调，只是嵌入的时间略超前。白板提这一格证明你知道还有第三条路，不要展开成 HLC 课。\n\n防回拨的运维一句：NTP **slew**（慢慢拖）不要 step 猛跳。这降低发生次数，**不能替代**代码里的检测。\n\n号段为什么不怕：内存计数和 DB `max_id`，不读墙钟。这是「主键必须抗回拨」时改号段的理由。\n\n**面试怎么说：**\n\n> 「雪花最大的坑是时钟回拨。我检测 `now < last_ts`：小就等，大就拒绝告警。有余量就预留序列位当逻辑时钟。号段不吃时钟。只说『上 NTP』是 red flag。」"
+    },
+    {
+      "id": "sec-2026",
+      "heading": "2026 vs 原书",
+      "secNum": null,
+      "related": [
+        "ch09"
+      ],
+      "body": "<details>\n<summary>原书 / 笔记当时怎么讲 · Ticket 并列、回拨只说 NTP、变体进这里</summary>\n\n| 原书 / 笔记 | 现在怎么答 |\n|---|---|\n| 多主 / UUID / Ticket / 雪花四方案并列 | **正文默认 Snowflake**。UUID、号段对照。Ticket、多主 why-not |\n| 时钟回拨一句 NTP | **主动讲等待 / 拒绝 / 预留位**。NTP slew 是运维，不是代码 |\n| 没提号段 | 严格递增、B+ 友好、短码 → **号段 / Leaf**。双 buffer 一句 |\n| 没提 UUIDv7 | **一句**：RFC 9562（2024）时间前缀 + 随机，128 位可排序；接受 128 位、不想协调 worker 时用。**不是**这题 64 位主方案的替代讲义 |\n| 雪花变体当正文 | **折叠一行**：Sonyflake 更保守（回拨只 sleep）；ULID 是 128 位可排序码。百度 UidGenerator 预借未来时间，点到即停 |\n| 短码接雪花 | **不要。** 6 位短码用号段，Ch09 |\n\n原书骨架仍成立：要唯一、要 64 位、要趋势递增、雪花分段。过时的是**把 Ticket 当和雪花同等篇幅的第三答案**，以及**不把回拨当 hard part**。\n\nUUIDv7（仅本折叠补一句）：48 位 Unix ms + 随机（可加单调计数）。可排序、无 worker 注册，数据库开始原生支持。仍是 128 位，索引比 long 宽；面试 64 位有序 ID 第一句还是 Snowflake。\n\n</details>"
+    },
+    {
+      "id": "sec-traps",
+      "heading": "追问陷阱",
+      "secNum": null,
+      "related": [
+        "ch09"
+      ],
+      "body": "1. 「为什么不用 UUID？」→ v4 无序，聚簇主键页分裂。要无协调且可排序，一句 UUIDv7（128 位），64 位仍用雪花。\n2. 「为什么不用 Ticket / 多主自增？」→ Ticket 单点；多主加机器改步长，还不跟时间走。why-not。\n3. 「41 位能用多久？」→ 约 69 年（2^41 ms）。自定义 epoch。到期换 epoch。\n4. 「为什么不用 Unix 1970？」→ 浪费高位。从业务上线日算。\n5. 「单机一毫秒最多多少？」→ 4096。超出等下一毫秒。\n6. 「时钟回拨怎么办？」→ 小等待、大拒绝；可预留序列位。只说 NTP 不够。\n7. 「worker_id 怎么发？」→ 启动领号（etcd / ZK / DB）。两台填一样会撞 ID。\n8. 「号段为什么抗回拨？」→ 内存 + DB max_id，不读墙钟。\n9. 「为什么不用雪花做 6 位短码？」→ 量级太大，base62 约 11 位；截断丢唯一。号段，见 Ch09。\n10. 「机器超过 1024？」→ 从序列挪位；或动态领 worker。不要为此改 Ticket。\n11. 「ID 必须连续吗？」→ 通常不要。连续会暴露单量；趋势递增够索引。\n12. 「四种方案都画一遍？」→ over-engineering。默认雪花 + 对照两格 + 回拨。"
+    },
+    {
+      "id": "sec-next",
+      "heading": "下一步",
+      "secNum": null,
+      "related": [
+        "ch08"
+      ],
+      "body": "收尾不要说完美。三个 bottleneck 口播：\n\n| bottleneck | 你怎么接 |\n|---|---|\n| 时钟回拨 | 检测；小等大拒；号段抗时钟 |\n| worker 撞号 | 启动领号，禁止手填重复 |\n| 同毫秒序列打满 | 等下一毫秒；不要换成中心 Ticket |\n\n自测：合上页，30 秒开场；画出 1+41+5+5+12；手算 4096/ms 和 69 年；三档回拨；说出短码为什么不用雪花。哪句卡，回哪一节。\n\n下一章 **Ch08 · 分布式锁**：互斥、fencing token、为什么不要把 Redlock 当默认。"
+    }
+  ],
+  "reviewMd": "# Ch07 · 记忆闪卡\n\n| # | 正面 | 背面 |\n|---|---|---|\n| 1 | 有序 64 位 ID，开场 30 秒说什么？ | 默认 Snowflake；UUID v4 无序不当主键；严格递增用号段；主动讲时钟回拨。 |\n| 2 | Snowflake 位布局？ | 1 符号 + 41 时间 + 5 机房 + 5 机器 + 12 序列（机器常合成 10 bit）。 |\n| 3 | 单机每毫秒多少 ID？打满怎么办？ | 4096。溢出等到下一毫秒，seq 归零。 |\n| 4 | 41 位时间能用多久？ | 约 69 年。用自定义 epoch，不要从 1970 起算。 |\n| 5 | 时间戳为什么放高位？ | 晚生成的 ID 更大 → 趋势递增。这也是回拨会乱序/撞号的原因。 |\n| 6 | UUID v4 为什么不当默认主键？ | 128 位且无序，B+ 树随机插页。 |\n| 7 | 号段适合什么？ | 严格递增、DB 友好、短码。不依赖时钟。 |\n| 8 | 号段怎么降 DB 压力？ | 一次领 step 个，内存发；双 buffer 预领下一段。 |\n| 9 | 时钟回拨三档？ | 小：等待。大：拒绝告警。第三档：预留/挪用序列位当逻辑时钟。 |\n| 10 | 只说「用 NTP」够不够？ | 不够。NTP slew 降频率；代码必须检测 now < last_ts。 |\n| 11 | 为什么短码不用 Snowflake？ | 雪花 ~10^18 → base62 约 11 位。6 位要用号段。截断丢唯一。Ch09。 |\n| 12 | Ticket / 多主为什么是 why-not？ | Ticket 单点；多主加机器改步长，ID 还不按时间递增。 |\n| 13 | worker_id 怎么避免撞？ | 启动时 etcd/ZK/DB 领号。两台手填一样会发重复 ID。 |\n| 14 | 这题典型的 over-engineering？ | 四方案平均画满；为 1 万 QPS 上 Ticket 集群；把 UUIDv7 讲成替换课。 |",
+  "tutorialMd": "# Ch07 · 分布式唯一 ID\n\n> **预计**：40–50 分钟 ｜ **前置**：Ch09 短码不要用雪花\n> **目标**：默认 **Snowflake**；对比 UUID / 号段；主动讲时钟回拨。\n\n分布式唯一 ID 是 M2 第四块砖：订单号、消息号、trace_id、主键都要一个不撞号的整数。面试官要的不是四种方案平均默写，而是三句能手算的话：**有序 64 位默认 Snowflake；UUID v4 无序、号段给 DB 友好自增；主动讲时钟回拨。**\n\nhard part（最该挖的那块）就是这三块。Ticket Server / 多主 auto_increment 只当 why-not，不要和 Snowflake 并列成「四个等价答案」。Sonyflake / ULID 进折叠。**不要把 Snowflake 喂给 6 位短码**——Ch09 已经算过：雪花量级 ~10^18，base62 约 11 位。\n\n## 面试怎么答\n\n### 开场 30 秒\n\n> 「全局唯一、64 位整数、趋势递增、万级以上 QPS。UUID v4 本地就能发，但无序，不当聚簇主键。要严格递增、B+ 树友好就号段（Leaf）。其余默认 Snowflake：1 符号 + 41 时间 + 10 机器 + 12 序列，单机每毫秒 4096 个。hard part 是时钟回拨——NTP、VM 迁移都会把墙钟往回拨：小就等待，大就拒绝。短码别用雪花，那是号段的活。」\n\n说完按这条链走，别一上来默写 Ticket / 多主 / Sonyflake / ULID 全家桶。\n\n```d2\nstyle.font-size: 12\ndirection: right\ns1.class: go\ns1: \"定 64 位有序\"\ns2.class: step\ns2: \"否掉 UUID\"\ns3.class: ok\ns3: \"Snowflake\"\ns4.class: warn\ns4: \"讲回拨\"\ns1 -> s2 -> s3 -> s4\n```\n\n| 时间盒 | 你在做什么 |\n|---|---|\n| 3–5 min | 澄清：64 位还是 128；趋势 vs 严格 +1；要不要连续；QPS |\n| 2 min | 粗估：发号 QPS；单机 4096/ms；41 位还能用多少年 |\n| 8–12 min | 高层：三方案对照；Snowflake 热路径无中心 |\n| 10–15 min | deep dive：位布局手算、号段领段、时钟回拨三档 |\n| 2–3 min | wrap-up：worker 撞号、序列打满、短码不要雪花 |\n\n**red flag：** 四种方案当等价实现；不提回拨；把 Snowflake 截断成 6 位短码；一上来画 Ticket 集群。\n\n## 澄清问题清单\n\n没问清「多长、要不要有序」，后面的 Snowflake 和号段都是空的。问 5–7 个就停，其余写假设。短码长度的数学丢给 **Ch09**，本章只定 ID 形态。\n\n| 你问 | 为什么问 | 写到白板上的默认假设 |\n|---|---|---|\n| 64 位整数，还是 128 位字符串？ | 64 位才走 Snowflake；接受 128 才能提 UUID | 「64 位 long，趋势递增」 |\n| 趋势递增就行，还是必须严格 +1？ | 严格连续 = 号段；Snowflake 只保证晚的更大 | 「趋势即可，允许空洞」 |\n| 要不要连续？能不能暴露业务量？ | 连续自增会漏单量；有序不等于无空洞 | 「不要求连续」 |\n| 大概多少 QPS？突发吗？ | 万级 Snowflake 轻松；号段要按 step 反推 DB | 「峰值 1 万 ID/s」 |\n| 当 DB 主键吗？InnoDB 聚簇？ | 无序 UUID 会打散 B+ 树页 | 「会当主键 → 不要 UUID v4」 |\n| 是短码 / 对外可见码吗？ | 6 位短码不是这题的 Snowflake | 「内部 ID；短码见 Ch09」 |\n\n面试官说「你来假设」时写上去：\n\n> 「假设：全局唯一、64 位整数、趋势递增、不要求连续。峰值约 1 万 QPS。默认 Snowflake。要严格递增再改号段。不是 6 位短码。」\n\n对方一说「6 位短链码」，**立刻改口号段**，不要把本章改写成 Ch09。\n\n## 粗估：发号 QPS 与位数余量\n\n这章的 back-of-envelope 要证明两件事：**发号本身通常不是 bottleneck**；以及 **位宽决定寿命和单机上限，要会手算余量**。数字是教学用，不是某厂容量规划。\n\n教学假设：峰值 **1 万 ID/s**（原书量级）；Snowflake 经典布局 1 + 41 + 10 + 12。\n\n| 项 | 口算 | 面试怎么用 |\n|---|---|---|\n| 单机序列 | 2^12 = **4096 / ms** | ×1000 ≈ **410 万 / 秒 / worker** |\n| 相对 1 万 QPS | 4e6 / 1e4 = **400 倍** | 一台 worker 就够；别为发号画集群 |\n| 时间寿命 | 2^41 ms ≈ 2.2e12 ms | / 1000 / 86400 / 365 ≈ **69 年** |\n| 机器位 | 2^10 = **1024** worker | 5 机房 + 5 机器，或合成 10 bit |\n| 号段 DB | step = 1000 | DB QPS ≈ 1 万 / 1000 = **10** |\n\n余量怎么说：41 位用自定义 epoch（不要从 1970 起算，高位会浪费）。到期换 epoch 或扩时间位。同毫秒序列打满 → 等到下一毫秒，这是吞吐的硬顶，不是再加 Ticket。机器不够 1024：从序列挪几位，trade-off 是单机突发下降。\n\n**面试怎么说：**\n\n> 「一万 QPS，Snowflake 单机每秒四百万，余量两个数量级。41 位大约 69 年。号段的话步长一千，DB 大约十次/秒。发号不是这题的 bottleneck。」\n\n不要从 4e6 反推成「所以要上 200 台 ID 服务」——那是 over-engineering。\n\n## 高层：三方案对照\n\n白板先摆三格，**Snowflake 打钩当默认**。UUID v4 和号段是对照，不是和它平级的「也都要实现」。Ticket / 多主 auto_increment 放 why-not 一句，不要第四列。\n\n```d2\nstyle.font-size: 12\ngrid-columns: 2\nmain: {\n  label: \"白板默认\"\n  class: groupOk\n  grid-columns: 2\n  sf.class: ok\n  sf: \"Snowflake\"\n  seg.class: ok\n  seg: \"号段/Leaf\"\n}\nother: {\n  label: \"无序 / why-not\"\n  class: groupBad\n  grid-columns: 2\n  uuid.class: warn\n  uuid: \"UUID v4\"\n  ticket.class: bad\n  ticket: \"Ticket 单点\"\n}\n```\n\n热路径：Snowflake 的 worker **本地**拼 64 位，发号不打 DB、不打 ZK。号段才有「先领一段再内存自增」。UUID v4 也是本地，但无序。\n\n| | Snowflake（默认） | 号段 / Leaf | UUID v4 |\n|---|---|---|---|\n| 长度 | 64 位整数 | 64 位整数 | 128 位 |\n| 有序 | 趋势递增 | 严格递增（段内） | 无 |\n| 热路径 | 无协调 | 偶发打 DB 领段 | 无协调 |\n| 时钟 | 依赖墙钟 | 不依赖 | 无 |\n| 适合 | 订单 / 消息 / 主键 | DB 友好、短码 | 文档 / 资源 ID |\n\nwhy-not 两句就停：\n\n1. **多主 auto_increment + 步长 k**：加机器要改步长，ID 还不跟时间走。\n2. **Ticket Server**（Flickr 一台自增表）：数值简单，但是单点；拆多台又变回方案 1。\n\n**面试怎么说：**\n\n> 「默认雪花，本地发、趋势递增。要严格递增或短码就号段。UUID v4 不当主键。Ticket 和多主当 why-not。」\n\n高层到这里停，问一句：「三格 OK 吗？下面先讲为什么这么选，再手算位，最后主动讲回拨。」\n\n## 深入 · 为什么 Snowflake / UUID / 号段\n\n第一个 hard part：**不是谁都能当默认，是需求把另外两个否掉。**\n\nUUID v4：本地随机 128 位，冲突概率可忽略，**零协调**。代价是无序——InnoDB 聚簇主键会随机插页，页分裂、缓存命中都差。索引和存储也比 8 字节 long 贵一截。所以白板说「简单但不排序，不当这题主键」。\n\n号段（Leaf-segment）：DB 里一行 `biz_tag / max_id / step`。应用一次领 `[max_id, max_id+step)`，内存里发完再领。DB 压力按 step 下降；段内严格 +1，B+ 树顺序写友好。**不依赖时钟**，所以也没有回拨。代价是依赖 DB、段与段之间可能空洞（进程挂了段没发完）、多实例领相邻段所以可猜。\n\n```d2\nstyle.font-size: 12\ndirection: right\napp.class: go\napp: \"App\"\ndb.class: store\ndb: \"号段表\"\nmem.class: ok\nmem: \"内存发号\"\nnext.class: step\nnext: \"快完再领\"\napp -> db -> mem -> next\n```\n\n本图引用：Ch09 短链（6 位短码用号段，不用雪花）\n\n生产常 **双 buffer**：当前段还没用完就异步领下一段，避免领段抖动打在热路径上。白板提一句即可。\n\nSnowflake：时间在高位 → 晚生成的 ID 更大；机器位保证跨机不撞；序列保证同毫秒不撞。热路径零网络。这就是 2026 白板对「有序唯一 64 位」的主方案。\n\n短码指针（不在这题展开）：6 位 base62 要求 ID < 62^6 ≈ 568 亿。Snowflake 约 10^18，编出来大约 11 位。**截断会丢唯一性。** 短码用号段或 DB 自增，见 **Ch09**。\n\n**面试怎么说：**\n\n> 「UUID 无序，否掉主键。号段给严格递增和短码。有序 64 位我用雪花。别把雪花截成 6 位。」\n\n## 深入 · 位布局与吞吐\n\n第二个 hard part：把 64 位画成 **4–5 段粗框**，会手算，不要画 64 个小格子。\n\nTwitter 经典（正数 long）：\n\n`1 符号 | 41 时间(ms) | 5 机房 | 5 机器 | 12 序列`\n\n机房 + 机器常合成 **10 bit worker**。符号位恒 0，保证有符号 64 位是正数。\n\n```d2\nstyle.font-size: 12\ndirection: right\nsign.class: box\nsign: \"1 符号\"\nts.class: go\nts: \"41 时间\"\ndc.class: step\ndc: \"5 机房\"\nwk.class: step\nwk: \"5 机器\"\nseq.class: store\nseq: \"12 序列\"\nsign -> ts -> dc -> wk -> seq\n```\n\n时间戳在**最高有效段**（符号之后）：比较 ID 大小 ≈ 比生成时间。这是趋势递增的来源，也是回拨会乱序 / 撞号的来源。\n\n同毫秒：序列 +1，到 4095 再加就溢出 → **等到下一毫秒**，seq 归零。不是换一台 Ticket。\n\nworker_id 必须全局唯一。撞号 = 两台在同一毫秒发出相同序列 → 重复 ID。分配三选一，点到即停：配置手填（易错）；启动时 etcd / ZK 领号（原版这条）；DB `INSERT … RETURNING`。生产别靠人填。\n\n自定义 epoch：从业务上线日算起，41 位才有满满 69 年。从 Unix 1970 起算，等于把高位浪费在「你还没上线」的那几十年。\n\n**面试怎么说：**\n\n> 「1+41+5+5+12。时间在高位所以趋势递增。单机每毫秒 4096，打满等下一毫秒。worker 启动领号，别两台填成一样。」\n\n## 深入 · 时钟回拨\n\n第三个 hard part：**Snowflake 依赖这台机器的墙钟单调向前。** NTP 回拨、虚拟机迁移、闰秒，都可能让 `now < last_ts`。若仍按新时间从 seq=0 发，可能和历史 ID 撞，或比已经发出的还小。\n\n原书只说「用 NTP」。2026 白板要**主动讲检测 + 三档处理**——这是区分度。\n\n```d2\nstyle.font-size: 12\ngrid-columns: 3\nwait.class: ok\nwait: \"小 等待\"\nrefuse.class: bad\nrefuse: \"大 拒绝\"\nextra.class: step\nextra: \"预留位\"\n```\n\n| 档 | 做法 | 什么时候 |\n|---|---|---|\n| **等待** | `sleep` 到 `now >= last_ts` | 回拨很小（几 ms） |\n| **拒绝** | 报错、告警、这台停发 | 回拨大，机器时钟已经不可信 |\n| **预留位** | 回拨期间改走备用序列空间，或钉住 last_ts 继续加 seq | 不想停机、又能保证 (时间, 序列) 不撞 |\n\n等待是最常见的面试默认：小抖动用延迟换正确性。大回拨不能死循环等——可能永远等不回来，要失败并告警。Twitter 原版对任何回拨都 `InvalidSystemClock` 拒绝，偏严；生产常拆成小等大拒。\n\n预留位 / 挪用位：从 12 位序列里划出一段，或额外 1 bit 标记「这段是回拨逻辑时钟」。回拨时不跟墙钟走，继续在已发出的最大戳上加。ID 仍唯一、仍单调，只是嵌入的时间略超前。白板提这一格证明你知道还有第三条路，不要展开成 HLC 课。\n\n防回拨的运维一句：NTP **slew**（慢慢拖）不要 step 猛跳。这降低发生次数，**不能替代**代码里的检测。\n\n号段为什么不怕：内存计数和 DB `max_id`，不读墙钟。这是「主键必须抗回拨」时改号段的理由。\n\n**面试怎么说：**\n\n> 「雪花最大的坑是时钟回拨。我检测 `now < last_ts`：小就等，大就拒绝告警。有余量就预留序列位当逻辑时钟。号段不吃时钟。只说『上 NTP』是 red flag。」\n\n## 2026 vs 原书\n\n<details>\n<summary>原书 / 笔记当时怎么讲 · Ticket 并列、回拨只说 NTP、变体进这里</summary>\n\n| 原书 / 笔记 | 现在怎么答 |\n|---|---|\n| 多主 / UUID / Ticket / 雪花四方案并列 | **正文默认 Snowflake**。UUID、号段对照。Ticket、多主 why-not |\n| 时钟回拨一句 NTP | **主动讲等待 / 拒绝 / 预留位**。NTP slew 是运维，不是代码 |\n| 没提号段 | 严格递增、B+ 友好、短码 → **号段 / Leaf**。双 buffer 一句 |\n| 没提 UUIDv7 | **一句**：RFC 9562（2024）时间前缀 + 随机，128 位可排序；接受 128 位、不想协调 worker 时用。**不是**这题 64 位主方案的替代讲义 |\n| 雪花变体当正文 | **折叠一行**：Sonyflake 更保守（回拨只 sleep）；ULID 是 128 位可排序码。百度 UidGenerator 预借未来时间，点到即停 |\n| 短码接雪花 | **不要。** 6 位短码用号段，Ch09 |\n\n原书骨架仍成立：要唯一、要 64 位、要趋势递增、雪花分段。过时的是**把 Ticket 当和雪花同等篇幅的第三答案**，以及**不把回拨当 hard part**。\n\nUUIDv7（仅本折叠补一句）：48 位 Unix ms + 随机（可加单调计数）。可排序、无 worker 注册，数据库开始原生支持。仍是 128 位，索引比 long 宽；面试 64 位有序 ID 第一句还是 Snowflake。\n\n</details>\n\n## 追问陷阱\n\n1. 「为什么不用 UUID？」→ v4 无序，聚簇主键页分裂。要无协调且可排序，一句 UUIDv7（128 位），64 位仍用雪花。\n2. 「为什么不用 Ticket / 多主自增？」→ Ticket 单点；多主加机器改步长，还不跟时间走。why-not。\n3. 「41 位能用多久？」→ 约 69 年（2^41 ms）。自定义 epoch。到期换 epoch。\n4. 「为什么不用 Unix 1970？」→ 浪费高位。从业务上线日算。\n5. 「单机一毫秒最多多少？」→ 4096。超出等下一毫秒。\n6. 「时钟回拨怎么办？」→ 小等待、大拒绝；可预留序列位。只说 NTP 不够。\n7. 「worker_id 怎么发？」→ 启动领号（etcd / ZK / DB）。两台填一样会撞 ID。\n8. 「号段为什么抗回拨？」→ 内存 + DB max_id，不读墙钟。\n9. 「为什么不用雪花做 6 位短码？」→ 量级太大，base62 约 11 位；截断丢唯一。号段，见 Ch09。\n10. 「机器超过 1024？」→ 从序列挪位；或动态领 worker。不要为此改 Ticket。\n11. 「ID 必须连续吗？」→ 通常不要。连续会暴露单量；趋势递增够索引。\n12. 「四种方案都画一遍？」→ over-engineering。默认雪花 + 对照两格 + 回拨。\n\n## 下一步\n\n收尾不要说完美。三个 bottleneck 口播：\n\n| bottleneck | 你怎么接 |\n|---|---|\n| 时钟回拨 | 检测；小等大拒；号段抗时钟 |\n| worker 撞号 | 启动领号，禁止手填重复 |\n| 同毫秒序列打满 | 等下一毫秒；不要换成中心 Ticket |\n\n自测：合上页，30 秒开场；画出 1+41+5+5+12；手算 4096/ms 和 69 年；三档回拨；说出短码为什么不用雪花。哪句卡，回哪一节。\n\n下一章 **Ch08 · 分布式锁**：互斥、fencing token、为什么不要把 Redlock 当默认。"
+}
