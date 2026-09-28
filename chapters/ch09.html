@@ -24,728 +24,505 @@
   </div>
 </header>
 <main class="wrap">
-<!--
-样板骨架（计划 2 照抄结构，业务按各章重写）：
-- article.chapter#chNN + data-ch
-- 双语：.bilingual > .lang-zh / .lang-en。标题用 span.lang-zh + span.lang-en
-- 幻灯片：figure.deck 的直接子元素 .slide，里面 svg.board（viewBox 宽大于高）+ figcaption
-- 一组 3 到 6 张，顺序是白板上落笔的顺序。svg 里只写短英文，中文放在 figcaption。颜色只用 class：box / box.alt / box.ok / box.bad / wire / head / label / sub
-- 一组讲完用 p.cite 链到 M6。已有 html 的相关章用 a.chip，还没写的用 span.chip.soon
-- head 里加 <link rel="icon" href="../favicon.ico" sizes="48x48">
-- 章末 button.flip 闪卡，以及 button.read-toggle
--->
 <article class="chapter" id="ch09" data-ch="ch09">
   <header>
     <div class="ch-kicker"><span class="lang-zh">CHAPTER 09 · 设计题</span><span class="lang-en">CHAPTER 09 · case</span></div>
     <h1><span class="lang-zh">设计短链服务</span><span class="lang-en">Design a URL shortener</span></h1>
-    <p class="ch-meta-line"><span class="lang-zh">约 35 分钟 · 前置：Ch01。KV 和唯一 ID 可以后读</span><span class="lang-en">~35 min · after Ch01. KV and unique IDs can wait</span></p>
+    <p class="ch-meta-line"><span class="lang-zh">约 35–40 分钟 · 前置：Ch01 · 7 组自动播放架构图</span><span class="lang-en">~35–40 min · after Ch01 · 7 autoplay architecture decks</span></p>
   </header>
-  
+
   <section class="goal">
     <h2><span class="lang-zh">这一章结束你能做什么</span><span class="lang-en">What you can do after this chapter</span></h2>
     <div class="bilingual">
-  <div class="lang-zh"><p class="col-kicker">中文</p>
-<ul><li>用 30 秒把两个 endpoint 和两个 hard part 说完。</li><li>默认答 <strong>302</strong>，以及 <strong>base62 + 号段或自增</strong>。</li><li>讲清为什么 Snowflake 不能当 6 位短码的 ID 源。</li></ul>
-  </div>
-  <div class="lang-en"><p class="col-kicker">English</p>
-<ul><li>Give the two endpoints and the two hard parts in 30 seconds.</li><li>Default to <strong>302</strong>, and to <strong>base62 of a counter</strong>.</li><li>Explain why a Snowflake is the wrong ID source for a 6-character code.</li></ul>
-  </div>
-</div>
+      <div class="lang-zh"><p class="col-kicker">中文</p><ul>
+        <li>在一张高层图上分清创建、跳转、ID 分配和异步统计。</li>
+        <li>把写路径与读路径逐步画完整，并讲清缓存、一致性与降级。</li>
+        <li>用数学解释 base62、号段与 Snowflake，而不是背结论。</li>
+      </ul></div>
+      <div class="lang-en"><p class="col-kicker">English</p><ul>
+        <li>Separate create, redirect, ID allocation, and async analytics on one high-level diagram.</li>
+        <li>Draw both write and read paths, including caching, consistency, and degradation.</li>
+        <li>Derive base62, segments, and Snowflake from the numbers instead of memorizing slogans.</li>
+      </ul></div>
+    </div>
   </section>
 
   <section>
-    <h2><span class="lang-zh">30 秒开场</span><span class="lang-en">The 30-second open</span></h2>
+    <h2><span class="lang-zh">30 秒开场与边界</span><span class="lang-en">The 30-second open and scope</span></h2>
     <div class="bilingual">
-  <div class="lang-zh"><p class="col-kicker">中文</p>
-<p class="say">短链两个 endpoint：POST /shorten 把 long URL 换成短码，GET /{code} 用 302 跳回长链。读多写少，存储也不大。Hard part 有两个：默认 302 而不是 301，因为要 Analytics；短码用 base62 加号段，不用 hash 截断，更不用 Snowflake。</p>
-        <p>范围就这么大。不要主动画全球 CDN 加数仓，除非他们追问热点。</p>
-  </div>
-  <div class="lang-en"><p class="col-kicker">English</p>
-<p class="say">Two endpoints. POST /shorten turns a long URL into a code. GET /{code} returns a 302 to the long URL. Reads dominate, and the data is small. Two hard parts: default to 302 rather than 301 because we need analytics, and build the code as base62 of a counter — not a truncated hash, and not a Snowflake.</p>
-        <p>That is the whole scope. Do not volunteer a global CDN plus a warehouse unless they ask about hot keys.</p>
-  </div>
-</div>
-    <figure class="deck">
-<div class="slide">
-  <svg viewBox="0 0 960 420" class="board" role="img">
-  <g>
-    <rect x="190" y="150" width="260" height="100" rx="12" class="box"/>
-    <text x="320" y="184" text-anchor="middle" class="label">POST /shorten</text>
-    <text x="320" y="208" text-anchor="middle" class="sub">long URL → code</text>
-  </g>
-  <g>
-    <rect x="510" y="150" width="260" height="100" rx="12" class="box alt"/>
-    <text x="640" y="184" text-anchor="middle" class="label">GET /{code}</text>
-    <text x="640" y="208" text-anchor="middle" class="sub">302 → long URL</text>
-  </g>
-  <line x1="456" y1="200" x2="499" y2="200" class="wire"/>
-  <polygon points="499,195 508,200 499,205" class="head"/>
-</svg>
-  <figcaption><span class="lang-zh">开场就说两个 endpoint。写一条映射，读的时候 302 跳回去。</span><span class="lang-en">Open with two endpoints. One write stores the mapping. The read is a 302 back to the long URL.</span></figcaption>
-</div>
-<div class="slide">
-  <svg viewBox="0 0 960 420" class="board" role="img">
-  <g>
-    <rect x="190" y="150" width="260" height="100" rx="12" class="box ok"/>
-    <text x="320" y="184" text-anchor="middle" class="label">302</text>
-    <text x="320" y="208" text-anchor="middle" class="sub">hits you again</text>
-  </g>
-  <g>
-    <rect x="510" y="150" width="260" height="100" rx="12" class="box bad"/>
-    <text x="640" y="184" text-anchor="middle" class="label">301</text>
-    <text x="640" y="208" text-anchor="middle" class="sub">browser caches</text>
-  </g>
-  <line x1="456" y1="200" x2="499" y2="200" class="wire"/>
-  <polygon points="499,195 508,200 499,205" class="head"/>
-</svg>
-  <figcaption><span class="lang-zh">默认 302。301 会被浏览器缓存，后面的点击不再经过你，Analytics 和过期都断了。</span><span class="lang-en">Default to 302. A 301 is cached by the browser, so later clicks skip you. Analytics and expiry both die.</span></figcaption>
-</div>
-<div class="slide">
-  <svg viewBox="0 0 960 420" class="board" role="img">
-  <g>
-    <rect x="190" y="150" width="260" height="100" rx="12" class="box ok"/>
-    <text x="320" y="184" text-anchor="middle" class="label">Hard part</text>
-    <text x="320" y="208" text-anchor="middle" class="sub">302, not 301</text>
-  </g>
-  <g>
-    <rect x="510" y="150" width="260" height="100" rx="12" class="box ok"/>
-    <text x="640" y="184" text-anchor="middle" class="label">Hard part</text>
-    <text x="640" y="208" text-anchor="middle" class="sub">base62 counter</text>
-  </g>
-  <line x1="456" y1="200" x2="499" y2="200" class="wire"/>
-  <polygon points="499,195 508,200 499,205" class="head"/>
-</svg>
-  <figcaption><span class="lang-zh">第二个 hard part：短码用 base62 编码号段或自增 ID。不要 hash 截断，也不要拿 Snowflake 去填 6 位。</span><span class="lang-en">Second hard part: base62 of a counter or an ID segment. Not a truncated hash, and not a Snowflake packed into 6 characters.</span></figcaption>
-</div>
-</figure>
-    <p class="cite"><span class="lang-zh">4 步法的时间盒在 <a class="chip" href="ch01.html">Ch01</a>。这一章按那个钟走。</span><span class="lang-en">The clock is in <a class="chip" href="ch01.html">Ch01</a>. This chapter runs on it.</span></p>
+      <div class="lang-zh"><p class="col-kicker">中文</p>
+        <p class="say">两个 endpoint：<code>POST /v1/links</code> 创建短码，<code>GET /{code}</code> 跳转。读远多于写。我先画 create 与 redirect 的高层路径，再深入三件事：短码分配、热点缓存、失败时如何降级。默认返回 302，并显式控制缓存；统计事件异步出关键路径。</p>
+        <p>先假设支持过期、撤销、自定义 alias 和点击统计；custom domain、全球多活与完整风控平台不在第一版范围。短码是定位符，不是访问控制。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">English</p>
+        <p class="say">Two endpoints: <code>POST /v1/links</code> creates a code and <code>GET /{code}</code> redirects. Reads dominate writes. I will draw create and redirect first, then go deep on code allocation, hot-key caching, and failure behavior. The default is a 302 with explicit cache control; click events leave the critical path asynchronously.</p>
+        <p>Assume expiry, revocation, custom aliases, and click analytics. Custom domains, global active-active, and a full abuse platform are outside version one. A short code is a locator, not access control.</p>
+      </div>
+    </div>
+    <table>
+      <thead><tr><th><span class="lang-zh">假设</span><span class="lang-en">Assumption</span></th><th><span class="lang-zh">数量级</span><span class="lang-en">Order</span></th><th><span class="lang-zh">它驱动的设计</span><span class="lang-en">Design consequence</span></th></tr></thead>
+      <tbody>
+        <tr><td>1M creates/day</td><td>11.6 avg / 116 peak QPS</td><td><span class="lang-zh">写吞吐不难，优先保证唯一与幂等</span><span class="lang-en">Writes are modest; uniqueness and idempotency matter more</span></td></tr>
+        <tr><td>100 redirects/create</td><td>1.16K avg / 11.6K peak QPS</td><td><span class="lang-zh">读侧缓存，统计异步</span><span class="lang-en">Cache reads and move analytics off path</span></td></tr>
+        <tr><td>6-char base62</td><td>62<sup>6</sup> = 56,800,235,584</td><td><span class="lang-zh">理论约 155 年空间，但仍预留增长与不复用 ID</span><span class="lang-en">About 155 theoretical years, with room reserved for growth and non-reuse</span></td></tr>
+      </tbody>
+    </table>
   </section>
 
   <section>
-    <h2><span class="lang-zh">先问清楚</span><span class="lang-en">Ask before you draw</span></h2>
+    <h2><span class="lang-zh">高层架构：先把两条主路径放对</span><span class="lang-en">High-level architecture: place both main paths first</span></h2>
+    <figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="h1t h1d">
+          <title id="h1t">Client enters the short-link system</title><desc id="h1d">A browser or app sends traffic through the edge and load balancer.</desc>
+          <rect x="250" y="70" width="520" height="270" rx="24" class="boundary"/>
+          <text x="270" y="100" class="tiny">SHORT-LINK SYSTEM</text>
+          <circle cx="140" cy="205" r="42" class="box"/><circle cx="140" cy="190" r="12" class="box"/><path d="M116 230 Q140 205 164 230" class="wire"/>
+          <text x="140" y="275" text-anchor="middle" class="label">Browser / App</text>
+          <g class="is-new"><rect x="365" y="160" width="220" height="90" rx="45" class="box alt"/><text x="475" y="198" text-anchor="middle" class="label">Edge + LB</text><text x="475" y="222" text-anchor="middle" class="sub">TLS · routing · rate limit</text></g>
+          <line x1="185" y1="205" x2="350" y2="205" class="wire"/><polygon points="350,199 362,205 350,211" class="head"/>
+        </svg>
+        <figcaption><span class="lang-zh">第一笔只画入口和系统边界：所有创建与跳转流量先经过统一的 Edge / LB。</span><span class="lang-en">First stroke: one entry and one system boundary. Both create and redirect traffic cross the same edge.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="h2t h2d">
+          <title id="h2t">Split create and redirect services</title><desc id="h2d">The edge routes POST requests to Shorten Service and GET requests to Redirect Service.</desc>
+          <rect x="220" y="45" width="680" height="330" rx="24" class="boundary"/><text x="240" y="75" class="tiny">SHORT-LINK SYSTEM</text>
+          <circle cx="100" cy="210" r="34" class="box"/><text x="100" y="270" text-anchor="middle" class="label">Client</text>
+          <rect x="260" y="165" width="150" height="82" rx="41" class="box alt"/><text x="335" y="199" text-anchor="middle" class="label">Edge + LB</text>
+          <line x1="136" y1="210" x2="248" y2="210" class="wire"/><polygon points="248,204 258,210 248,216" class="head"/>
+          <g class="is-new"><rect x="535" y="92" width="205" height="80" rx="12" class="box ok"/><text x="638" y="126" text-anchor="middle" class="label">Shorten Service</text><text x="638" y="150" text-anchor="middle" class="sub">POST /v1/links</text>
+          <rect x="535" y="250" width="205" height="80" rx="12" class="box"/><text x="638" y="284" text-anchor="middle" class="label">Redirect Service</text><text x="638" y="308" text-anchor="middle" class="sub">GET /{code}</text>
+          <path d="M412 194 C455 194 470 132 522 132" class="wire"/><polygon points="520,126 532,132 520,138" class="head"/><text x="454" y="143" class="tiny">create</text>
+          <path d="M412 225 C455 225 470 290 522 290" class="wire"/><polygon points="520,284 532,290 520,296" class="head"/><text x="454" y="280" class="tiny">redirect</text></g>
+        </svg>
+        <figcaption><span class="lang-zh">第二笔把读写拆开：创建服务可以慢一点做校验，跳转服务只保留低延迟关键路径。</span><span class="lang-en">Second stroke: split reads from writes. Creation may validate more; redirect stays latency-sensitive.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="h3t h3d">
+          <title id="h3t">Attach cache and source of truth</title><desc id="h3d">Redirect Service reads Redis before the authoritative Mapping Store; Shorten Service writes the store.</desc>
+          <rect x="170" y="35" width="750" height="350" rx="24" class="boundary"/><text x="190" y="65" class="tiny">SHORT-LINK SYSTEM</text>
+          <circle cx="80" cy="210" r="30" class="box"/><text x="80" y="258" text-anchor="middle" class="sub">Client</text>
+          <rect x="195" y="175" width="120" height="70" rx="35" class="box alt"/><text x="255" y="216" text-anchor="middle" class="label">Edge</text>
+          <rect x="385" y="82" width="180" height="72" rx="12" class="box ok"/><text x="475" y="113" text-anchor="middle" class="label">Shorten</text><text x="475" y="136" text-anchor="middle" class="sub">write path</text>
+          <rect x="385" y="265" width="180" height="72" rx="12" class="box"/><text x="475" y="296" text-anchor="middle" class="label">Redirect</text><text x="475" y="319" text-anchor="middle" class="sub">read path</text>
+          <line x1="112" y1="210" x2="182" y2="210" class="wire"/><polygon points="182,204 192,210 182,216" class="head"/>
+          <path d="M317 195 C345 175 350 118 373 118" class="wire"/><polygon points="373,112 383,118 373,124" class="head"/>
+          <path d="M317 225 C345 245 350 301 373 301" class="wire"/><polygon points="373,295 383,301 373,307" class="head"/>
+          <g class="is-new"><rect x="650" y="260" width="125" height="68" rx="8" class="cache"/><rect x="642" y="252" width="125" height="68" rx="8" class="cache"/><text x="705" y="291" text-anchor="middle" class="label">Redis</text>
+          <ellipse cx="827" cy="142" rx="78" ry="22" class="store"/><rect x="749" y="142" width="156" height="103" class="store"/><ellipse cx="827" cy="245" rx="78" ry="22" class="store"/><text x="827" y="187" text-anchor="middle" class="label">Mapping Store</text><text x="827" y="211" text-anchor="middle" class="sub">source of truth</text>
+          <path d="M567 301 L630 290" class="wire"/><polygon points="628,284 640,288 630,296" class="head"/><path d="M768 270 C790 250 800 242 800 240" class="wire"/>
+          <path d="M567 118 C660 118 680 165 737 174" class="wire"/><polygon points="735,168 747,176 733,180" class="head"/></g>
+        </svg>
+        <figcaption><span class="lang-zh">第三笔才落状态：Mapping Store 是权威映射，Redis 只是读侧加速，不能反客为主。</span><span class="lang-en">Third stroke: place state. The Mapping Store owns truth; Redis accelerates reads but never becomes authority.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="h4t h4d">
+          <title id="h4t">Add the ID allocator to the write path</title><desc id="h4d">Shorten Service obtains a small ID segment, encodes it as base62, and writes the mapping.</desc>
+          <rect x="155" y="30" width="780" height="360" rx="24" class="boundary"/><text x="175" y="60" class="tiny">SHORT-LINK SYSTEM</text>
+          <circle cx="70" cy="205" r="28" class="box"/><text x="70" y="250" text-anchor="middle" class="sub">Client</text>
+          <rect x="185" y="170" width="110" height="68" rx="34" class="box alt"/><text x="240" y="210" text-anchor="middle" class="label">Edge</text>
+          <rect x="355" y="75" width="170" height="70" rx="12" class="box ok"/><text x="440" y="106" text-anchor="middle" class="label">Shorten</text><text x="440" y="130" text-anchor="middle" class="sub">validate + encode</text>
+          <rect x="355" y="265" width="170" height="70" rx="12" class="box"/><text x="440" y="306" text-anchor="middle" class="label">Redirect</text>
+          <rect x="610" y="265" width="112" height="62" rx="8" class="cache"/><rect x="603" y="258" width="112" height="62" rx="8" class="cache"/><text x="659" y="295" text-anchor="middle" class="label">Redis</text>
+          <ellipse cx="850" cy="160" rx="68" ry="20" class="store"/><rect x="782" y="160" width="136" height="95" class="store"/><ellipse cx="850" cy="255" rx="68" ry="20" class="store"/><text x="850" y="207" text-anchor="middle" class="label">Mapping</text>
+          <path d="M99 205 L173 205" class="wire"/><polygon points="173,199 183,205 173,211" class="head"/><path d="M297 190 C320 170 330 110 343 110" class="wire"/><polygon points="343,104 353,110 343,116" class="head"/><path d="M297 220 C325 245 330 300 343 300" class="wire"/><polygon points="343,294 353,300 343,306" class="head"/>
+          <path d="M527 300 L591 292" class="wire"/><path d="M717 276 L775 235" class="wire"/><path d="M527 110 C660 110 700 181 775 192" class="wire"/><polygon points="773,186 783,193 771,198" class="head"/>
+          <g class="is-new"><rect x="605" y="64" width="148" height="72" rx="12" class="box alt"/><text x="679" y="95" text-anchor="middle" class="label">ID Allocator</text><text x="679" y="119" text-anchor="middle" class="sub">small segments</text><line x1="527" y1="100" x2="592" y2="100" class="wire"/><polygon points="592,94 602,100 592,106" class="head"/><text x="545" y="91" class="tiny">next ID</text></g>
+        </svg>
+        <figcaption><span class="lang-zh">第四笔把 ID allocator 接到写侧。它发小而连续的号段，Shorten 在本地递增并编码，不进入 redirect 关键路径。</span><span class="lang-en">Fourth stroke: attach the allocator only to writes. It leases compact segments; redirect never depends on it.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="h5t h5d">
+          <title id="h5t">Complete URL shortener architecture</title><desc id="h5d">The complete architecture includes create and redirect services, ID allocator, cache, mapping store, and an asynchronous analytics pipeline.</desc>
+          <rect x="145" y="25" width="800" height="365" rx="24" class="boundary"/><text x="165" y="52" class="tiny">SHORT-LINK SYSTEM</text>
+          <circle cx="62" cy="197" r="27" class="box"/><text x="62" y="239" text-anchor="middle" class="sub">Client</text>
+          <rect x="175" y="165" width="105" height="62" rx="31" class="box alt"/><text x="228" y="202" text-anchor="middle" class="label">Edge</text>
+          <rect x="335" y="70" width="150" height="64" rx="12" class="box ok"/><text x="410" y="99" text-anchor="middle" class="label">Shorten</text><text x="410" y="121" text-anchor="middle" class="sub">POST /links</text>
+          <rect x="335" y="246" width="150" height="64" rx="12" class="box"/><text x="410" y="275" text-anchor="middle" class="label">Redirect</text><text x="410" y="297" text-anchor="middle" class="sub">GET /{code}</text>
+          <rect x="555" y="57" width="135" height="60" rx="12" class="box alt"/><text x="623" y="83" text-anchor="middle" class="label">ID Allocator</text><text x="623" y="104" text-anchor="middle" class="sub">segment</text>
+          <rect x="550" y="248" width="105" height="57" rx="8" class="cache"/><rect x="544" y="242" width="105" height="57" rx="8" class="cache"/><text x="597" y="276" text-anchor="middle" class="label">Redis</text>
+          <ellipse cx="850" cy="105" rx="66" ry="18" class="store"/><rect x="784" y="105" width="132" height="82" class="store"/><ellipse cx="850" cy="187" rx="66" ry="18" class="store"/><text x="850" y="148" text-anchor="middle" class="label">Mapping</text>
+          <path d="M90 197 L163 197" class="wire"/><polygon points="163,191 173,197 163,203" class="head"/><path d="M282 183 C305 160 310 102 323 102" class="wire"/><polygon points="323,96 333,102 323,108" class="head"/><path d="M282 211 C305 232 310 278 323 278" class="wire"/><polygon points="323,272 333,278 323,284" class="head"/>
+          <path d="M487 91 L543 86" class="wire"/><polygon points="543,80 553,86 543,92" class="head"/><path d="M487 112 C650 112 710 143 776 143" class="wire"/><polygon points="774,137 784,143 774,149" class="head"/>
+          <path d="M487 278 L535 272" class="wire"/><polygon points="535,266 543,272 533,278" class="head"/><path d="M651 260 C715 230 735 180 780 165" class="wire"/>
+          <path d="M335 322 C250 355 165 290 102 219" class="wire reply"/><polygon points="102,213 92,209 98,221" class="head reply"/><text x="190" y="333" class="tiny">302 Location + no-store</text>
+          <g class="is-new"><path d="M535 340 h150 a18 18 0 0 1 0 36 h-150 a18 18 0 0 1 0-36" class="queue"/><text x="610" y="363" text-anchor="middle" class="label">Click Stream</text><rect x="752" y="329" width="156" height="58" rx="12" class="box alt"/><text x="830" y="354" text-anchor="middle" class="label">Analytics</text><text x="830" y="375" text-anchor="middle" class="sub">batch sink</text><path d="M435 312 C460 350 490 358 520 358" class="wire async"/><polygon points="518,352 530,358 518,364" class="head async"/><line x1="704" y1="358" x2="740" y2="358" class="wire async"/><polygon points="740,352 750,358 740,364" class="head async"/></g>
+        </svg>
+        <figcaption><span class="lang-zh">终图把四种语义放齐：同步请求、302 回程、权威状态、异步 click event。后面只放大其中一条路径。</span><span class="lang-en">The final frame carries four semantics: requests, the 302 response, authoritative state, and async click events.</span></figcaption>
+      </div>
+    </figure>
+    <p class="cite"><span class="lang-zh">这张图的原则：先画最小闭环，再让每个新组件回答一个已出现的问题。</span><span class="lang-en">Rule: close the smallest loop first; every new component must answer an observed problem.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">API、幂等与最小数据模型</span><span class="lang-en">API, idempotency, and the minimum data model</span></h2>
     <div class="bilingual">
-  <div class="lang-zh"><p class="col-kicker">中文</p>
-<p>没问清楚就画图，又是 Jimmy。五个问题够了，其余写成假设，写在白板边上。</p>
-  </div>
-  <div class="lang-en"><p class="col-kicker">English</p>
-<p>Drawing before you ask is Jimmy again. Five questions are enough. Write the rest as assumptions on the side of the board.</p>
-  </div>
-</div>
-    <figure class="deck">
-<div class="slide">
-  <svg viewBox="0 0 960 420" class="board" role="img">
-  <g>
-    <rect x="350" y="150" width="260" height="96" rx="12" class="box"/>
-    <text x="480" y="184" text-anchor="middle" class="label">Alias</text>
-    <text x="480" y="208" text-anchor="middle" class="sub">custom code first</text>
-  </g>
-</svg>
-  <figcaption><span class="lang-zh">先问要不要自定义短码。要的话，写路径先查占用。</span><span class="lang-en">Ask whether custom aliases exist. If they do, the write path checks for a collision first.</span></figcaption>
-</div>
-<div class="slide">
-  <svg viewBox="0 0 960 420" class="board" role="img">
-  <g>
-    <rect x="211" y="150" width="260" height="96" rx="12" class="box"/>
-    <text x="341" y="184" text-anchor="middle" class="label">Alias</text>
-    <text x="341" y="208" text-anchor="middle" class="sub">custom code first</text>
-  </g>
-  <g>
-    <rect x="489" y="150" width="260" height="96" rx="12" class="box"/>
-    <text x="619" y="184" text-anchor="middle" class="label">TTL</text>
-    <text x="619" y="208" text-anchor="middle" class="sub">optional expiry</text>
-  </g>
-  <line x1="469" y1="198" x2="478" y2="198" class="wire"/>
-  <polygon points="478,193 487,198 478,203" class="head"/>
-</svg>
-  <figcaption><span class="lang-zh">过期是可选项。schema 加 expires_at，读的时候校验，过期就不要再 302。</span><span class="lang-en">Expiry is optional. Add expires_at, check it on read, and do not redirect after that.</span></figcaption>
-</div>
-<div class="slide">
-  <svg viewBox="0 0 960 420" class="board" role="img">
-  <g>
-    <rect x="72" y="150" width="260" height="96" rx="12" class="box"/>
-    <text x="202" y="184" text-anchor="middle" class="label">Alias</text>
-    <text x="202" y="208" text-anchor="middle" class="sub">custom code first</text>
-  </g>
-  <g>
-    <rect x="350" y="150" width="260" height="96" rx="12" class="box"/>
-    <text x="480" y="184" text-anchor="middle" class="label">TTL</text>
-    <text x="480" y="208" text-anchor="middle" class="sub">optional expiry</text>
-  </g>
-  <line x1="330" y1="198" x2="339" y2="198" class="wire"/>
-  <polygon points="339,193 348,198 339,203" class="head"/>
-  <g>
-    <rect x="628" y="150" width="260" height="96" rx="12" class="box ok"/>
-    <text x="758" y="184" text-anchor="middle" class="label">Analytics</text>
-    <text x="758" y="208" text-anchor="middle" class="sub">so use 302</text>
-  </g>
-  <line x1="608" y1="198" x2="617" y2="198" class="wire"/>
-  <polygon points="617,193 626,198 617,203" class="head"/>
-</svg>
-  <figcaption><span class="lang-zh">Analytics 一旦要，状态码就被定死：必须每次点击都回到你的服务。</span><span class="lang-en">The moment they want analytics, the status code is decided: every click has to hit your service.</span></figcaption>
-</div>
-<div class="slide">
-  <svg viewBox="0 0 960 420" class="board" role="img">
-  <g>
-    <rect x="29" y="150" width="212" height="96" rx="12" class="box"/>
-    <text x="135" y="184" text-anchor="middle" class="label">Alias</text>
-    <text x="135" y="208" text-anchor="middle" class="sub">custom code first</text>
-  </g>
-  <g>
-    <rect x="259" y="150" width="212" height="96" rx="12" class="box"/>
-    <text x="365" y="184" text-anchor="middle" class="label">TTL</text>
-    <text x="365" y="208" text-anchor="middle" class="sub">optional expiry</text>
-  </g>
-  <line x1="239" y1="198" x2="248" y2="198" class="wire"/>
-  <polygon points="248,193 257,198 248,203" class="head"/>
-  <g>
-    <rect x="489" y="150" width="212" height="96" rx="12" class="box ok"/>
-    <text x="595" y="184" text-anchor="middle" class="label">Analytics</text>
-    <text x="595" y="208" text-anchor="middle" class="sub">so use 302</text>
-  </g>
-  <line x1="469" y1="198" x2="478" y2="198" class="wire"/>
-  <polygon points="478,193 487,198 478,203" class="head"/>
-  <g>
-    <rect x="719" y="150" width="212" height="96" rx="12" class="box"/>
-    <text x="825" y="184" text-anchor="middle" class="label">Read : write</text>
-    <text x="825" y="208" text-anchor="middle" class="sub">about 100 : 1</text>
-  </g>
-  <line x1="699" y1="198" x2="708" y2="198" class="wire"/>
-  <polygon points="708,193 717,198 708,203" class="head"/>
-</svg>
-  <figcaption><span class="lang-zh">自己补上读远多于写。后面的缓存和短码空间都从这里来。</span><span class="lang-en">State the assumption yourself: reads dwarf writes. Cache and the size of the code space both follow from that.</span></figcaption>
-</div>
-</figure>
+      <div class="lang-zh"><p class="col-kicker">中文</p>
+        <p><code>POST /v1/links</code> 接受 <code>long_url</code>、可选 <code>custom_alias</code> 与 <code>expires_at</code>；header 带 <code>Idempotency-Key</code>。alias 已占用返回 <code>409</code>。<code>GET /{code}</code> 成功返回 <code>302 Location</code>；unknown 返回 404，expired / revoked 返回 410 或产品定义的安全页。</p>
+        <p>不要默认全局做 <code>target_url → code</code> 去重：同一落地页可能属于不同 owner、campaign、expiry。幂等按 owner + key 定界。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">English</p>
+        <p><code>POST /v1/links</code> accepts <code>long_url</code>, optional <code>custom_alias</code> and <code>expires_at</code>, plus an <code>Idempotency-Key</code> header. A taken alias returns <code>409</code>. <code>GET /{code}</code> returns <code>302 Location</code>; unknown is 404, while expired or revoked becomes 410 or a product safety page.</p>
+        <p>Do not globally deduplicate <code>target_url → code</code>. The same landing page can belong to different owners, campaigns, or expiries. Scope idempotency by owner and key.</p>
+      </div>
+    </div>
+    <pre><code>Link(code PK, target_url, owner_id, status, created_at, expires_at, version)
+Idempotency(owner_id, key, code, expires_at, PRIMARY KEY(owner_id, key))</code></pre>
   </section>
 
   <section>
-    <h2><span class="lang-zh">数量级</span><span class="lang-en">Orders of magnitude</span></h2>
+    <h2><span class="lang-zh">写路径：唯一性落在条件写，不落在运气</span><span class="lang-en">Write path: uniqueness comes from conditional writes, not luck</span></h2>
+    <figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="w1t w1d">
+          <title id="w1t">Validate a create request</title><desc id="w1d">The client sends a create request; Shorten Service validates scheme, quota, and policy.</desc>
+          <rect x="55" y="55" width="850" height="300" rx="18" class="boundary"/><text x="75" y="82" class="tiny">CREATE SEQUENCE</text>
+          <circle cx="125" cy="185" r="34" class="box"/><text x="125" y="245" text-anchor="middle" class="label">Client</text>
+          <rect x="305" y="145" width="190" height="80" rx="12" class="box ok"/><text x="400" y="178" text-anchor="middle" class="label">Shorten Service</text><text x="400" y="202" text-anchor="middle" class="sub">validate request</text>
+          <g class="is-new"><line x1="160" y1="185" x2="292" y2="185" class="wire"/><polygon points="292,179 302,185 292,191" class="head"/><text x="184" y="168" class="tiny">POST /v1/links</text><rect x="570" y="145" width="185" height="80" rx="12" class="box alt"/><text x="663" y="178" text-anchor="middle" class="label">Policy Check</text><text x="663" y="202" text-anchor="middle" class="sub">scheme · quota · abuse</text><line x1="497" y1="185" x2="557" y2="185" class="wire"/><polygon points="557,179 567,185 557,191" class="head"/></g>
+        </svg>
+        <figcaption><span class="lang-zh">第一步先拒绝坏输入：只允许 http/https，检查 tenant quota；昂贵的检测不应无限阻塞创建。</span><span class="lang-en">Reject bad input first: allow http/https, enforce tenant quota, and keep expensive policy work bounded.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="w2t w2d">
+          <title id="w2t">Check idempotency before allocation</title><desc id="w2d">Shorten Service checks an owner-scoped idempotency record before creating another code.</desc>
+          <rect x="35" y="35" width="890" height="340" rx="18" class="boundary"/><text x="55" y="62" class="tiny">CREATE SEQUENCE</text>
+          <circle cx="95" cy="160" r="28" class="box"/><text x="95" y="207" text-anchor="middle" class="sub">Client</text>
+          <rect x="230" y="125" width="165" height="70" rx="12" class="box ok"/><text x="313" y="155" text-anchor="middle" class="label">Shorten</text><text x="313" y="178" text-anchor="middle" class="sub">validate</text>
+          <rect x="500" y="125" width="165" height="70" rx="12" class="box alt"/><text x="583" y="155" text-anchor="middle" class="label">Policy</text><text x="583" y="178" text-anchor="middle" class="sub">allow / reject</text>
+          <line x1="125" y1="160" x2="217" y2="160" class="wire"/><polygon points="217,154 227,160 217,166" class="head"/><line x1="397" y1="160" x2="487" y2="160" class="wire"/><polygon points="487,154 497,160 487,166" class="head"/>
+          <g class="is-new"><ellipse cx="800" cy="126" rx="77" ry="20" class="store"/><rect x="723" y="126" width="154" height="92" class="store"/><ellipse cx="800" cy="218" rx="77" ry="20" class="store"/><text x="800" y="165" text-anchor="middle" class="label">Idempotency</text><text x="800" y="188" text-anchor="middle" class="sub">owner + key</text><path d="M665 175 C700 185 705 180 713 175" class="wire"/><polygon points="711,169 721,175 711,181" class="head"/><path d="M724 225 C640 295 400 300 145 185" class="wire reply"/><polygon points="148,179 135,180 143,191" class="head reply"/><text x="465" y="314" class="tiny">hit → return the original code</text></g>
+        </svg>
+        <figcaption><span class="lang-zh">重试先查 owner + idempotency key；命中就返回原结果，避免网络超时制造重复短码。</span><span class="lang-en">A retry checks owner plus idempotency key and returns the original result before allocating anything new.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="w3t w3d">
+          <title id="w3t">Reserve a custom alias conditionally</title><desc id="w3d">A custom alias bypasses the allocator and is reserved with a put-if-absent operation.</desc>
+          <rect x="40" y="32" width="880" height="350" rx="18" class="boundary"/><text x="60" y="59" class="tiny">CUSTOM ALIAS BRANCH</text>
+          <circle cx="100" cy="185" r="29" class="box"/><text x="100" y="233" text-anchor="middle" class="sub">Client</text>
+          <rect x="245" y="150" width="165" height="70" rx="12" class="box ok"/><text x="328" y="180" text-anchor="middle" class="label">Shorten</text><text x="328" y="203" text-anchor="middle" class="sub">alias = /sale</text>
+          <line x1="130" y1="185" x2="232" y2="185" class="wire"/><polygon points="232,179 242,185 232,191" class="head"/>
+          <g class="is-new"><ellipse cx="690" cy="124" rx="92" ry="22" class="store"/><rect x="598" y="124" width="184" height="115" class="store"/><ellipse cx="690" cy="239" rx="92" ry="22" class="store"/><text x="690" y="168" text-anchor="middle" class="label">Mapping Store</text><text x="690" y="193" text-anchor="middle" class="sub">PUT /sale IF ABSENT</text><line x1="412" y1="185" x2="585" y2="185" class="wire"/><polygon points="585,179 595,185 585,191" class="head"/><path d="M600 250 C515 310 300 305 140 210" class="wire fail"/><polygon points="142,204 130,204 138,216" class="head fail"/><text x="382" y="321" class="tiny">occupied → 409 Conflict</text></g>
+        </svg>
+        <figcaption><span class="lang-zh">自定义 alias 不走 ID allocator；用原子条件写抢占，竞争失败返回 409，而不是“先查再写”。</span><span class="lang-en">A custom alias bypasses allocation. Reserve it atomically; do not race with a separate read-then-write.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="w4t w4d">
+          <title id="w4t">Generate a normal code from a leased segment</title><desc id="w4d">Shorten instances draw local IDs from disjoint leased ranges and encode them as fixed-width base62.</desc>
+          <rect x="35" y="34" width="890" height="345" rx="18" class="boundary"/><text x="55" y="62" class="tiny">GENERATED CODE BRANCH</text>
+          <rect x="78" y="150" width="165" height="72" rx="12" class="box ok"/><text x="160" y="181" text-anchor="middle" class="label">Shorten A</text><text x="160" y="204" text-anchor="middle" class="sub">local 1001…2000</text>
+          <rect x="78" y="265" width="165" height="72" rx="12" class="box ok"/><text x="160" y="296" text-anchor="middle" class="label">Shorten B</text><text x="160" y="319" text-anchor="middle" class="sub">local 2001…3000</text>
+          <rect x="350" y="78" width="180" height="76" rx="12" class="box alt"/><text x="440" y="110" text-anchor="middle" class="label">ID Allocator</text><text x="440" y="134" text-anchor="middle" class="sub">lease disjoint ranges</text>
+          <ellipse cx="690" cy="84" rx="83" ry="20" class="store"/><rect x="607" y="84" width="166" height="86" class="store"/><ellipse cx="690" cy="170" rx="83" ry="20" class="store"/><text x="690" y="123" text-anchor="middle" class="label">Segment DB</text><text x="690" y="146" text-anchor="middle" class="sub">max_id + step</text>
+          <path d="M608 121 L543 121" class="wire reply"/><polygon points="543,115 533,121 543,127" class="head reply"/><path d="M410 157 C350 185 300 185 255 185" class="wire reply"/><polygon points="255,179 245,185 255,191" class="head reply"/><path d="M425 157 C350 250 300 300 255 300" class="wire reply"/><polygon points="255,294 245,300 255,306" class="head reply"/>
+          <g class="is-new"><rect x="350" y="248" width="180" height="76" rx="12" class="box ok"/><text x="440" y="280" text-anchor="middle" class="label">base62 + pad</text><text x="440" y="304" text-anchor="middle" class="sub">1001 → 0000g9</text><line x1="245" y1="210" x2="340" y2="268" class="wire"/><polygon points="337,261 347,272 333,271" class="head"/><ellipse cx="720" cy="272" rx="84" ry="20" class="store"/><rect x="636" y="272" width="168" height="78" class="store"/><ellipse cx="720" cy="350" rx="84" ry="20" class="store"/><text x="720" y="312" text-anchor="middle" class="label">Mapping</text><text x="720" y="334" text-anchor="middle" class="sub">code → target</text><line x1="532" y1="286" x2="624" y2="310" class="wire"/><polygon points="622,304 633,312 619,316" class="head"/></g>
+        </svg>
+        <figcaption><span class="lang-zh">普通码来自不重叠号段；实例本地递增减少协调。base62 若要“固定 6 位”，必须明确 padding 或保留起始区间。</span><span class="lang-en">Normal codes come from disjoint leases. Local increments reduce coordination. Fixed six characters require padding or a reserved range.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="w5t w5d">
+          <title id="w5t">Commit mapping and idempotency result</title><desc id="w5d">After a conditional mapping write, the service records the idempotency result and returns the short URL.</desc>
+          <rect x="35" y="35" width="890" height="340" rx="18" class="boundary"/><text x="55" y="63" class="tiny">CREATE COMMIT</text>
+          <circle cx="90" cy="200" r="28" class="box"/><text x="90" y="246" text-anchor="middle" class="sub">Client</text>
+          <rect x="220" y="165" width="165" height="70" rx="12" class="box ok"/><text x="303" y="195" text-anchor="middle" class="label">Shorten</text><text x="303" y="218" text-anchor="middle" class="sub">code ready</text>
+          <rect x="480" y="95" width="150" height="67" rx="12" class="box alt"/><text x="555" y="124" text-anchor="middle" class="label">Idempotency</text><text x="555" y="147" text-anchor="middle" class="sub">owner + key</text>
+          <ellipse cx="775" cy="161" rx="88" ry="21" class="store"/><rect x="687" y="161" width="176" height="100" class="store"/><ellipse cx="775" cy="261" rx="88" ry="21" class="store"/><text x="775" y="204" text-anchor="middle" class="label">Mapping Store</text><text x="775" y="229" text-anchor="middle" class="sub">conditional insert</text>
+          <g class="is-new"><line x1="387" y1="200" x2="674" y2="205" class="wire"/><polygon points="674,199 684,205 674,211" class="head"/><text x="485" y="189" class="tiny">1 · PUT code if absent</text><path d="M690 270 C620 315 550 270 550 174" class="wire"/><polygon points="544,175 550,165 556,175" class="head"/><text x="575" y="306" class="tiny">2 · store result</text><path d="M480 135 C340 75 170 95 118 176" class="wire reply"/><polygon points="113,172 108,187 122,179" class="head reply"/><text x="217" y="103" class="tiny">3 · 201 short_url</text></g>
+        </svg>
+        <figcaption><span class="lang-zh">先让 mapping 的唯一约束定胜负，再记录幂等结果并返回。跨两份状态的原子性要靠同库事务或可重试补偿明确说明。</span><span class="lang-en">Let the mapping constraint decide uniqueness, then record the idempotent result. State whether the two writes share a transaction or use retryable repair.</span></figcaption>
+      </div>
+    </figure>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">读路径：302、缓存与统计各走自己的线</span><span class="lang-en">Read path: separate the 302, caching, and analytics lines</span></h2>
+    <figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="r1t r1d">
+          <title id="r1t">Start the redirect critical path</title><desc id="r1d">A browser sends GET slash code through the edge to Redirect Service.</desc>
+          <rect x="65" y="60" width="830" height="290" rx="18" class="boundary"/><text x="85" y="87" class="tiny">REDIRECT CRITICAL PATH</text>
+          <circle cx="135" cy="205" r="35" class="box"/><text x="135" y="263" text-anchor="middle" class="label">Browser</text>
+          <rect x="335" y="166" width="150" height="74" rx="37" class="box alt"/><text x="410" y="209" text-anchor="middle" class="label">Edge + LB</text>
+          <g class="is-new"><rect x="625" y="158" width="205" height="90" rx="12" class="box ok"/><text x="728" y="194" text-anchor="middle" class="label">Redirect Service</text><text x="728" y="220" text-anchor="middle" class="sub">parse + validate code</text><line x1="171" y1="205" x2="322" y2="205" class="wire"/><polygon points="322,199 332,205 322,211" class="head"/><line x1="487" y1="203" x2="612" y2="203" class="wire"/><polygon points="612,197 622,203 612,209" class="head"/><text x="210" y="187" class="tiny">GET /aZ91k2</text></g>
+        </svg>
+        <figcaption><span class="lang-zh">redirect 的 SLO 从浏览器点击开始，不从数据库查询开始；入口校验无效字符，服务保持无状态。</span><span class="lang-en">The redirect SLO starts at the click, not at the database. Reject malformed codes at the edge of the stateless service.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="r2t r2d">
+          <title id="r2t">Serve cache hits</title><desc id="r2d">Redirect Service checks an in-process cache, then Redis, and returns immediately on a hit.</desc>
+          <rect x="35" y="42" width="890" height="335" rx="18" class="boundary"/><text x="55" y="70" class="tiny">REDIRECT · CACHE HIT</text>
+          <circle cx="80" cy="180" r="28" class="box"/><text x="80" y="227" text-anchor="middle" class="sub">Browser</text>
+          <rect x="180" y="148" width="125" height="64" rx="32" class="box alt"/><text x="243" y="185" text-anchor="middle" class="label">Edge</text>
+          <rect x="370" y="142" width="175" height="76" rx="12" class="box ok"/><text x="458" y="174" text-anchor="middle" class="label">Redirect</text><text x="458" y="197" text-anchor="middle" class="sub">GET code</text>
+          <line x1="109" y1="180" x2="168" y2="180" class="wire"/><polygon points="168,174 178,180 168,186" class="head"/><line x1="307" y1="180" x2="357" y2="180" class="wire"/><polygon points="357,174 367,180 357,186" class="head"/>
+          <g class="is-new"><rect x="630" y="105" width="132" height="58" rx="8" class="cache"/><rect x="624" y="99" width="132" height="58" rx="8" class="cache"/><text x="690" y="134" text-anchor="middle" class="label">Local LRU</text><rect x="630" y="232" width="132" height="58" rx="8" class="cache"/><rect x="624" y="226" width="132" height="58" rx="8" class="cache"/><text x="690" y="261" text-anchor="middle" class="label">Redis</text><path d="M547 164 L612 135" class="wire"/><polygon points="609,129 621,131 613,141" class="head"/><path d="M547 196 L612 244" class="wire"/><polygon points="611,237 621,251 607,247" class="head"/><path d="M625 92 C520 40 230 65 108 158" class="wire hit"/><polygon points="106,152 98,166 112,161" class="head hit"/><text x="355" y="69" class="tiny">hit → target URL</text></g>
+        </svg>
+        <figcaption><span class="lang-zh">快路径是 Local LRU 命中；其次才是 Redis。缓存只保存已校验的映射和短 TTL 状态。</span><span class="lang-en">The fastest path is a local hit, then Redis. Cache only validated mappings with bounded freshness.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="r3t r3d">
+          <title id="r3t">Fill caches after a miss</title><desc id="r3d">On a double cache miss, Redirect Service reads the Mapping Store and fills Redis and local cache.</desc>
+          <rect x="30" y="30" width="900" height="360" rx="18" class="boundary"/><text x="50" y="58" class="tiny">REDIRECT · CACHE MISS</text>
+          <rect x="65" y="155" width="165" height="72" rx="12" class="box ok"/><text x="148" y="186" text-anchor="middle" class="label">Redirect</text><text x="148" y="209" text-anchor="middle" class="sub">singleflight(code)</text>
+          <rect x="330" y="80" width="125" height="58" rx="8" class="cache"/><rect x="324" y="74" width="125" height="58" rx="8" class="cache"/><text x="387" y="109" text-anchor="middle" class="label">Local</text>
+          <rect x="330" y="245" width="125" height="58" rx="8" class="cache"/><rect x="324" y="239" width="125" height="58" rx="8" class="cache"/><text x="387" y="274" text-anchor="middle" class="label">Redis</text>
+          <path d="M232 174 L312 116" class="wire"/><polygon points="309,109 321,109 313,121" class="head"/><path d="M232 207 L312 255" class="wire"/><polygon points="310,248 322,261 307,258" class="head"/><text x="260" y="104" class="tiny">miss</text><text x="260" y="257" class="tiny">miss</text>
+          <g class="is-new"><ellipse cx="735" cy="132" rx="91" ry="22" class="store"/><rect x="644" y="132" width="182" height="116" class="store"/><ellipse cx="735" cy="248" rx="91" ry="22" class="store"/><text x="735" y="178" text-anchor="middle" class="label">Mapping Store</text><text x="735" y="203" text-anchor="middle" class="sub">code → record</text><line x1="457" y1="268" x2="632" y2="205" class="wire"/><polygon points="629,199 641,202 633,211" class="head"/><path d="M644 228 C575 320 470 315 455 288" class="wire reply"/><polygon points="450,291 448,278 460,286" class="head reply"/><path d="M650 126 C575 70 485 85 458 103" class="wire reply"/><polygon points="459,97 449,109 463,108" class="head reply"/><text x="505" y="331" class="tiny">fill Redis, then Local</text></g>
+        </svg>
+        <figcaption><span class="lang-zh">两级 miss 才访问权威存储；同一码的并发 miss 用 singleflight 合并，否则缓存失效瞬间会击穿存储。</span><span class="lang-en">Only a double miss reaches authority. Coalesce concurrent loads for one code so expiry does not stampede the store.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="r4t r4d">
+          <title id="r4t">Choose redirect or terminal response</title><desc id="r4d">Redirect Service checks record status and either returns 302 with Location and no-store or returns a terminal response.</desc>
+          <rect x="40" y="42" width="880" height="335" rx="18" class="boundary"/><text x="60" y="70" class="tiny">REDIRECT · DECISION</text>
+          <ellipse cx="190" cy="129" rx="83" ry="20" class="store"/><rect x="107" y="129" width="166" height="90" class="store"/><ellipse cx="190" cy="219" rx="83" ry="20" class="store"/><text x="190" y="169" text-anchor="middle" class="label">Link record</text><text x="190" y="193" text-anchor="middle" class="sub">status · expires_at</text>
+          <rect x="365" y="132" width="175" height="76" rx="12" class="box ok"/><text x="453" y="164" text-anchor="middle" class="label">Redirect</text><text x="453" y="188" text-anchor="middle" class="sub">evaluate record</text><line x1="275" y1="170" x2="352" y2="170" class="wire"/><polygon points="352,164 362,170 352,176" class="head"/>
+          <g class="is-new"><path d="M542 153 C610 105 650 102 700 115" class="wire reply"/><polygon points="697,109 710,118 696,121" class="head reply"/><rect x="710" y="78" width="155" height="75" rx="12" class="box ok"/><text x="788" y="107" text-anchor="middle" class="label">302 Location</text><text x="788" y="132" text-anchor="middle" class="sub">Cache-Control: no-store</text><path d="M542 191 C610 245 650 263 700 256" class="wire fail"/><polygon points="698,250 710,255 699,262" class="head fail"/><rect x="710" y="225" width="155" height="75" rx="12" class="box bad"/><text x="788" y="254" text-anchor="middle" class="label">404 / 410</text><text x="788" y="279" text-anchor="middle" class="sub">unknown · expired · revoked</text></g>
+        </svg>
+        <figcaption><span class="lang-zh">302 本身不是“永不缓存”的魔法；若每次点击都要回源，响应要显式带 <code>Cache-Control: no-store</code>。301 才是可启发式缓存的永久重定向。[1][2]</span><span class="lang-en">A 302 is not magic anti-cache. If every click must reach origin, send explicit <code>Cache-Control: no-store</code>. A 301 is the heuristically cacheable permanent redirect. [1][2]</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="r5t r5d">
+          <title id="r5t">Return first and publish analytics asynchronously</title><desc id="r5d">The browser receives the 302 while a click event is published independently to a stream and analytics sink.</desc>
+          <rect x="38" y="35" width="885" height="350" rx="18" class="boundary"/><text x="58" y="63" class="tiny">REDIRECT · RESPONSE AND EVENT</text>
+          <circle cx="100" cy="128" r="29" class="box"/><text x="100" y="175" text-anchor="middle" class="sub">Browser</text>
+          <rect x="315" y="92" width="185" height="75" rx="12" class="box ok"/><text x="408" y="123" text-anchor="middle" class="label">Redirect</text><text x="408" y="147" text-anchor="middle" class="sub">decision complete</text>
+          <path d="M312 111 C245 70 165 82 128 112" class="wire reply"/><polygon points="126,106 117,121 132,115" class="head reply"/><text x="177" y="75" class="tiny">302 + Location</text>
+          <g class="is-new"><path d="M306 260 h210 a22 22 0 0 1 0 44 h-210 a22 22 0 0 1 0-44" class="queue"/><text x="411" y="287" text-anchor="middle" class="label">Click Event Stream</text><rect x="650" y="246" width="190" height="72" rx="12" class="box alt"/><text x="745" y="276" text-anchor="middle" class="label">Analytics Sink</text><text x="745" y="299" text-anchor="middle" class="sub">batch · dedupe · aggregate</text><path d="M408 169 L408 247" class="wire async"/><polygon points="402,247 408,257 414,247" class="head async"/><line x1="540" y1="282" x2="637" y2="282" class="wire async"/><polygon points="637,276 647,282 637,288" class="head async"/><text x="430" y="218" class="tiny">best-effort publish</text></g>
+        </svg>
+        <figcaption><span class="lang-zh">先把 302 交给浏览器，再发布 click event。MQ / analytics 故障不应拖慢跳转；统计允许明确的降级与去重策略。</span><span class="lang-en">Return the 302 first, then publish the click event. Analytics failure must not stretch redirect latency.</span></figcaption>
+      </div>
+    </figure>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">短码与 ID：把长度算出来</span><span class="lang-en">Codes and IDs: derive the length</span></h2>
     <div class="bilingual">
-  <div class="lang-zh"><p class="col-kicker">中文</p>
-<p>公式细节在 Ch03。这里只要证明你知道这是一个小系统。数字是公开量级上的假设，不是某家公司的内部数。</p>
-  </div>
-  <div class="lang-en"><p class="col-kicker">English</p>
-<p>The formulas sit in Ch03. Here you only need to show this is a small system. The numbers are public-scale assumptions, not an internal figure from a company.</p>
-  </div>
-</div>
+      <div class="lang-zh"><p class="col-kicker">中文</p><p>6 位 base62 的空间是 568 亿。号段让多个实例拿到不重叠的小 ID，再做 base62。它紧凑且无碰撞，但顺序可枚举。需要不可预测时，可选择足够熵的随机 token 或对连续 ID 做可逆置换；代价是碰撞处理或密钥管理。</p></div>
+      <div class="lang-en"><p class="col-kicker">English</p><p>Six base62 characters give 56.8 billion values. Segments lease disjoint small IDs to instances before base62 encoding. This is compact and collision-free but enumerable. If unpredictability matters, use a sufficiently random token or a keyed permutation, accepting collision handling or key management.</p></div>
+    </div>
     <figure class="deck">
-<div class="slide">
-  <svg viewBox="0 0 960 420" class="board" role="img">
-  <g>
-    <rect x="200" y="150" width="255" height="100" rx="12" class="box"/>
-    <text x="328" y="184" text-anchor="middle" class="label">Write</text>
-    <text x="328" y="208" text-anchor="middle" class="sub">~10 QPS</text>
-  </g>
-  <g>
-    <rect x="505" y="150" width="255" height="100" rx="12" class="box alt"/>
-    <text x="632" y="184" text-anchor="middle" class="label">Peak</text>
-    <text x="632" y="208" text-anchor="middle" class="sub">~100 QPS</text>
-  </g>
-  <line x1="461" y1="200" x2="494" y2="200" class="wire"/>
-  <polygon points="494,195 503,200 494,205" class="head"/>
-</svg>
-  <figcaption><span class="lang-zh">假设每天新建约 100 万条。100 万 / 86400 ≈ 12 QPS，峰值按 10 倍，写也就一百上下。</span><span class="lang-en">Assume about a million new links a day. A million / 86,400 is about 12 QPS. A 10× peak is still around a hundred writes.</span></figcaption>
-</div>
-<div class="slide">
-  <svg viewBox="0 0 960 420" class="board" role="img">
-  <g>
-    <rect x="200" y="150" width="255" height="100" rx="12" class="box"/>
-    <text x="328" y="184" text-anchor="middle" class="label">Read</text>
-    <text x="328" y="208" text-anchor="middle" class="sub">~1e3 QPS</text>
-  </g>
-  <g>
-    <rect x="505" y="150" width="255" height="100" rx="12" class="box alt"/>
-    <text x="632" y="184" text-anchor="middle" class="label">Peak</text>
-    <text x="632" y="208" text-anchor="middle" class="sub">~1e4 QPS</text>
-  </g>
-  <line x1="461" y1="200" x2="494" y2="200" class="wire"/>
-  <polygon points="494,195 503,200 494,205" class="head"/>
-</svg>
-  <figcaption><span class="lang-zh">每条平均被点约 100 次，读是写的两个数量级，峰值大约 1 万 QPS。这是缓存题，不是写扩散题。</span><span class="lang-en">If each link is opened about 100 times, reads are two orders above writes, with a peak around 10k QPS. This is a cache problem, not a write-fan-out problem.</span></figcaption>
-</div>
-<div class="slide">
-  <svg viewBox="0 0 960 420" class="board" role="img">
-  <g>
-    <rect x="195" y="150" width="260" height="100" rx="12" class="box ok"/>
-    <text x="325" y="184" text-anchor="middle" class="label">Store</text>
-    <text x="325" y="208" text-anchor="middle" class="sub">code → URL</text>
-  </g>
-  <g>
-    <rect x="505" y="150" width="260" height="100" rx="12" class="box"/>
-    <text x="635" y="184" text-anchor="middle" class="label">Size</text>
-    <text x="635" y="208" text-anchor="middle" class="sub">no shard yet</text>
-  </g>
-  <line x1="461" y1="200" x2="494" y2="200" class="wire"/>
-  <polygon points="494,195 503,200 494,205" class="head"/>
-</svg>
-  <figcaption><span class="lang-zh">一条记录就是短码到长链，再加可选的过期时间。存储很小，先别画分片。</span><span class="lang-en">A row is a short code, a long URL, and maybe an expiry. Storage is small. Do not shard it in the first picture.</span></figcaption>
-</div>
-</figure>
-    <p class="cite"><span class="lang-zh">估算口径见 <span class="chip soon">Ch03 · 粗略估算</span>。</span><span class="lang-en">The estimate habit is <span class="chip soon">Ch03 · back-of-the-envelope</span>.</span></p>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="i1t i1d">
+          <title id="i1t">Derive six-character capacity</title><desc id="i1d">A six-character alphabet of size 62 yields 56.8 billion combinations and about 155 theoretical years at one million creates per day.</desc>
+          <rect x="90" y="75" width="780" height="270" rx="22" class="boundary"/><text x="115" y="105" class="tiny">CAPACITY, NOT A PRODUCTION METRIC</text>
+          <text x="480" y="175" text-anchor="middle" class="label">alphabet = 0–9 · a–z · A–Z</text>
+          <g class="is-new"><text x="480" y="230" text-anchor="middle" class="clock">62⁶ = 56,800,235,584</text><path d="M250 270 H710" class="wire"/><circle cx="250" cy="270" r="7" class="badge"/><circle cx="710" cy="270" r="7" class="badge"/><text x="250" y="300" text-anchor="middle" class="sub">day 1</text><text x="710" y="300" text-anchor="middle" class="sub">~155 years @ 1M/day</text></g>
+        </svg>
+        <figcaption><span class="lang-zh">容量证明 6 位在假设下够用，但生产还要预留删除不复用、测试、alias 与增长空间。</span><span class="lang-en">Capacity says six characters fit the assumption, not that every one is usable. Reserve room for non-reuse, tests, aliases, and growth.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="i2t i2d">
+          <title id="i2t">Lease segments to multiple writers</title><desc id="i2d">A segment database advances max ID and leases disjoint ranges to several Shorten Service instances.</desc>
+          <ellipse cx="480" cy="95" rx="103" ry="22" class="store"/><rect x="377" y="95" width="206" height="83" class="store"/><ellipse cx="480" cy="178" rx="103" ry="22" class="store"/><text x="480" y="132" text-anchor="middle" class="label">Segment DB</text><text x="480" y="155" text-anchor="middle" class="sub">atomic max_id += step</text>
+          <g class="is-new"><rect x="100" y="260" width="190" height="75" rx="12" class="box ok"/><text x="195" y="291" text-anchor="middle" class="label">Shorten A</text><text x="195" y="315" text-anchor="middle" class="sub">1…10,000</text><rect x="385" y="260" width="190" height="75" rx="12" class="box ok"/><text x="480" y="291" text-anchor="middle" class="label">Shorten B</text><text x="480" y="315" text-anchor="middle" class="sub">10,001…20,000</text><rect x="670" y="260" width="190" height="75" rx="12" class="box ok"/><text x="765" y="291" text-anchor="middle" class="label">Shorten C</text><text x="765" y="315" text-anchor="middle" class="sub">20,001…30,000</text><path d="M420 190 L230 250" class="wire reply"/><polygon points="232,244 220,253 235,255" class="head reply"/><line x1="480" y1="200" x2="480" y2="247" class="wire reply"/><polygon points="474,247 480,257 486,247" class="head reply"/><path d="M540 190 L730 250" class="wire reply"/><polygon points="725,245 740,253 728,257" class="head reply"/></g>
+        </svg>
+        <figcaption><span class="lang-zh">DB 只在领号段时协调，实例在内存里自增；这正是 Leaf segment mode 的核心工程思路。[4]</span><span class="lang-en">The database coordinates only when leasing a range; instances increment in memory. This is the core idea behind Leaf segment mode. [4]</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="i3t i3d">
+          <title id="i3t">Encode and pad a compact ID</title><desc id="i3d">A compact integer is encoded in base62 and explicitly left-padded if a fixed six-character product contract is required.</desc>
+          <rect x="80" y="120" width="180" height="92" rx="12" class="box ok"/><text x="170" y="157" text-anchor="middle" class="label">Small ID</text><text x="170" y="184" text-anchor="middle" class="clock">1001</text>
+          <line x1="262" y1="166" x2="350" y2="166" class="wire"/><polygon points="350,160 360,166 350,172" class="head"/><text x="280" y="148" class="tiny">base62</text>
+          <rect x="362" y="120" width="180" height="92" rx="12" class="box alt"/><text x="452" y="157" text-anchor="middle" class="label">Encoded</text><text x="452" y="184" text-anchor="middle" class="clock">g9</text>
+          <g class="is-new"><line x1="544" y1="166" x2="632" y2="166" class="wire"/><polygon points="632,160 642,166 632,172" class="head"/><text x="562" y="148" class="tiny">left pad</text><rect x="644" y="120" width="220" height="92" rx="12" class="box ok"/><text x="754" y="157" text-anchor="middle" class="label">Product code</text><text x="754" y="184" text-anchor="middle" class="clock">0000g9</text><text x="480" y="280" text-anchor="middle" class="sub">Without padding, base62(counter) is variable-length.</text></g>
+        </svg>
+        <figcaption><span class="lang-zh">“固定 6 位”不是 base62 自动提供的属性；必须显式 padding，或从足够大的起始 ID 开始。</span><span class="lang-en">Fixed width is not a property base62 gives for free. Pad explicitly or start from a reserved high range.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="i4t i4d">
+          <title id="i4t">Compare Snowflake bit layout to a six-character code</title><desc id="i4d">A classic Snowflake packs timestamp, worker, and sequence into 63 effective bits; its upper range requires eleven base62 characters.</desc>
+          <text x="80" y="88" class="label">Classic Snowflake · 63 effective bits</text>
+          <rect x="80" y="120" width="44" height="90" class="zone"/><text x="102" y="157" text-anchor="middle" class="label">0</text><text x="102" y="183" text-anchor="middle" class="tiny">sign</text>
+          <rect x="124" y="120" width="480" height="90" class="box alt"/><text x="364" y="157" text-anchor="middle" class="label">41-bit timestamp</text><text x="364" y="183" text-anchor="middle" class="sub">time since custom epoch</text>
+          <rect x="604" y="120" width="140" height="90" class="box ok"/><text x="674" y="157" text-anchor="middle" class="label">10-bit worker</text><text x="674" y="183" text-anchor="middle" class="sub">node identity</text>
+          <rect x="744" y="120" width="136" height="90" class="box bad"/><text x="812" y="157" text-anchor="middle" class="label">12-bit seq</text><text x="812" y="183" text-anchor="middle" class="sub">per ms</text>
+          <g class="is-new"><path d="M480 222 V270" class="wire"/><polygon points="474,270 480,280 486,270" class="head"/><rect x="235" y="282" width="490" height="78" rx="12" class="box bad"/><text x="480" y="314" text-anchor="middle" class="clock">2⁶³ − 1 &gt; 62¹⁰ → up to 11 base62 chars</text><text x="480" y="340" text-anchor="middle" class="sub">Truncation throws away the uniqueness guarantee.</text></g>
+        </svg>
+        <figcaption><span class="lang-zh">Snowflake 解决“分布式高吞吐唯一 ID”，不是“紧凑 6 位 token”。上界需要 11 个 base62 字符；截断任意位都会破坏原唯一性保证。[3][4]</span><span class="lang-en">Snowflake solves distributed high-throughput uniqueness, not compact six-character tokens. Its upper range needs 11 base62 characters; truncation voids the guarantee. [3][4]</span></figcaption>
+      </div>
+    </figure>
   </section>
 
   <section>
-    <h2><span class="lang-zh">读路径，一笔一笔画</span><span class="lang-en">Draw the read path one stroke at a time</span></h2>
+    <h2><span class="lang-zh">热点缓存：挡住爆款，也挡住击穿</span><span class="lang-en">Hot-key caching: absorb popularity and stampedes</span></h2>
+    <figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="c1t c1d">
+          <title id="c1t">A hot code concentrates traffic</title><desc id="c1d">Many clients request one popular code, creating a highly skewed read workload.</desc>
+          <g class="is-new"><circle cx="120" cy="105" r="22" class="box"/><circle cx="120" cy="190" r="22" class="box"/><circle cx="120" cy="275" r="22" class="box"/><circle cx="220" cy="145" r="22" class="box"/><circle cx="220" cy="235" r="22" class="box"/></g>
+          <rect x="400" y="145" width="190" height="110" rx="16" class="box bad"/><text x="495" y="187" text-anchor="middle" class="label">Hot code</text><text x="495" y="216" text-anchor="middle" class="clock">/launch</text>
+          <path d="M145 105 L388 177 M145 190 L388 193 M145 275 L388 223 M245 145 L388 184 M245 235 L388 214" class="wire"/>
+          <path d="M592 200 H790" class="wire fail"/><polygon points="790,194 800,200 790,206" class="head fail"/><ellipse cx="845" cy="175" rx="65" ry="18" class="store"/><rect x="780" y="175" width="130" height="68" class="store"/><ellipse cx="845" cy="243" rx="65" ry="18" class="store"/><text x="845" y="215" text-anchor="middle" class="label">Store</text>
+        </svg>
+        <figcaption><span class="lang-zh">“平均 11.6K QPS”会隐藏单个爆款码。Web 请求常呈 Zipf-like 偏斜，所以 bottleneck 是 hot key，不是平均值。[6]</span><span class="lang-en">An average hides one viral code. Web demand is often Zipf-like, so the bottleneck is the hot key rather than the mean. [6]</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="c2t c2d">
+          <title id="c2t">Build a cache hierarchy</title><desc id="c2d">Traffic passes through per-process local caches and shared Redis before reaching the Mapping Store.</desc>
+          <circle cx="82" cy="205" r="29" class="box"/><text x="82" y="253" text-anchor="middle" class="sub">Traffic</text>
+          <rect x="185" y="168" width="160" height="74" rx="12" class="box ok"/><text x="265" y="199" text-anchor="middle" class="label">Redirect fleet</text><text x="265" y="222" text-anchor="middle" class="sub">stateless</text><line x1="112" y1="205" x2="172" y2="205" class="wire"/><polygon points="172,199 182,205 172,211" class="head"/>
+          <g class="is-new"><rect x="430" y="100" width="130" height="60" rx="8" class="cache"/><rect x="424" y="94" width="130" height="60" rx="8" class="cache"/><text x="489" y="130" text-anchor="middle" class="label">Local LRU</text><rect x="430" y="250" width="130" height="60" rx="8" class="cache"/><rect x="424" y="244" width="130" height="60" rx="8" class="cache"/><text x="489" y="280" text-anchor="middle" class="label">Redis</text><ellipse cx="780" cy="157" rx="85" ry="21" class="store"/><rect x="695" y="157" width="170" height="98" class="store"/><ellipse cx="780" cy="255" rx="85" ry="21" class="store"/><text x="780" y="199" text-anchor="middle" class="label">Mapping Store</text><text x="780" y="223" text-anchor="middle" class="sub">authority</text><path d="M347 185 L412 133" class="wire"/><polygon points="409,126 421,126 413,138" class="head"/><path d="M347 222 L412 260" class="wire"/><polygon points="410,253 421,266 407,263" class="head"/><line x1="557" y1="274" x2="682" y2="216" class="wire"/><polygon points="679,210 691,212 683,222" class="head"/></g>
+        </svg>
+        <figcaption><span class="lang-zh">Local LRU 挡住单实例的爆款，Redis 共享热集，Mapping Store 保持权威。缓存层的失效与失败语义必须显式设计。[7]</span><span class="lang-en">Local LRU absorbs per-instance heat, Redis shares the hot set, and the Mapping Store remains authority. [7]</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="c3t c3d">
+          <title id="c3t">Coalesce concurrent misses</title><desc id="c3d">Many misses for one code join a single in-flight store load and share the result.</desc>
+          <circle cx="95" cy="85" r="20" class="box"/><circle cx="95" cy="150" r="20" class="box"/><circle cx="95" cy="215" r="20" class="box"/><circle cx="95" cy="280" r="20" class="box"/><circle cx="95" cy="345" r="20" class="box"/>
+          <path d="M116 85 L300 185 M116 150 L300 198 M116 215 L300 211 M116 280 L300 224 M116 345 L300 237" class="wire"/>
+          <g class="is-new"><path d="M300 165 h230 a45 45 0 0 1 0 90 h-230 a45 45 0 0 1 0-90" class="queue"/><text x="415" y="200" text-anchor="middle" class="label">singleflight(code)</text><text x="415" y="226" text-anchor="middle" class="sub">one leader · many waiters</text><ellipse cx="760" cy="165" rx="82" ry="21" class="store"/><rect x="678" y="165" width="164" height="94" class="store"/><ellipse cx="760" cy="259" rx="82" ry="21" class="store"/><text x="760" y="208" text-anchor="middle" class="label">Mapping</text><text x="760" y="232" text-anchor="middle" class="sub">one read</text><line x1="552" y1="210" x2="665" y2="210" class="wire"/><polygon points="665,204 675,210 665,216" class="head"/></g>
+        </svg>
+        <figcaption><span class="lang-zh">缓存同时过期时，同一码只允许一个 leader 回源，其余请求等待共享结果；这比给 KV 盲目扩容更直接。</span><span class="lang-en">When a hot entry expires, one leader loads it and waiters share the result. This attacks the stampede directly.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="c4t c4d">
+          <title id="c4t">Invalidate caches after retarget or revoke</title><desc id="c4d">An admin update commits a new version in the store, publishes invalidation, and removes old cache entries.</desc>
+          <circle cx="80" cy="125" r="28" class="box"/><text x="80" y="172" text-anchor="middle" class="sub">Admin</text>
+          <rect x="195" y="91" width="160" height="68" rx="12" class="box ok"/><text x="275" y="120" text-anchor="middle" class="label">Link Service</text><text x="275" y="143" text-anchor="middle" class="sub">retarget / revoke</text><line x1="109" y1="125" x2="182" y2="125" class="wire"/><polygon points="182,119 192,125 182,131" class="head"/>
+          <ellipse cx="520" cy="80" rx="82" ry="20" class="store"/><rect x="438" y="80" width="164" height="87" class="store"/><ellipse cx="520" cy="167" rx="82" ry="20" class="store"/><text x="520" y="118" text-anchor="middle" class="label">Mapping</text><text x="520" y="143" text-anchor="middle" class="sub">version n + 1</text><line x1="357" y1="125" x2="425" y2="125" class="wire"/><polygon points="425,119 435,125 425,131" class="head"/>
+          <g class="is-new"><path d="M355 260 h210 a21 21 0 0 1 0 42 h-210 a21 21 0 0 1 0-42" class="queue"/><text x="460" y="286" text-anchor="middle" class="label">Invalidation Event</text><rect x="685" y="220" width="145" height="62" rx="8" class="cache"/><rect x="679" y="214" width="145" height="62" rx="8" class="cache"/><text x="752" y="251" text-anchor="middle" class="label">Redis</text><rect x="685" y="315" width="145" height="62" rx="8" class="cache"/><rect x="679" y="309" width="145" height="62" rx="8" class="cache"/><text x="752" y="346" text-anchor="middle" class="label">Local LRU</text><path d="M520 180 C520 215 490 225 470 247" class="wire async"/><polygon points="465,243 460,257 474,251" class="head async"/><line x1="586" y1="281" x2="666" y2="251" class="wire async"/><polygon points="663,245 676,247 668,257" class="head async"/><line x1="752" y1="283" x2="752" y2="296" class="wire async"/><polygon points="746,296 752,306 758,296" class="head async"/></g>
+        </svg>
+        <figcaption><span class="lang-zh">retarget / revoke 先提交权威版本，再广播失效；TTL 是最后保险，不是唯一一致性方案。</span><span class="lang-en">Commit the authoritative version before broadcasting invalidation. TTL is the final safety net, not the only consistency plan.</span></figcaption>
+      </div>
+    </figure>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">失败与降级：读写故障域要分开</span><span class="lang-en">Failure and degradation: isolate read and write domains</span></h2>
+    <figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="f1t f1d">
+          <title id="f1t">Bypass Redis during cache failure</title><desc id="f1d">When Redis is unavailable, Redirect Service bypasses it with a circuit breaker and protects the Mapping Store.</desc>
+          <rect x="80" y="155" width="180" height="76" rx="12" class="box ok"/><text x="170" y="187" text-anchor="middle" class="label">Redirect</text><text x="170" y="211" text-anchor="middle" class="sub">circuit breaker</text>
+          <rect x="380" y="80" width="150" height="66" rx="8" class="cache bad"/><rect x="374" y="74" width="150" height="66" rx="8" class="cache bad"/><text x="449" y="113" text-anchor="middle" class="label">Redis down</text><path d="M262 176 L362 119" class="wire fail"/><text x="295" y="129" class="tiny">open circuit</text>
+          <g class="is-new"><ellipse cx="750" cy="153" rx="91" ry="22" class="store"/><rect x="659" y="153" width="182" height="104" class="store"/><ellipse cx="750" cy="257" rx="91" ry="22" class="store"/><text x="750" y="197" text-anchor="middle" class="label">Mapping Store</text><text x="750" y="221" text-anchor="middle" class="sub">protected fallback</text><path d="M262 211 C390 320 555 285 649 227" class="wire fail"/><polygon points="646,221 658,221 651,233" class="head fail"/><text x="420" y="308" class="tiny">bypass + rate limit + singleflight</text></g>
+        </svg>
+        <figcaption><span class="lang-zh">Redis 挂了可以绕过，但必须限流、singleflight 和熔断保护 Mapping Store；否则降级会变成级联故障。</span><span class="lang-en">Redis can be bypassed, but rate limits, coalescing, and a breaker must protect the store from a cascading failure.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="f2t f2d">
+          <title id="f2t">Continue creating while a local segment remains</title><desc id="f2d">If the ID allocator is down, writers consume their current local ranges; after exhaustion creation fails while redirects continue.</desc>
+          <rect x="70" y="80" width="185" height="75" rx="12" class="box bad"/><text x="163" y="111" text-anchor="middle" class="label">ID Allocator</text><text x="163" y="135" text-anchor="middle" class="sub">unavailable</text>
+          <rect x="365" y="70" width="190" height="75" rx="12" class="box ok"/><text x="460" y="101" text-anchor="middle" class="label">Shorten A</text><text x="460" y="125" text-anchor="middle" class="sub">312 IDs left</text>
+          <rect x="365" y="245" width="190" height="75" rx="12" class="box ok"/><text x="460" y="276" text-anchor="middle" class="label">Redirect fleet</text><text x="460" y="300" text-anchor="middle" class="sub">no allocator dependency</text>
+          <path d="M257 116 L352 108" class="wire fail"/>
+          <g class="is-new"><rect x="680" y="70" width="190" height="75" rx="12" class="box alt"/><text x="775" y="101" text-anchor="middle" class="label">Create</text><text x="775" y="125" text-anchor="middle" class="sub">works until exhausted</text><line x1="557" y1="108" x2="667" y2="108" class="wire reply"/><polygon points="667,102 677,108 667,114" class="head reply"/><rect x="680" y="245" width="190" height="75" rx="12" class="box ok"/><text x="775" y="276" text-anchor="middle" class="label">Redirect</text><text x="775" y="300" text-anchor="middle" class="sub">unaffected</text><line x1="557" y1="283" x2="667" y2="283" class="wire reply"/><polygon points="667,277 677,283 667,289" class="head reply"/></g>
+        </svg>
+        <figcaption><span class="lang-zh">号段让 allocator 短暂故障不立刻打断创建；本地号段耗尽后 create 明确失败，但 redirect 完全不受影响。</span><span class="lang-en">A lease masks a short allocator outage. Once exhausted, create fails explicitly while redirect remains independent.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="f3t f3d">
+          <title id="f3t">Degrade analytics without delaying redirects</title><desc id="f3d">When the event stream is unavailable, redirect responses still succeed while events use a bounded buffer or are dropped according to policy.</desc>
+          <circle cx="90" cy="115" r="28" class="box"/><text x="90" y="162" text-anchor="middle" class="sub">Browser</text>
+          <rect x="285" y="78" width="180" height="74" rx="12" class="box ok"/><text x="375" y="109" text-anchor="middle" class="label">Redirect</text><text x="375" y="133" text-anchor="middle" class="sub">response first</text><path d="M283 98 C220 60 150 70 118 99" class="wire reply"/><polygon points="116,93 108,108 123,102" class="head reply"/>
+          <path d="M285 255 h190 a22 22 0 0 1 0 44 h-190 a22 22 0 0 1 0-44" class="queue bad"/><text x="380" y="283" text-anchor="middle" class="label">Event Stream down</text><path d="M375 154 V243" class="wire async"/>
+          <g class="is-new"><rect x="645" y="210" width="205" height="82" rx="12" class="box alt"/><text x="748" y="242" text-anchor="middle" class="label">Bounded buffer</text><text x="748" y="267" text-anchor="middle" class="sub">retry or sampled drop</text><path d="M498 277 H632" class="wire fail"/><polygon points="632,271 642,277 632,283" class="head fail"/><text x="565" y="260" text-anchor="middle" class="tiny">explicit policy</text></g>
+        </svg>
+        <figcaption><span class="lang-zh">统计是可降级支路：有限缓冲、重试或采样丢弃都可以，但不能让无界重试拖垮 redirect。</span><span class="lang-en">Analytics is degradable. Bound buffering and retries—or explicitly sample drops—rather than blocking redirect indefinitely.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="f4t f4d">
+          <title id="f4t">State the stale-read boundary during store failure</title><desc id="f4d">When Mapping Store is unavailable, cached active records may be served briefly, while uncached, expired, or revoked records fail closed.</desc>
+          <ellipse cx="185" cy="102" rx="84" ry="20" class="store bad"/><rect x="101" y="102" width="168" height="82" class="store bad"/><ellipse cx="185" cy="184" rx="84" ry="20" class="store bad"/><text x="185" y="139" text-anchor="middle" class="label">Mapping down</text><text x="185" y="163" text-anchor="middle" class="sub">authority unavailable</text>
+          <rect x="392" y="75" width="175" height="70" rx="8" class="cache"/><rect x="386" y="69" width="175" height="70" rx="8" class="cache"/><text x="474" y="111" text-anchor="middle" class="label">Cached active</text>
+          <rect x="392" y="260" width="175" height="70" rx="8" class="cache bad"/><rect x="386" y="254" width="175" height="70" rx="8" class="cache bad"/><text x="474" y="284" text-anchor="middle" class="label">Miss / stale</text><text x="474" y="307" text-anchor="middle" class="sub">unknown state</text>
+          <g class="is-new"><rect x="700" y="69" width="175" height="70" rx="12" class="box ok"/><text x="788" y="99" text-anchor="middle" class="label">Brief stale read</text><text x="788" y="123" text-anchor="middle" class="sub">only if policy allows</text><line x1="564" y1="104" x2="687" y2="104" class="wire reply"/><polygon points="687,98 697,104 687,110" class="head reply"/><rect x="700" y="254" width="175" height="70" rx="12" class="box bad"/><text x="788" y="284" text-anchor="middle" class="label">Fail closed</text><text x="788" y="308" text-anchor="middle" class="sub">no invented mapping</text><line x1="564" y1="289" x2="687" y2="289" class="wire fail"/><polygon points="687,283 697,289 687,295" class="head fail"/></g>
+        </svg>
+        <figcaption><span class="lang-zh">存储故障时不要笼统说“缓存兜底”：只有仍在允许陈旧窗口内的 active 映射可暂时服务；miss、expired、revoked 必须 fail closed。</span><span class="lang-en">Do not say “cache saves us” generically. Only active records inside a stated stale window may serve; misses and uncertain revocations fail closed.</span></figcaption>
+      </div>
+    </figure>
+    <p class="cite"><span class="lang-zh">KV 的可用性与一致性 trade-off 可延伸阅读 Dynamo，但具体行为必须由本题语义决定。[8]</span><span class="lang-en">Dynamo is useful background for availability/consistency trade-offs, but this service still needs explicit product semantics. [8]</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">安全与滥用：短码不是秘密</span><span class="lang-en">Security and abuse: a short code is not a secret</span></h2>
+    <figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="s1t s1d">
+          <title id="s1t">Defend the create trust boundary</title><desc id="s1d">Untrusted creators cross rate limit, quota, scheme validation, and abuse checks before Link Service.</desc>
+          <rect x="350" y="55" width="530" height="310" rx="22" class="boundary"/><text x="370" y="84" class="tiny">TRUSTED SERVICE BOUNDARY</text>
+          <circle cx="115" cy="205" r="36" class="box bad"/><text x="115" y="264" text-anchor="middle" class="label">Creator</text><text x="115" y="287" text-anchor="middle" class="sub">untrusted input</text>
+          <g class="is-new"><rect x="390" y="115" width="150" height="70" rx="12" class="box alt"/><text x="465" y="145" text-anchor="middle" class="label">Rate + quota</text><text x="465" y="168" text-anchor="middle" class="sub">tenant limits</text><rect x="390" y="235" width="150" height="70" rx="12" class="box alt"/><text x="465" y="265" text-anchor="middle" class="label">URL policy</text><text x="465" y="288" text-anchor="middle" class="sub">scheme · deny list</text><rect x="675" y="166" width="165" height="78" rx="12" class="box ok"/><text x="758" y="198" text-anchor="middle" class="label">Link Service</text><text x="758" y="222" text-anchor="middle" class="sub">accepted create</text><path d="M152 205 C250 205 290 150 378 150" class="wire"/><polygon points="378,144 388,150 378,156" class="head"/><path d="M152 213 C250 213 290 270 378 270" class="wire"/><polygon points="378,264 388,270 378,276" class="head"/><path d="M542 150 C610 150 620 188 663 199" class="wire"/><path d="M542 270 C610 270 620 225 663 213" class="wire"/><polygon points="661,207 673,211 663,219" class="head"/></g>
+        </svg>
+        <figcaption><span class="lang-zh">创建侧先做限流、tenant quota、scheme 与恶意目标检查；短链天然会隐藏真实目标，风控不是可选装饰。</span><span class="lang-en">Creation enforces limits, tenant quotas, schemes, and malicious-target checks. Hiding the destination creates an abuse surface by design.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="s2t s2d">
+          <title id="s2t">Show enumeration against a small token space</title><desc id="s2d">A scanner walks short codes and discovers targets because short tokens are locators rather than authorization secrets.</desc>
+          <circle cx="105" cy="205" r="38" class="box bad"/><text x="105" y="266" text-anchor="middle" class="label">Scanner</text>
+          <g class="is-new"><path d="M165 85 h285 a18 18 0 0 1 0 36 h-285 a18 18 0 0 1 0-36" class="queue"/><text x="308" y="109" text-anchor="middle" class="clock">000001 · 000002 · 000003 · …</text><path d="M145 185 C210 130 230 120 250 120" class="wire fail"/><rect x="590" y="120" width="225" height="170" rx="18" class="box bad"/><text x="703" y="163" text-anchor="middle" class="label">Discovered targets</text><text x="703" y="198" text-anchor="middle" class="sub">documents · maps · shares</text><text x="703" y="231" text-anchor="middle" class="clock">short ≠ secret</text><line x1="470" y1="103" x2="577" y2="154" class="wire fail"/><polygon points="575,147 587,159 572,158" class="head fail"/></g>
+        </svg>
+        <figcaption><span class="lang-zh">5–6 位 token 可被系统化扫描已有实证研究。任何私密资源仍需真正的授权；加长或随机化只能提高扫描成本。[5]</span><span class="lang-en">Empirical research has shown systematic scanning of 5–6 character tokens. Private resources still need authorization; randomness only raises scan cost. [5]</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="s3t s3d">
+          <title id="s3t">Close the abuse response loop</title><desc id="s3d">Reports and detection update link status; Redirect Service checks status and routes blocked links to a safety page.</desc>
+          <circle cx="85" cy="105" r="27" class="box"/><text x="85" y="149" text-anchor="middle" class="sub">Report</text>
+          <rect x="220" y="69" width="175" height="72" rx="12" class="box alt"/><text x="308" y="99" text-anchor="middle" class="label">Abuse Review</text><text x="308" y="123" text-anchor="middle" class="sub">detect · report · appeal</text><line x1="113" y1="105" x2="207" y2="105" class="wire"/><polygon points="207,99 217,105 207,111" class="head"/>
+          <ellipse cx="540" cy="70" rx="76" ry="20" class="store"/><rect x="464" y="70" width="152" height="82" class="store"/><ellipse cx="540" cy="152" rx="76" ry="20" class="store"/><text x="540" y="106" text-anchor="middle" class="label">Link status</text><text x="540" y="130" text-anchor="middle" class="sub">active / blocked</text><line x1="397" y1="105" x2="451" y2="105" class="wire"/><polygon points="451,99 461,105 451,111" class="head"/>
+          <g class="is-new"><rect x="220" y="265" width="175" height="72" rx="12" class="box ok"/><text x="308" y="295" text-anchor="middle" class="label">Redirect</text><text x="308" y="319" text-anchor="middle" class="sub">check status</text><path d="M505 165 C470 230 410 270 397 278" class="wire"/><polygon points="397,272 387,284 401,283" class="head"/><rect x="660" y="265" width="190" height="72" rx="12" class="box bad"/><text x="755" y="295" text-anchor="middle" class="label">Safety page</text><text x="755" y="319" text-anchor="middle" class="sub">no redirect when blocked</text><line x1="397" y1="301" x2="647" y2="301" class="wire fail"/><polygon points="647,295 657,301 647,307" class="head fail"/></g>
+        </svg>
+        <figcaption><span class="lang-zh">安全不是只在创建时扫一次：举报、检测、封禁状态和 appeal 要形成闭环；blocked 链接在读侧停止 302。</span><span class="lang-en">Safety is not a one-time create scan. Reports, detection, block state, and appeals form a loop; blocked links stop redirecting.</span></figcaption>
+      </div>
+    </figure>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">收尾：三个 trade-off，不说“完美”</span><span class="lang-en">Close with three trade-offs, not “perfect”</span></h2>
     <div class="bilingual">
-  <div class="lang-zh"><p class="col-kicker">中文</p>
-<p>买到 buy-in 之后再拆。schema 够用就停：<code>short_code</code> 做主键，对应 <code>long_url</code>，可选 <code>expires_at</code>。不需要 JOIN。</p>
-        <p>写路径口头补一句：自定义码先查占用；同一条 long URL 可以用反向索引返回已有短码，避免重复创建。</p>
-  </div>
-  <div class="lang-en"><p class="col-kicker">English</p>
-<p>Split the picture only after buy-in. Stop the schema when it is enough: <code>short_code</code> as the primary key, <code>long_url</code>, optional <code>expires_at</code>. No join.</p>
-        <p>Say the write path in one breath: a custom alias checks for a taken code, and a reverse index can return the existing code for the same long URL so you do not mint duplicates.</p>
-  </div>
-</div>
-    <figure class="deck">
-<div class="slide">
-  <svg viewBox="0 0 960 420" class="board" role="img">
-  <g>
-    <rect x="350" y="150" width="260" height="90" rx="12" class="box"/>
-    <text x="480" y="184" text-anchor="middle" class="label">Client</text>
-    <text x="480" y="208" text-anchor="middle" class="sub">opens the link</text>
-  </g>
-</svg>
-  <figcaption><span class="lang-zh">读路径从一次点击开始。先只画 Client。</span><span class="lang-en">The read path starts at one click. Draw only the client.</span></figcaption>
-</div>
-<div class="slide">
-  <svg viewBox="0 0 960 420" class="board" role="img">
-  <g>
-    <rect x="211" y="150" width="260" height="90" rx="12" class="box"/>
-    <text x="341" y="184" text-anchor="middle" class="label">Client</text>
-    <text x="341" y="208" text-anchor="middle" class="sub">opens the link</text>
-  </g>
-  <g>
-    <rect x="489" y="150" width="260" height="90" rx="12" class="box"/>
-    <text x="619" y="201" text-anchor="middle" class="label">LB</text>
-  </g>
-  <line x1="469" y1="195" x2="478" y2="195" class="wire"/>
-  <polygon points="478,190 487,195 478,200" class="head"/>
-</svg>
-  <figcaption><span class="lang-zh">短链打到 LB。服务本身无状态，可以水平加。</span><span class="lang-en">The short URL hits a load balancer. The service is stateless, so you can add instances.</span></figcaption>
-</div>
-<div class="slide">
-  <svg viewBox="0 0 960 420" class="board" role="img">
-  <g>
-    <rect x="72" y="150" width="260" height="90" rx="12" class="box"/>
-    <text x="202" y="184" text-anchor="middle" class="label">Client</text>
-    <text x="202" y="208" text-anchor="middle" class="sub">opens the link</text>
-  </g>
-  <g>
-    <rect x="350" y="150" width="260" height="90" rx="12" class="box"/>
-    <text x="480" y="201" text-anchor="middle" class="label">LB</text>
-  </g>
-  <line x1="330" y1="195" x2="339" y2="195" class="wire"/>
-  <polygon points="339,190 348,195 339,200" class="head"/>
-  <g>
-    <rect x="628" y="150" width="260" height="90" rx="12" class="box ok"/>
-    <text x="758" y="184" text-anchor="middle" class="label">Redirect</text>
-    <text x="758" y="208" text-anchor="middle" class="sub">GET /{code}</text>
-  </g>
-  <line x1="608" y1="195" x2="617" y2="195" class="wire"/>
-  <polygon points="617,190 626,195 617,200" class="head"/>
-</svg>
-  <figcaption><span class="lang-zh">Redirect 服务查码。这一框就是 GET /{code}。</span><span class="lang-en">The redirect service looks up the code. That box is GET /{code}.</span></figcaption>
-</div>
-<div class="slide">
-  <svg viewBox="0 0 960 420" class="board" role="img">
-  <g>
-    <rect x="17" y="150" width="218" height="90" rx="12" class="box"/>
-    <text x="126" y="184" text-anchor="middle" class="label">Client</text>
-    <text x="126" y="208" text-anchor="middle" class="sub">opens the link</text>
-  </g>
-  <g>
-    <rect x="253" y="150" width="218" height="90" rx="12" class="box"/>
-    <text x="362" y="201" text-anchor="middle" class="label">LB</text>
-  </g>
-  <line x1="233" y1="195" x2="242" y2="195" class="wire"/>
-  <polygon points="242,190 251,195 242,200" class="head"/>
-  <g>
-    <rect x="489" y="150" width="218" height="90" rx="12" class="box ok"/>
-    <text x="598" y="184" text-anchor="middle" class="label">Redirect</text>
-    <text x="598" y="208" text-anchor="middle" class="sub">GET /{code}</text>
-  </g>
-  <line x1="469" y1="195" x2="478" y2="195" class="wire"/>
-  <polygon points="478,190 487,195 478,200" class="head"/>
-  <g>
-    <rect x="725" y="150" width="218" height="90" rx="12" class="box alt"/>
-    <text x="834" y="184" text-anchor="middle" class="label">Cache</text>
-    <text x="834" y="208" text-anchor="middle" class="sub">hot codes</text>
-  </g>
-  <line x1="705" y1="195" x2="714" y2="195" class="wire"/>
-  <polygon points="714,190 723,195 714,200" class="head"/>
-</svg>
-  <figcaption><span class="lang-zh">热码先打 Cache。爆款活动页不该每次都打到 KV。</span><span class="lang-en">Hot codes hit the cache first. A campaign link should not reach the KV on every click.</span></figcaption>
-</div>
-<div class="slide">
-  <svg viewBox="0 0 960 420" class="board" role="img">
-  <g>
-    <rect x="16" y="150" width="171" height="90" rx="12" class="box"/>
-    <text x="102" y="184" text-anchor="middle" class="label">Client</text>
-    <text x="102" y="208" text-anchor="middle" class="sub">opens the link</text>
-  </g>
-  <g>
-    <rect x="206" y="150" width="171" height="90" rx="12" class="box"/>
-    <text x="291" y="201" text-anchor="middle" class="label">LB</text>
-  </g>
-  <line x1="186" y1="195" x2="194" y2="195" class="wire"/>
-  <polygon points="194,190 204,195 194,200" class="head"/>
-  <g>
-    <rect x="394" y="150" width="171" height="90" rx="12" class="box ok"/>
-    <text x="480" y="184" text-anchor="middle" class="label">Redirect</text>
-    <text x="480" y="208" text-anchor="middle" class="sub">GET /{code}</text>
-  </g>
-  <line x1="374" y1="195" x2="384" y2="195" class="wire"/>
-  <polygon points="384,190 392,195 384,200" class="head"/>
-  <g>
-    <rect x="584" y="150" width="171" height="90" rx="12" class="box alt"/>
-    <text x="669" y="184" text-anchor="middle" class="label">Cache</text>
-    <text x="669" y="208" text-anchor="middle" class="sub">hot codes</text>
-  </g>
-  <line x1="564" y1="195" x2="572" y2="195" class="wire"/>
-  <polygon points="572,190 582,195 572,200" class="head"/>
-  <g>
-    <rect x="772" y="150" width="171" height="90" rx="12" class="box"/>
-    <text x="858" y="184" text-anchor="middle" class="label">KV</text>
-    <text x="858" y="208" text-anchor="middle" class="sub">source of truth</text>
-  </g>
-  <line x1="752" y1="195" x2="762" y2="195" class="wire"/>
-  <polygon points="762,190 770,195 762,200" class="head"/>
-</svg>
-  <figcaption><span class="lang-zh">Cache miss 才读 KV。KV 里是短码到长链的权威映射。</span><span class="lang-en">A cache miss reads the KV. That mapping is the source of truth.</span></figcaption>
-</div>
-<div class="slide">
-  <svg viewBox="0 0 960 420" class="board" role="img">
-  <g>
-    <rect x="16" y="78" width="171" height="84" rx="12" class="box"/>
-    <text x="102" y="112" text-anchor="middle" class="label">Client</text>
-    <text x="102" y="136" text-anchor="middle" class="sub">opens the link</text>
-  </g>
-  <g>
-    <rect x="206" y="78" width="171" height="84" rx="12" class="box"/>
-    <text x="291" y="126" text-anchor="middle" class="label">LB</text>
-  </g>
-  <line x1="186" y1="120" x2="194" y2="120" class="wire"/>
-  <polygon points="194,115 204,120 194,125" class="head"/>
-  <g>
-    <rect x="394" y="78" width="171" height="84" rx="12" class="box ok"/>
-    <text x="480" y="112" text-anchor="middle" class="label">Redirect</text>
-    <text x="480" y="136" text-anchor="middle" class="sub">GET /{code}</text>
-  </g>
-  <line x1="374" y1="120" x2="384" y2="120" class="wire"/>
-  <polygon points="384,115 392,120 384,125" class="head"/>
-  <g>
-    <rect x="584" y="78" width="171" height="84" rx="12" class="box alt"/>
-    <text x="669" y="112" text-anchor="middle" class="label">Cache</text>
-    <text x="669" y="136" text-anchor="middle" class="sub">hot codes</text>
-  </g>
-  <line x1="564" y1="120" x2="572" y2="120" class="wire"/>
-  <polygon points="572,115 582,120 572,125" class="head"/>
-  <g>
-    <rect x="772" y="78" width="171" height="84" rx="12" class="box"/>
-    <text x="858" y="112" text-anchor="middle" class="label">KV</text>
-    <text x="858" y="136" text-anchor="middle" class="sub">source of truth</text>
-  </g>
-  <line x1="752" y1="120" x2="762" y2="120" class="wire"/>
-  <polygon points="762,115 770,120 762,125" class="head"/>
-  <g>
-    <rect x="394" y="250" width="171" height="78" rx="12" class="box alt"/>
-    <text x="480" y="284" text-anchor="middle" class="label">Analytics</text>
-    <text x="480" y="308" text-anchor="middle" class="sub">async, off path</text>
-  </g>
-  <line x1="480" y1="168" x2="480" y2="242" class="wire"/>
-  <polygon points="475,242 480,252 485,242" class="head"/>
-</svg>
-  <figcaption><span class="lang-zh">302 先返回。点击事件异步送去 Analytics，不放在跳转的关键路径上。</span><span class="lang-en">Return the 302 first. Ship the click to analytics asynchronously. It does not sit on the redirect path.</span></figcaption>
-</div>
-</figure>
-    <p class="cite"><span class="lang-zh">KV、存储和缓存的机制后读：<span class="chip soon">Ch06 · 键值</span><span class="chip soon">Ch37 · 存储</span><span class="chip soon">Ch38 · 缓存</span>。</span><span class="lang-en">Read the mechanisms later: <span class="chip soon">Ch06 · KV</span><span class="chip soon">Ch37 · storage</span><span class="chip soon">Ch38 · cache</span>.</span></p>
-  </section>
-
-  <section>
-    <h2><span class="lang-zh">Hard part · 301 还是 302</span><span class="lang-en">Hard part · 301 or 302</span></h2>
-    <figure class="deck">
-<div class="slide">
-  <svg viewBox="0 0 960 420" class="board" role="img">
-  <g>
-    <rect x="200" y="150" width="260" height="96" rx="12" class="box"/>
-    <text x="330" y="204" text-anchor="middle" class="label">Click</text>
-  </g>
-  <g>
-    <rect x="500" y="150" width="260" height="96" rx="12" class="box ok"/>
-    <text x="630" y="184" text-anchor="middle" class="label">Your service</text>
-    <text x="630" y="208" text-anchor="middle" class="sub">sees the click</text>
-  </g>
-  <line x1="466" y1="198" x2="489" y2="198" class="wire"/>
-  <polygon points="489,193 498,198 489,203" class="head"/>
-</svg>
-  <figcaption><span class="lang-zh">302 Found：浏览器这次跳走，但不会把映射当成永久事实。下一次点击还回到你这里。</span><span class="lang-en">302 Found: the browser redirects this time, and does not treat the mapping as permanent. The next click comes back to you.</span></figcaption>
-</div>
-<div class="slide">
-  <svg viewBox="0 0 960 420" class="board" role="img">
-  <g>
-    <rect x="200" y="150" width="260" height="96" rx="12" class="box bad"/>
-    <text x="330" y="184" text-anchor="middle" class="label">Browser</text>
-    <text x="330" y="208" text-anchor="middle" class="sub">caches 301</text>
-  </g>
-  <g>
-    <rect x="500" y="150" width="260" height="96" rx="12" class="box bad"/>
-    <text x="630" y="184" text-anchor="middle" class="label">Long URL</text>
-    <text x="630" y="208" text-anchor="middle" class="sub">skips you</text>
-  </g>
-  <line x1="466" y1="198" x2="489" y2="198" class="wire"/>
-  <polygon points="489,193 498,198 489,203" class="head"/>
-</svg>
-  <figcaption><span class="lang-zh">301 Moved Permanently：浏览器记住 Location，之后直接去长链。你的服务看不到后续点击。</span><span class="lang-en">301 Moved Permanently: the browser remembers Location and goes straight to the long URL. You never see the later clicks.</span></figcaption>
-</div>
-<div class="slide">
-  <svg viewBox="0 0 960 420" class="board" role="img">
-  <g>
-    <rect x="66" y="150" width="260" height="96" rx="12" class="box ok"/>
-    <text x="196" y="184" text-anchor="middle" class="label">302</text>
-    <text x="196" y="208" text-anchor="middle" class="sub">every click</text>
-  </g>
-  <g>
-    <rect x="350" y="150" width="260" height="96" rx="12" class="box ok"/>
-    <text x="480" y="184" text-anchor="middle" class="label">Analytics</text>
-    <text x="480" y="208" text-anchor="middle" class="sub">can count</text>
-  </g>
-  <line x1="330" y1="198" x2="339" y2="198" class="wire"/>
-  <polygon points="339,193 348,198 339,203" class="head"/>
-  <g>
-    <rect x="634" y="150" width="260" height="96" rx="12" class="box"/>
-    <text x="764" y="184" text-anchor="middle" class="label">TTL</text>
-    <text x="764" y="208" text-anchor="middle" class="sub">can retarget</text>
-  </g>
-  <line x1="614" y1="198" x2="623" y2="198" class="wire"/>
-  <polygon points="623,193 632,198 623,203" class="head"/>
-</svg>
-  <figcaption><span class="lang-zh">所以短链默认 302。要统计、要过期、要换落地页，都依赖每次回源。</span><span class="lang-en">That is why a shortener defaults to 302. Counts, expiry, and changing the target all depend on every click coming back.</span></figcaption>
-</div>
-<div class="slide">
-  <svg viewBox="0 0 960 420" class="board" role="img">
-  <g>
-    <rect x="200" y="150" width="260" height="96" rx="12" class="box"/>
-    <text x="330" y="184" text-anchor="middle" class="label">301</text>
-    <text x="330" y="208" text-anchor="middle" class="sub">permanent move</text>
-  </g>
-  <g>
-    <rect x="500" y="150" width="260" height="96" rx="12" class="box alt"/>
-    <text x="630" y="184" text-anchor="middle" class="label">SEO</text>
-    <text x="630" y="208" text-anchor="middle" class="sub">rare</text>
-  </g>
-  <line x1="466" y1="198" x2="489" y2="198" class="wire"/>
-  <polygon points="489,193 498,198 489,203" class="head"/>
-</svg>
-  <figcaption><span class="lang-zh">301 留给真正的永久搬家，或明确的 SEO 需求。不要为了省一点回源流量当默认。</span><span class="lang-en">Keep 301 for a real permanent move, or an explicit SEO need. Do not pick it just to save origin traffic.</span></figcaption>
-</div>
-</figure>
-    <p class="cite"><span class="lang-zh">缓存为什么会把 301 记住，去 <span class="chip soon">Ch38 · 缓存与 CDN</span>。</span><span class="lang-en">Why a cache keeps a 301: <span class="chip soon">Ch38 · cache and CDN</span>.</span></p>
-  </section>
-
-  <section>
-    <h2><span class="lang-zh">Hard part · 短码从哪来</span><span class="lang-en">Hard part · where the code comes from</span></h2>
-    <figure class="deck">
-<div class="slide">
-  <svg viewBox="0 0 960 420" class="board" role="img">
-  <g>
-    <rect x="350" y="156" width="260" height="100" rx="12" class="box ok"/>
-    <text x="480" y="190" text-anchor="middle" class="label">6 chars</text>
-    <text x="480" y="214" text-anchor="middle" class="sub">62^6 ~ 56.8B</text>
-  </g>
-</svg>
-  <figcaption><span class="lang-zh">6 位 base62 是 62 的 6 次方，约 568 亿。每天 100 万条，用上百年都满不了。不够就加到 7 位，不要先换 ID 方案。</span><span class="lang-en">Six base62 characters are 62 to the sixth, about 56.8 billion. A million a day will not fill that for centuries. If it ever does, go to 7 characters. Do not change the ID scheme first.</span></figcaption>
-</div>
-<div class="slide">
-  <svg viewBox="0 0 960 420" class="board" role="img">
-  <g>
-    <rect x="200" y="150" width="260" height="100" rx="12" class="box ok"/>
-    <text x="330" y="184" text-anchor="middle" class="label">Counter</text>
-    <text x="330" y="208" text-anchor="middle" class="sub">segment</text>
-  </g>
-  <g>
-    <rect x="500" y="150" width="260" height="100" rx="12" class="box ok"/>
-    <text x="630" y="184" text-anchor="middle" class="label">base62</text>
-    <text x="630" y="208" text-anchor="middle" class="sub">fixed 6</text>
-  </g>
-  <line x1="466" y1="200" x2="489" y2="200" class="wire"/>
-  <polygon points="489,195 498,200 489,205" class="head"/>
-</svg>
-  <figcaption><span class="lang-zh">生产默认：号段或数据库自增，再 base62。无冲突，长度稳定。字符集是 0-9a-zA-Z。</span><span class="lang-en">Production default: a segment or a database counter, then base62. No collisions, stable length. The alphabet is 0-9, a-z, A-Z.</span></figcaption>
-</div>
-<div class="slide">
-  <svg viewBox="0 0 960 420" class="board" role="img">
-  <g>
-    <rect x="200" y="150" width="260" height="100" rx="12" class="box bad"/>
-    <text x="330" y="184" text-anchor="middle" class="label">MD5</text>
-    <text x="330" y="208" text-anchor="middle" class="sub">keep 6</text>
-  </g>
-  <g>
-    <rect x="500" y="150" width="260" height="100" rx="12" class="box bad"/>
-    <text x="630" y="184" text-anchor="middle" class="label">Lookup</text>
-    <text x="630" y="208" text-anchor="middle" class="sub">retry on clash</text>
-  </g>
-  <line x1="466" y1="200" x2="489" y2="200" class="wire"/>
-  <polygon points="489,195 498,200 489,205" class="head"/>
-</svg>
-  <figcaption><span class="lang-zh">把 long URL 做 hash 再截成 6 位，生日碰撞躲不掉。每次都要查库，冲突就加盐重试。写路径变慢，也更难解释。</span><span class="lang-en">Hash the long URL and keep 6 characters, and birthday collisions show up. Every write looks the code up and retries with salt. The write gets slower and harder to explain.</span></figcaption>
-</div>
-<div class="slide">
-  <svg viewBox="0 0 960 420" class="board" role="img">
-  <g>
-    <rect x="200" y="150" width="260" height="100" rx="12" class="box bad"/>
-    <text x="330" y="184" text-anchor="middle" class="label">Snowflake</text>
-    <text x="330" y="208" text-anchor="middle" class="sub">~10^18</text>
-  </g>
-  <g>
-    <rect x="500" y="150" width="260" height="100" rx="12" class="box bad"/>
-    <text x="630" y="184" text-anchor="middle" class="label">base62</text>
-    <text x="630" y="208" text-anchor="middle" class="sub">~11 chars</text>
-  </g>
-  <line x1="466" y1="200" x2="489" y2="200" class="wire"/>
-  <polygon points="489,195 498,200 489,205" class="head"/>
-</svg>
-  <figcaption><span class="lang-zh">Snowflake 大约 10 的 18 次方，base62 要 11 位左右。塞进 6 位只能截断，唯一性就没了。6 位短码不要用它当 ID 源。</span><span class="lang-en">A Snowflake is about 10 to the 18, which is roughly 11 base62 characters. Truncating it into 6 drops uniqueness. Do not use it as the ID source for a 6-character code.</span></figcaption>
-</div>
-</figure>
-    <p class="cite"><span class="lang-zh">唯一 ID 的通用做法在 <span class="chip soon">Ch07 · 分布式 ID</span>。短链这题不要把 Snowflake 原样搬过来。</span><span class="lang-en">General unique IDs are <span class="chip soon">Ch07 · unique IDs</span>. Do not drop a Snowflake into this design unchanged.</span></p>
-  </section>
-
-  <section>
-    <h2><span class="lang-zh">热点短码</span><span class="lang-en">Hot codes</span></h2>
-    <figure class="deck">
-<div class="slide">
-  <svg viewBox="0 0 960 420" class="board" role="img">
-  <g>
-    <rect x="350" y="156" width="260" height="100" rx="12" class="box bad"/>
-    <text x="480" y="190" text-anchor="middle" class="label">Zipf</text>
-    <text x="480" y="214" text-anchor="middle" class="sub">few codes, most clicks</text>
-  </g>
-</svg>
-  <figcaption><span class="lang-zh">读是 Zipf：少数短码吃掉大部分点击。bottleneck 在热点，不在再加一层数仓。</span><span class="lang-en">Reads are Zipf: a few codes take most of the clicks. The bottleneck is the hot key, not another warehouse.</span></figcaption>
-</div>
-<div class="slide">
-  <svg viewBox="0 0 960 420" class="board" role="img">
-  <g>
-    <rect x="350" y="150" width="260" height="96" rx="12" class="box ok"/>
-    <text x="480" y="184" text-anchor="middle" class="label">Local LRU</text>
-    <text x="480" y="208" text-anchor="middle" class="sub">absorbs burst</text>
-  </g>
-</svg>
-  <figcaption><span class="lang-zh">进程内 LRU 先挡住同一台机器上的爆款，免得每一下都去 Redis。</span><span class="lang-en">An in-process LRU absorbs the burst on that machine, so not every click goes to Redis.</span></figcaption>
-</div>
-<div class="slide">
-  <svg viewBox="0 0 960 420" class="board" role="img">
-  <g>
-    <rect x="206" y="150" width="260" height="96" rx="12" class="box ok"/>
-    <text x="336" y="184" text-anchor="middle" class="label">Local LRU</text>
-    <text x="336" y="208" text-anchor="middle" class="sub">absorbs burst</text>
-  </g>
-  <g>
-    <rect x="494" y="150" width="260" height="96" rx="12" class="box alt"/>
-    <text x="624" y="184" text-anchor="middle" class="label">Redis</text>
-    <text x="624" y="208" text-anchor="middle" class="sub">hot set</text>
-  </g>
-  <line x1="472" y1="198" x2="483" y2="198" class="wire"/>
-  <polygon points="483,193 492,198 483,203" class="head"/>
-</svg>
-  <figcaption><span class="lang-zh">Redis 放热集合。单机挂了，还可以回 KV。</span><span class="lang-en">Redis holds the hot set. If that node dies, you still have the KV.</span></figcaption>
-</div>
-<div class="slide">
-  <svg viewBox="0 0 960 420" class="board" role="img">
-  <g>
-    <rect x="62" y="150" width="260" height="96" rx="12" class="box ok"/>
-    <text x="192" y="184" text-anchor="middle" class="label">Local LRU</text>
-    <text x="192" y="208" text-anchor="middle" class="sub">absorbs burst</text>
-  </g>
-  <g>
-    <rect x="350" y="150" width="260" height="96" rx="12" class="box alt"/>
-    <text x="480" y="184" text-anchor="middle" class="label">Redis</text>
-    <text x="480" y="208" text-anchor="middle" class="sub">hot set</text>
-  </g>
-  <line x1="328" y1="198" x2="339" y2="198" class="wire"/>
-  <polygon points="339,193 348,198 339,203" class="head"/>
-  <g>
-    <rect x="638" y="150" width="260" height="96" rx="12" class="box"/>
-    <text x="768" y="184" text-anchor="middle" class="label">KV</text>
-    <text x="768" y="208" text-anchor="middle" class="sub">cold data</text>
-  </g>
-  <line x1="616" y1="198" x2="627" y2="198" class="wire"/>
-  <polygon points="627,193 636,198 627,203" class="head"/>
-</svg>
-  <figcaption><span class="lang-zh">KV 是冷数据和权威映射。同一爆款同时 miss 时要合并回源，避免击穿。</span><span class="lang-en">The KV is cold data and the source of truth. When one hot code misses everywhere at once, collapse those loads so you do not stampede.</span></figcaption>
-</div>
-</figure>
-    <p class="cite"><span class="lang-zh">这三层就是 <span class="chip soon">Ch38 · 缓存</span> 在这道题里的用法。</span><span class="lang-en">Those three layers are <span class="chip soon">Ch38 · cache</span> applied to this question.</span></p>
-  </section>
-
-  <section>
-    <h2><span class="lang-zh">收尾，不要说完美</span><span class="lang-en">Close without saying perfect</span></h2>
-    <div class="bilingual">
-  <div class="lang-zh"><p class="col-kicker">中文</p>
-<table><thead><tr><th>bottleneck</th><th>你怎么接</th></tr></thead><tbody>
-        <tr><td>热点短码</td><td>本地 LRU，加上 Redis；同一码同时 miss 时合并回源</td></tr>
-        <tr><td>被枚举、被刷创建</td><td>创建接口限流；同一 long URL 返回已有码</td></tr>
-        <tr><td>缓存和 KV 不一致</td><td>短 TTL，删除或过期时主动失效</td></tr>
+      <div class="lang-zh"><p class="col-kicker">中文</p>
+        <table><thead><tr><th>trade-off</th><th>面试口述</th></tr></thead><tbody>
+          <tr><td>统计完整 vs 延迟 / 流量</td><td>302 + no-store 保证每次回源；短 TTL 或 edge analytics 可换更低延迟，但统计语义会变</td></tr>
+          <tr><td>紧凑顺序码 vs 不可预测</td><td>segment + base62 紧凑无碰撞但可枚举；随机 token 要足够熵与唯一约束</td></tr>
+          <tr><td>撤销新鲜度 vs redirect 可用性</td><td>主动失效 + 短 TTL 缩小窗口；存储故障时是否读 stale 必须写成产品策略</td></tr>
         </tbody></table>
-        <details class="fold"><summary>原书更偏向 301 的那一版</summary>
-        <p>旧材料常把 301 当默认，理由是省回源。现在短链要统计、要改目标、要过期，默认改成 302。埋点走队列，不挡跳转。301 只留在永久搬家。</p>
-        </details>
-        <p>下一道完整题是通知系统，计划 2 再写。自测：合上页面，用开场那 30 秒把 302 和「不用 Snowflake」讲一遍。</p>
-  </div>
-  <div class="lang-en"><p class="col-kicker">English</p>
-<table><thead><tr><th>Bottleneck</th><th>What you say</th></tr></thead><tbody>
-        <tr><td>Hot code</td><td>Local LRU plus Redis, and collapse concurrent misses</td></tr>
-        <tr><td>Enumeration and create abuse</td><td>Rate-limit creates; return the existing code for the same long URL</td></tr>
-        <tr><td>Cache and KV disagree</td><td>Short TTL, and invalidate on delete or expiry</td></tr>
+        <p class="say">最后 20 秒：create 用幂等键和条件写，redirect 用 Local LRU → Redis → Mapping Store，302 明确 no-store，点击事件异步。号段给小 ID，base62 固定宽度要 padding；Snowflake 不适合 6 位码。热点用 singleflight，故障按读写域降级。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">English</p>
+        <table><thead><tr><th>Trade-off</th><th>Interview line</th></tr></thead><tbody>
+          <tr><td>Complete analytics vs latency / traffic</td><td>302 plus no-store returns every click; short TTL or edge analytics lowers latency but changes counting semantics</td></tr>
+          <tr><td>Compact sequence vs unpredictability</td><td>Segment plus base62 is compact and collision-free but enumerable; random tokens need entropy and uniqueness checks</td></tr>
+          <tr><td>Fresh revocation vs redirect availability</td><td>Invalidation plus short TTL narrows the window; stale reads during store failure are a product decision</td></tr>
         </tbody></table>
-        <details class="fold"><summary>The book leaned toward 301</summary>
-        <p>Older notes often default to 301 to save origin traffic. A shortener that counts clicks, changes targets, and expires links now defaults to 302. Analytics goes through a queue and does not block the redirect. Keep 301 for a permanent move.</p>
-        </details>
-        <p>The next full case is a notification system, in plan 2. Check yourself: close the page and give the 30-second open, including 302 and why not a Snowflake.</p>
-  </div>
-</div>
+        <p class="say">Final twenty seconds: create uses an idempotency key and conditional writes. Redirect uses Local LRU → Redis → Mapping Store, returns a 302 with no-store, and publishes clicks asynchronously. Segments produce small IDs; fixed-width base62 needs padding; Snowflake does not fit six characters. Singleflight protects hot keys, and failures degrade by read/write domain.</p>
+      </div>
+    </div>
   </section>
-<section>
-  <h2><span class="lang-zh">闪卡</span><span class="lang-en">Flashcards</span></h2>
-  <p class="cite"><span class="lang-zh">点一下翻面。能讲出来才算会。</span><span class="lang-en">Click to flip. If you can say it, you know it.</span></p>
-  <div class="cards-grid">
-<button type="button" class="flip">
-  <span class="q"><span class="lang-zh">短链两个 endpoint 是什么？</span><span class="lang-en">What are the two endpoints?</span></span>
-  <span class="a"><span class="lang-zh">POST /shorten 把 long URL 换成短码。GET /{code} 用 302 跳回长链。</span><span class="lang-en">POST /shorten maps a long URL to a code. GET /{code} returns a 302 to the long URL.</span></span>
-</button>
-<button type="button" class="flip">
-  <span class="q"><span class="lang-zh">默认 301 还是 302？</span><span class="lang-en">301 or 302 by default?</span></span>
-  <span class="a"><span class="lang-zh">302。要 Analytics、要过期、要换目标。301 会被浏览器缓存，后续点击不回源。</span><span class="lang-en">302. You need analytics, expiry, and the ability to change the target. A 301 is cached, so later clicks never return.</span></span>
-</button>
-<button type="button" class="flip">
-  <span class="q"><span class="lang-zh">6 位短码怎么生成？</span><span class="lang-en">How do you mint a 6-character code?</span></span>
-  <span class="a"><span class="lang-zh">号段或数据库自增，再 base62。不要 hash 截断。</span><span class="lang-en">A counter or an ID segment, then base62. Not a truncated hash.</span></span>
-</button>
-<button type="button" class="flip">
-  <span class="q"><span class="lang-zh">为什么不用 Snowflake？</span><span class="lang-en">Why not a Snowflake?</span></span>
-  <span class="a"><span class="lang-zh">它大约 10^18，base62 要 11 位左右。截成 6 位就不再唯一。</span><span class="lang-en">It is about 10^18, roughly 11 base62 characters. Truncating to 6 drops uniqueness.</span></span>
-</button>
-<button type="button" class="flip">
-  <span class="q"><span class="lang-zh">6 位够不够？</span><span class="lang-en">Is 6 characters enough?</span></span>
-  <span class="a"><span class="lang-zh">62^6 约 568 亿。每天 100 万条也极其宽裕。不够就加到 7 位。</span><span class="lang-en">62^6 is about 56.8 billion. A million a day does not fill it. If it ever does, use 7 characters.</span></span>
-</button>
-<button type="button" class="flip">
-  <span class="q"><span class="lang-zh">读路径的 bottleneck 在哪？</span><span class="lang-en">Where is the bottleneck on the read path?</span></span>
-  <span class="a"><span class="lang-zh">热点短码。本地 LRU，Redis，最后才是 KV。同时 miss 要合并回源。</span><span class="lang-en">Hot codes. Local LRU, then Redis, then the KV. Collapse concurrent misses.</span></span>
-</button>
-<button type="button" class="flip">
-  <span class="q"><span class="lang-zh">Analytics 放在哪？</span><span class="lang-en">Where does analytics sit?</span></span>
-  <span class="a"><span class="lang-zh">302 之后异步送走，不挡跳转。</span><span class="lang-en">After the 302, asynchronously. It does not block the redirect.</span></span>
-</button>
-<button type="button" class="flip">
-  <span class="q"><span class="lang-zh">Wrap-up 准备哪三句？</span><span class="lang-en">Which three lines do you keep for the wrap-up?</span></span>
-  <span class="a"><span class="lang-zh">热点、创建被刷、缓存和 KV 不一致。不要说设计完美。</span><span class="lang-en">Hot keys, create abuse, and cache versus KV. Do not say the design is perfect.</span></span>
-</button>
-  </div>
-</section><p><button type="button" class="read-toggle">
-  <span class="when-off"><span class="lang-zh">我已学完本章</span><span class="lang-en">Mark this chapter done</span></span>
-  <span class="when-on"><span class="lang-zh">已学完本章</span><span class="lang-en">Completed</span></span>
-</button></p>
-<p class="cite"><span class="lang-zh">进度存在这台浏览器里。</span><span class="lang-en">Saved in this browser only.</span></p>
+
+  <section>
+    <h2><span class="lang-zh">引用与延伸阅读</span><span class="lang-en">References and further reading</span></h2>
+    <ol class="references">
+      <li>[1] IETF, <a href="https://www.rfc-editor.org/rfc/rfc9110.html">RFC 9110 · HTTP Semantics</a>, 2022 — 301 / 302 redirect semantics.</li>
+      <li>[2] IETF, <a href="https://www.rfc-editor.org/rfc/rfc9111.html">RFC 9111 · HTTP Caching</a>, 2022 — storage, freshness, heuristic caching, and <code>no-store</code>.</li>
+      <li>[3] Twitter, <a href="https://github.com/twitter-archive/snowflake">Snowflake archived source</a> — the original high-scale unique ID service; this is an implementation source, not a fabricated “Snowflake paper.”</li>
+      <li>[4] Meituan, <a href="https://tech.meituan.com/2019/03/07/open-source-project-leaf.html">Leaf distributed ID service</a> and <a href="https://github.com/Meituan-Dianping/Leaf">source repository</a>, 2019 — segment and Snowflake modes.</li>
+      <li>[5] Martin Georgiev &amp; Vitaly Shmatikov, <a href="https://arxiv.org/abs/1604.02734"><em>Gone in Six Characters: Short URLs Considered Harmful for Cloud Services</em></a>, 2016.</li>
+      <li>[6] Lee Breslau et al., <a href="https://doi.org/10.1109/INFCOM.1999.749260"><em>Web Caching and Zipf-like Distributions</em></a>, IEEE INFOCOM, 1999.</li>
+      <li>[7] Rajesh Nishtala et al., <a href="https://www.usenix.org/conference/nsdi13/technical-sessions/presentation/nishtala"><em>Scaling Memcache at Facebook</em></a>, NSDI, 2013.</li>
+      <li>[8] Giuseppe DeCandia et al., <a href="https://www.amazon.science/publications/dynamo-amazons-highly-available-key-value-store"><em>Dynamo: Amazon’s Highly Available Key-value Store</em></a>, SOSP, 2007.</li>
+    </ol>
+    <p class="cite"><span class="lang-zh">站内延伸：</span><span class="lang-en">Course follow-ups:</span> <a class="chip" href="ch06.html">Ch06 · KV</a><a class="chip" href="ch07.html">Ch07 · ID</a><a class="chip" href="ch37.html">Ch37 · Storage</a><a class="chip" href="ch38.html">Ch38 · Cache</a></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">闪卡</span><span class="lang-en">Flashcards</span></h2>
+    <p class="cite"><span class="lang-zh">点一下翻面。能把路径讲出来才算会。</span><span class="lang-en">Click to flip. Knowing means you can walk the path.</span></p>
+    <div class="cards-grid">
+      <button type="button" class="flip"><span class="q"><span class="lang-zh">创建路径如何保证重试不重复？</span><span class="lang-en">How does create survive retries?</span></span><span class="a"><span class="lang-zh">owner + Idempotency-Key 先查原结果；mapping 用条件写保证 code 唯一。</span><span class="lang-en">Check owner plus Idempotency-Key first; a conditional mapping write guarantees code uniqueness.</span></span></button>
+      <button type="button" class="flip"><span class="q"><span class="lang-zh">302 为什么仍要写 Cache-Control？</span><span class="lang-en">Why does a 302 still need Cache-Control?</span></span><span class="a"><span class="lang-zh">302 可在显式 freshness 下缓存。要每次回源统计就返回 no-store，不能只靠状态码。</span><span class="lang-en">A 302 can be cached with explicit freshness. Use no-store when every click must return.</span></span></button>
+      <button type="button" class="flip"><span class="q"><span class="lang-zh">普通 base62(counter) 固定 6 位吗？</span><span class="lang-en">Is base62(counter) naturally six characters?</span></span><span class="a"><span class="lang-zh">不是，天然变长。固定宽度需要 padding 或保留足够大的起始区间。</span><span class="lang-en">No. It is variable-length; fixed width needs padding or a reserved starting range.</span></span></button>
+      <button type="button" class="flip"><span class="q"><span class="lang-zh">为什么 Snowflake 不适合 6 位码？</span><span class="lang-en">Why does Snowflake not fit six characters?</span></span><span class="a"><span class="lang-zh">经典 Snowflake 有 63 个有效位，上界需 11 个 base62 字符；截断会丢唯一性。</span><span class="lang-en">Classic Snowflake has 63 effective bits and needs up to 11 base62 characters; truncation loses uniqueness.</span></span></button>
+      <button type="button" class="flip"><span class="q"><span class="lang-zh">热点缓存同时 miss 怎么办？</span><span class="lang-en">What handles concurrent hot-key misses?</span></span><span class="a"><span class="lang-zh">对同一码 singleflight：一个 leader 回源，其余等待共享结果。</span><span class="lang-en">Singleflight per code: one leader loads, and waiters share the result.</span></span></button>
+      <button type="button" class="flip"><span class="q"><span class="lang-zh">ID allocator 挂了，哪些路径受影响？</span><span class="lang-en">What fails when the ID allocator is down?</span></span><span class="a"><span class="lang-zh">create 可消耗已领号段，耗尽后失败；redirect 不依赖 allocator，不受影响。</span><span class="lang-en">Create consumes its current lease, then fails; redirect has no allocator dependency.</span></span></button>
+      <button type="button" class="flip"><span class="q"><span class="lang-zh">MQ 挂了能不能继续跳转？</span><span class="lang-en">Can redirect continue when the event stream fails?</span></span><span class="a"><span class="lang-zh">能。302 先返回，统计用有限缓冲、重试或明确采样丢弃。</span><span class="lang-en">Yes. Return the 302; use bounded buffering, retry, or explicit sampling for analytics.</span></span></button>
+      <button type="button" class="flip"><span class="q"><span class="lang-zh">短码能当私密访问凭证吗？</span><span class="lang-en">Is a short code an access secret?</span></span><span class="a"><span class="lang-zh">不能。短 token 可被枚举；私密资源必须有真正授权。</span><span class="lang-en">No. Short tokens can be enumerated; private resources need real authorization.</span></span></button>
+    </div>
+  </section>
+
+  <p><button type="button" class="read-toggle"><span class="when-off"><span class="lang-zh">我已学完本章</span><span class="lang-en">Mark this chapter done</span></span><span class="when-on"><span class="lang-zh">已学完本章</span><span class="lang-en">Completed</span></span></button></p>
+  <p class="cite"><span class="lang-zh">进度存在这台浏览器里。</span><span class="lang-en">Saved in this browser only.</span></p>
 </article>
 </main>
 <script src="../assets/js/nav.js"></script>

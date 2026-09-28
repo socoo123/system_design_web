@@ -264,15 +264,34 @@ th { color: rgb(var(--fg-muted)); font-weight: 650; font-size: 13px; }
 .deck {
   margin: 1rem 0 0.4rem;
   padding: 12px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
   background: rgb(var(--bg-card));
   border: 1px solid rgb(var(--border-subtle));
   border-radius: 16px;
+  overflow: hidden;
 }
 .deck:focus { outline: 2px solid rgb(var(--accent)); outline-offset: 3px; }
-.deck .slide { display: none; }
-.deck .slide.is-on { display: block; }
+.deck .slide {
+  grid-column: 1;
+  grid-row: 1;
+  overflow-x: auto;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translateY(5px);
+  transition: opacity 220ms ease, transform 220ms ease, visibility 0s linear 220ms;
+}
+.deck .slide.is-on {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transform: translateY(0);
+  transition-delay: 0s;
+}
 .board {
   width: 100%;
+  min-width: 720px;
   height: auto;
   display: block;
   background: rgb(var(--bg-elev));
@@ -282,15 +301,37 @@ th { color: rgb(var(--fg-muted)); font-weight: 650; font-size: 13px; }
 .board .box.alt { stroke: rgb(var(--drac-cyan)); }
 .board .box.ok { stroke: rgb(var(--drac-green)); }
 .board .box.bad { stroke: rgb(var(--drac-red)); }
+.board .boundary { fill: none; stroke: rgb(var(--border-strong)); stroke-width: 1.5; stroke-dasharray: 8 6; }
+.board .store { fill: rgb(var(--bg-card)); stroke: rgb(var(--drac-purple)); stroke-width: 2; }
+.board .cache { fill: rgb(var(--bg-card)); stroke: rgb(var(--drac-cyan)); stroke-width: 2; }
+.board .queue { fill: rgb(var(--bg-card)); stroke: rgb(var(--drac-orange)); stroke-width: 2; }
+.board .cache.bad, .board .store.bad, .board .queue.bad { stroke: rgb(var(--drac-red)); }
+.board .lane { fill: rgb(var(--bg-card)); stroke: rgb(var(--border-subtle)); stroke-width: 1; }
+.board .zone { fill: rgb(var(--bg-elev)); stroke: rgb(var(--border-subtle)); stroke-width: 1; }
 .board .label, .board .sub, .board .tiny {
   font-family: -apple-system, "PingFang SC", "Segoe UI", sans-serif;
 }
 .board .label { fill: rgb(var(--drac-fg)); font-size: 16px; font-weight: 650; }
 .board .sub { fill: rgb(var(--drac-comment)); font-size: 13px; }
 .board .tiny { fill: rgb(var(--drac-comment)); font-size: 12px; }
-.board .wire { stroke: rgb(var(--drac-comment)); stroke-width: 2; }
+.board .wire { fill: none; stroke: rgb(var(--drac-comment)); stroke-width: 2; }
+.board .wire.reply { stroke: rgb(var(--drac-green)); }
+.board .wire.async { stroke: rgb(var(--drac-orange)); stroke-dasharray: 7 5; }
+.board .wire.fail { stroke: rgb(var(--drac-red)); stroke-dasharray: 6 5; }
+.board .wire.hit { stroke: rgb(var(--drac-green)); }
 .board .head { fill: rgb(var(--drac-comment)); }
+.board .head.reply, .board .head.hit { fill: rgb(var(--drac-green)); }
+.board .head.async { fill: rgb(var(--drac-orange)); }
+.board .head.fail { fill: rgb(var(--drac-red)); }
+.board .badge { fill: rgb(var(--accent)); }
+.board .badge-text { fill: rgb(var(--bg-elev)); font-size: 12px; font-weight: 750; font-family: ui-monospace, Menlo, monospace; }
+.board .muted { opacity: 0.34; }
+.deck .slide.is-on .is-new { animation: deck-emphasis 620ms ease-out both; }
 .board .clock { fill: rgb(var(--accent)); font-size: 13px; font-weight: 700; font-family: ui-monospace, Menlo, monospace; }
+@keyframes deck-emphasis {
+  0% { opacity: 0.18; transform: translateY(5px); }
+  100% { opacity: 1; transform: translateY(0); }
+}
 figcaption {
   margin-top: 8px;
   color: rgb(var(--fg-muted));
@@ -298,8 +339,11 @@ figcaption {
   line-height: 1.55;
 }
 .deck-bar {
+  grid-column: 1;
+  grid-row: 2;
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 10px;
   margin-top: 10px;
 }
@@ -325,6 +369,18 @@ figcaption {
   background: rgb(var(--border-strong)) !important;
 }
 .dot.is-on { background: rgb(var(--accent)) !important; }
+
+.references {
+  padding-left: 1.35rem;
+  color: rgb(var(--fg-muted));
+  font-size: 14px;
+}
+.references li { margin: 0.55rem 0; }
+
+@media (prefers-reduced-motion: reduce) {
+  .deck .slide { transition: none; transform: none; }
+  .deck .slide.is-on .is-new { animation: none; }
+}
 
 .cite { font-size: 14px; color: rgb(var(--fg-muted)); }
 .chip, a.chip {
