@@ -1,0 +1,1148 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="parchment" data-locale="zh">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ch02 · 从零扩展到百万用户</title>
+  <link rel="icon" href="../favicon.ico" sizes="48x48">
+  <link rel="stylesheet" href="../assets/css/style.css">
+  <script src="../assets/js/boot.js"></script>
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="../index.html"><span class="brand-logo">SD</span><span class="lang-zh">系统设计面试</span><span class="lang-en">System Design Interview</span></a>
+  <span class="spacer"></span>
+  <a class="map-link" href="../index.html"><span class="lang-zh">课程地图</span><span class="lang-en">Map</span></a>
+  <div class="seg" role="group" aria-label="language">
+    <button type="button" data-locale-set="zh">中文</button>
+    <button type="button" data-locale-set="both"><span class="lang-zh">对照</span><span class="lang-en">Both</span></button>
+    <button type="button" data-locale-set="en">EN</button>
+  </div>
+  <div class="seg" role="group" aria-label="theme">
+    <button type="button" data-theme-set="parchment"><span class="lang-zh">护眼</span><span class="lang-en">Paper</span></button>
+    <button type="button" data-theme-set="dracula"><span class="lang-zh">深色</span><span class="lang-en">Dark</span></button>
+  </div>
+</header>
+<main class="wrap">
+<article class="chapter" id="ch02" data-ch="ch02">
+  <header>
+    <div class="ch-kicker"><span class="lang-zh">CHAPTER 02 · 面试方法</span><span class="lang-en">CHAPTER 02 · method</span></div>
+    <h1><span class="lang-zh">从零扩展到百万用户</span><span class="lang-en">Scale from zero to a million users</span></h1>
+    <p class="ch-meta-line"><span class="lang-zh">约 30 分钟 · 前置：Ch01</span><span class="lang-en">~30 min · prereq: Ch01</span></p>
+  </header>
+
+  <section class="goal">
+    <h2><span class="lang-zh">这一章结束你能做什么</span><span class="lang-en">What you can do after this chapter</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">中文</p>
+        <ul>
+          <li>用「痛点 → 方案 → 新痛点」把单机讲到百万用户，8–12 分钟，不先画终图。</li>
+          <li>每加一个组件，就说出它没解决的下一个 bottleneck。</li>
+          <li>能讲清 read-your-writes、cache-aside 删缓存、分片键怎么选。</li>
+        </ul>
+      </div>
+      <div class="lang-en"><p class="col-kicker">English</p>
+        <ul>
+          <li>Walk one box to a million users as pain → fix → new pain, in 8–12 minutes, without opening on the final diagram.</li>
+          <li>Each new box, name the bottleneck it does not solve.</li>
+          <li>Say read-your-writes, why cache-aside deletes, and how you pick a shard key.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">先说演进，再落笔</span><span class="lang-en">Say the evolution, then draw it</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">中文</p>
+        <p>Ch01 是 45 分钟怎么打。这一章是架构怎么长出来。面试官说「设计一个能撑百万用户的系统」时，strong hire 的信号是：从一台机器开始，每次只加一个组件，说清它解决了什么、又引入了什么。</p>
+        <p class="say">我会从最简单的单机开始，先找 bottleneck，再一次加一个组件。每一步说：为什么现在动、引入什么、解决了什么、新痛点是什么。整段演进我控制在 8–12 分钟，不先画终图。</p>
+        <p>超过 12 分钟，你是在 Step 2 里做 deep dive。那是 red flag。八集各大约一分钟，嘴上按这张表念。</p>
+        <table>
+          <thead>
+            <tr><th>集</th><th>痛点</th><th>引入</th><th>新痛点</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>1 单机</td><td>还没有系统</td><td>一台跑 web + DB</td><td>抢资源；一台挂全挂</td></tr>
+            <tr><td>2 拆层</td><td>抢 CPU / 内存</td><td>web、DB 分机</td><td>DB 仍是单点</td></tr>
+            <tr><td>3 LB</td><td>单 web 扩不了</td><td>托管 LB + 多 web</td><td>DB 仍单点；sticky 是假扩展</td></tr>
+            <tr><td>4 主从</td><td>读打满单库</td><td>primary 写、replica 读</td><td>failover 可能丢；读有延迟</td></tr>
+            <tr><td>5 缓存</td><td>读路径仍慢</td><td>cache-aside + CDN</td><td>短暂不一致；cache 也能成 SPOF</td></tr>
+            <tr><td>6 无状态</td><td>sticky 卡住扩缩</td><td>共享 session 或 JWT</td><td>多一个依赖；token 作废要另做</td></tr>
+            <tr><td>7 多机房</td><td>单 Region、跨洲慢</td><td>geoDNS 或 Anycast</td><td>跨 Region 写要付 CAP</td></tr>
+            <tr><td>8 分片</td><td>写到顶；慢任务堵路</td><td>托管 Kafka；分片或分布式 SQL</td><td>重复消费；reshard、热点、跨片 join</td></tr>
+          </tbody>
+        </table>
+        <p>话术：我按这条链演进，现在还在第 1 集。你想跳到多 Region 或分片，告诉我，我加速；否则我一集一集加。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">English</p>
+        <p>Ch01 is how you spend 45 minutes. This chapter is how the architecture grows. When they say “design a system that can hold a million users,” the strong-hire signal is: start from one machine, add one component at a time, and say what it solves and what it introduces.</p>
+        <p class="say">I’ll start from one box, find the bottleneck, then add one component at a time. Each step: why we move now, what we add, what it fixes, and the new pain. I’ll keep the whole evolution in 8–12 minutes. I won’t open with the final picture.</p>
+        <p>Past 12 minutes you are deep-diving inside step 2. That is a red flag. About a minute an episode. Say this table out loud.</p>
+        <table>
+          <thead>
+            <tr><th>Episode</th><th>Pain</th><th>Introduce</th><th>New pain</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>1 Single box</td><td>No system yet</td><td>One machine, web + DB</td><td>Resource fight; one death takes the site</td></tr>
+            <tr><td>2 Split</td><td>CPU / RAM fight</td><td>web and DB apart</td><td>DB is still a single point</td></tr>
+            <tr><td>3 LB</td><td>One web cannot scale</td><td>Managed LB + more web</td><td>DB still one; sticky scale-out is fake</td></tr>
+            <tr><td>4 Replica</td><td>Reads fill the DB</td><td>primary writes, replica reads</td><td>failover may lose data; reads lag</td></tr>
+            <tr><td>5 Cache</td><td>Reads still slow</td><td>cache-aside + CDN</td><td>Brief staleness; cache can be a SPOF</td></tr>
+            <tr><td>6 Stateless</td><td>Sticky blocks scale</td><td>Shared session or JWT</td><td>New dependency; token revoke is extra</td></tr>
+            <tr><td>7 Multi-DC</td><td>One Region, slow abroad</td><td>geoDNS or Anycast</td><td>Cross-Region writes pay CAP</td></tr>
+            <tr><td>8 Shard</td><td>Write ceiling; slow jobs</td><td>Managed Kafka; shard or distributed SQL</td><td>Duplicates; reshard, hot keys, cross-shard join</td></tr>
+          </tbody>
+        </table>
+        <p>Say: I’ll evolve along this chain. We’re on episode 1. If you want multi-Region or sharding, tell me and I’ll speed up. Otherwise I add one episode at a time.</p>
+      </div>
+    </div>
+    <figure class="deck">
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="350" y="150" width="260" height="96" rx="12" class="box"/>
+            <text x="480" y="184" text-anchor="middle" class="label">1 · Single box</text>
+            <text x="480" y="208" text-anchor="middle" class="sub">start here</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">第一笔只有单机。终图开场是 over-engineering，面试官要的是推理，不是默写拓扑。</span><span class="lang-en">The first stroke is one box. Opening with the final picture is over-engineering. They want the reasoning.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="104" y="150" width="220" height="96" rx="12" class="box bad"/>
+            <text x="214" y="184" text-anchor="middle" class="label">Pain</text>
+            <text x="214" y="208" text-anchor="middle" class="sub">why move now</text>
+          </g>
+          <line x1="328" y1="198" x2="359" y2="198" class="wire"/>
+          <polygon points="359,193 368,198 359,203" class="head"/>
+          <g>
+            <rect x="370" y="150" width="220" height="96" rx="12" class="box ok"/>
+            <text x="480" y="184" text-anchor="middle" class="label">Fix</text>
+            <text x="480" y="208" text-anchor="middle" class="sub">one new box</text>
+          </g>
+          <line x1="594" y1="198" x2="625" y2="198" class="wire"/>
+          <polygon points="625,193 634,198 625,203" class="head"/>
+          <g>
+            <rect x="636" y="150" width="220" height="96" rx="12" class="box bad"/>
+            <text x="746" y="184" text-anchor="middle" class="label">New pain</text>
+            <text x="746" y="208" text-anchor="middle" class="sub">next bottleneck</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">每一集就这三句。先说为什么现在动，再加一个组件，最后把新痛点写在白板上。</span><span class="lang-en">Three sentences an episode: why we move, one new box, and the bottleneck that box just created.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="50" y="150" width="188" height="96" rx="12" class="box"/>
+            <text x="144" y="184" text-anchor="middle" class="label">1 Single</text>
+            <text x="144" y="208" text-anchor="middle" class="sub">web + DB</text>
+          </g>
+          <line x1="242" y1="198" x2="263" y2="198" class="wire"/>
+          <polygon points="263,193 272,198 263,203" class="head"/>
+          <g>
+            <rect x="274" y="150" width="188" height="96" rx="12" class="box"/>
+            <text x="368" y="184" text-anchor="middle" class="label">2 Split</text>
+            <text x="368" y="208" text-anchor="middle" class="sub">two machines</text>
+          </g>
+          <line x1="466" y1="198" x2="487" y2="198" class="wire"/>
+          <polygon points="487,193 496,198 487,203" class="head"/>
+          <g>
+            <rect x="498" y="150" width="188" height="96" rx="12" class="box"/>
+            <text x="592" y="184" text-anchor="middle" class="label">3 LB</text>
+            <text x="592" y="208" text-anchor="middle" class="sub">web xN</text>
+          </g>
+          <line x1="690" y1="198" x2="711" y2="198" class="wire"/>
+          <polygon points="711,193 720,198 711,203" class="head"/>
+          <g>
+            <rect x="722" y="150" width="188" height="96" rx="12" class="box"/>
+            <text x="816" y="184" text-anchor="middle" class="label">4 Replica</text>
+            <text x="816" y="208" text-anchor="middle" class="sub">reads scale</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">前四集还在一个 Region：单机、拆层、加 LB、再给库加副本。缓存和多机房先别画。</span><span class="lang-en">Episodes 1–4 stay in one Region: one box, split, LB, then a replica. Leave cache and multi-DC for later.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="92" y="40" width="170" height="96" rx="12" class="box"/>
+            <text x="177" y="74" text-anchor="middle" class="label">1 Single</text>
+            <text x="177" y="98" text-anchor="middle" class="sub">web + DB</text>
+          </g>
+          <line x1="266" y1="88" x2="283" y2="88" class="wire"/>
+          <polygon points="283,83 292,88 283,93" class="head"/>
+          <g>
+            <rect x="294" y="40" width="170" height="96" rx="12" class="box"/>
+            <text x="379" y="74" text-anchor="middle" class="label">2 Split</text>
+            <text x="379" y="98" text-anchor="middle" class="sub">two machines</text>
+          </g>
+          <line x1="468" y1="88" x2="485" y2="88" class="wire"/>
+          <polygon points="485,83 494,88 485,93" class="head"/>
+          <g>
+            <rect x="496" y="40" width="170" height="96" rx="12" class="box"/>
+            <text x="581" y="74" text-anchor="middle" class="label">3 LB</text>
+            <text x="581" y="98" text-anchor="middle" class="sub">web xN</text>
+          </g>
+          <line x1="670" y1="88" x2="687" y2="88" class="wire"/>
+          <polygon points="687,83 696,88 687,93" class="head"/>
+          <g>
+            <rect x="698" y="40" width="170" height="96" rx="12" class="box"/>
+            <text x="783" y="74" text-anchor="middle" class="label">4 Replica</text>
+            <text x="783" y="98" text-anchor="middle" class="sub">reads scale</text>
+          </g>
+          <g>
+            <rect x="92" y="248" width="170" height="96" rx="12" class="box"/>
+            <text x="177" y="282" text-anchor="middle" class="label">5 Cache</text>
+            <text x="177" y="306" text-anchor="middle" class="sub">CDN</text>
+          </g>
+          <line x1="266" y1="296" x2="283" y2="296" class="wire"/>
+          <polygon points="283,291 292,296 283,301" class="head"/>
+          <g>
+            <rect x="294" y="248" width="170" height="96" rx="12" class="box"/>
+            <text x="379" y="282" text-anchor="middle" class="label">6 Stateless</text>
+            <text x="379" y="306" text-anchor="middle" class="sub">session out</text>
+          </g>
+          <line x1="468" y1="296" x2="485" y2="296" class="wire"/>
+          <polygon points="485,291 494,296 485,301" class="head"/>
+          <g>
+            <rect x="496" y="248" width="170" height="96" rx="12" class="box"/>
+            <text x="581" y="282" text-anchor="middle" class="label">7 Multi-DC</text>
+            <text x="581" y="306" text-anchor="middle" class="sub">geoDNS</text>
+          </g>
+          <line x1="670" y1="296" x2="687" y2="296" class="wire"/>
+          <polygon points="687,291 696,296 687,301" class="head"/>
+          <g>
+            <rect x="698" y="248" width="170" height="96" rx="12" class="box ok"/>
+            <text x="783" y="282" text-anchor="middle" class="label">8 Shard</text>
+            <text x="783" y="306" text-anchor="middle" class="sub">write path</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">后四集才是缓存、无状态、多 Region、MQ 和分片。这张只回答顺序，不是生产终图。</span><span class="lang-en">The second row is cache, stateless web, multi-Region, then MQ and sharding. This is the order, not a production diagram.</span></figcaption>
+      </div>
+    </figure>
+    <p class="cite"><span class="lang-zh">时间盒在 <a class="chip" href="ch01.html">Ch01 · 4 步法</a>。数量级留给 <span class="chip soon">Ch03 · 粗略估算</span>。CAP、缓存、分片这里只点名。</span><span class="lang-en">The clock is <a class="chip" href="ch01.html">Ch01 · 4 steps</a>. Orders of magnitude wait in <span class="chip soon">Ch03 · estimates</span>. CAP, cache, and sharding get a name here.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">先问三类，再写假设</span><span class="lang-en">Three questions, then an assumption</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">中文</p>
+        <p>这是扩展叙事，不是短链那种功能题。Step 1 仍然先问，收成三类就停。</p>
+        <table>
+          <thead>
+            <tr><th>类</th><th>你问</th><th>为什么问</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>规模</td><td>百万是 DAU 还是注册总量？读 QPS 哪个数量级？</td><td>决定停在主从，还是必须分片</td></tr>
+            <tr><td>读写</td><td>读:写大概多少？有没有写完立刻读？</td><td>决定 replica、缓存、CDN 怎么摆</td></tr>
+            <tr><td>区域</td><td>用户是否跨洲？能否接受单 Region？</td><td>决定要不要多 Region。Active-Active 很贵</td></tr>
+          </tbody>
+        </table>
+        <p>还有时间再补两个：延迟是同城毫秒还是跨洲百毫秒；哪类数据要强一致。账户可以，点赞通常不要。</p>
+        <p class="say">假设 100 万 DAU、读多写少、先单 Region。全球用户再加 geoDNS。</p>
+        <p>问 5–7 个就停。假设错了对方会改。本章不讲估算公式。Step 2 前留 1–2 分钟：先把 QPS 和存储的数量级写上，用它检查每一集撑不撑得住。延迟叙事用内存、NVMe、同城、跨洲。单机加大内存、上 NVMe，往往比直觉能扛更多读。一上来就分布式，是 over-engineering。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">English</p>
+        <p>This prompt is an evolution story, not a feature problem like a short URL. Step 1 still asks first. Stop after three buckets.</p>
+        <table>
+          <thead>
+            <tr><th>Bucket</th><th>You ask</th><th>Why</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Scale</td><td>Is a million DAU or total signups? What order of magnitude is read QPS?</td><td>Stop at primary/replica, or you must shard</td></tr>
+            <tr><td>Read/write</td><td>Rough read:write? Any write-then-immediately-read?</td><td>Where replica, cache, and CDN sit</td></tr>
+            <tr><td>Region</td><td>Users across continents? Can we live with one Region?</td><td>Whether multi-Region is in scope. Active-Active is expensive</td></tr>
+          </tbody>
+        </table>
+        <p>Two more if you have room: same-city milliseconds or cross-continent hundreds of milliseconds; which data needs strong consistency. Accounts can. Likes usually should not.</p>
+        <p class="say">Assume 1M DAU, read-heavy, one Region first. Global users, then geoDNS.</p>
+        <p>Stop at 5–7. A wrong assumption they will correct. This chapter does not teach the formulas. Leave 1–2 minutes before step 2: write QPS and storage as an order of magnitude, then check each episode against it. The latency story is memory, NVMe, same-city, cross-continent. One box with NVMe and a lot of RAM often takes more reads than intuition says. Going distributed on minute one is over-engineering.</p>
+      </div>
+    </div>
+    <p class="cite"><span class="lang-zh">公式和 2026 延迟表在 <span class="chip soon">Ch03 · 粗略估算</span>。</span><span class="lang-en">Formulas and the 2026 latency table live in <span class="chip soon">Ch03 · estimates</span>.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">单机，拆层，然后 LB</span><span class="lang-en">One box, then a split, then an LB</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">中文</p>
+        <p>第 1 集：用户经 DNS 拿到公网 IP，HTTP 打到一台机器，上面同时跑 web 和数据库。DNS 用托管服务，先当成已知外部依赖。你要能补一句：权威 DNS 以后可以做 geo 路由，细节留到第 7 集。</p>
+        <p>新痛点说出口：web 和 DB 抢同一份 CPU、内存、NVMe；没有冗余，进程一挂全站挂；垂直加配有硬件天花板。</p>
+        <p>第 2 集：web 放业务，DB 单独一台。2026 默认先选关系库，PostgreSQL 这一类。有 schema、要事务、要 join，就别为了显得分布式改 NoSQL。纯 KV、纯时序、海量写入再换专用存储。</p>
+        <p>第 3 集：水平加 web，前面放托管 LB。LB 做两件事：健康检查摘掉坏节点，以及把流量摊开。机器同构，轮询就够；长连接再提最少连接。客户端只看见 LB 的公网入口，web 之间走内网。</p>
+        <p>停在这里要承认：DB 还是一台，读一涨先死在库上。session 如果还在某台 web 的内存里，LB 只能 sticky，水平扩展是假的。第 6 集再拆。现在先写上这块隐患。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">English</p>
+        <p>Episode 1: DNS hands the user a public IP, HTTP lands on one machine, and that machine runs web and the database. Treat DNS as a managed external. You should be able to add: authoritative DNS can do geo routing later. Details wait for episode 7.</p>
+        <p>Say the new pain: web and DB fight for the same CPU, RAM, and NVMe. No redundancy, so one process death takes the site. Vertical scale hits a hardware ceiling.</p>
+        <p>Episode 2: web holds the logic, DB gets its own machine. In 2026 the default is a relational store first, PostgreSQL-class. Schema, transactions, and joins do not get a NoSQL box just to look distributed. Pure KV, pure time-series, or massive writes, then a specialized store.</p>
+        <p>Episode 3: add web boxes horizontally, put a managed LB in front. The LB drops unhealthy nodes and spreads traffic. Homogeneous machines: round-robin is enough. Long-lived connections, then least-conn. Clients only see the LB. Web boxes talk on the private network.</p>
+        <p>Stop and admit it: the DB is still one machine, and reads die there first. If session still lives in one web’s memory, the LB has to be sticky, and horizontal scale is fake. Episode 6 splits that. Write the landmine on the board now.</p>
+      </div>
+    </div>
+    <figure class="deck">
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="200" y="150" width="240" height="96" rx="12" class="box alt"/>
+            <text x="320" y="184" text-anchor="middle" class="label">User</text>
+            <text x="320" y="208" text-anchor="middle" class="sub">DNS to IP</text>
+          </g>
+          <line x1="444" y1="198" x2="509" y2="198" class="wire"/>
+          <polygon points="509,193 518,198 509,203" class="head"/>
+          <g>
+            <rect x="520" y="150" width="240" height="96" rx="12" class="box"/>
+            <text x="640" y="184" text-anchor="middle" class="label">One box</text>
+            <text x="640" y="208" text-anchor="middle" class="sub">web + DB</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">入口只有这一台。先让请求有地方落地，再谈扩展。</span><span class="lang-en">One machine is the whole system. Give the request a place to land before you scale it.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="104" y="150" width="220" height="96" rx="12" class="box alt"/>
+            <text x="214" y="184" text-anchor="middle" class="label">User</text>
+            <text x="214" y="208" text-anchor="middle" class="sub">HTTP</text>
+          </g>
+          <line x1="328" y1="198" x2="359" y2="198" class="wire"/>
+          <polygon points="359,193 368,198 359,203" class="head"/>
+          <g>
+            <rect x="370" y="150" width="220" height="96" rx="12" class="box"/>
+            <text x="480" y="184" text-anchor="middle" class="label">Web</text>
+            <text x="480" y="208" text-anchor="middle" class="sub">app logic</text>
+          </g>
+          <line x1="594" y1="198" x2="625" y2="198" class="wire"/>
+          <polygon points="625,193 634,198 625,203" class="head"/>
+          <g>
+            <rect x="636" y="150" width="220" height="96" rx="12" class="box"/>
+            <text x="746" y="184" text-anchor="middle" class="label">DB</text>
+            <text x="746" y="208" text-anchor="middle" class="sub">relational</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">拆开是为了两边各自扩。关系库仍是默认。DB 还是单点，web 也还是一台。</span><span class="lang-en">Split so each side can scale. Relational stays the default. The DB is still a single point, and web is still one box.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="50" y="150" width="188" height="96" rx="12" class="box alt"/>
+            <text x="144" y="184" text-anchor="middle" class="label">User</text>
+            <text x="144" y="208" text-anchor="middle" class="sub">public HTTP</text>
+          </g>
+          <line x1="242" y1="198" x2="263" y2="198" class="wire"/>
+          <polygon points="263,193 272,198 263,203" class="head"/>
+          <g>
+            <rect x="274" y="150" width="188" height="96" rx="12" class="box"/>
+            <text x="368" y="184" text-anchor="middle" class="label">LB</text>
+            <text x="368" y="208" text-anchor="middle" class="sub">managed</text>
+          </g>
+          <line x1="466" y1="198" x2="487" y2="198" class="wire"/>
+          <polygon points="487,193 496,198 487,203" class="head"/>
+          <g>
+            <rect x="498" y="150" width="188" height="96" rx="12" class="box"/>
+            <text x="592" y="184" text-anchor="middle" class="label">Web</text>
+            <text x="592" y="208" text-anchor="middle" class="sub">one box</text>
+          </g>
+          <line x1="690" y1="198" x2="711" y2="198" class="wire"/>
+          <polygon points="711,193 720,198 711,203" class="head"/>
+          <g>
+            <rect x="722" y="150" width="188" height="96" rx="12" class="box"/>
+            <text x="816" y="184" text-anchor="middle" class="label">DB</text>
+            <text x="816" y="208" text-anchor="middle" class="sub">still one</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">先把托管 LB 放进入口。这一笔只解决「请求从哪进来」，库还没动。</span><span class="lang-en">Put a managed LB on the entry. This stroke only answers where the request comes in. The database has not moved.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="50" y="150" width="188" height="96" rx="12" class="box"/>
+            <text x="144" y="184" text-anchor="middle" class="label">LB</text>
+            <text x="144" y="208" text-anchor="middle" class="sub">health check</text>
+          </g>
+          <line x1="242" y1="198" x2="263" y2="198" class="wire"/>
+          <polygon points="263,193 272,198 263,203" class="head"/>
+          <g>
+            <rect x="274" y="150" width="188" height="96" rx="12" class="box ok"/>
+            <text x="368" y="184" text-anchor="middle" class="label">Web A</text>
+            <text x="368" y="208" text-anchor="middle" class="sub">alive</text>
+          </g>
+          <line x1="466" y1="198" x2="487" y2="198" class="wire"/>
+          <polygon points="487,193 496,198 487,203" class="head"/>
+          <g>
+            <rect x="498" y="150" width="188" height="96" rx="12" class="box ok"/>
+            <text x="592" y="184" text-anchor="middle" class="label">Web B</text>
+            <text x="592" y="208" text-anchor="middle" class="sub">alive</text>
+          </g>
+          <line x1="690" y1="198" x2="711" y2="198" class="wire"/>
+          <polygon points="711,193 720,198 711,203" class="head"/>
+          <g>
+            <rect x="722" y="150" width="188" height="96" rx="12" class="box bad"/>
+            <text x="816" y="184" text-anchor="middle" class="label">DB</text>
+            <text x="816" y="208" text-anchor="middle" class="sub">SPOF</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">web 可以水平加了。坏节点靠健康检查摘掉。新痛点画成红的：库仍是单点。</span><span class="lang-en">Web can scale out. Health checks drop a dead node. The new pain is in red: the database is still a single point.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="104" y="150" width="220" height="96" rx="12" class="box bad"/>
+            <text x="214" y="184" text-anchor="middle" class="label">LB sticky</text>
+            <text x="214" y="208" text-anchor="middle" class="sub">pinned user</text>
+          </g>
+          <line x1="328" y1="198" x2="359" y2="198" class="wire"/>
+          <polygon points="359,193 368,198 359,203" class="head"/>
+          <g>
+            <rect x="370" y="150" width="220" height="96" rx="12" class="box bad"/>
+            <text x="480" y="184" text-anchor="middle" class="label">Web A</text>
+            <text x="480" y="208" text-anchor="middle" class="sub">session in RAM</text>
+          </g>
+          <line x1="594" y1="198" x2="625" y2="198" class="wire"/>
+          <polygon points="625,193 634,198 625,203" class="head"/>
+          <g>
+            <rect x="636" y="150" width="220" height="96" rx="12" class="box alt"/>
+            <text x="746" y="184" text-anchor="middle" class="label">Web B</text>
+            <text x="746" y="208" text-anchor="middle" class="sub">idle for them</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">session 在内存里，加机器是假的。这台挂了会话没了，缩容还得搬家。先承认，第 6 集再拆。</span><span class="lang-en">Session in RAM makes extra web boxes fake. That box dies and the session dies. Scale-in has to migrate it. Admit it. Episode 6 removes it.</span></figcaption>
+      </div>
+    </figure>
+    <p class="cite"><span class="lang-zh">存储选型在 <span class="chip soon">Ch37 · 存储</span>。L4 / L7 和一致性哈希 LB 在 <span class="chip soon">Ch39 · 负载均衡</span>。HTTP 读路径在 <span class="chip soon">Ch40 · 协议</span>。</span><span class="lang-en">Storage choice is <span class="chip soon">Ch37 · storage</span>. L4 / L7 and consistent-hash LB are <span class="chip soon">Ch39 · load balancing</span>. The HTTP read path is <span class="chip soon">Ch40 · protocols</span>.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">主从、缓存，然后把 session 拿出去</span><span class="lang-en">Replica, cache, then session leaves the web</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">中文</p>
+        <p>第 4 集：web 能加了，典型业务仍是读多写少，读把单库打满。术语用 primary / replica。一次说完三件事：读摊开、数据有副本、库挂了还能切。</p>
+        <p>复制默认先说异步：快，主挂可能丢掉还没复制出去的写入。要更小的丢失窗口，再提半同步，至少一个 replica 收到才 ACK。等所有 replica 会把跨 AZ 延迟写进关键路径。金融可以谈，社交 timeline 通常不值得。</p>
+        <p>新痛点先记在白板上：failover 不是改一条 DNS；replica 会落后。用户写完立刻读 replica，可能读到旧值。这两点是后面的 deep dive。</p>
+        <p>第 5 集：热点读走 cache-aside。miss 回源再回填；写库之后删缓存，不改缓存。头像、JS、视频走 CDN 和对象存储。TTL 必须有。cache 自己要多副本，不然只是把 SPOF 搬了个地方。</p>
+        <p>2026 可以补一句：多个派生数据不想让应用双写时，用 CDC 听 WAL 或 binlog 做失效或回填。会 aside 就能过，CDC 是加分。穿透、击穿、雪崩只点名：空值 TTL、热点互斥、TTL 加抖动。</p>
+        <p>第 6 集：web 无状态。session 放到共享存储，或用 JWT，web 只验签。任意一台都能接，LB 不必粘滞。JWT 的代价说出来：主动登出要黑名单，或短 access 加 refresh。无状态副本才能按指标加实例，编排细节另读。新痛点：共享 session 是新依赖；单 Region 挂了，前面这些救不了跨洲用户。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">English</p>
+        <p>Episode 4: web can grow, and a typical product is still read-heavy, so reads fill the single database. Say primary / replica. Three wins in one breath: reads spread out, data has copies, a dead database can still fail over.</p>
+        <p>Default replication is async: fast, and a dead primary can lose writes that never reached a replica. A smaller loss window is semi-sync: ACK after at least one replica has it. Waiting for every replica puts cross-AZ latency on the critical path. Finance can talk about that. A social timeline usually should not.</p>
+        <p>Park the new pain on the board: failover is not “change a DNS record,” and replicas lag. A user who writes and immediately reads a replica can see a stale value. Those two are the deep dive.</p>
+        <p>Episode 5: hot reads go cache-aside. A miss reads origin and fills. After the DB write, delete the cache. Do not update it. Avatars, JS, and video go through a CDN and object storage. TTL is required. The cache needs its own replicas, or you only moved the SPOF.</p>
+        <p>One 2026 line: when several derived stores should not be dual-written by the app, use CDC on the WAL or binlog to invalidate or refill. Aside is enough to pass. CDC is extra credit. Penetration, breakdown, and stampede: name empty-value TTL, a mutex on the hot key, and TTL with jitter.</p>
+        <p>Episode 6: the web tier is stateless. Session lives in a shared store, or in a JWT the web only verifies. Any box can take the request, so the LB does not stick. Say the JWT cost: logout needs a denylist, or a short access token plus refresh. Only stateless replicas scale from a metric. Orchestration details live elsewhere. New pain: the shared session is a new dependency. A dead Region still does not save a user on another continent.</p>
+      </div>
+    </div>
+    <figure class="deck">
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="200" y="150" width="240" height="96" rx="12" class="box ok"/>
+            <text x="320" y="184" text-anchor="middle" class="label">Web xN</text>
+            <text x="320" y="208" text-anchor="middle" class="sub">scaled</text>
+          </g>
+          <line x1="444" y1="198" x2="509" y2="198" class="wire"/>
+          <polygon points="509,193 518,198 509,203" class="head"/>
+          <g>
+            <rect x="520" y="150" width="240" height="96" rx="12" class="box bad"/>
+            <text x="640" y="184" text-anchor="middle" class="label">Primary</text>
+            <text x="640" y="208" text-anchor="middle" class="sub">reads full</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">痛点换层了。web 不再是瓶颈，读把 primary 打满。</span><span class="lang-en">The bottleneck moved. Web is fine. Reads saturate the primary.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="104" y="150" width="220" height="96" rx="12" class="box"/>
+            <text x="214" y="184" text-anchor="middle" class="label">Web</text>
+            <text x="214" y="208" text-anchor="middle" class="sub">app</text>
+          </g>
+          <line x1="328" y1="198" x2="359" y2="198" class="wire"/>
+          <polygon points="359,193 368,198 359,203" class="head"/>
+          <g>
+            <rect x="370" y="150" width="220" height="96" rx="12" class="box"/>
+            <text x="480" y="184" text-anchor="middle" class="label">Primary</text>
+            <text x="480" y="208" text-anchor="middle" class="sub">writes, async</text>
+          </g>
+          <line x1="594" y1="198" x2="625" y2="198" class="wire"/>
+          <polygon points="625,193 634,198 625,203" class="head"/>
+          <g>
+            <rect x="636" y="150" width="220" height="96" rx="12" class="box ok"/>
+            <text x="746" y="184" text-anchor="middle" class="label">Replica</text>
+            <text x="746" y="208" text-anchor="middle" class="sub">reads, may lag</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">primary 接写，replica 接读。先说异步。落后和丢数据先记着，不要在这一笔承诺零丢失。</span><span class="lang-en">Primary takes writes, replicas take reads. Say async first. Lag and loss stay on the board. Do not promise zero loss on this stroke.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="50" y="150" width="188" height="96" rx="12" class="box"/>
+            <text x="144" y="184" text-anchor="middle" class="label">Web</text>
+            <text x="144" y="208" text-anchor="middle" class="sub">read path</text>
+          </g>
+          <line x1="242" y1="198" x2="263" y2="198" class="wire"/>
+          <polygon points="263,193 272,198 263,203" class="head"/>
+          <g>
+            <rect x="274" y="150" width="188" height="96" rx="12" class="box ok"/>
+            <text x="368" y="184" text-anchor="middle" class="label">Cache</text>
+            <text x="368" y="208" text-anchor="middle" class="sub">aside</text>
+          </g>
+          <line x1="466" y1="198" x2="487" y2="198" class="wire"/>
+          <polygon points="487,193 496,198 487,203" class="head"/>
+          <g>
+            <rect x="498" y="150" width="188" height="96" rx="12" class="box"/>
+            <text x="592" y="184" text-anchor="middle" class="label">Primary</text>
+            <text x="592" y="208" text-anchor="middle" class="sub">miss + writes</text>
+          </g>
+          <line x1="690" y1="198" x2="711" y2="198" class="wire"/>
+          <polygon points="711,193 720,198 711,203" class="head"/>
+          <g>
+            <rect x="722" y="150" width="188" height="96" rx="12" class="box"/>
+            <text x="816" y="184" text-anchor="middle" class="label">Replica</text>
+            <text x="816" y="208" text-anchor="middle" class="sub">read miss</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">热点读先打缓存。miss 再回源回填。写库之后删缓存。这一笔还没处理静态大文件。</span><span class="lang-en">Hot reads hit cache first. A miss goes to origin and fills. After a DB write, delete the cache. Static files are not on this stroke yet.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="104" y="150" width="220" height="96" rx="12" class="box alt"/>
+            <text x="214" y="184" text-anchor="middle" class="label">Client</text>
+            <text x="214" y="208" text-anchor="middle" class="sub">static files</text>
+          </g>
+          <line x1="328" y1="198" x2="359" y2="198" class="wire"/>
+          <polygon points="359,193 368,198 359,203" class="head"/>
+          <g>
+            <rect x="370" y="150" width="220" height="96" rx="12" class="box ok"/>
+            <text x="480" y="184" text-anchor="middle" class="label">CDN</text>
+            <text x="480" y="208" text-anchor="middle" class="sub">TTL</text>
+          </g>
+          <line x1="594" y1="198" x2="625" y2="198" class="wire"/>
+          <polygon points="625,193 634,198 625,203" class="head"/>
+          <g>
+            <rect x="636" y="150" width="220" height="96" rx="12" class="box"/>
+            <text x="746" y="184" text-anchor="middle" class="label">Object store</text>
+            <text x="746" y="208" text-anchor="middle" class="sub">origin</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">头像、JS、视频离开应用路径。TTL 太长会 stale，太短会打爆源站。业务读仍走上一笔的 cache-aside。</span><span class="lang-en">Avatars, JS, and video leave the app path. A long TTL goes stale. A short one blows origin. App reads still use cache-aside from the previous stroke.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="34" y="40" width="150" height="96" rx="12" class="box alt"/>
+            <text x="109" y="74" text-anchor="middle" class="label">Client</text>
+            <text x="109" y="98" text-anchor="middle" class="sub">any user</text>
+          </g>
+          <line x1="188" y1="88" x2="201" y2="88" class="wire"/>
+          <polygon points="201,83 210,88 201,93" class="head"/>
+          <g>
+            <rect x="212" y="40" width="150" height="96" rx="12" class="box"/>
+            <text x="287" y="74" text-anchor="middle" class="label">LB</text>
+            <text x="287" y="98" text-anchor="middle" class="sub">no sticky</text>
+          </g>
+          <line x1="366" y1="88" x2="379" y2="88" class="wire"/>
+          <polygon points="379,83 388,88 379,93" class="head"/>
+          <g>
+            <rect x="390" y="40" width="150" height="96" rx="12" class="box ok"/>
+            <text x="465" y="74" text-anchor="middle" class="label">Web</text>
+            <text x="465" y="98" text-anchor="middle" class="sub">stateless</text>
+          </g>
+          <line x1="544" y1="88" x2="549" y2="88" class="wire"/>
+          <polygon points="549,83 558,88 549,93" class="head"/>
+          <g>
+            <rect x="560" y="40" width="150" height="96" rx="12" class="box alt"/>
+            <text x="635" y="74" text-anchor="middle" class="label">Session</text>
+            <text x="635" y="98" text-anchor="middle" class="sub">or JWT</text>
+          </g>
+          <line x1="465" y1="136" x2="465" y2="226" class="wire"/>
+          <polygon points="460,226 465,234 470,226" class="head"/>
+          <g>
+            <rect x="390" y="236" width="150" height="96" rx="12" class="box"/>
+            <text x="465" y="270" text-anchor="middle" class="label">Cache</text>
+            <text x="465" y="294" text-anchor="middle" class="sub">aside</text>
+          </g>
+          <line x1="544" y1="284" x2="557" y2="284" class="wire"/>
+          <polygon points="557,279 566,284 557,289" class="head"/>
+          <g>
+            <rect x="568" y="236" width="150" height="96" rx="12" class="box"/>
+            <text x="643" y="270" text-anchor="middle" class="label">Primary</text>
+            <text x="643" y="294" text-anchor="middle" class="sub">writes</text>
+          </g>
+          <line x1="722" y1="284" x2="735" y2="284" class="wire"/>
+          <polygon points="735,279 744,284 735,289" class="head"/>
+          <g>
+            <rect x="746" y="236" width="150" height="96" rx="12" class="box"/>
+            <text x="821" y="270" text-anchor="middle" class="label">Replica</text>
+            <text x="821" y="294" text-anchor="middle" class="sub">reads</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">到第 6 集，白板长成这样：LB 不再粘滞，session 在共享存储或 JWT，读走缓存和 replica，写进 primary。CDN 在旁边接静态文件。</span><span class="lang-en">By episode 6 the board looks like this: the LB does not stick, session is shared or a JWT, reads use cache and a replica, writes hit the primary. The CDN sits beside this for static files.</span></figcaption>
+      </div>
+    </figure>
+    <p class="cite"><span class="lang-zh">复制和事务在 <span class="chip soon">Ch41 · 复制与分片</span>。缓存和 CDN 在 <span class="chip soon">Ch38 · 缓存</span>。无状态和 LB 在 <span class="chip soon">Ch39 · 负载均衡</span>。按指标扩实例在 <span class="chip soon">Ch42 · 弹性</span>。</span><span class="lang-en">Replication and transactions are <span class="chip soon">Ch41 · replication and sharding</span>. Cache and CDN are <span class="chip soon">Ch38 · cache</span>. Stateless web and the LB are <span class="chip soon">Ch39 · load balancing</span>. Scaling replicas from a metric is <span class="chip soon">Ch42 · resilience</span>.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">多 Region，然后才是 MQ 和分片</span><span class="lang-en">Multi-Region, then MQ and sharding</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">中文</p>
+        <p>第 7 集的痛点：单 Region 故障域太大，跨洲用户每次 RTT 都是百毫秒级。同一 Region 里多 AZ 是 2026 的默认高可用，不是加分项。真要容灾和就近访问，入口用 geoDNS 或 Anycast，按位置和健康检查切流量。</p>
+        <table>
+          <thead>
+            <tr><th></th><th>Active-Passive</th><th>Active-Active</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>流量</td><td>一个 Region 接写，另一个热备</td><td>两个都接</td></tr>
+            <tr><td>failover</td><td>分钟级切主</td><td>本来就活着</td></tr>
+            <tr><td>数据</td><td>单向复制，冲突少</td><td>双向写，冲突是 hard part</td></tr>
+            <tr><td>成本</td><td>备可以降配</td><td>接近两份活资源</td></tr>
+          </tbody>
+        </table>
+        <p>Active-Active 不是免费的全球低延迟。跨洲同步，要么为了一致加延迟，要么为了可用接受短暂分叉。按数据选，不要按整站选：账户可以偏一致，Feed 可以偏可用。常见逃法是用户固定写归属 Region，而不是一上来全球同步写。对象存储的跨 Region 复制好讲，疼的是数据库。</p>
+        <p>第 8 集上半：上传转码、通知、刷派生数据如果同步做，写路径被慢任务堵住，web 和 worker 也不能分开扩。写入先落到托管 Kafka 这一类日志，web 尽快返回，积压就加消费者。生产默认 at-least-once，所以消费方用业务唯一键做幂等。exactly-once 作为口号很响，工程上多半是至少一次加上幂等。MQ 解决不了单库写天花板。</p>
+        <p>第 8 集下半：主从只扩读。按分片键把数据拆开。键要高基数、分布均匀、常用点查落到一个 shard。<code>user_id</code> 通常可以；<code>gender</code> 或单调时间戳当唯一键容易热点。2026 第一句：能用原生分布式 SQL 就优先，让存储层切 range、再平衡、做多副本。面试仍会问手搓分片，因为 hard part 没变：分片键、reshard、热点、跨片 join。跨片 join 和跨片事务优先避开，同一聚合的数据放一起。到这里演进可以收住，转 Step 3。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">English</p>
+        <p>Episode 7 pain: one Region is too big a failure domain, and every cross-continent RTT is hundreds of milliseconds. Several AZs inside one Region is default HA in 2026, not extra credit. Real disaster recovery and proximity mean geoDNS or Anycast at the edge, switching on location and health.</p>
+        <table>
+          <thead>
+            <tr><th></th><th>Active-Passive</th><th>Active-Active</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Traffic</td><td>One Region writes, the other is hot standby</td><td>Both take traffic</td></tr>
+            <tr><td>failover</td><td>Minute-class cutover</td><td>Already live</td></tr>
+            <tr><td>Data</td><td>One-way replication, few conflicts</td><td>Bidirectional writes. Conflict is the hard part</td></tr>
+            <tr><td>Cost</td><td>Standby can be smaller</td><td>Close to two live copies</td></tr>
+          </tbody>
+        </table>
+        <p>Active-Active is not free global low latency. Cross-continent sync either adds latency for consistency, or accepts a brief fork for availability. Pick per data, not per whole site: accounts can lean consistent, a feed can lean available. The usual escape is a user always writes their home Region, not global sync-on-write from minute one. Object storage replication is the easy sentence. The database is the pain.</p>
+        <p>Episode 8, first half: if transcode, notifications, and derived data run on the request, slow jobs block the write path, and web and workers cannot scale apart. Land the event on managed Kafka, or a similar log. The web returns fast. Backlog means add consumers. Production default is at-least-once, so the consumer is idempotent on a business unique key. exactly-once is usually at-least-once plus idempotency. MQ does not lift the single-DB write ceiling.</p>
+        <p>Second half: primary/replica only scales reads. Split rows by a shard key. The key needs high cardinality, an even spread, and point lookups on one shard. <code>user_id</code> usually works. <code>gender</code>, or a monotonic timestamp as the only key, hotspots. First sentence in 2026: prefer native distributed SQL, and let the storage layer split ranges, rebalance, and keep replicas. Interviews still ask for hand-rolled sharding, because the hard part did not change: shard key, reshard, hot keys, cross-shard join. Avoid cross-shard joins and cross-shard transactions. Keep one aggregate together. Park the evolution here and switch to step 3.</p>
+      </div>
+    </div>
+    <figure class="deck">
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="350" y="150" width="260" height="96" rx="12" class="box bad"/>
+            <text x="480" y="184" text-anchor="middle" class="label">One Region</text>
+            <text x="480" y="208" text-anchor="middle" class="sub">failure domain</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">前面的 LB、缓存、副本都在一个 Region 里。这个故障域仍然太大，跨洲也仍然慢。</span><span class="lang-en">LB, cache, and replicas so far all sit in one Region. The failure domain is still too big, and another continent is still slow.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="160" y="162" width="240" height="96" rx="12" class="box"/>
+            <text x="280" y="196" text-anchor="middle" class="label">geoDNS</text>
+            <text x="280" y="220" text-anchor="middle" class="sub">or Anycast</text>
+          </g>
+          <line x1="400" y1="210" x2="470" y2="210" class="wire"/>
+          <line x1="470" y1="104" x2="470" y2="308" class="wire"/>
+          <line x1="470" y1="104" x2="549" y2="104" class="wire"/>
+          <polygon points="549,99 558,104 549,109" class="head"/>
+          <line x1="470" y1="308" x2="549" y2="308" class="wire"/>
+          <polygon points="549,303 558,308 549,313" class="head"/>
+          <g>
+            <rect x="560" y="56" width="220" height="96" rx="12" class="box ok"/>
+            <text x="670" y="90" text-anchor="middle" class="label">Region A</text>
+            <text x="670" y="114" text-anchor="middle" class="sub">near users</text>
+          </g>
+          <g>
+            <rect x="560" y="260" width="220" height="96" rx="12" class="box ok"/>
+            <text x="670" y="294" text-anchor="middle" class="label">Region B</text>
+            <text x="670" y="318" text-anchor="middle" class="sub">near users</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">入口按位置和健康检查把用户送进就近 Region。两个 Region 都画出来，还没说谁接写。</span><span class="lang-en">The edge sends users to a nearby Region by location and health. Both Regions are on the board. Who takes writes is the next sentence.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="104" y="150" width="220" height="96" rx="12" class="box"/>
+            <text x="214" y="184" text-anchor="middle" class="label">Web</text>
+            <text x="214" y="208" text-anchor="middle" class="sub">return fast</text>
+          </g>
+          <line x1="328" y1="198" x2="359" y2="198" class="wire"/>
+          <polygon points="359,193 368,198 359,203" class="head"/>
+          <g>
+            <rect x="370" y="150" width="220" height="96" rx="12" class="box ok"/>
+            <text x="480" y="184" text-anchor="middle" class="label">Kafka</text>
+            <text x="480" y="208" text-anchor="middle" class="sub">at-least-once</text>
+          </g>
+          <line x1="594" y1="198" x2="625" y2="198" class="wire"/>
+          <polygon points="625,193 634,198 625,203" class="head"/>
+          <g>
+            <rect x="636" y="150" width="220" height="96" rx="12" class="box"/>
+            <text x="746" y="184" text-anchor="middle" class="label">Worker</text>
+            <text x="746" y="208" text-anchor="middle" class="sub">idempotent</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">慢任务离开写路径。web 写进日志就返回，worker 自己扩。重复投递靠消费方幂等，不靠口号。</span><span class="lang-en">Slow jobs leave the write path. Web appends to the log and returns. Workers scale on their own. Duplicates are handled by an idempotent consumer.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="160" y="162" width="240" height="96" rx="12" class="box"/>
+            <text x="280" y="196" text-anchor="middle" class="label">user_id</text>
+            <text x="280" y="220" text-anchor="middle" class="sub">shard key</text>
+          </g>
+          <line x1="400" y1="210" x2="470" y2="210" class="wire"/>
+          <line x1="470" y1="104" x2="470" y2="308" class="wire"/>
+          <line x1="470" y1="104" x2="549" y2="104" class="wire"/>
+          <polygon points="549,99 558,104 549,109" class="head"/>
+          <line x1="470" y1="308" x2="549" y2="308" class="wire"/>
+          <polygon points="549,303 558,308 549,313" class="head"/>
+          <g>
+            <rect x="560" y="56" width="220" height="96" rx="12" class="box ok"/>
+            <text x="670" y="90" text-anchor="middle" class="label">Shard A</text>
+            <text x="670" y="114" text-anchor="middle" class="sub">even</text>
+          </g>
+          <g>
+            <rect x="560" y="260" width="220" height="96" rx="12" class="box ok"/>
+            <text x="670" y="294" text-anchor="middle" class="label">Shard B</text>
+            <text x="670" y="318" text-anchor="middle" class="sub">even</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">写天花板用分片键拆开。点查要落到一个 shard。能用分布式 SQL，就让存储层做再平衡，键你仍然要讲清楚。</span><span class="lang-en">The write ceiling splits on a shard key. A point lookup should hit one shard. If you can use distributed SQL, let it rebalance. You still explain the key.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="104" y="150" width="220" height="96" rx="12" class="box bad"/>
+            <text x="214" y="184" text-anchor="middle" class="label">Hot key</text>
+            <text x="214" y="208" text-anchor="middle" class="sub">one shard</text>
+          </g>
+          <line x1="328" y1="198" x2="359" y2="198" class="wire"/>
+          <polygon points="359,193 368,198 359,203" class="head"/>
+          <g>
+            <rect x="370" y="150" width="220" height="96" rx="12" class="box bad"/>
+            <text x="480" y="184" text-anchor="middle" class="label">Reshard</text>
+            <text x="480" y="208" text-anchor="middle" class="sub">moves rows</text>
+          </g>
+          <line x1="594" y1="198" x2="625" y2="198" class="wire"/>
+          <polygon points="625,193 634,198 625,203" class="head"/>
+          <g>
+            <rect x="636" y="150" width="220" height="96" rx="12" class="box bad"/>
+            <text x="746" y="184" text-anchor="middle" class="label">Cross-shard</text>
+            <text x="746" y="208" text-anchor="middle" class="sub">join, txn</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">分片的新痛点就这三样。演进叙事收到这里，转去挖 failover 或缓存一致性。</span><span class="lang-en">Those three are the new pain. Park the evolution story and deep-dive failover or cache consistency.</span></figcaption>
+      </div>
+    </figure>
+    <p class="cite"><span class="lang-zh">CAP / PACELC 在 <span class="chip soon">Ch36 · Trade-off</span>。日志和投递语义在 <span class="chip soon">Ch42 · 消息</span>。分片键和一致性哈希在 <span class="chip soon">Ch05 · 一致性哈希</span><span class="chip soon">Ch41 · 分片</span>。</span><span class="lang-en">CAP / PACELC is <span class="chip soon">Ch36 · trade-offs</span>. The log and delivery semantics are <span class="chip soon">Ch42 · messaging</span>. Shard keys and consistent hashing are <span class="chip soon">Ch05 · consistent hashing</span><span class="chip soon">Ch41 · sharding</span>.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">失败路径：failover 和读到旧值</span><span class="lang-en">Failure path: failover and a stale read</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">中文</p>
+        <p>Step 3 挑 1–2 个挖透。这题的 hard part 通常是下面两块，外加分片键。三个都浅，不如一块讲完。</p>
+        <p>failover 五步：探测（连续健康检查失败）→ 选本（复制位点最新的 replica）→ 对齐（追上旧 primary）→ 切路由 → 补副本。异步下，ACK 了但还没进 replica 的写入会丢。这就是 RPO。半同步缩小窗口，代价是写延迟。说你接受多大窗口，用什么复制模式买这个窗口。</p>
+        <p>写后立刻读是必追问。三种接法，说清 trade-off 即可。</p>
+        <table>
+          <thead>
+            <tr><th>做法</th><th>效果</th><th>代价</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>写后短时间读 primary</td><td>该用户 read-your-writes</td><td>primary 读压力上去</td></tr>
+            <tr><td>带版本，replica 没追上就回 primary</td><td>更准</td><td>要暴露位点或版本</td></tr>
+            <tr><td>半同步</td><td>stale 窗口变短</td><td>写变慢</td></tr>
+          </tbody>
+        </table>
+        <p>单调读：同一用户钉在同一个 replica，别让 LB 在落后程度不同的副本之间跳。刷新之后数据变少，就是这个 bug。</p>
+        <p>缓存写路径是先写 DB，再删缓存。删是幂等的。并发下「写库同时 SET 缓存」会把旧值盖回去。删完靠下次读回填，TTL 当兜底。仍可能发生：读拿到旧行，写删了空缓存，读再把旧行 SET 回去。短 TTL 把窗口限住。下游多（缓存、搜索、数仓）就提 CDC，不要在白板上现编一套双写协议。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">English</p>
+        <p>In step 3, pick one or two and go to the bottom. The hard part here is usually the next two, plus the shard key. Skimming all three scores worse than finishing one.</p>
+        <p>Failover in five spoken steps: detect consecutive health-check failures, pick the replica with the newest position, catch it up, cut routing, rebuild replicas. Under async, a write can be ACK’d and still never reach a replica. That loss is RPO. Semi-sync shrinks the window and slows writes. Say how large a window you accept, and which mode buys it.</p>
+        <p>Read-your-writes is a must-follow-up. Three moves. Name the trade-off.</p>
+        <table>
+          <thead>
+            <tr><th>Move</th><th>Effect</th><th>Cost</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>After a write, read primary for a short window</td><td>That user gets read-your-writes</td><td>Primary read pressure goes up</td></tr>
+            <tr><td>Client carries a version; lagging replica falls back to primary</td><td>More precise</td><td>You expose a position or version</td></tr>
+            <tr><td>Semi-sync</td><td>Shorter stale window</td><td>Writes get slower</td></tr>
+          </tbody>
+        </table>
+        <p>Monotonic reads: pin the same user to the same replica. If the LB hops across replicas that lag by different amounts, a refresh makes the data shrink.</p>
+        <p>The cache write path is write the DB, then delete the cache. Delete is idempotent. SET in the same breath as the DB write can put the old value back under concurrency. The next read fills. TTL is the net. A race remains: a read holds the old row, a write deletes an empty cache, the read SETs the old row. A short TTL bounds that window. Several downstreams (cache, search, warehouse) means mention CDC. Do not invent a dual-write protocol on the board.</p>
+      </div>
+    </div>
+    <figure class="deck">
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="104" y="150" width="220" height="96" rx="12" class="box alt"/>
+            <text x="214" y="184" text-anchor="middle" class="label">App</text>
+            <text x="214" y="208" text-anchor="middle" class="sub">POST</text>
+          </g>
+          <line x1="328" y1="198" x2="359" y2="198" class="wire"/>
+          <polygon points="359,193 368,198 359,203" class="head"/>
+          <g>
+            <rect x="370" y="150" width="220" height="96" rx="12" class="box"/>
+            <text x="480" y="184" text-anchor="middle" class="label">Web</text>
+            <text x="480" y="208" text-anchor="middle" class="sub">INSERT</text>
+          </g>
+          <line x1="594" y1="198" x2="625" y2="198" class="wire"/>
+          <polygon points="625,193 634,198 625,203" class="head"/>
+          <g>
+            <rect x="636" y="150" width="220" height="96" rx="12" class="box ok"/>
+            <text x="746" y="184" text-anchor="middle" class="label">Primary</text>
+            <text x="746" y="208" text-anchor="middle" class="sub">ACK</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">写成功只说明 primary ACK 了。异步复制下，这行可能还没到任何 replica。</span><span class="lang-en">A successful write means the primary ACK’d. Under async replication, that row may not be on any replica yet.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="104" y="150" width="220" height="96" rx="12" class="box alt"/>
+            <text x="214" y="184" text-anchor="middle" class="label">App</text>
+            <text x="214" y="208" text-anchor="middle" class="sub">GET now</text>
+          </g>
+          <line x1="328" y1="198" x2="359" y2="198" class="wire"/>
+          <polygon points="359,193 368,198 359,203" class="head"/>
+          <g>
+            <rect x="370" y="150" width="220" height="96" rx="12" class="box"/>
+            <text x="480" y="184" text-anchor="middle" class="label">Web</text>
+            <text x="480" y="208" text-anchor="middle" class="sub">SELECT</text>
+          </g>
+          <line x1="594" y1="198" x2="625" y2="198" class="wire"/>
+          <polygon points="625,193 634,198 625,203" class="head"/>
+          <g>
+            <rect x="636" y="150" width="220" height="96" rx="12" class="box bad"/>
+            <text x="746" y="184" text-anchor="middle" class="label">Replica</text>
+            <text x="746" y="208" text-anchor="middle" class="sub">stale</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">刷新看不到刚写的数据，是因为读到了落后的 replica。这就是 read-your-writes。</span><span class="lang-en">A refresh that misses the write hit a lagging replica. That is read-your-writes.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="104" y="150" width="220" height="96" rx="12" class="box alt"/>
+            <text x="214" y="184" text-anchor="middle" class="label">Same user</text>
+            <text x="214" y="208" text-anchor="middle" class="sub">just wrote</text>
+          </g>
+          <line x1="328" y1="198" x2="359" y2="198" class="wire"/>
+          <polygon points="359,193 368,198 359,203" class="head"/>
+          <g>
+            <rect x="370" y="150" width="220" height="96" rx="12" class="box"/>
+            <text x="480" y="184" text-anchor="middle" class="label">Web</text>
+            <text x="480" y="208" text-anchor="middle" class="sub">short window</text>
+          </g>
+          <line x1="594" y1="198" x2="625" y2="198" class="wire"/>
+          <polygon points="625,193 634,198 625,203" class="head"/>
+          <g>
+            <rect x="636" y="150" width="220" height="96" rx="12" class="box ok"/>
+            <text x="746" y="184" text-anchor="middle" class="label">Primary</text>
+            <text x="746" y="208" text-anchor="middle" class="sub">fresh read</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">最容易讲完的修法：这个用户写完后的短窗口读 primary。代价是写库又承担一部分读。</span><span class="lang-en">The easiest fix to finish: for a short window after that user’s write, read the primary. The cost is extra reads on the writer.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="50" y="150" width="188" height="96" rx="12" class="box"/>
+            <text x="144" y="184" text-anchor="middle" class="label">Detect</text>
+            <text x="144" y="208" text-anchor="middle" class="sub">health fails</text>
+          </g>
+          <line x1="242" y1="198" x2="263" y2="198" class="wire"/>
+          <polygon points="263,193 272,198 263,203" class="head"/>
+          <g>
+            <rect x="274" y="150" width="188" height="96" rx="12" class="box"/>
+            <text x="368" y="184" text-anchor="middle" class="label">Pick</text>
+            <text x="368" y="208" text-anchor="middle" class="sub">newest log</text>
+          </g>
+          <line x1="466" y1="198" x2="487" y2="198" class="wire"/>
+          <polygon points="487,193 496,198 487,203" class="head"/>
+          <g>
+            <rect x="498" y="150" width="188" height="96" rx="12" class="box"/>
+            <text x="592" y="184" text-anchor="middle" class="label">Catch up</text>
+            <text x="592" y="208" text-anchor="middle" class="sub">replay</text>
+          </g>
+          <line x1="690" y1="198" x2="711" y2="198" class="wire"/>
+          <polygon points="711,193 720,198 711,203" class="head"/>
+          <g>
+            <rect x="722" y="150" width="188" height="96" rx="12" class="box ok"/>
+            <text x="816" y="184" text-anchor="middle" class="label">Cut over</text>
+            <text x="816" y="208" text-anchor="middle" class="sub">then rebuild</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">切主是这四步，做完再补副本。没复制到的 ACK 写进 RPO，不要改口说不会丢。</span><span class="lang-en">Cutover is these four steps, then you rebuild replicas. ACK’d writes that never replicated are RPO. Do not switch to “we never lose data.”</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="104" y="150" width="220" height="96" rx="12" class="box ok"/>
+            <text x="214" y="184" text-anchor="middle" class="label">Write DB</text>
+            <text x="214" y="208" text-anchor="middle" class="sub">first</text>
+          </g>
+          <line x1="328" y1="198" x2="359" y2="198" class="wire"/>
+          <polygon points="359,193 368,198 359,203" class="head"/>
+          <g>
+            <rect x="370" y="150" width="220" height="96" rx="12" class="box ok"/>
+            <text x="480" y="184" text-anchor="middle" class="label">Delete cache</text>
+            <text x="480" y="208" text-anchor="middle" class="sub">idempotent</text>
+          </g>
+          <line x1="594" y1="198" x2="625" y2="198" class="wire"/>
+          <polygon points="625,193 634,198 625,203" class="head"/>
+          <g>
+            <rect x="636" y="150" width="220" height="96" rx="12" class="box bad"/>
+            <text x="746" y="184" text-anchor="middle" class="label">SET old</text>
+            <text x="746" y="208" text-anchor="middle" class="sub">race</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">标准写路径是写库再删缓存。并发 SET 仍可能把旧值写回，用短 TTL 限窗口。下游多就提 CDC。</span><span class="lang-en">The standard write is DB, then delete cache. A concurrent SET can still write the old value back. A short TTL bounds it. Many downstreams, mention CDC.</span></figcaption>
+      </div>
+    </figure>
+    <p class="cite"><span class="lang-zh">复制位点、半同步和跨片事务在 <span class="chip soon">Ch41 · 复制与事务</span>。CDC 和缓存异常在 <span class="chip soon">Ch38 · 缓存</span>。</span><span class="lang-en">Replication position, semi-sync, and cross-shard transactions are <span class="chip soon">Ch41 · replication and transactions</span>. CDC and cache failure modes are <span class="chip soon">Ch38 · cache</span>.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">四个 trade-off，各选一边</span><span class="lang-en">Four trade-offs, pick a side</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">中文</p>
+        <p>面试官要的是你选边，并说出代价。下面四笔按追问出现的顺序画。默认答案放左边或中间，你准备放弃的那一侧标出来。</p>
+        <p>复制：先异步。对方追丢数据，再把半同步摆上来。等所有副本，只在对方明确要更小 RPO、且能接受写变慢时才谈。</p>
+        <p>会话：sticky 是过渡或反例。正文默认共享 session 或 JWT。两种都要说出作废和依赖。</p>
+        <p>多 Region：默认同 Region 多 AZ，跨 Region 先 Active-Passive。Active-Active 的 hard part 是双向写冲突。</p>
+        <p>分片：<code>hash % N</code> 改 N 几乎全量搬家。能用分布式 SQL 就让它再平衡。手搓时提前说迁移窗口，不要假装取模能活到很大。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">English</p>
+        <p>They want you to pick a side and name the cost. Draw these four in the order follow-ups show up. The default sits on the left or in the middle. Mark the side you are ready to drop.</p>
+        <p>Replication: async first. If they push on data loss, bring up semi-sync. Waiting for every replica only if they ask for a smaller RPO and will accept slower writes.</p>
+        <p>Session: sticky is a transition or a counter-example. The body default is a shared session or a JWT. Both need a sentence on revoke and on the new dependency.</p>
+        <p>Multi-Region: default is several AZs in one Region. Across Regions, start Active-Passive. The hard part of Active-Active is a bidirectional write conflict.</p>
+        <p>Sharding: change N on <code>hash % N</code> and you move almost every row. Distributed SQL rebalances for you when you can use it. If you hand-roll, say the migration window up front. Modulo does not quietly survive a much larger N.</p>
+      </div>
+    </div>
+    <figure class="deck">
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="104" y="150" width="220" height="96" rx="12" class="box ok"/>
+            <text x="214" y="184" text-anchor="middle" class="label">Async</text>
+            <text x="214" y="208" text-anchor="middle" class="sub">fast, RPO &gt; 0</text>
+          </g>
+          <line x1="328" y1="198" x2="359" y2="198" class="wire"/>
+          <polygon points="359,193 368,198 359,203" class="head"/>
+          <g>
+            <rect x="370" y="150" width="220" height="96" rx="12" class="box"/>
+            <text x="480" y="184" text-anchor="middle" class="label">Semi-sync</text>
+            <text x="480" y="208" text-anchor="middle" class="sub">one replica</text>
+          </g>
+          <line x1="594" y1="198" x2="625" y2="198" class="wire"/>
+          <polygon points="625,193 634,198 625,203" class="head"/>
+          <g>
+            <rect x="636" y="150" width="220" height="96" rx="12" class="box bad"/>
+            <text x="746" y="184" text-anchor="middle" class="label">Sync all</text>
+            <text x="746" y="208" text-anchor="middle" class="sub">AZ on write</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">默认异步。要更小的丢失窗口，停在半同步。等齐所有 replica，把跨 AZ 延迟写进了关键路径。</span><span class="lang-en">Default async. A smaller loss window stops at semi-sync. Waiting for every replica puts cross-AZ latency on the write.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="104" y="150" width="220" height="96" rx="12" class="box bad"/>
+            <text x="214" y="184" text-anchor="middle" class="label">Sticky</text>
+            <text x="214" y="208" text-anchor="middle" class="sub">session in RAM</text>
+          </g>
+          <line x1="328" y1="198" x2="359" y2="198" class="wire"/>
+          <polygon points="359,193 368,198 359,203" class="head"/>
+          <g>
+            <rect x="370" y="150" width="220" height="96" rx="12" class="box ok"/>
+            <text x="480" y="184" text-anchor="middle" class="label">Shared store</text>
+            <text x="480" y="208" text-anchor="middle" class="sub">any web</text>
+          </g>
+          <line x1="594" y1="198" x2="625" y2="198" class="wire"/>
+          <polygon points="625,193 634,198 625,203" class="head"/>
+          <g>
+            <rect x="636" y="150" width="220" height="96" rx="12" class="box ok"/>
+            <text x="746" y="184" text-anchor="middle" class="label">JWT</text>
+            <text x="746" y="208" text-anchor="middle" class="sub">verify only</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">sticky 能撑一阵，挂机丢会话。共享 session 多一个依赖。JWT 要单独做作废。</span><span class="lang-en">Sticky survives for a while, then a dead box drops the session. A shared store is a new dependency. A JWT needs its own revoke path.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="200" y="150" width="240" height="96" rx="12" class="box ok"/>
+            <text x="320" y="184" text-anchor="middle" class="label">Passive</text>
+            <text x="320" y="208" text-anchor="middle" class="sub">one writer</text>
+          </g>
+          <line x1="444" y1="198" x2="509" y2="198" class="wire"/>
+          <polygon points="509,193 518,198 509,203" class="head"/>
+          <g>
+            <rect x="520" y="150" width="240" height="96" rx="12" class="box"/>
+            <text x="640" y="184" text-anchor="middle" class="label">Active-Active</text>
+            <text x="640" y="208" text-anchor="middle" class="sub">write conflict</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">跨 Region 先热备。两个都接写，冲突和延迟一起出现。按数据选一致还是可用。</span><span class="lang-en">Across Regions, start with a hot standby. Both sides writing brings conflicts and latency together. Pick consistency or availability per data.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="200" y="150" width="240" height="96" rx="12" class="box bad"/>
+            <text x="320" y="184" text-anchor="middle" class="label">hash % N</text>
+            <text x="320" y="208" text-anchor="middle" class="sub">change N, move all</text>
+          </g>
+          <line x1="444" y1="198" x2="509" y2="198" class="wire"/>
+          <polygon points="509,193 518,198 509,203" class="head"/>
+          <g>
+            <rect x="520" y="150" width="240" height="96" rx="12" class="box ok"/>
+            <text x="640" y="184" text-anchor="middle" class="label">Dist SQL</text>
+            <text x="640" y="208" text-anchor="middle" class="sub">range rebalance</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">取模改 N 几乎全量搬家。分布式 SQL 让存储层拆 range。热点和分片键你仍然要会讲。</span><span class="lang-en">Changing N on a modulo moves almost everything. Distributed SQL splits ranges in the storage layer. You still have to explain hot keys and the shard key.</span></figcaption>
+      </div>
+    </figure>
+    <p class="cite"><span class="lang-zh">一致性和可用性怎么开口，在 <span class="chip soon">Ch36 · CAP</span>。分片迁移在 <span class="chip soon">Ch41 · 分片</span>。</span><span class="lang-en">How to open consistency versus availability is <span class="chip soon">Ch36 · CAP</span>. Shard migration is <span class="chip soon">Ch41 · sharding</span>.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">追问时怎么接</span><span class="lang-en">How to take the follow-ups</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">中文</p>
+        <ol>
+          <li>为什么不直接画最终架构？演进推理才是得分点。终图开场是 over-engineering。</li>
+          <li>写完立刻刷新看不到？读了落后 replica。写后短窗口读 primary，或版本没追上就回 primary。</li>
+          <li>primary 挂了会丢数据吗？异步会。讲 RPO 和你接受的窗口。</li>
+          <li>缓存和库不一致？aside 删缓存加 TTL。下游多就提 CDC。</li>
+          <li>sticky 不也能扩吗？能撑一阵。挂机丢 session，缩容要搬家。正解是无状态。</li>
+          <li>多 Region 怎么又快又一致？按数据选。账户和 Feed 不必同一个答案。</li>
+          <li>流量翻 10 倍？先找哪一层先炸：LB、缓存、primary 写、热点 shard。再决定加副本还是分片。</li>
+        </ol>
+        <details class="fold">
+          <summary>2026 和原书差在哪</summary>
+          <table>
+            <thead>
+              <tr><th>原书大约 2020</th><th>现在怎么答</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>master / slave</td><td>primary / replica</td></tr>
+              <tr><td>延迟表拿 HDD 当锚点</td><td>正文用内存、NVMe、同城、跨洲</td></tr>
+              <tr><td>sticky session 写成可用方案</td><td>过渡或反例。默认无状态</td></tr>
+              <tr><td>多数据中心几段带过</td><td>Region / AZ，geoDNS 或 Anycast</td></tr>
+              <tr><td>缓存几乎只讲 aside</td><td>aside 仍是基线，可点 CDC</td></tr>
+              <tr><td>终局是手搓分片</td><td>键、reshard、热点仍要问；能用分布式 SQL 就优先</td></tr>
+              <tr><td>按云厂商列负载均衡和队列</td><td>说托管 LB、对象存储、托管 Kafka</td></tr>
+              <tr><td>一张最终大图收尾</td><td>用演进收尾</td></tr>
+            </tbody>
+          </table>
+          <p>Service Mesh、边缘计算全家桶可以在 wrap-up 说「下一曲线」。第 2 集不要画上去。</p>
+        </details>
+      </div>
+      <div class="lang-en"><p class="col-kicker">English</p>
+        <ol>
+          <li>Why not draw the final architecture? They score the evolution. Opening with the final picture is over-engineering.</li>
+          <li>I wrote, refreshed, and don’t see it? You read a lagging replica. After a write, read primary for a short window, or fall back when the version has not caught up.</li>
+          <li>If the primary dies, do we lose data? Async, yes. Talk RPO and the window you accept.</li>
+          <li>Cache and DB disagree? Aside, delete, TTL. Many downstreams, mention CDC.</li>
+          <li>Can’t sticky still scale? For a while. Box death drops the session, and scale-in has to migrate it. The answer you stand on is stateless.</li>
+          <li>Multi-Region that is both fast and consistent? Pick per data. Accounts and a feed do not need the same answer.</li>
+          <li>Traffic times 10? Find which layer dies first: LB, cache, primary writes, or a hot shard. Then replicas or sharding. Adding machines with no layer named is not a plan.</li>
+        </ol>
+        <details class="fold">
+          <summary>2026 versus the book</summary>
+          <table>
+            <thead>
+              <tr><th>Book, around 2020</th><th>How you answer now</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>master / slave</td><td>primary / replica</td></tr>
+              <tr><td>Latency table anchored on HDD</td><td>Memory, NVMe, same-city, cross-continent</td></tr>
+              <tr><td>Sticky session as a real design</td><td>A transition or a counter-example. Default stateless</td></tr>
+              <tr><td>A few lines on multi data center</td><td>Region / AZ, geoDNS or Anycast</td></tr>
+              <tr><td>Cache almost only aside</td><td>Aside is still the baseline. You may name CDC</td></tr>
+              <tr><td>Endgame is hand-rolled sharding</td><td>Key, reshard, and hot keys are still asked. Prefer distributed SQL when you can</td></tr>
+              <tr><td>Vendor lists of balancers and queues</td><td>Say managed LB, object storage, managed Kafka</td></tr>
+              <tr><td>Close on one final picture</td><td>Close on the evolution</td></tr>
+            </tbody>
+          </table>
+          <p>A service mesh and the whole edge kit can be “the next curve” in the wrap-up. Do not draw them in episode 2.</p>
+        </details>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">下一步</span><span class="lang-en">Next</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">中文</p>
+        <p>合上这一页，用八集把「百万用户」讲一遍，每集三句话：痛点、方案、新痛点。卡在数字上就去粗略估算。第一道带 4 步法的小题是限流器。想先看一道完整设计题，打开短链。</p>
+        <p>自测：不画终图，能不能在第 4 集就让对方听懂 failover 和读延迟。能，这一章就过了。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">English</p>
+        <p>Close the page and walk a million users in eight episodes, three sentences each: pain, fix, new pain. If you stall on numbers, go to estimates. The first small 4-step problem is a rate limiter. To see a full case now, open the URL shortener.</p>
+        <p>Self-check: without a final picture, can you make them understand failover and read lag by episode 4? If yes, this chapter is done.</p>
+      </div>
+    </div>
+    <p class="cite"><span class="lang-zh"><span class="chip soon">Ch03 · 粗略估算</span><span class="chip soon">Ch04 · 限流器</span><a class="chip" href="ch09.html">Ch09 · 短链</a></span><span class="lang-en"><span class="chip soon">Ch03 · estimates</span><span class="chip soon">Ch04 · rate limiter</span><a class="chip" href="ch09.html">Ch09 · URL shortener</a></span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">闪卡</span><span class="lang-en">Flashcards</span></h2>
+    <p class="cite"><span class="lang-zh">点一下翻面。能讲出来才算会。</span><span class="lang-en">Click to flip. If you can say it, you know it.</span></p>
+    <div class="cards-grid">
+      <button type="button" class="flip">
+        <span class="q"><span class="lang-zh">扩展题为什么不能先画终图？</span><span class="lang-en">Why not open a scale question with the final diagram?</span></span>
+        <span class="a"><span class="lang-zh">考的是痛点 → 方案 → 新痛点。终图开场是 over-engineering。</span><span class="lang-en">They score pain → fix → new pain. Opening with the final picture is over-engineering.</span></span>
+      </button>
+      <button type="button" class="flip">
+        <span class="q"><span class="lang-zh">八集顺序是什么？</span><span class="lang-en">What is the eight-episode order?</span></span>
+        <span class="a"><span class="lang-zh">单机 → 拆层 → LB → 主从 → 缓存/CDN → 无状态 → 多机房 → MQ/分片。</span><span class="lang-en">Single box, split, LB, primary/replica, cache/CDN, stateless, multi-DC, MQ/sharding.</span></span>
+      </button>
+      <button type="button" class="flip">
+        <span class="q"><span class="lang-zh">Step 1 必问哪三类？</span><span class="lang-en">Which three buckets does step 1 ask?</span></span>
+        <span class="a"><span class="lang-zh">规模、读写、是否跨 Region。</span><span class="lang-en">Scale, read/write, and whether users cross Regions.</span></span>
+      </button>
+      <button type="button" class="flip">
+        <span class="q"><span class="lang-zh">估算公式在哪一章？</span><span class="lang-en">Where do the estimate formulas live?</span></span>
+        <span class="a"><span class="lang-zh">Ch03。这一章只留 back-of-the-envelope 的位置。</span><span class="lang-en">Ch03. This chapter only leaves a slot for back-of-the-envelope.</span></span>
+      </button>
+      <button type="button" class="flip">
+        <span class="q"><span class="lang-zh">LB 解决什么，不解决什么？</span><span class="lang-en">What does the LB solve, and what does it leave?</span></span>
+        <span class="a"><span class="lang-zh">解决 web 的 failover 和水平扩展。不解决 DB 单点。</span><span class="lang-en">Web failover and horizontal scale. It does not fix the database as a single point.</span></span>
+      </button>
+      <button type="button" class="flip">
+        <span class="q"><span class="lang-zh">异步 failover 会丢数据吗？</span><span class="lang-en">Can async failover lose data?</span></span>
+        <span class="a"><span class="lang-zh">会。ACK 了但还没到 replica 的写入算进 RPO。</span><span class="lang-en">Yes. ACK’d writes that never reached a replica sit in the RPO.</span></span>
+      </button>
+      <button type="button" class="flip">
+        <span class="q"><span class="lang-zh">cache-aside 写路径为什么删缓存？</span><span class="lang-en">Why does cache-aside delete the cache on write?</span></span>
+        <span class="a"><span class="lang-zh">删是幂等的。并发 SET 容易把旧值写回。TTL 是兜底。</span><span class="lang-en">Delete is idempotent. A concurrent SET can write the old value back. TTL is the net.</span></span>
+      </button>
+      <button type="button" class="flip">
+        <span class="q"><span class="lang-zh">分片键怎么选？热点呢？</span><span class="lang-en">How do you pick a shard key? What about a hot key?</span></span>
+        <span class="a"><span class="lang-zh">高基数、均匀、点查单片。热点用缓存、加盐或单独资源。能用分布式 SQL 就优先。</span><span class="lang-en">High cardinality, even, point lookup on one shard. Hot keys: cache, salt, or their own resource. Prefer distributed SQL when you can.</span></span>
+      </button>
+    </div>
+  </section>
+  <p><button type="button" class="read-toggle">
+    <span class="when-off"><span class="lang-zh">我已学完本章</span><span class="lang-en">Mark this chapter done</span></span>
+    <span class="when-on"><span class="lang-zh">已学完本章</span><span class="lang-en">Completed</span></span>
+  </button></p>
+  <p class="cite"><span class="lang-zh">进度存在这台浏览器里。</span><span class="lang-en">Saved in this browser only.</span></p>
+</article>
+</main>
+<script src="../assets/js/nav.js"></script>
+<script src="../assets/js/lang.js"></script>
+<script src="../assets/js/slides.js"></script>
+<script src="../assets/js/progress.js"></script>
+</body>
+</html>

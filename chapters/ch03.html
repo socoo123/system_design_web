@@ -1,0 +1,808 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="parchment" data-locale="zh">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ch03 · 粗略估算</title>
+  <link rel="icon" href="../favicon.ico" sizes="48x48">
+  <link rel="stylesheet" href="../assets/css/style.css">
+  <script src="../assets/js/boot.js"></script>
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="../index.html"><span class="brand-logo">SD</span><span class="lang-zh">系统设计面试</span><span class="lang-en">System Design Interview</span></a>
+  <span class="spacer"></span>
+  <a class="map-link" href="../index.html"><span class="lang-zh">课程地图</span><span class="lang-en">Map</span></a>
+  <div class="seg" role="group" aria-label="language">
+    <button type="button" data-locale-set="zh">中文</button>
+    <button type="button" data-locale-set="both"><span class="lang-zh">对照</span><span class="lang-en">Both</span></button>
+    <button type="button" data-locale-set="en">EN</button>
+  </div>
+  <div class="seg" role="group" aria-label="theme">
+    <button type="button" data-theme-set="parchment"><span class="lang-zh">护眼</span><span class="lang-en">Paper</span></button>
+    <button type="button" data-theme-set="dracula"><span class="lang-zh">深色</span><span class="lang-en">Dark</span></button>
+  </div>
+</header>
+<main class="wrap">
+<article class="chapter" id="ch03" data-ch="ch03">
+  <header>
+    <div class="ch-kicker"><span class="lang-zh">CHAPTER 03 · 面试方法</span><span class="lang-en">CHAPTER 03 · method</span></div>
+    <h1><span class="lang-zh">粗略估算</span><span class="lang-en">Back-of-the-envelope estimates</span></h1>
+    <p class="ch-meta-line"><span class="lang-zh">约 30 分钟 · 前置：Ch01、Ch02</span><span class="lang-en">~30 min · prereq: Ch01, Ch02</span></p>
+  </header>
+
+  <section class="goal">
+    <h2><span class="lang-zh">这一章结束你能做什么</span><span class="lang-en">What you can do after this chapter</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">中文</p>
+        <ul>
+          <li>用 2–4 分钟在白板上走完：单位 → 从 DAU 到 QPS → peak → 存储 → 带宽。</li>
+          <li>每个数取整、带单位，读写分开，peak 写在平均旁边。</li>
+          <li>用数量级决定缓存、分片、要不要多 Region。数字是公开教学假设。</li>
+        </ul>
+      </div>
+      <div class="lang-en"><p class="col-kicker">English</p>
+        <ul>
+          <li>Spend 2–4 minutes on the board: units, DAU to QPS, peak, storage, bandwidth.</li>
+          <li>Round, label units, split read and write, and write peak next to the average.</li>
+          <li>Let the order of magnitude pick cache, sharding, and multi-Region. The numbers are public teaching assumptions.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">这 2–4 分钟怎么开口</span><span class="lang-en">How you open those 2–4 minutes</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">中文</p>
+        <p><a class="chip" href="ch01.html">Ch01</a> 管时间盒，<a class="chip" href="ch02.html">Ch02</a> 管盒子怎么一个个加上去。这一章是 Step 1–2 里面那几分钟数字。多数人能画框，说不出是 1 千还是 10 万 QPS。gap 在这里。</p>
+        <p class="say">我先做 back-of-the-envelope。单位先说死：一天按 10^5 秒，存储用 Byte，带宽用 bit。假设写在白板上：DAU、人均操作、read:write、peak 倍数。然后走 QPS、存储、带宽、机器，取整、标单位。peak 用平均 ×2–3。算完用一句话接上架构。</p>
+        <p>说完就写假设。面试官要的是推理。这几分钟夹在澄清和高层之间。本章把它拆开练，上场时压回这张表。</p>
+        <table>
+          <thead>
+            <tr><th>节拍</th><th>你在做什么</th><th>停的信号</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>30 秒</td><td>开口，写下 4 个假设</td><td>对方点头，或改一个数</td></tr>
+            <tr><td>1–2 分钟</td><td>QPS，含 peak，读写两行</td><td>平均和 peak 都在板上</td></tr>
+            <tr><td>1 分钟</td><td>存储 × 副本；带宽看 B 和 b</td><td>数量级落到 GB / TB</td></tr>
+            <tr><td>30 秒</td><td>机器量级，加一句成本</td><td>说清是两台还是一千台</td></tr>
+          </tbody>
+        </table>
+        <p>纪律：86400 按 10^5 秒。每个数带单位。假设留在板上，后面回查。算到小数点后三位，就不是 back-of-the-envelope。收尾必须有一句把数字接到设计上，例如 read:write 大约 10:1，所以先缓存。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">English</p>
+        <p><a class="chip" href="ch01.html">Ch01</a> is the clock. <a class="chip" href="ch02.html">Ch02</a> is how the boxes show up one at a time. This chapter is the few minutes of numbers inside step 1–2. Most people can draw boxes. They cannot say whether it is 1K or 100K QPS. That is the gap.</p>
+        <p class="say">I’ll start with back-of-the-envelope. Units first: a day is 10^5 seconds, storage is bytes, bandwidth is bits. Assumptions on the board: DAU, ops per user, read:write, peak multiplier. Then QPS, storage, bandwidth, and boxes. I round, and every number has a unit. Peak is average times 2 to 3. I close with one sentence that ties the numbers to the design.</p>
+        <p>Then write the assumptions. They want the reasoning. On a real prompt this slot sits between clarify and the high-level picture. This chapter unpacks it. In the room you compress back to this table.</p>
+        <table>
+          <thead>
+            <tr><th>Beat</th><th>What you are doing</th><th>Stop when</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>30 sec</td><td>Open, write the four assumptions</td><td>They nod, or they change a number</td></tr>
+            <tr><td>1–2 min</td><td>QPS, including peak, read and write</td><td>Average and peak are both on the board</td></tr>
+            <tr><td>1 min</td><td>Storage times replicas; bandwidth watches B vs b</td><td>The order lands on GB or TB</td></tr>
+            <tr><td>30 sec</td><td>Machine order, plus one cost line</td><td>You said two boxes or a thousand</td></tr>
+          </tbody>
+        </table>
+        <p>Discipline: treat 86400 as 10^5 seconds. Every number has a unit. Leave the assumptions on the board so you can look back. Three decimal places is not back-of-the-envelope. Close with one sentence that hooks the numbers to the design, such as read:write around 10:1, so cache first.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">先约定单位</span><span class="lang-en">Lock the units first</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">中文</p>
+        <p>估算是数量级。先把单位写上，再代公式。面试里 1 KB 就当 10^3 字节，1 MB 当 10^6，1 GB 当 10^9。和 1024 差大约 2%，改不了架构。TB 是 10^12，PB 是 10^15，数字跨过去再写。</p>
+        <p>一天精确是 86400 秒。口算一律除以 10^5。存储用 Byte（B），带宽用 bit/s（bps）。小写 b 是 bit，大写 B 是 Byte，差 8 倍。混在一起是经典 red flag。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">English</p>
+        <p>An estimate is an order of magnitude. Write the units, then the formula. In the room, 1 KB is 10^3 bytes, 1 MB is 10^6, 1 GB is 10^9. The gap versus 1024 is about 2%. It does not change the design. TB is 10^12 and PB is 10^15. Write those when the number crosses them.</p>
+        <p>A day is exactly 86400 seconds. Mental math always divides by 10^5. Storage uses bytes (B). Bandwidth uses bits per second (bps). Lowercase b is a bit, uppercase B is a byte, and they differ by 8×. Mixing them is a classic red flag.</p>
+      </div>
+    </div>
+    <figure class="deck">
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="350" y="162" width="260" height="96" rx="12" class="box"/>
+            <text x="480" y="196" text-anchor="middle" class="label">1 day</text>
+            <text x="480" y="220" text-anchor="middle" class="sub">~ 10^5 seconds</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">第一笔只写这个。86400 收成 10^5。后面所有 QPS 都除以它。</span><span class="lang-en">The first stroke is only this. 86400 becomes 10^5. Every later QPS divides by it.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="114" y="162" width="220" height="96" rx="12" class="box"/>
+            <text x="224" y="196" text-anchor="middle" class="label">1 KB</text>
+            <text x="224" y="220" text-anchor="middle" class="sub">~ 10^3</text>
+          </g>
+          <line x1="342" y1="210" x2="358" y2="210" class="wire"/>
+          <polygon points="358,205 367,210 358,215" class="head"/>
+          <g>
+            <rect x="370" y="162" width="220" height="96" rx="12" class="box"/>
+            <text x="480" y="196" text-anchor="middle" class="label">1 MB</text>
+            <text x="480" y="220" text-anchor="middle" class="sub">~ 10^6</text>
+          </g>
+          <line x1="598" y1="210" x2="614" y2="210" class="wire"/>
+          <polygon points="614,205 623,210 614,215" class="head"/>
+          <g>
+            <rect x="626" y="162" width="220" height="96" rx="12" class="box"/>
+            <text x="736" y="196" text-anchor="middle" class="label">1 GB</text>
+            <text x="736" y="220" text-anchor="middle" class="sub">~ 10^9</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">容量按 10 的幂。TB ~ 10^12，PB ~ 10^15。本章的算术停在 GB 和 TB。</span><span class="lang-en">Capacity stays on powers of 10. TB is ~10^12, PB is ~10^15. The arithmetic in this chapter stops at GB and TB.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="196" y="162" width="260" height="96" rx="12" class="box"/>
+            <text x="326" y="196" text-anchor="middle" class="label">Byte (B)</text>
+            <text x="326" y="220" text-anchor="middle" class="sub">storage</text>
+          </g>
+          <line x1="468" y1="210" x2="492" y2="210" class="wire"/>
+          <polygon points="492,205 501,210 492,215" class="head"/>
+          <g>
+            <rect x="504" y="162" width="260" height="96" rx="12" class="box alt"/>
+            <text x="634" y="196" text-anchor="middle" class="label">bit (b)</text>
+            <text x="634" y="220" text-anchor="middle" class="sub">bandwidth, x8</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">1 byte = 8 bits。存储留在 B，带宽换成 bps 时乘 8。100 Mbps = 12.5 MB/s，后面带宽那一组会代一次。</span><span class="lang-en">1 byte = 8 bits. Storage stays in B. Bandwidth multiplies by 8 to get bps. 100 Mbps = 12.5 MB/s. The bandwidth deck plugs that in.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="196" y="162" width="260" height="96" rx="12" class="box bad"/>
+            <text x="326" y="196" text-anchor="middle" class="label">3 decimals</text>
+            <text x="326" y="220" text-anchor="middle" class="sub">red flag</text>
+          </g>
+          <g>
+            <rect x="504" y="162" width="260" height="96" rx="12" class="box ok"/>
+            <text x="634" y="196" text-anchor="middle" class="label">Round</text>
+            <text x="634" y="220" text-anchor="middle" class="sub">number + unit</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">板上写 ~10 GB/day：一个约数，再带单位。小数点后三位说明你已经离开 back-of-the-envelope。</span><span class="lang-en">Write ~10 GB/day: one rounded number, with a unit. Three decimal places means you left back-of-the-envelope.</span></figcaption>
+      </div>
+    </figure>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">从 DAU 推 QPS</span><span class="lang-en">From DAU to QPS</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">中文</p>
+        <p>先问再算。问 4 个就够开工，其余自己假设并写上。对方说「你来假设」，就写下这句然后动笔：1000 万 DAU、读多写少、peak ×3、先单 Region。错了对方会改。</p>
+        <table>
+          <thead>
+            <tr><th>你问</th><th>为什么</th><th>写到板上的默认</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>百万是 DAU、MAU，还是注册总量？</td><td>只有 DAU 进 QPS</td><td>10M DAU</td></tr>
+            <tr><td>每人每天几次读、几次写？</td><td>没有人均就没有 QPS</td><td>10 次读，1 次写</td></tr>
+            <tr><td>read:write 大概多少？</td><td>直接改架构重心</td><td>先按 10:1</td></tr>
+            <tr><td>peak 倍数？有没有大促？</td><td>漏 peak 是 red flag</td><td>日常 ×2–3，大促 ×10</td></tr>
+          </tbody>
+        </table>
+        <p>单条多大、留多久、用户跨不跨洲，有空再补：文本 1 KB，媒体另算，留 1 年，先单 Region。禁止编「某厂线上 37 万 QPS」。下面整组幻灯片用这一套公开教学假设，一口算到底。</p>
+        <p>公式先写再代：平均 QPS = DAU × 人均操作 / 10^5。读和写分成两行。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">English</p>
+        <p>Ask, then calculate. Four questions are enough to start. Assume the rest and write it down. If they say “you assume,” write this and move: 10M DAU, read-heavy, peak ×3, one Region first. If it is wrong, they will correct it.</p>
+        <table>
+          <thead>
+            <tr><th>You ask</th><th>Why</th><th>Default on the board</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Is “a million” DAU, MAU, or signups?</td><td>Only DAU enters QPS</td><td>10M DAU</td></tr>
+            <tr><td>Reads and writes per user per day?</td><td>No per-user ops, no QPS</td><td>10 reads, 1 write</td></tr>
+            <tr><td>Rough read:write?</td><td>It moves the architecture</td><td>Start at 10:1</td></tr>
+            <tr><td>Peak multiplier? Any promo?</td><td>A missed peak is a red flag</td><td>Daily ×2–3, promo ×10</td></tr>
+          </tbody>
+        </table>
+        <p>Record size, retention, and cross-continent users come next if you have room: text 1 KB, media separate, keep 1 year, one Region first. Do not invent “company X runs 370K QPS in prod.” The slides use this one public teaching assumption and carry it all the way through.</p>
+        <p>Write the formula, then plug in: average QPS = DAU × ops per user / 10^5. Read and write go on two lines.</p>
+      </div>
+    </div>
+    <figure class="deck">
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="350" y="162" width="260" height="96" rx="12" class="box"/>
+            <text x="480" y="196" text-anchor="middle" class="label">Assumptions</text>
+            <text x="480" y="220" text-anchor="middle" class="sub">10M DAU, 10R / 1W</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">先把假设写上，再碰公式。10M DAU，每人 10 次读、1 次写。对方改数字，你只重算被改的那一行。</span><span class="lang-en">Assumptions land before the formula. 10M DAU, 10 reads and 1 write per user. If they change a number, redo only that line.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="350" y="162" width="260" height="96" rx="12" class="box"/>
+            <text x="480" y="196" text-anchor="middle" class="label">QPS</text>
+            <text x="480" y="220" text-anchor="middle" class="sub">DAU x ops / 10^5</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">公式单独占一笔，方便面试官跟上。除数用 10^5，不用 86400。</span><span class="lang-en">The formula gets its own stroke so they can follow. The divisor is 10^5, not 86400.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="350" y="162" width="260" height="96" rx="12" class="box alt"/>
+            <text x="480" y="196" text-anchor="middle" class="label">Write QPS</text>
+            <text x="480" y="220" text-anchor="middle" class="sub">10^7 / 10^5 = 100</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">写先算。10^7 × 1 / 10^5 = 100。精确除以 86400 大约是 116，同一数量级，板上写 100。</span><span class="lang-en">Writes first. 10^7 × 1 / 10^5 = 100. Dividing by 86400 is about 116. Same order. Write 100.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="196" y="162" width="260" height="96" rx="12" class="box alt"/>
+            <text x="326" y="196" text-anchor="middle" class="label">Write</text>
+            <text x="326" y="220" text-anchor="middle" class="sub">100 QPS</text>
+          </g>
+          <line x1="468" y1="210" x2="492" y2="210" class="wire"/>
+          <polygon points="492,205 501,210 492,215" class="head"/>
+          <g>
+            <rect x="504" y="162" width="260" height="96" rx="12" class="box"/>
+            <text x="634" y="196" text-anchor="middle" class="label">Read</text>
+            <text x="634" y="220" text-anchor="middle" class="sub">1,000 QPS</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">读是 10^7 × 10 / 10^5 = 1,000。两行都留下。只报一个「QPS」会把读写糊在一起。</span><span class="lang-en">Reads are 10^7 × 10 / 10^5 = 1,000. Keep both lines. One blended “QPS” hides the ratio.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="350" y="162" width="260" height="96" rx="12" class="box ok"/>
+            <text x="480" y="196" text-anchor="middle" class="label">Read : write</text>
+            <text x="480" y="220" text-anchor="middle" class="sub">10 : 1</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">立刻把比例说出来。这一句比把 1000 再精修 10% 更值钱。架构上先缓存，分片要等写量和字节数。</span><span class="lang-en">Say the ratio immediately. That sentence is worth more than shaving 10% off 1,000. Cache comes first. Sharding waits on write QPS and bytes.</span></figcaption>
+      </div>
+    </figure>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">再带上 peak</span><span class="lang-en">Put peak on the board</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">中文</p>
+        <p>平均 QPS 回答「平常能不能活」。peak 决定余量和要不要削峰。早晚高峰用平均 ×2–3。大促、晚会用平均 ×10。×10 是削峰和降级的理由，把全年机器都按 ×10 买齐，是成本上的 red flag。</p>
+        <p>只报平均，等对方问「高峰呢」再补，也是 red flag。wrap-up 主动说：高峰按 ×3 留余量；再高就限流和降级。</p>
+        <p>存储用平均写 QPS，因为一天的字节是写请求积出来的。带宽和机器用 peak，因为管道和连接数要扛得住那一下。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">English</p>
+        <p>Average QPS answers “can we live on a normal day.” Peak decides headroom, and whether you shed load. Morning and evening are average ×2–3. A promo or a live event is average ×10. ×10 is why you queue and degrade. Buying every box at ×10 for the whole year is a cost red flag.</p>
+        <p>Quoting the average and patching peak only when they ask is a red flag too. In the wrap-up, say it yourself: peak headroom is ×3; past that, rate-limit and degrade.</p>
+        <p>Storage uses average write QPS, because the bytes in a day are the integral of writes. Bandwidth and boxes use peak, because the pipe and the connection pool have to survive the spike.</p>
+      </div>
+    </div>
+    <figure class="deck">
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="196" y="162" width="260" height="96" rx="12" class="box"/>
+            <text x="326" y="196" text-anchor="middle" class="label">Avg read</text>
+            <text x="326" y="220" text-anchor="middle" class="sub">1,000 QPS</text>
+          </g>
+          <g>
+            <rect x="504" y="162" width="260" height="96" rx="12" class="box alt"/>
+            <text x="634" y="196" text-anchor="middle" class="label">Avg write</text>
+            <text x="634" y="220" text-anchor="middle" class="sub">100 QPS</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">peak 那一笔之前，平均先留在板上。读 1,000，写 100。不要擦掉重来。</span><span class="lang-en">Before the peak stroke, the average stays up. Read 1,000, write 100. Do not erase it.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="196" y="162" width="260" height="96" rx="12" class="box"/>
+            <text x="326" y="196" text-anchor="middle" class="label">Daily x3</text>
+            <text x="326" y="220" text-anchor="middle" class="sub">on the average</text>
+          </g>
+          <line x1="468" y1="210" x2="492" y2="210" class="wire"/>
+          <polygon points="492,205 501,210 492,215" class="head"/>
+          <g>
+            <rect x="504" y="162" width="260" height="96" rx="12" class="box ok"/>
+            <text x="634" y="196" text-anchor="middle" class="label">Peak</text>
+            <text x="634" y="220" text-anchor="middle" class="sub">R 3,000 / W 300</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">日常 peak = 平均 ×3。读 3,000，写 300。×2 也行，先和面试官对齐倍数。</span><span class="lang-en">Daily peak is average ×3. Read 3,000, write 300. ×2 is fine too. Agree the multiplier out loud.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="196" y="162" width="260" height="96" rx="12" class="box alt"/>
+            <text x="326" y="196" text-anchor="middle" class="label">Promo x10</text>
+            <text x="326" y="220" text-anchor="middle" class="sub">on the average</text>
+          </g>
+          <line x1="468" y1="210" x2="492" y2="210" class="wire"/>
+          <polygon points="492,205 501,210 492,215" class="head"/>
+          <g>
+            <rect x="504" y="162" width="260" height="96" rx="12" class="box"/>
+            <text x="634" y="196" text-anchor="middle" class="label">Promo read</text>
+            <text x="634" y="220" text-anchor="middle" class="sub">~ 10,000 QPS</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">大促是平均 ×10，大约 1 万读 QPS。这是队列和降级的理由。全年按 1 万台机器常备，成本说不通。</span><span class="lang-en">A promo is average ×10, about 10K read QPS. That justifies a queue and degradation. Standing capacity at 10× all year does not.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="350" y="162" width="260" height="96" rx="12" class="box bad"/>
+            <text x="480" y="196" text-anchor="middle" class="label">Average only</text>
+            <text x="480" y="220" text-anchor="middle" class="sub">red flag</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">板上如果只有平均，高峰时连接数和 IOPS 先炸，缓存命中掉下来会变成雪崩。</span><span class="lang-en">If the board has only the average, connections and IOPS blow first at peak. Cache hit rate drops, and you avalanche.</span></figcaption>
+      </div>
+    </figure>
+    <p class="cite"><span class="lang-zh">限流阈值从这组 peak 来，下一章是 <span class="chip soon">Ch04 · 限流器</span>。削峰和降级在 <span class="chip soon">Ch42 · 弹性</span>。</span><span class="lang-en">The rate-limit threshold comes from this peak. Next chapter is <span class="chip soon">Ch04 · rate limiter</span>. Shedding load lives in <span class="chip soon">Ch42 · resilience</span>.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">存储</span><span class="lang-en">Storage</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">中文</p>
+        <p>日增量 = 平均写 QPS × 10^5 秒 × 单条大小。总量 = 日增量 × 天数 × 副本。副本先 ×3：多 AZ 各留一份，备份也别漏。对方问三年后，再乘一个增长系数，别只报今天。</p>
+        <p>媒体和元数据分开。1 MB 的图走对象存储，写进行存里会把 TB 估爆。热、温、冷分层点到后面的存储章，这里只把文本行算清。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">English</p>
+        <p>Daily growth = average write QPS × 10^5 seconds × record size. Total = daily growth × days × replicas. Replicas start at ×3: a copy per AZ, and do not forget backups. If they ask about three years from now, multiply a growth factor. Do not quote today alone.</p>
+        <p>Media and metadata stay apart. A 1 MB image belongs in object storage. Stuffing it into the row blows the TB number. Hot, warm, and cold tiers wait for the storage chapter. Here you size the text row.</p>
+      </div>
+    </div>
+    <figure class="deck">
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="350" y="162" width="260" height="96" rx="12" class="box"/>
+            <text x="480" y="196" text-anchor="middle" class="label">Daily growth</text>
+            <text x="480" y="220" text-anchor="middle" class="sub">W QPS x 10^5 x size</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">公式先落笔。用平均写 QPS，用 100。peak 的 300 是容量余量，不是一天的字节。</span><span class="lang-en">Formula first. Use average write QPS, which is 100. The peak of 300 is headroom, not the bytes in a day.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="350" y="162" width="260" height="96" rx="12" class="box alt"/>
+            <text x="480" y="196" text-anchor="middle" class="label">~ 10 GB / day</text>
+            <text x="480" y="220" text-anchor="middle" class="sub">100 x 10^5 x 1 KB</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">100 × 10^5 × 1 KB = 10^7 KB = 10 GB。用 86400 大约是 9 GB。板上写 ~10 GB/day。</span><span class="lang-en">100 × 10^5 × 1 KB = 10^7 KB = 10 GB. With 86400 it is about 9 GB. Write ~10 GB/day.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="196" y="162" width="260" height="96" rx="12" class="box"/>
+            <text x="326" y="196" text-anchor="middle" class="label">~ 10 GB / day</text>
+            <text x="326" y="220" text-anchor="middle" class="sub">text, 1 KB</text>
+          </g>
+          <line x1="468" y1="210" x2="492" y2="210" class="wire"/>
+          <polygon points="492,205 501,210 492,215" class="head"/>
+          <g>
+            <rect x="504" y="162" width="260" height="96" rx="12" class="box"/>
+            <text x="634" y="196" text-anchor="middle" class="label">~ 4 TB / year</text>
+            <text x="634" y="220" text-anchor="middle" class="sub">x 365, round</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">10 GB × 365 ≈ 3.6 TB，口算收成 ~4 TB。一年文本是几 TB，不是 PB。</span><span class="lang-en">10 GB × 365 is about 3.6 TB. Round to ~4 TB. A year of text is a few TB, not a PB.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="196" y="162" width="260" height="96" rx="12" class="box"/>
+            <text x="326" y="196" text-anchor="middle" class="label">~ 4 TB raw</text>
+            <text x="326" y="220" text-anchor="middle" class="sub">1 year, 1 copy</text>
+          </g>
+          <line x1="468" y1="210" x2="492" y2="210" class="wire"/>
+          <polygon points="492,205 501,210 492,215" class="head"/>
+          <g>
+            <rect x="504" y="162" width="260" height="96" rx="12" class="box ok"/>
+            <text x="634" y="196" text-anchor="middle" class="label">~ 12 TB</text>
+            <text x="634" y="220" text-anchor="middle" class="sub">x3 replicas</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">×3 之后仍是十几 TB。图片不要塞进这 1 KB。对象存储另开一行账。</span><span class="lang-en">After ×3 you are still in the low tens of TB. Keep images out of that 1 KB. Object storage is a separate line.</span></figcaption>
+      </div>
+    </figure>
+    <p class="cite"><span class="lang-zh">介质和行存、对象存储怎么选，在 <a class="chip" href="ch37.html">Ch37 · 存储选型</a>。热温冷分层在 <span class="chip soon">Ch43 · 分层</span>。</span><span class="lang-en">How you pick the medium, the row store, and object storage is <a class="chip" href="ch37.html">Ch37 · storage choices</a>. Hot, warm, and cold tiers are <span class="chip soon">Ch43 · tiers</span>.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">带宽和机器</span><span class="lang-en">Bandwidth and boxes</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">中文</p>
+        <p>bps = peak QPS × 单次 Byte × 8。上行和下行分开。文本读路径常常很小；把媒体放进同一次读，经常会得到「要 CDN」。这就是估算的用处。</p>
+        <p>机器 ≈ max(QPS / 单机 QPS, 数据 / 单机盘) × 1.5–2。单机能力用公开数量级：无状态 web 大约万级 QPS 一台，缓存实例到十万级，NVMe 上的单库读比 HDD 年代的直觉高一个数量级。×1.5–2 是 failover，不是把数字做大。</p>
+        <p>成本说到「每月小几千美金，还是小几十万」就停。报内部折扣，或背一串云 SKU，都不是这一章。</p>
+        <p>读 QPS 的手感，当校准，不当 SLA：大约 1 万，单机加 NVMe 往往够，上分布式要讲理由；大约 10 万，要 LB 和多机，read:write 决定要不要缓存；大约 100 万，缓存、CDN、分片进高层图；大约 1000 万，先找 bottleneck，再谈加机器。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">English</p>
+        <p>bps = peak QPS × bytes per request × 8. Split ingress and egress. A text read path is often small. Put media on that same read and you often land on “this needs a CDN.” That is the point of the estimate.</p>
+        <p>Boxes ≈ max(QPS / per-box QPS, bytes / per-box disk) × 1.5–2. Per-box capacity is a public order of magnitude: a stateless web box is tens of thousands of QPS, a cache node is hundreds of thousands, and a single DB on NVMe reads an order of magnitude above HDD-era intuition. The ×1.5–2 is failover, not a bigger number for its own sake.</p>
+        <p>Stop the cost line at “a few thousand USD a month, or a few hundred thousand.” Internal discounts and a cloud SKU list are not this chapter.</p>
+        <p>Read-QPS feel, for calibration, not as an SLA: around 10K, one box plus NVMe often holds, and going distributed needs a reason; around 100K, an LB and several boxes, and read:write decides cache; around 1M, cache, CDN, and sharding enter the high-level picture; around 10M, name the bottleneck before you add machines.</p>
+      </div>
+    </div>
+    <figure class="deck">
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="350" y="162" width="260" height="96" rx="12" class="box"/>
+            <text x="480" y="196" text-anchor="middle" class="label">bps</text>
+            <text x="480" y="220" text-anchor="middle" class="sub">QPS x bytes x 8</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">先写公式。QPS 用 peak 读，3,000。字节还是那条 1 KB 文本。</span><span class="lang-en">Formula first. QPS is the peak read, 3,000. The bytes are still that 1 KB of text.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="196" y="162" width="260" height="96" rx="12" class="box"/>
+            <text x="326" y="196" text-anchor="middle" class="label">100 Mbps</text>
+            <text x="326" y="220" text-anchor="middle" class="sub">link rate</text>
+          </g>
+          <line x1="468" y1="210" x2="492" y2="210" class="wire"/>
+          <polygon points="492,205 501,210 492,215" class="head"/>
+          <g>
+            <rect x="504" y="162" width="260" height="96" rx="12" class="box ok"/>
+            <text x="634" y="196" text-anchor="middle" class="label">12.5 MB/s</text>
+            <text x="634" y="220" text-anchor="middle" class="sub">divide by 8</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">100 Mbps ÷ 8 = 12.5 MB/s。把 Mbps 当成 MB/s，会偏 8 倍。</span><span class="lang-en">100 Mbps ÷ 8 = 12.5 MB/s. Treating Mbps as MB/s is an 8× miss.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="350" y="162" width="260" height="96" rx="12" class="box"/>
+            <text x="480" y="196" text-anchor="middle" class="label">24 Mbps</text>
+            <text x="480" y="220" text-anchor="middle" class="sub">3,000 x 1 KB x 8</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">文本 peak：3,000 × 1,000 × 8 = 2.4×10^7 bit/s = 24 Mbps。这条管道不是 bottleneck。</span><span class="lang-en">Text at peak: 3,000 × 1,000 × 8 = 2.4×10^7 bit/s = 24 Mbps. This pipe is not the bottleneck.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="196" y="162" width="260" height="96" rx="12" class="box alt"/>
+            <text x="326" y="196" text-anchor="middle" class="label">~ 5 Gbps</text>
+            <text x="326" y="220" text-anchor="middle" class="sub">3K x 200 KB image</text>
+          </g>
+          <line x1="468" y1="210" x2="492" y2="210" class="wire"/>
+          <polygon points="492,205 501,210 492,215" class="head"/>
+          <g>
+            <rect x="504" y="162" width="260" height="96" rx="12" class="box ok"/>
+            <text x="634" y="196" text-anchor="middle" class="label">CDN</text>
+            <text x="634" y="220" text-anchor="middle" class="sub">media off origin</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">同一 QPS，若一次读是 200 KB 的图（教学假设）：3,000 × 2×10^5 × 8 ≈ 4.8 Gbps，收成 ~5 Gbps。这才是上 CDN 的理由。</span><span class="lang-en">Same QPS, if one read is a 200 KB image (a teaching assumption): 3,000 × 2×10^5 × 8 ≈ 4.8 Gbps, call it ~5 Gbps. That is the CDN argument.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="196" y="162" width="260" height="96" rx="12" class="box"/>
+            <text x="326" y="196" text-anchor="middle" class="label">3K read QPS</text>
+            <text x="326" y="220" text-anchor="middle" class="sub">~ 12 TB on disk</text>
+          </g>
+          <line x1="468" y1="210" x2="492" y2="210" class="wire"/>
+          <polygon points="492,205 501,210 492,215" class="head"/>
+          <g>
+            <rect x="504" y="162" width="260" height="96" rx="12" class="box ok"/>
+            <text x="634" y="196" text-anchor="middle" class="label">2 boxes</text>
+            <text x="634" y="220" text-anchor="middle" class="sub">1 holds it, x2 HA</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">公开数量级里，一台 NVMe 上的库读得动大约 1 万 QPS，十几 TB 也放得下。第二台是 failover。不是 64 个 shard。</span><span class="lang-en">At public orders of magnitude, one DB on NVMe handles about 10K read QPS, and the low tens of TB fit. The second box is failover. Not 64 shards.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="350" y="162" width="260" height="96" rx="12" class="box ok"/>
+            <text x="480" y="196" text-anchor="middle" class="label">Cache first</text>
+            <text x="480" y="220" text-anchor="middle" class="sub">read:write is 10:1</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">收尾这一句：read:write 是 10:1，先缓存，因为热点会打在少数 key 上。分片等写 QPS 和字节数，这题两边都还小。成本是每月小几千美金这个量级。</span><span class="lang-en">Close on this sentence: read:write is 10:1, so cache first, because hot keys will dominate. Sharding waits on write QPS and bytes, and both are still small. Cost is a few thousand USD a month, as an order of magnitude.</span></figcaption>
+      </div>
+    </figure>
+    <p class="cite"><span class="lang-zh">缓存和 CDN 的机制在 <span class="chip soon">Ch38 · 缓存</span>。1 MB 在 100 Gbps 上的发送时间大约 0.08 ms，别把它和 RTT 加成一个数。</span><span class="lang-en">Cache and CDN mechanisms are <span class="chip soon">Ch38 · cache</span>. Send time for 1 MB on 100 Gbps is about 0.08 ms. Keep that separate from RTT.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">同一套步骤，再走一个短链</span><span class="lang-en">Same steps, one short-URL pass</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">中文</p>
+        <p>换题只换假设，不换顺序。下面都是公开教学假设。短链的完整设计在 <a class="chip" href="ch09.html">Ch09</a>，这里只口算数量级。</p>
+        <table>
+          <thead>
+            <tr><th>题</th><th>假设</th><th>数量级</th><th>你接着说</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>本章主例</td><td>10M DAU，10 读 1 写，1 KB，1 年</td><td>读 1,000 / 写 100，peak 读 3,000，×3 副本 ~12 TB</td><td>先缓存。两台就够，为了 HA</td></tr>
+            <tr><td>短链</td><td>100M DAU，人均 5 次，10% 是创建，500 B，10 年</td><td>写 ~500，读 ~4,500，peak 读 ~1.4 万；日增 ~25 GB，10 年裸数据 ~90 TB，×3 ~270 TB</td><td>读吞吐一台 KV 扛得住，副本为 HA。几百 TB 是存储计划，不是全球分片</td></tr>
+            <tr><td>聊天形状</td><td>10M DAU，人均 40 条，200 B，留 7 天</td><td>写 ~4,000，peak ×2 ~8,000；日增 ~80 GB，7 天 ~560 GB</td><td>疼的是长连接和 fan-out，不是磁盘</td></tr>
+          </tbody>
+        </table>
+        <p>短链改用 86400，写大约 600、读大约 5,200，10 年 ×3 大约 280 TB。和表上的 10^5 是同一数量级。Feed 若是 10M DAU、每人 2 条帖、刷 20 次，写大约 200 QPS，读大约 2,000，peak 读大约 6,000：缓存该出现，分片还没到。一次刷新再去拉 20 条，是下游放大，估算时先把请求 QPS 写对。</p>
+        <p>写远大于读（日志、IoT）走队列和批量落盘。读写接近（聊天、协作）别停在「加一个缓存就结束」，一致性要单独说。原书里那组 2010 年社交产品数字，同样只当教学假设。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">English</p>
+        <p>A new prompt changes the assumptions, not the order. All of these are public teaching assumptions. The full short-URL design is <a class="chip" href="ch09.html">Ch09</a>. Here you only size it.</p>
+        <table>
+          <thead>
+            <tr><th>Prompt</th><th>Assumption</th><th>Order of magnitude</th><th>What you say next</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>This chapter</td><td>10M DAU, 10 reads, 1 write, 1 KB, 1 year</td><td>Read 1,000 / write 100, peak read 3,000, ~12 TB with ×3</td><td>Cache first. Two boxes, for HA</td></tr>
+            <tr><td>Short URL</td><td>100M DAU, 5 ops, 10% creates, 500 B, 10 years</td><td>Write ~500, read ~4,500, peak read ~14K; ~25 GB/day, ~90 TB raw over 10 years, ~270 TB with ×3</td><td>One KV tier takes the read QPS; replicas are HA. A few hundred TB is a storage plan, not global sharding</td></tr>
+            <tr><td>Chat-shaped</td><td>10M DAU, 40 messages, 200 B, keep 7 days</td><td>Write ~4,000, peak ×2 ~8,000; ~80 GB/day, ~560 GB over 7 days</td><td>The pain is connections and fan-out, not disk</td></tr>
+          </tbody>
+        </table>
+        <p>Divide the short URL by 86400 and you get about 600 writes, 5,200 reads, and about 280 TB with ×3 over 10 years. Same order as the 10^5 row. A feed at 10M DAU, 2 posts and 20 refreshes, is about 200 write QPS and 2,000 reads, peak read about 6,000: cache belongs in the picture, sharding does not yet. If one refresh then loads 20 items, that amplifies downstream. At estimate time, get request QPS right first.</p>
+        <p>Writes far above reads (logs, IoT) go to a queue and batched flush. Reads and writes close together (chat, collab) do not end at “add a cache.” Say consistency on its own. The book’s 2010 social-product figures are teaching assumptions in the same way.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">延迟表和几个 9</span><span class="lang-en">Latency bands and the nines</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">中文</p>
+        <p>数字决定要不要分片之后，面试官会问「那延迟你用多少」。背 2026 的五档，别背成某厂 SLO。锚点来自 Jeff Dean / Norvig 那张表的现代修订，加上云上跨 AZ、跨 Region 的公开 RTT 量级。</p>
+        <table>
+          <thead>
+            <tr><th>锚点</th><th>量级</th><th>你怎么用</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>DRAM</td><td>~100 ns</td><td>所有比较的基准</td></tr>
+            <tr><td>NVMe 随机读 4 KB</td><td>~100 μs（区间 10–100 μs）</td><td>比内存慢约 1000×</td></tr>
+            <tr><td>同城 RTT</td><td>~0.5 ms</td><td>服务间调用按这个</td></tr>
+            <tr><td>跨 AZ RTT</td><td>~1–2 ms</td><td>同步复制会进写延迟</td></tr>
+            <tr><td>跨洲 RTT</td><td>~150 ms（大约 80–200）</td><td>光速地板，CDN / 多 Region</td></tr>
+          </tbody>
+        </table>
+        <p>三句就够。缓存比 NVMe 上的库大约快 1000×，缓存是为了热点、跨洲 RTT、卸掉查询，HDD 寻道不是 2026 的第一理由。同城 10 次串行 RPC 大约 5 ms，该并行或合并。跨洲 150 ms 改不了，不要承诺单 Region 全球 50 ms。对象存储首字节常常几十毫秒，和 NVMe 不是一类延迟。</p>
+        <p>几个 9 是一年允许多少停机。必背 3、4、5。从 3 个 9 到 4 个 9，停机少 10 倍，钱不是少 10 倍，是多 AZ、自动 failover、演练。全站 5 个 9 是 over-engineering。核心交易可以谈 4 个 9，边缘功能 3 个 9。RPO / RTO 一句带过：社交可以秒级丢失、分钟级恢复，支付更严。机制留给后面的 trade-off 章。</p>
+        <table>
+          <thead>
+            <tr><th>可用性</th><th>一年停机</th><th>什么时候说</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>99%（2 个 9）</td><td>~3.7 天</td><td>内部工具</td></tr>
+            <tr><td>99.9%（3 个 9）</td><td>~8.8 小时</td><td>常见底线</td></tr>
+            <tr><td>99.99%（4 个 9）</td><td>~53 分钟</td><td>核心业务</td></tr>
+            <tr><td>99.999%（5 个 9）</td><td>~5 分钟</td><td>金融、电信；成本再上一档</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="lang-en"><p class="col-kicker">English</p>
+        <p>Once the numbers have decided sharding, they ask what latency you are using. Memorize five 2026 bands. They are not some company’s SLO. The anchors are a modern revision of the Jeff Dean / Norvig list, plus public cross-AZ and cross-Region RTT.</p>
+        <table>
+          <thead>
+            <tr><th>Anchor</th><th>Order</th><th>How you use it</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>DRAM</td><td>~100 ns</td><td>Baseline for every comparison</td></tr>
+            <tr><td>NVMe random read, 4 KB</td><td>~100 μs (range 10–100 μs)</td><td>About 1000× slower than memory</td></tr>
+            <tr><td>Same-city RTT</td><td>~0.5 ms</td><td>Service-to-service calls</td></tr>
+            <tr><td>Cross-AZ RTT</td><td>~1–2 ms</td><td>Sync replication lands on the write</td></tr>
+            <tr><td>Cross-continent RTT</td><td>~150 ms (about 80–200)</td><td>Speed-of-light floor; CDN or multi-Region</td></tr>
+          </tbody>
+        </table>
+        <p>Three sentences are enough. Cache is about 1000× faster than a DB on NVMe. You want it for hot keys, cross-continent RTT, and offloading the query. HDD seek is not the 2026 reason. Ten serial RPCs in the same city are about 5 ms, so parallelize or batch. Cross-continent 150 ms does not move. Do not promise 50 ms worldwide from one Region. Object-storage first byte is often tens of milliseconds. That is not the same class as NVMe.</p>
+        <p>A few nines means how much downtime you allow in a year. Memorize 3, 4, and 5. From 3 nines to 4, downtime drops 10×. The money does not drop 10×. You are paying for multi-AZ, automatic failover, and drills. Site-wide 5 nines is over-engineering. Core payments can talk 4 nines. An edge feature can live at 3. One line on RPO / RTO: social can lose seconds and recover in minutes; payments are stricter. The mechanism waits for the trade-off chapter.</p>
+        <table>
+          <thead>
+            <tr><th>Availability</th><th>Downtime / year</th><th>When you say it</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>99% (2 nines)</td><td>~3.7 days</td><td>Internal tools</td></tr>
+            <tr><td>99.9% (3 nines)</td><td>~8.8 hours</td><td>A common floor</td></tr>
+            <tr><td>99.99% (4 nines)</td><td>~53 minutes</td><td>Core product</td></tr>
+            <tr><td>99.999% (5 nines)</td><td>~5 minutes</td><td>Finance and telco; cost steps up</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <figure class="deck">
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="350" y="162" width="260" height="96" rx="12" class="box"/>
+            <text x="480" y="196" text-anchor="middle" class="label">DRAM</text>
+            <text x="480" y="220" text-anchor="middle" class="sub">~ 100 ns</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">延迟表的第一笔是基准。后面每一档都跟 100 ns 比。</span><span class="lang-en">The first latency stroke is the baseline. Every later band is compared with 100 ns.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="196" y="162" width="260" height="96" rx="12" class="box"/>
+            <text x="326" y="196" text-anchor="middle" class="label">DRAM</text>
+            <text x="326" y="220" text-anchor="middle" class="sub">~ 100 ns</text>
+          </g>
+          <line x1="468" y1="210" x2="492" y2="210" class="wire"/>
+          <polygon points="492,205 501,210 492,215" class="head"/>
+          <g>
+            <rect x="504" y="162" width="260" height="96" rx="12" class="box alt"/>
+            <text x="634" y="196" text-anchor="middle" class="label">NVMe</text>
+            <text x="634" y="220" text-anchor="middle" class="sub">~ 100 us, ~1000x</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">100 μs / 100 ns = 1000×。缓存仍要，理由是热点和跨洲，不是盘还能寻道 10 ms。</span><span class="lang-en">100 μs / 100 ns = 1000×. You still want cache, for hot keys and cross-continent RTT. The reason is not a 10 ms seek.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="114" y="162" width="220" height="96" rx="12" class="box ok"/>
+            <text x="224" y="196" text-anchor="middle" class="label">Same city</text>
+            <text x="224" y="220" text-anchor="middle" class="sub">~ 0.5 ms</text>
+          </g>
+          <line x1="342" y1="210" x2="358" y2="210" class="wire"/>
+          <polygon points="358,205 367,210 358,215" class="head"/>
+          <g>
+            <rect x="370" y="162" width="220" height="96" rx="12" class="box alt"/>
+            <text x="480" y="196" text-anchor="middle" class="label">Cross-AZ</text>
+            <text x="480" y="220" text-anchor="middle" class="sub">1-2 ms</text>
+          </g>
+          <line x1="598" y1="210" x2="614" y2="210" class="wire"/>
+          <polygon points="614,205 623,210 614,215" class="head"/>
+          <g>
+            <rect x="626" y="162" width="220" height="96" rx="12" class="box bad"/>
+            <text x="736" y="196" text-anchor="middle" class="label">Continent</text>
+            <text x="736" y="220" text-anchor="middle" class="sub">~ 150 ms</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">同城 0.5 ms，跨 AZ 1–2 ms，跨洲 ~150 ms，大约 300×。跨洲是光纤里的光速。用户到站的 50–150 ms 已经盖过一次 NVMe 读。</span><span class="lang-en">Same-city 0.5 ms, cross-AZ 1–2 ms, cross-continent ~150 ms, about 300×. That last hop is the speed of light in fiber. The user’s 50–150 ms to the site already dwarfs one NVMe read.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="196" y="162" width="260" height="96" rx="12" class="box ok"/>
+            <text x="326" y="196" text-anchor="middle" class="label">3 nines</text>
+            <text x="326" y="220" text-anchor="middle" class="sub">~ 8.8 h / year</text>
+          </g>
+          <line x1="468" y1="210" x2="492" y2="210" class="wire"/>
+          <polygon points="492,205 501,210 492,215" class="head"/>
+          <g>
+            <rect x="504" y="162" width="260" height="96" rx="12" class="box ok"/>
+            <text x="634" y="196" text-anchor="middle" class="label">4 nines</text>
+            <text x="634" y="220" text-anchor="middle" class="sub">~ 53 min / year</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">3 个 9 大约 8.8 小时，4 个 9 大约 53 分钟，差 10 倍。多出来的钱花在多 AZ 和演练上。</span><span class="lang-en">3 nines is about 8.8 hours. 4 nines is about 53 minutes. That is 10×. The extra money is multi-AZ and drills.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="196" y="162" width="260" height="96" rx="12" class="box alt"/>
+            <text x="326" y="196" text-anchor="middle" class="label">5 nines</text>
+            <text x="326" y="220" text-anchor="middle" class="sub">~ 5 min / year</text>
+          </g>
+          <line x1="468" y1="210" x2="492" y2="210" class="wire"/>
+          <polygon points="492,205 501,210 492,215" class="head"/>
+          <g>
+            <rect x="504" y="162" width="260" height="96" rx="12" class="box bad"/>
+            <text x="634" y="196" text-anchor="middle" class="label">Site-wide</text>
+            <text x="634" y="220" text-anchor="middle" class="sub">over-engineering</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">5 个 9 大约 5 分钟，通常要多 Region 双活。全站都要 5 个 9，是 over-engineering。按业务分级。</span><span class="lang-en">5 nines is about 5 minutes, and it usually wants multi-Region active-active. Site-wide 5 nines is over-engineering. Grade it by product.</span></figcaption>
+      </div>
+    </figure>
+    <p class="cite"><span class="lang-zh">SLO、PACELC、RPO / RTO 的展开在 <span class="chip soon">Ch36 · trade-off</span>。复制在 <span class="chip soon">Ch41 · 复制</span>。盘的介质仍回到 <a class="chip" href="ch37.html">Ch37 · 存储选型</a>。</span><span class="lang-en">SLO, PACELC, and RPO / RTO expand in <span class="chip soon">Ch36 · trade-off</span>. Replication is <span class="chip soon">Ch41 · replication</span>. The medium still comes back to <a class="chip" href="ch37.html">Ch37 · storage choices</a>.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">追问时怎么接</span><span class="lang-en">How you take the follow-ups</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">中文</p>
+        <ol>
+          <li>磁盘延迟用多少？先问介质。NVMe ~100 μs。HDD ~10 ms 放在折叠里，不当第一答案。</li>
+          <li>内存比 NVMe 快多少？~100 ns 对 ~100 μs，约 1000×。HDD 年代那句「10 万倍」已经过时。</li>
+          <li>同城和跨洲？0.5 ms 对 ~150 ms，约 300×。</li>
+          <li>100 Mbps 是多少 MB/s？12.5。B 和 b。</li>
+          <li>三年后呢？乘增长。存储和分片提前说，别只报今天的 12 TB。</li>
+          <li>这是某厂真实 QPS 吗？不是。白板上的都是教学假设。编内部数字更糟。</li>
+        </ol>
+        <details class="fold">
+          <summary>2010 的盘，现在放哪</summary>
+          <p>原书把 HDD 寻道 ~10 ms、同机房 0.5 ms、跨大陆 150 ms 当主记忆。现在正文用 DRAM / NVMe / 同城 / 跨 AZ / 跨洲。跨洲 150 ms 仍然成立，变了的是盘。HDD 只当冷归档。原书常只估 QPS 和存储；现在补 peak、B 和 b、机器量级、成本量级。估完主动说 read:write，再选缓存、队列或分片。原书那组社交产品的月活和 100:1，是教学假设，用来论证媒体带宽和 CDN。</p>
+        </details>
+      </div>
+      <div class="lang-en"><p class="col-kicker">English</p>
+        <ol>
+          <li>What disk latency are you using? Ask the medium. NVMe is ~100 μs. HDD at ~10 ms stays in the fold. It is not the first answer.</li>
+          <li>How much faster is memory than NVMe? ~100 ns versus ~100 μs, about 1000×. The HDD-era line “100,000×” is outdated.</li>
+          <li>Same-city versus cross-continent? 0.5 ms versus ~150 ms, about 300×.</li>
+          <li>100 Mbps is how many MB/s? 12.5. B versus b.</li>
+          <li>Three years from now? Multiply growth. Say storage and sharding early. Do not stop at today’s 12 TB.</li>
+          <li>Is this some company’s real QPS? No. Everything on the board is a teaching assumption. Inventing an internal number is worse.</li>
+        </ol>
+        <details class="fold">
+          <summary>Where the 2010 disk goes now</summary>
+          <p>The book memorized HDD seek at ~10 ms, same-datacenter 0.5 ms, and cross-continent 150 ms as the main list. The body now uses DRAM / NVMe / same-city / cross-AZ / cross-continent. Cross-continent 150 ms still holds. What changed is the disk. HDD is cold archive. The book often stopped at QPS and storage. You now add peak, B versus b, machine order, and cost order. After QPS, say read:write, then pick cache, a queue, or sharding. The book’s social-product MAU and 100:1 are a teaching assumption, used to argue media bandwidth and a CDN.</p>
+        </details>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">下一步</span><span class="lang-en">Next</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">中文</p>
+        <p>合上这一页，对着空白纸走五笔：单位 → QPS → peak → 存储 ×3 → 带宽 ×8。再把短链那行口算一次。自测两分钟：五档延迟能不能说出来，以及为什么大约 1 万读 QPS 不必马上分片。</p>
+        <p>下一章是 M2 的第一块构件，<span class="chip soon">Ch04 · 限流器</span>。今天的 peak 会变成限流阈值从哪来。想看这套数字落进一道完整题，打开 <a class="chip" href="ch09.html">Ch09 · 短链</a>。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">English</p>
+        <p>Close the page and walk five strokes on blank paper: units, QPS, peak, storage ×3, bandwidth ×8. Then hand-calc the short-URL row once. Two-minute check: can you say the five latency bands, and why about 10K read QPS does not need sharding yet?</p>
+        <p>The next chapter is the first M2 block, <span class="chip soon">Ch04 · rate limiter</span>. Today’s peak becomes where the limit comes from. To see these numbers land in a full prompt, open <a class="chip" href="ch09.html">Ch09 · URL shortener</a>.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">闪卡</span><span class="lang-en">Flashcards</span></h2>
+    <p class="cite"><span class="lang-zh">点一下翻面。能讲出来才算会。</span><span class="lang-en">Click to flip. If you can say it, you know it.</span></p>
+    <div class="cards-grid">
+      <button type="button" class="flip">
+        <span class="q"><span class="lang-zh">估算开场先写什么？</span><span class="lang-en">What do you write before any arithmetic?</span></span>
+        <span class="a"><span class="lang-zh">单位，然后四个假设：DAU、人均读写、read:write、peak 倍数。每个结果带单位。</span><span class="lang-en">Units, then four assumptions: DAU, ops per user, read:write, peak multiplier. Every result has a unit.</span></span>
+      </button>
+      <button type="button" class="flip">
+        <span class="q"><span class="lang-zh">平均 QPS 怎么口算？</span><span class="lang-en">How do you get average QPS?</span></span>
+        <span class="a"><span class="lang-zh">DAU × 人均 / 10^5。读写分开。10M DAU、10 读 1 写 → 读 1,000，写 100。</span><span class="lang-en">DAU × ops / 10^5. Split read and write. 10M DAU, 10 reads and 1 write → read 1,000, write 100.</span></span>
+      </button>
+      <button type="button" class="flip">
+        <span class="q"><span class="lang-zh">peak 怎么乘？存储和带宽各用哪个？</span><span class="lang-en">How do you scale peak, and which number feeds storage?</span></span>
+        <span class="a"><span class="lang-zh">日常 ×2–3，大促 ×10。只报平均是 red flag。存储用平均写，带宽和机器用 peak。</span><span class="lang-en">Daily ×2–3, promo ×10. Average-only is a red flag. Storage uses average writes. Bandwidth and boxes use peak.</span></span>
+      </button>
+      <button type="button" class="flip">
+        <span class="q"><span class="lang-zh">这组假设的存储是多少？为什么 ×3？</span><span class="lang-en">What is storage here, and why ×3?</span></span>
+        <span class="a"><span class="lang-zh">~10 GB/天，一年 ~4 TB，×3 副本 ~12 TB。×3 是副本和备份。图片另走对象存储。</span><span class="lang-en">~10 GB/day, ~4 TB a year, ~12 TB with ×3. The ×3 is replicas and backups. Images go to object storage.</span></span>
+      </button>
+      <button type="button" class="flip">
+        <span class="q"><span class="lang-zh">带宽公式？100 Mbps 等于多少？</span><span class="lang-en">Bandwidth formula? What is 100 Mbps?</span></span>
+        <span class="a"><span class="lang-zh">bps = QPS × Byte × 8。100 Mbps = 12.5 MB/s。文本 peak 大约 24 Mbps；200 KB 的图大约 5 Gbps，该上 CDN。</span><span class="lang-en">bps = QPS × bytes × 8. 100 Mbps = 12.5 MB/s. Text at peak is about 24 Mbps. A 200 KB image is about 5 Gbps, so CDN.</span></span>
+      </button>
+      <button type="button" class="flip">
+        <span class="q"><span class="lang-zh">2026 的五档延迟？</span><span class="lang-en">Five 2026 latency bands?</span></span>
+        <span class="a"><span class="lang-zh">DRAM ~100 ns，NVMe ~100 μs，同城 ~0.5 ms，跨 AZ ~1–2 ms，跨洲 ~150 ms。</span><span class="lang-en">DRAM ~100 ns, NVMe ~100 μs, same-city ~0.5 ms, cross-AZ ~1–2 ms, cross-continent ~150 ms.</span></span>
+      </button>
+      <button type="button" class="flip">
+        <span class="q"><span class="lang-zh">3 个 9 和 4 个 9 差多少？</span><span class="lang-en">3 nines versus 4 nines?</span></span>
+        <span class="a"><span class="lang-zh">大约 8.8 小时对 53 分钟，差 10 倍。全站 5 个 9 是 over-engineering。</span><span class="lang-en">About 8.8 hours versus 53 minutes, 10×. Site-wide 5 nines is over-engineering.</span></span>
+      </button>
+      <button type="button" class="flip">
+        <span class="q"><span class="lang-zh">数字之后第一句架构怎么说？</span><span class="lang-en">What is the first architecture sentence after the numbers?</span></span>
+        <span class="a"><span class="lang-zh">read:write 是 10:1，先缓存。3,000 读 QPS 一台 NVMe 加副本就够。板上的数是教学假设。</span><span class="lang-en">read:write is 10:1, so cache first. 3,000 read QPS is one NVMe box plus a replica. The numbers are teaching assumptions.</span></span>
+      </button>
+    </div>
+  </section>
+  <p><button type="button" class="read-toggle">
+    <span class="when-off"><span class="lang-zh">我已学完本章</span><span class="lang-en">Mark this chapter done</span></span>
+    <span class="when-on"><span class="lang-zh">已学完本章</span><span class="lang-en">Completed</span></span>
+  </button></p>
+  <p class="cite"><span class="lang-zh">进度存在这台浏览器里。</span><span class="lang-en">Saved in this browser only.</span></p>
+</article>
+</main>
+<script src="../assets/js/nav.js"></script>
+<script src="../assets/js/lang.js"></script>
+<script src="../assets/js/slides.js"></script>
+<script src="../assets/js/progress.js"></script>
+</body>
+</html>

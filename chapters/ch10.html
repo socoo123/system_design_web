@@ -1,0 +1,864 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="parchment" data-locale="zh">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ch10 · 设计通知系统</title>
+  <link rel="icon" href="../favicon.ico" sizes="48x48">
+  <link rel="stylesheet" href="../assets/css/style.css">
+  <script src="../assets/js/boot.js"></script>
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="../index.html"><span class="brand-logo">SD</span><span class="lang-zh">系统设计面试</span><span class="lang-en">System Design Interview</span></a>
+  <span class="spacer"></span>
+  <a class="map-link" href="../index.html"><span class="lang-zh">课程地图</span><span class="lang-en">Map</span></a>
+  <div class="seg" role="group" aria-label="language">
+    <button type="button" data-locale-set="zh">中文</button>
+    <button type="button" data-locale-set="both"><span class="lang-zh">对照</span><span class="lang-en">Both</span></button>
+    <button type="button" data-locale-set="en">EN</button>
+  </div>
+  <div class="seg" role="group" aria-label="theme">
+    <button type="button" data-theme-set="parchment"><span class="lang-zh">护眼</span><span class="lang-en">Paper</span></button>
+    <button type="button" data-theme-set="dracula"><span class="lang-zh">深色</span><span class="lang-en">Dark</span></button>
+  </div>
+</header>
+<main class="wrap">
+<article class="chapter" id="ch10" data-ch="ch10">
+  <header>
+    <div class="ch-kicker"><span class="lang-zh">CHAPTER 10 · 设计题</span><span class="lang-en">CHAPTER 10 · case</span></div>
+    <h1><span class="lang-zh">设计通知系统</span><span class="lang-en">Design a notification system</span></h1>
+    <p class="ch-meta-line"><span class="lang-zh">约 40 分钟 · 前置：Ch01。限流和投递语义可以后读</span><span class="lang-en">~40 min · after Ch01. Rate limiting and delivery semantics can wait</span></p>
+  </header>
+
+  <section class="goal">
+    <h2><span class="lang-zh">这一章结束你能做什么</span><span class="lang-en">What you can do after this chapter</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">中文</p>
+        <ul>
+          <li>30 秒讲完三个 hard part，Push 默认 <strong>FCM HTTP v1</strong>。</li>
+          <li>可靠性说 <strong>at-least-once</strong> 加 idempotency，不说 exactly-once。</li>
+          <li>按白板顺序画完：澄清、数量级、接入到分通道 worker。失败路径和通道 trade-off 分开讲。</li>
+        </ul>
+      </div>
+      <div class="lang-en"><p class="col-kicker">English</p>
+        <ul>
+          <li>Give the three hard parts in 30 seconds, and default Push to <strong>FCM HTTP v1</strong>.</li>
+          <li>Say <strong>at-least-once</strong> plus idempotency. Exactly-once is not the claim.</li>
+          <li>Draw clarify, scale, then ingress through per-channel workers. The failure path and the channel trade-offs each get their own pass.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">30 秒开场</span><span class="lang-en">The 30-second open</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">中文</p>
+        <p class="say">通知三个 hard part：通道不一样、不丢不重、别骚扰。我先确认 Push / SMS / Email、事务还是营销、单发还是群发。千万 DAU 的白板上，Push 日均是千级 QPS，营销突发被三方限速卡住。链路是业务方 → 通知 API → MQ → 分通道 worker → 三方。Push 主叙事用 FCM HTTP v1，覆盖 Android 和 Web；iOS 走 APNS，但不是整张图的唯一出口。可靠性是 at-least-once，加上 notification_id 的 idempotency。我不说 exactly-once。</p>
+        <p>范围就这么大。<a href="ch09.html">短链</a>是读多写少的 KV，这题是 fan-out 和投递。全球多 Region 加打开率漏斗，等他们追问再补。还没问通道就只画 APNS、还没分事务和营销就讲分区、声称 exactly-once、在 API 里循环千万用户，都是 red flag。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">English</p>
+        <p class="say">Notifications have three hard parts: channels that do not look alike, don't drop and don't duplicate, and don't spam. I'll confirm Push, SMS, and Email, transactional versus marketing, and one-to-one versus broadcast. On a 10-million DAU board, Push is about a thousand QPS on average, and a marketing burst is gated by the vendor rate limit. The picture is product services, the notification API, a queue, a worker pool per channel, then the vendors. Push leads with FCM HTTP v1 for Android and Web. iOS still uses APNS, but it is not the only door on the diagram. Reliability is at-least-once plus idempotency on notification_id. I will not claim exactly-once.</p>
+        <p>That is the scope. A <a href="ch09.html">URL shortener</a> is a read-heavy KV. This prompt is fan-out and delivery. Leave global multi-region and an open-rate funnel until they ask. Drawing only APNS before you asked about channels, lecturing partitions before transactional versus marketing, claiming exactly-once, or looping ten million users inside the API — those are the red flags.</p>
+      </div>
+    </div>
+    <figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img">
+          <g>
+            <rect x="350" y="150" width="260" height="100" rx="12" class="box"/>
+            <text x="480" y="184" text-anchor="middle" class="label">Fan-out</text>
+            <text x="480" y="208" text-anchor="middle" class="sub">delivery, not a KV</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">开场先定性。这题是把一条 intent 送到很多设备和通道，不是一条短码映射。</span><span class="lang-en">Name the prompt first. One intent goes out to many devices and channels. It is not a short-code lookup.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img">
+          <g>
+            <rect x="350" y="150" width="260" height="100" rx="12" class="box"/>
+            <text x="480" y="184" text-anchor="middle" class="label">Channels</text>
+            <text x="480" y="208" text-anchor="middle" class="sub">hard part</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">第一个 hard part：Push、SMS、Email 的协议、速率、回执、成本都不一样。</span><span class="lang-en">First hard part: Push, SMS, and Email differ in protocol, rate, receipt, and cost.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img">
+          <g>
+            <rect x="190" y="150" width="260" height="100" rx="12" class="box"/>
+            <text x="320" y="184" text-anchor="middle" class="label">Channels</text>
+            <text x="320" y="208" text-anchor="middle" class="sub">hard part</text>
+          </g>
+          <g>
+            <rect x="510" y="150" width="260" height="100" rx="12" class="box"/>
+            <text x="640" y="184" text-anchor="middle" class="label">Idempotency</text>
+            <text x="640" y="208" text-anchor="middle" class="sub">hard part</text>
+          </g>
+          <line x1="456" y1="200" x2="499" y2="200" class="wire"/>
+          <polygon points="499,195 508,200 499,205" class="head"/>
+        </svg>
+        <figcaption><span class="lang-zh">第二个：不丢，也不让用户收到两遍。用户感觉「只来一次」靠 idempotency，不是免费的 exactly-once。</span><span class="lang-en">Second: don't drop it, and don't make the user see it twice. "I got it once" is idempotency, not free exactly-once.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img">
+          <g>
+            <rect x="62" y="150" width="260" height="100" rx="12" class="box"/>
+            <text x="192" y="184" text-anchor="middle" class="label">Channels</text>
+            <text x="192" y="208" text-anchor="middle" class="sub">hard part</text>
+          </g>
+          <g>
+            <rect x="350" y="150" width="260" height="100" rx="12" class="box"/>
+            <text x="480" y="184" text-anchor="middle" class="label">Idempotency</text>
+            <text x="480" y="208" text-anchor="middle" class="sub">hard part</text>
+          </g>
+          <line x1="328" y1="200" x2="339" y2="200" class="wire"/>
+          <polygon points="339,195 348,200 339,205" class="head"/>
+          <g>
+            <rect x="638" y="150" width="260" height="100" rx="12" class="box"/>
+            <text x="768" y="184" text-anchor="middle" class="label">Anti-spam</text>
+            <text x="768" y="208" text-anchor="middle" class="sub">hard part</text>
+          </g>
+          <line x1="616" y1="200" x2="627" y2="200" class="wire"/>
+          <polygon points="627,195 636,200 627,205" class="head"/>
+        </svg>
+        <figcaption><span class="lang-zh">第三个：发得出去不等于该发。三个 hard part 点完就停，先问问题，别画终图。</span><span class="lang-en">Third: being able to send is not the same as should send. Name the three hard parts, then stop. Ask before you draw the final picture.</span></figcaption>
+      </div>
+    </figure>
+    <p class="cite"><span class="lang-zh">时间盒在 <a class="chip" href="ch01.html">Ch01</a>。上一道完整题是 <a class="chip" href="ch09.html">Ch09 · 短链</a>。</span><span class="lang-en">The clock is <a class="chip" href="ch01.html">Ch01</a>. The previous full case is <a class="chip" href="ch09.html">Ch09 · URL shortener</a>.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">先问清楚</span><span class="lang-en">Ask before you draw</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">中文</p>
+        <p>没问清楚就画图，又是 Jimmy。五个问题就停，其余写成假设，写在白板边上。问过 10 分钟也是 red flag。</p>
+        <p class="say">我假设 Push、SMS、Email 都要；事务和营销都有；验证码不能丢；营销要静默时段和退订。Push 用 FCM HTTP v1 做 Android / Web 的主通道。我按这个画，不对你打断我。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">English</p>
+        <p>Drawing before you ask is Jimmy again. Five questions, then stop. Write the rest as assumptions on the side of the board. Past ten minutes of questions is a red flag too.</p>
+        <p class="say">I'll assume Push, SMS, and Email are all in, both transactional and marketing, OTP cannot drop, and marketing needs quiet hours and unsubscribe. Push uses FCM HTTP v1 as the Android and Web channel. I'll draw on that — cut me off if it's wrong.</p>
+      </div>
+    </div>
+    <figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img">
+          <g>
+            <rect x="350" y="150" width="260" height="100" rx="12" class="box"/>
+            <text x="480" y="184" text-anchor="middle" class="label">Channels</text>
+            <text x="480" y="208" text-anchor="middle" class="sub">Push, SMS, Email</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">先问通道。Web Push 算 Push。通道一变，后面的 worker 和协议都变。</span><span class="lang-en">Ask channels first. Web Push counts as Push. The workers and the protocols follow from this answer.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img">
+          <g>
+            <rect x="190" y="150" width="260" height="100" rx="12" class="box"/>
+            <text x="320" y="184" text-anchor="middle" class="label">Channels</text>
+            <text x="320" y="208" text-anchor="middle" class="sub">Push, SMS, Email</text>
+          </g>
+          <g>
+            <rect x="510" y="150" width="260" height="100" rx="12" class="box"/>
+            <text x="640" y="184" text-anchor="middle" class="label">Both</text>
+            <text x="640" y="208" text-anchor="middle" class="sub">txn + marketing</text>
+          </g>
+          <line x1="456" y1="200" x2="499" y2="200" class="wire"/>
+          <polygon points="499,195 508,200 499,205" class="head"/>
+        </svg>
+        <figcaption><span class="lang-zh">事务和营销都有。这一笔决定后面要不要分优先级，营销才走静默和退订。</span><span class="lang-en">Both transactional and marketing. That is why priority splits later, and why only marketing gets quiet hours and unsubscribe.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img">
+          <g>
+            <rect x="62" y="150" width="260" height="100" rx="12" class="box"/>
+            <text x="192" y="184" text-anchor="middle" class="label">Channels</text>
+            <text x="192" y="208" text-anchor="middle" class="sub">Push, SMS, Email</text>
+          </g>
+          <g>
+            <rect x="350" y="150" width="260" height="100" rx="12" class="box"/>
+            <text x="480" y="184" text-anchor="middle" class="label">Both</text>
+            <text x="480" y="208" text-anchor="middle" class="sub">txn + marketing</text>
+          </g>
+          <line x1="328" y1="200" x2="339" y2="200" class="wire"/>
+          <polygon points="339,195 348,200 339,205" class="head"/>
+          <g>
+            <rect x="638" y="150" width="260" height="100" rx="12" class="box ok"/>
+            <text x="768" y="184" text-anchor="middle" class="label">Fan-out</text>
+            <text x="768" y="208" text-anchor="middle" class="sub">not in the API</text>
+          </g>
+          <line x1="616" y1="200" x2="627" y2="200" class="wire"/>
+          <polygon points="627,195 636,200 627,205" class="head"/>
+        </svg>
+        <figcaption><span class="lang-zh">事务是单发。营销可以群发，但是异步 fan-out 进队列。API 请求线程里不循环用户。</span><span class="lang-en">Transactional is one-to-one. Marketing may broadcast, as an async fan-out into the queue. The API thread does not loop users.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img">
+          <g>
+            <rect x="38" y="150" width="200" height="100" rx="12" class="box"/>
+            <text x="138" y="184" text-anchor="middle" class="label">Channels</text>
+            <text x="138" y="208" text-anchor="middle" class="sub">Push SMS Email</text>
+          </g>
+          <g>
+            <rect x="266" y="150" width="200" height="100" rx="12" class="box"/>
+            <text x="366" y="184" text-anchor="middle" class="label">Both</text>
+            <text x="366" y="208" text-anchor="middle" class="sub">txn + marketing</text>
+          </g>
+          <line x1="244" y1="200" x2="255" y2="200" class="wire"/>
+          <polygon points="255,195 264,200 255,205" class="head"/>
+          <g>
+            <rect x="494" y="150" width="200" height="100" rx="12" class="box"/>
+            <text x="594" y="184" text-anchor="middle" class="label">Fan-out</text>
+            <text x="594" y="208" text-anchor="middle" class="sub">not in the API</text>
+          </g>
+          <line x1="472" y1="200" x2="483" y2="200" class="wire"/>
+          <polygon points="483,195 492,200 483,205" class="head"/>
+          <g>
+            <rect x="722" y="150" width="200" height="100" rx="12" class="box ok"/>
+            <text x="822" y="184" text-anchor="middle" class="label">OTP</text>
+            <text x="822" y="208" text-anchor="middle" class="sub">cannot drop</text>
+          </g>
+          <line x1="700" y1="200" x2="711" y2="200" class="wire"/>
+          <polygon points="711,195 720,200 711,205" class="head"/>
+        </svg>
+        <figcaption><span class="lang-zh">验证码不能丢，偶尔重一条可以接受。所以先落库再发，并用 idempotency 挡住第二次。</span><span class="lang-en">OTP cannot drop. An occasional duplicate is acceptable. Persist first, then send, and block the second send with idempotency.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img">
+          <g>
+            <rect x="190" y="150" width="260" height="100" rx="12" class="box"/>
+            <text x="320" y="184" text-anchor="middle" class="label">Quiet hours</text>
+            <text x="320" y="208" text-anchor="middle" class="sub">marketing only</text>
+          </g>
+          <g>
+            <rect x="510" y="150" width="260" height="100" rx="12" class="box alt"/>
+            <text x="640" y="184" text-anchor="middle" class="label">Unsubscribe</text>
+            <text x="640" y="208" text-anchor="middle" class="sub">marketing stops</text>
+          </g>
+          <line x1="456" y1="200" x2="499" y2="200" class="wire"/>
+          <polygon points="499,195 508,200 499,205" class="head"/>
+        </svg>
+        <figcaption><span class="lang-zh">营销要静默和退订。打开率点到为止：payload 带一个 id。这题不是数仓课。</span><span class="lang-en">Marketing needs quiet hours and unsubscribe. An open rate is one sentence: put an id in the payload. This is not a warehouse class.</span></figcaption>
+      </div>
+    </figure>
+    <p class="cite"><span class="lang-zh">提问的习惯在 <a class="chip" href="ch01.html">Ch01</a>。问关键的，写下假设，继续画。</span><span class="lang-en">The habit of asking lives in <a class="chip" href="ch01.html">Ch01</a>. Ask the key ones, write the assumptions, keep drawing.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">数量级</span><span class="lang-en">Orders of magnitude</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">中文</p>
+        <p>公式在后面的估算章。这里只要证明：这是中等吞吐，难点不在打满一台机器。下面全是白板假设，不是某家公司的内部数字。不要编一个精确投递率。</p>
+        <p class="say">按千万 DAU：Push 日均千级 QPS，日志是 TB 级。营销可以把瞬时量拉到每秒上万，但 FCM 和 SMS 聚合商会限速，所以要 MQ 削峰。bottleneck 不是算力，是送达，以及别骚扰。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">English</p>
+        <p>The formulas live in the estimates chapter. Here you only show this is medium throughput. The hard part is not saturating one box. Every number below is a board assumption, not an internal figure. Do not invent a delivery-rate percentage.</p>
+        <p class="say">On a 10-million DAU board, Push is about a thousand QPS on average, and logs are TB-scale. Marketing can spike into the tens of thousands per second, but FCM and the SMS aggregators will rate-limit you, so the queue has to absorb the burst. The bottleneck is delivery, and not spamming people. It is not compute.</p>
+      </div>
+    </div>
+    <figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img">
+          <g>
+            <rect x="350" y="150" width="260" height="100" rx="12" class="box"/>
+            <text x="480" y="184" text-anchor="middle" class="label">10M DAU</text>
+            <text x="480" y="208" text-anchor="middle" class="sub">~10 push / day</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">先把假设写上：大约 1000 万 DAU，每人每天大约 10 条 Push。SMS 和 Email 量更小，后面单独说。</span><span class="lang-en">Write the assumption: about 10 million DAU, about 10 pushes a person a day. SMS and Email are smaller. Say them next, separately.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img">
+          <g>
+            <rect x="190" y="150" width="260" height="100" rx="12" class="box"/>
+            <text x="320" y="184" text-anchor="middle" class="label">~1k QPS</text>
+            <text x="320" y="208" text-anchor="middle" class="sub">1e7 x 10 / 86400</text>
+          </g>
+          <g>
+            <rect x="510" y="150" width="260" height="100" rx="12" class="box alt"/>
+            <text x="640" y="184" text-anchor="middle" class="label">Peak</text>
+            <text x="640" y="208" text-anchor="middle" class="sub">a few thousand</text>
+          </g>
+          <line x1="456" y1="200" x2="499" y2="200" class="wire"/>
+          <polygon points="499,195 508,200 499,205" class="head"/>
+        </svg>
+        <figcaption><span class="lang-zh">1e7 × 10 / 86400 ≈ 1.2×10³。口播说千级 QPS。峰值按 5 倍，仍是几千，不是十万。</span><span class="lang-en">1e7 × 10 / 86400 is about 1.2×10³. Say "about a thousand QPS." A 5× peak is still a few thousand, not a hundred thousand.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img">
+          <g>
+            <rect x="190" y="150" width="260" height="100" rx="12" class="box"/>
+            <text x="320" y="184" text-anchor="middle" class="label">Burst ~1e4/s</text>
+            <text x="320" y="208" text-anchor="middle" class="sub">10M / 10 min</text>
+          </g>
+          <g>
+            <rect x="510" y="150" width="260" height="100" rx="12" class="box ok"/>
+            <text x="640" y="184" text-anchor="middle" class="label">Quota</text>
+            <text x="640" y="208" text-anchor="middle" class="sub">workers leak</text>
+          </g>
+          <line x1="456" y1="200" x2="499" y2="200" class="wire"/>
+          <polygon points="499,195 508,200 499,205" class="head"/>
+        </svg>
+        <figcaption><span class="lang-zh">一千万用户塞进 10 分钟，大约 1.7×10⁴ 条/秒，口播用量级 1e4/s。这个数字不是你要同步打进三方的 QPS。队列吃下来，worker 按配额漏。</span><span class="lang-en">Ten million users in ten minutes is about 1.7×10⁴ per second. Say order 1e4/s. That is not a QPS you synchronously punch into the vendor. The queue absorbs it. Workers leak at the quota.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img">
+          <g>
+            <rect x="190" y="150" width="260" height="100" rx="12" class="box"/>
+            <text x="320" y="184" text-anchor="middle" class="label">Logs</text>
+            <text x="320" y="208" text-anchor="middle" class="sub">TB-scale</text>
+          </g>
+          <g>
+            <rect x="510" y="150" width="260" height="100" rx="12" class="box alt"/>
+            <text x="640" y="184" text-anchor="middle" class="label">Bottleneck</text>
+            <text x="640" y="208" text-anchor="middle" class="sub">delivery</text>
+          </g>
+          <line x1="456" y1="200" x2="499" y2="200" class="wire"/>
+          <polygon points="499,195 508,200 499,205" class="head"/>
+        </svg>
+        <figcaption><span class="lang-zh">一天约 1 亿条、每条 0.5 KB、留 30 天，原始日志大约 1.5 TB，含副本仍是 TB 级。SMS 一天按 10 万条是个位数 QPS，Email 一天按 100 万条是十级。出站卡在三方配额，不是视频带宽。</span><span class="lang-en">About 100 million rows a day at 0.5 KB, kept 30 days, is about 1.5 TB of raw logs. With replicas it is still TB-scale. SMS at about 100k a day is single-digit QPS. Email at about a million a day is tens. Outbound is gated by vendor quota, not by video bandwidth.</span></figcaption>
+      </div>
+    </figure>
+    <p class="cite"><span class="lang-zh">估算口径见 <span class="chip soon">Ch03 · 粗略估算</span>。</span><span class="lang-en">The estimate habit is <span class="chip soon">Ch03 · back-of-the-envelope</span>.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">高层：接入到分通道 worker</span><span class="lang-en">High-level: ingress to per-channel workers</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">中文</p>
+        <p>从接入画起，一笔加一个。MQ 必答四句：三方慢，API 先返回；营销突发要削峰；三方抖一下可以重试；SMS 慢不能拖死 Push。topic 按通道拆，再按优先级拆。分区和 ISR 不要在这题展开。</p>
+        <p>schema 够用就停。<code>notification</code> 有 id、user_id、channel、status、template_id。<code>device</code> 有 user_id、token、platform、status。用户对设备是一对多。<code>user_preference</code> 放通道、opt-in、quiet hours。不要在白板上铺五张宽表。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">English</p>
+        <p>Start at the ingress and add one box per stroke. Four reasons for the queue, then stop: vendor calls are slow, so the API returns first; marketing bursts need absorbing; a vendor blip can be retried; slow SMS cannot stall Push. Split topics by channel, then by priority. Leave partitions and ISR for the queue chapter.</p>
+        <p>Stop the schema when it is enough. <code>notification</code> is id, user_id, channel, status, template_id. <code>device</code> is user_id, token, platform, status. User to device is one-to-many. <code>user_preference</code> holds channel, opt-in, and quiet hours. Do not draw five wide tables.</p>
+      </div>
+    </div>
+    <figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img">
+          <g>
+            <rect x="350" y="150" width="260" height="100" rx="12" class="box"/>
+            <text x="480" y="184" text-anchor="middle" class="label">API</text>
+            <text x="480" y="208" text-anchor="middle" class="sub">ingress</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">第一笔只画接入。通知 API 校验、做请求级 idempotency、查偏好。退订的营销在这里就停。</span><span class="lang-en">First stroke is only the ingress. The notification API validates, checks request idempotency, and reads preferences. Unsubscribed marketing stops here.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img">
+          <g>
+            <rect x="190" y="150" width="260" height="100" rx="12" class="box"/>
+            <text x="320" y="184" text-anchor="middle" class="label">API</text>
+            <text x="320" y="208" text-anchor="middle" class="sub">write PENDING</text>
+          </g>
+          <g>
+            <rect x="510" y="150" width="260" height="100" rx="12" class="box alt"/>
+            <text x="640" y="184" text-anchor="middle" class="label">MQ</text>
+            <text x="640" y="208" text-anchor="middle" class="sub">then enqueue</text>
+          </g>
+          <line x1="456" y1="200" x2="499" y2="200" class="wire"/>
+          <polygon points="499,195 508,200 499,205" class="head"/>
+        </svg>
+        <figcaption><span class="lang-zh">先把 intent 写成 PENDING，再入队，然后 API 就返回。三方调用不在这条请求里。营销群发用单独的 fan-out 任务往队列灌。</span><span class="lang-en">Persist the intent as PENDING, then enqueue, then the API returns. The vendor call is not on this request. A marketing broadcast is a separate fan-out job pouring into the queue.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img">
+          <g>
+            <rect x="62" y="150" width="260" height="100" rx="12" class="box"/>
+            <text x="192" y="184" text-anchor="middle" class="label">API</text>
+            <text x="192" y="208" text-anchor="middle" class="sub">write PENDING</text>
+          </g>
+          <g>
+            <rect x="350" y="150" width="260" height="100" rx="12" class="box alt"/>
+            <text x="480" y="184" text-anchor="middle" class="label">MQ</text>
+            <text x="480" y="208" text-anchor="middle" class="sub">absorb burst</text>
+          </g>
+          <line x1="328" y1="200" x2="339" y2="200" class="wire"/>
+          <polygon points="339,195 348,200 339,205" class="head"/>
+          <g>
+            <rect x="638" y="150" width="260" height="100" rx="12" class="box ok"/>
+            <text x="768" y="184" text-anchor="middle" class="label">Workers</text>
+            <text x="768" y="208" text-anchor="middle" class="sub">per channel</text>
+          </g>
+          <line x1="616" y1="200" x2="627" y2="200" class="wire"/>
+          <polygon points="627,195 636,200 627,205" class="head"/>
+        </svg>
+        <figcaption><span class="lang-zh">加上 worker。先画成一块，下一笔再拆开。速率、鉴权、重试、计费每条腿都不一样。</span><span class="lang-en">Add workers. Draw them as one box, then split on the next stroke. Rate, auth, retry, and billing differ on every leg.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img">
+          <g>
+            <rect x="80" y="150" width="240" height="100" rx="12" class="box ok"/>
+            <text x="200" y="184" text-anchor="middle" class="label">Push worker</text>
+            <text x="200" y="208" text-anchor="middle" class="sub">FCM HTTP v1</text>
+          </g>
+          <g>
+            <rect x="360" y="150" width="240" height="100" rx="12" class="box ok"/>
+            <text x="480" y="184" text-anchor="middle" class="label">SMS worker</text>
+            <text x="480" y="208" text-anchor="middle" class="sub">aggregator</text>
+          </g>
+          <g>
+            <rect x="640" y="150" width="240" height="100" rx="12" class="box ok"/>
+            <text x="760" y="184" text-anchor="middle" class="label">Email worker</text>
+            <text x="760" y="208" text-anchor="middle" class="sub">ESP</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">三个池是并列的，所以这张不画箭头。SMS 按条计费，并发要严；Push 吞吐高，但要处理死 token。混成一个池，慢的那条会拖垮全部。</span><span class="lang-en">Three pools side by side, so this stroke has no arrow. SMS is billed per message, so cap concurrency. Push is fast, but dead tokens have to be handled. One shared pool: the slow leg drags the rest down.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img">
+          <g>
+            <rect x="34" y="150" width="156" height="100" rx="12" class="box"/>
+            <text x="112" y="184" text-anchor="middle" class="label">Services</text>
+            <text x="112" y="208" text-anchor="middle" class="sub">caller</text>
+          </g>
+          <g>
+            <rect x="218" y="150" width="156" height="100" rx="12" class="box"/>
+            <text x="296" y="184" text-anchor="middle" class="label">API</text>
+            <text x="296" y="208" text-anchor="middle" class="sub">ingress</text>
+          </g>
+          <line x1="196" y1="200" x2="207" y2="200" class="wire"/>
+          <polygon points="207,195 216,200 207,205" class="head"/>
+          <g>
+            <rect x="402" y="150" width="156" height="100" rx="12" class="box alt"/>
+            <text x="480" y="184" text-anchor="middle" class="label">MQ</text>
+            <text x="480" y="208" text-anchor="middle" class="sub">absorb</text>
+          </g>
+          <line x1="380" y1="200" x2="391" y2="200" class="wire"/>
+          <polygon points="391,195 400,200 391,205" class="head"/>
+          <g>
+            <rect x="586" y="150" width="156" height="100" rx="12" class="box ok"/>
+            <text x="664" y="184" text-anchor="middle" class="label">Workers</text>
+            <text x="664" y="208" text-anchor="middle" class="sub">per channel</text>
+          </g>
+          <line x1="564" y1="200" x2="575" y2="200" class="wire"/>
+          <polygon points="575,195 584,200 575,205" class="head"/>
+          <g>
+            <rect x="770" y="150" width="156" height="100" rx="12" class="box alt"/>
+            <text x="848" y="184" text-anchor="middle" class="label">Vendors</text>
+            <text x="848" y="208" text-anchor="middle" class="sub">FCM SMS ESP</text>
+          </g>
+          <line x1="748" y1="200" x2="759" y2="200" class="wire"/>
+          <polygon points="759,195 768,200 759,205" class="head"/>
+        </svg>
+        <figcaption><span class="lang-zh">完整图就留这五块。Workers 是上一笔的三个池。Push 出去走 FCM HTTP v1。问一句：方向可以吗？接下来分开讲失败路径和通道 trade-off。</span><span class="lang-en">Leave these five boxes up. Workers means the three pools from the previous stroke. Push egress is FCM HTTP v1. Ask: does this direction look right? Next, the failure path and the channel trade-offs, as two separate passes.</span></figcaption>
+      </div>
+    </figure>
+    <p class="cite"><span class="lang-zh">协议对比在 <span class="chip soon">Ch40 · 协议选型</span>。投递和重试的语义在 <span class="chip soon">Ch42 · 消息与弹性</span>。分区课是 <span class="chip soon">Ch20 · 分布式消息队列</span>，这题不展开。</span><span class="lang-en">Protocol comparison is <span class="chip soon">Ch40 · protocol choices</span>. Delivery and retry semantics are <span class="chip soon">Ch42 · messaging</span>. The partition chapter is <span class="chip soon">Ch20 · message queue</span>. Not this board.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">Hard part · 失败路径</span><span class="lang-en">Hard part · failure path</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">中文</p>
+        <p>这一套只讲不丢、重试、去重、死 token。通道之间怎么换，下一套再画，不塞进同一张。</p>
+        <p class="say">我保证 at-least-once：先落库再发，失败就重试，耗尽进 DLQ。重复用 notification_id 挡住。我不说 exactly-once，三方自己的重试我控制不了。</p>
+        <p>端到端 exactly-once 跨 FCM、APNS、SMS 做不到。2PC 把延迟和运维成本拉高，通知不值。服务端按 id 去重，客户端按 id 再滤一次。验证码用独立高优 topic，重试更积极。营销丢一条可以接受，但不能拿「能丢」当借口不做落库。SMS 聚合商可以熔断换路；Push 没有另一家等价出口。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">English</p>
+        <p>This pass is only don't-drop, retry, dedup, and dead tokens. How the channels differ is the next pass. They do not share a slide.</p>
+        <p class="say">I guarantee at-least-once: persist first, then send, retry on failure, and exhaust into the DLQ. Duplicates are blocked by notification_id. I will not say exactly-once. I do not control the vendor's own retries.</p>
+        <p>End-to-end exactly-once across FCM, APNS, and SMS does not exist. 2PC pulls latency and ops cost up, and notifications are not worth it. Dedup on the server by id, and filter again on the client by id. OTP gets its own high-priority topic and a more aggressive retry. Dropping one marketing message is acceptable. "We can drop it" is not an excuse to skip the write. An SMS aggregator can fail over. Push has no second equivalent door.</p>
+      </div>
+    </div>
+    <figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img">
+          <g>
+            <rect x="350" y="150" width="260" height="100" rx="12" class="box bad"/>
+            <text x="480" y="184" text-anchor="middle" class="label">Send first</text>
+            <text x="480" y="208" text-anchor="middle" class="sub">crash drops it</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">失败从这里开始。还没落库就去调三方，进程一崩，验证码就没了。白板上先把这条死路划掉。</span><span class="lang-en">The failure starts here. Call the vendor before the row exists, and a crash drops the OTP. Cross this path off first.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img">
+          <g>
+            <rect x="190" y="150" width="260" height="100" rx="12" class="box ok"/>
+            <text x="320" y="184" text-anchor="middle" class="label">PENDING</text>
+            <text x="320" y="208" text-anchor="middle" class="sub">write the intent</text>
+          </g>
+          <g>
+            <rect x="510" y="150" width="260" height="100" rx="12" class="box alt"/>
+            <text x="640" y="184" text-anchor="middle" class="label">MQ</text>
+            <text x="640" y="208" text-anchor="middle" class="sub">enqueue after</text>
+          </g>
+          <line x1="456" y1="200" x2="499" y2="200" class="wire"/>
+          <polygon points="499,195 508,200 499,205" class="head"/>
+        </svg>
+        <figcaption><span class="lang-zh">正确顺序：数据库里先有 PENDING，再入队。入队失败可以靠这条记录再投一次。</span><span class="lang-en">The safe order: the PENDING row exists, then the enqueue. If the enqueue fails, that row can be published again.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img">
+          <g>
+            <rect x="190" y="150" width="260" height="100" rx="12" class="box"/>
+            <text x="320" y="184" text-anchor="middle" class="label">Worker</text>
+            <text x="320" y="208" text-anchor="middle" class="sub">do not ack</text>
+          </g>
+          <g>
+            <rect x="510" y="150" width="260" height="100" rx="12" class="box bad"/>
+            <text x="640" y="184" text-anchor="middle" class="label">Timeout</text>
+            <text x="640" y="208" text-anchor="middle" class="sub">vendor blip</text>
+          </g>
+          <line x1="456" y1="200" x2="499" y2="200" class="wire"/>
+          <polygon points="499,195 508,200 499,205" class="head"/>
+        </svg>
+        <figcaption><span class="lang-zh">三方超时或 5xx。这条消息先别 ack，让队列重投。ack 了再发现没送出去，就真丢了。</span><span class="lang-en">Vendor timeout or a 5xx. Do not ack yet. Let the queue redeliver. Ack, then discover it never left, and it is actually gone.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img">
+          <g>
+            <rect x="190" y="150" width="260" height="100" rx="12" class="box ok"/>
+            <text x="320" y="184" text-anchor="middle" class="label">Backoff</text>
+            <text x="320" y="208" text-anchor="middle" class="sub">exponential + jitter</text>
+          </g>
+          <g>
+            <rect x="510" y="150" width="260" height="100" rx="12" class="box alt"/>
+            <text x="640" y="184" text-anchor="middle" class="label">DLQ</text>
+            <text x="640" y="208" text-anchor="middle" class="sub">after N, alert</text>
+          </g>
+          <line x1="456" y1="200" x2="499" y2="200" class="wire"/>
+          <polygon points="499,195 508,200 499,205" class="head"/>
+        </svg>
+        <figcaption><span class="lang-zh">重试带指数退避和 jitter，避免一起打回去。N 次之后进 DLQ 并告警。验证码的 N 更小、间隔更短；营销可以更松。</span><span class="lang-en">Retry with exponential backoff and jitter, so you do not stampede back. After N tries, the DLQ plus an alert. OTP uses a smaller N and a shorter gap. Marketing can be looser.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img">
+          <g>
+            <rect x="190" y="150" width="260" height="100" rx="12" class="box"/>
+            <text x="320" y="184" text-anchor="middle" class="label">Redelivery</text>
+            <text x="320" y="208" text-anchor="middle" class="sub">same message</text>
+          </g>
+          <g>
+            <rect x="510" y="150" width="260" height="100" rx="12" class="box ok"/>
+            <text x="640" y="184" text-anchor="middle" class="label">SET NX</text>
+            <text x="640" y="208" text-anchor="middle" class="sub">notification_id</text>
+          </g>
+          <line x1="456" y1="200" x2="499" y2="200" class="wire"/>
+          <polygon points="499,195 508,200 499,205" class="head"/>
+        </svg>
+        <figcaption><span class="lang-zh">重试会带来重复。请求重放和 MQ 重投用同一个 notification_id 做 SET NX，TTL 例如 24 小时。再加 user + template + 窗口，挡住连点。客户端按 id 再滤一次。</span><span class="lang-en">Retries create duplicates. A replayed request and a redelivered queue message share one notification_id SET NX, with a TTL on the order of 24 hours. Also dedup on user + template + window, against a double-tap. The client filters by id again.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img">
+          <g>
+            <rect x="190" y="150" width="260" height="100" rx="12" class="box bad"/>
+            <text x="320" y="184" text-anchor="middle" class="label">UNREGISTERED</text>
+            <text x="320" y="208" text-anchor="middle" class="sub">or APNS 410</text>
+          </g>
+          <g>
+            <rect x="510" y="150" width="260" height="100" rx="12" class="box ok"/>
+            <text x="640" y="184" text-anchor="middle" class="label">Inactive</text>
+            <text x="640" y="208" text-anchor="middle" class="sub">stop pushing</text>
+          </g>
+          <line x1="456" y1="200" x2="499" y2="200" class="wire"/>
+          <polygon points="499,195 508,200 499,205" class="head"/>
+        </svg>
+        <figcaption><span class="lang-zh">token 不是永久的。FCM 返回 UNREGISTERED，或直连 APNS 常见 410，就把 device 标成 inactive，后面跳过。继续推是在浪费配额。多设备挂在 user_id 上，token 不是用户主键。发送失败的回调是主路径。</span><span class="lang-en">A device token is not forever. FCM returns UNREGISTERED, or direct APNS often returns 410. Mark the device inactive and skip it. Keep pushing and you waste quota. Hang many tokens off user_id. The token is not the user key. The send-failure callback is the main path.</span></figcaption>
+      </div>
+    </figure>
+    <p class="cite"><span class="lang-zh">投递语义的展开在 <span class="chip soon">Ch42 · 消息与弹性</span>。</span><span class="lang-en">The longer version of delivery semantics is <span class="chip soon">Ch42 · messaging</span>.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">Hard part · 通道 trade-off</span><span class="lang-en">Hard part · channel trade-offs</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">中文</p>
+        <p>这一套只比通道，不把上一套的重试步骤再画一遍。2026 的白板：Android 和 Web 的主叙事是 <strong>FCM HTTP v1</strong>，鉴权是短时 OAuth，不是永久 server key。iOS 仍是 APNS，可以直连，也可以让 FCM 代发。</p>
+        <p class="say">Android 和 Web 我走 FCM HTTP v1，iOS 走 APNS。我不会把 APNS 画成整题的默认出口，也不会用已经停掉的 FCM legacy key。</p>
+        <p>SMS 不自建短信中心，走聚合商：按国家、运营商、价格、成功率选路，失败就熔断换备用。DLR 用 webhook 回来，靠 msg_id 对账，所以 SMS 比 Push 好统计「送达到了」。国内还要签名、模板和退订。Email 走 ESP，便宜，适合营销，但要听 bounce、complaint 和退订。协议名词点到为止。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">English</p>
+        <p>This pass only compares channels. Do not redraw the retry steps from the previous pass. On a 2026 board the Android and Web story is <strong>FCM HTTP v1</strong>, with a short-lived OAuth token, not a forever server key. iOS is still APNS. Talk to it directly, or let FCM proxy.</p>
+        <p class="say">Android and Web go FCM HTTP v1. iOS goes APNS. I will not draw APNS as the default door for the whole prompt, and I will not use the FCM legacy key. That send API is gone.</p>
+        <p>You do not run your own SMSC. An aggregator routes by country, carrier, price, and success rate, and fails over when a route breaks. DLR comes back on a webhook, reconciled by msg_id, which is why SMS is easier to count as delivered than Push. In China you still need a signature, a template, and unsubscribe. Email goes through an ESP. It is cheap and fits marketing, and you honor bounce, complaint, and unsubscribe. Name the protocols and stop.</p>
+      </div>
+    </div>
+    <figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img">
+          <g>
+            <rect x="190" y="150" width="260" height="100" rx="12" class="box ok"/>
+            <text x="320" y="184" text-anchor="middle" class="label">FCM HTTP v1</text>
+            <text x="320" y="208" text-anchor="middle" class="sub">Android + Web</text>
+          </g>
+          <g>
+            <rect x="510" y="150" width="260" height="100" rx="12" class="box bad"/>
+            <text x="640" y="184" text-anchor="middle" class="label">APNS only</text>
+            <text x="640" y="208" text-anchor="middle" class="sub">iOS, not the whole</text>
+          </g>
+          <line x1="456" y1="200" x2="499" y2="200" class="wire"/>
+          <polygon points="499,195 508,200 499,205" class="head"/>
+        </svg>
+        <figcaption><span class="lang-zh">左边是 Push 的默认答案。右边只覆盖 Apple。把 APNS 画在图中央当唯一出口，Android 和 Web 就没了。</span><span class="lang-en">The left box is the default Push answer. The right box only covers Apple. Draw APNS in the center as the only egress, and Android and Web disappear.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img">
+          <g>
+            <rect x="190" y="150" width="260" height="100" rx="12" class="box ok"/>
+            <text x="320" y="184" text-anchor="middle" class="label">OAuth</text>
+            <text x="320" y="208" text-anchor="middle" class="sub">short-lived token</text>
+          </g>
+          <g>
+            <rect x="510" y="150" width="260" height="100" rx="12" class="box bad"/>
+            <text x="640" y="184" text-anchor="middle" class="label">Server key</text>
+            <text x="640" y="208" text-anchor="middle" class="sub">legacy, stopped</text>
+          </g>
+          <line x1="456" y1="200" x2="499" y2="200" class="wire"/>
+          <polygon points="499,195 508,200 499,205" class="head"/>
+        </svg>
+        <figcaption><span class="lang-zh">FCM HTTP v1 用 service account 换短时 OAuth。legacy server key 的发送接口 2024 年已经停了。面试里还拿它当默认，是过时答案。</span><span class="lang-en">FCM HTTP v1 trades a service account for a short-lived OAuth token. The legacy server-key send API stopped in 2024. Leading with it is the outdated answer.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img">
+          <g>
+            <rect x="80" y="150" width="240" height="100" rx="12" class="box ok"/>
+            <text x="200" y="184" text-anchor="middle" class="label">Push</text>
+            <text x="200" y="208" text-anchor="middle" class="sub">no device ack</text>
+          </g>
+          <g>
+            <rect x="360" y="150" width="240" height="100" rx="12" class="box alt"/>
+            <text x="480" y="184" text-anchor="middle" class="label">SMS</text>
+            <text x="480" y="208" text-anchor="middle" class="sub">DLR, billed</text>
+          </g>
+          <g>
+            <rect x="640" y="150" width="240" height="100" rx="12" class="box alt"/>
+            <text x="760" y="184" text-anchor="middle" class="label">Email</text>
+            <text x="760" y="208" text-anchor="middle" class="sub">cheap, bounce</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">三张并列，不是一条流水线。Push 免费、吞吐高，APNS 没有「设备已收到」的正向回执。SMS 按条钱，有 DLR。Email 便宜，适合营销，退订必须听。</span><span class="lang-en">Three boxes side by side, not a pipeline. Push is free and high throughput. APNS has no positive "device received" receipt. SMS is billed per message and has a DLR. Email is cheap, fits marketing, and unsubscribe is mandatory.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img">
+          <g>
+            <rect x="190" y="150" width="260" height="100" rx="12" class="box bad"/>
+            <text x="320" y="184" text-anchor="middle" class="label">One pool</text>
+            <text x="320" y="208" text-anchor="middle" class="sub">SMS stalls Push</text>
+          </g>
+          <g>
+            <rect x="510" y="150" width="260" height="100" rx="12" class="box ok"/>
+            <text x="640" y="184" text-anchor="middle" class="label">Per channel</text>
+            <text x="640" y="208" text-anchor="middle" class="sub">own rate, own auth</text>
+          </g>
+          <line x1="456" y1="200" x2="499" y2="200" class="wire"/>
+          <polygon points="499,195 508,200 499,205" class="head"/>
+        </svg>
+        <figcaption><span class="lang-zh">这是通道 trade-off 落到进程上的那一笔。一个池子省事，SMS 一慢，Push 和验证码一起排队。拆开之后，每条腿用自己的速率和鉴权。</span><span class="lang-en">This is the channel trade-off as it lands on processes. One pool is simpler, and a slow SMS line queues Push and OTP behind it. Split them, and each leg keeps its own rate and its own auth.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img">
+          <g>
+            <rect x="190" y="150" width="260" height="100" rx="12" class="box alt"/>
+            <text x="320" y="184" text-anchor="middle" class="label">APNS direct</text>
+            <text x="320" y="208" text-anchor="middle" class="sub">HTTP/2 + p8</text>
+          </g>
+          <g>
+            <rect x="510" y="150" width="260" height="100" rx="12" class="box alt"/>
+            <text x="640" y="184" text-anchor="middle" class="label">FCM proxy</text>
+            <text x="640" y="208" text-anchor="middle" class="sub">iOS still APNS</text>
+          </g>
+          <line x1="456" y1="200" x2="499" y2="200" class="wire"/>
+          <polygon points="499,195 508,200 499,205" class="head"/>
+        </svg>
+        <figcaption><span class="lang-zh">iOS 两条都成立：直连 APNS，或让 FCM 代发。两边都不是 Android 的替代品。选一条说清楚，不要两套都展开成课。</span><span class="lang-en">Both are valid for iOS: talk to APNS directly, or let FCM proxy. Neither replaces the Android path. Pick one and say why. Do not teach both as a second class.</span></figcaption>
+      </div>
+    </figure>
+    <p class="cite"><span class="lang-zh">通道协议的词典在 <span class="chip soon">Ch40 · 协议选型</span>。这里不要把 SMPP 讲成一节。</span><span class="lang-en">The protocol dictionary is <span class="chip soon">Ch40 · protocol choices</span>. Do not turn SMPP into a section here.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">Hard part · 别骚扰</span><span class="lang-en">Hard part · don't spam</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">中文</p>
+        <p>第三个 hard part。营销把验证码堵住、凌晨把人叫醒、退订了还发，都是 red flag。限流算法本身不在这题展开，只说放在哪一层，以及事务和营销为什么必须分开。</p>
+        <p class="say">用户级和通道级都要限。验证码单独高优队列。营销看静默时段和退订，到点再发，不扔掉。我不会为了「必达」把用户叫醒。</p>
+        <p>四层就够：用户每天或每小时的上限；通道级 SMS 最严；同一模板的短窗口去重；全局配额保住 FCM 和聚合商。社交通知可以合并，十个赞合成一条。偏好读多，短 TTL 缓存，源在数据库。trade-off 要说出来：防骚扰会压低营销到达；重试做猛会增加重复。不是再画十个箭头。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">English</p>
+        <p>Third hard part. Marketing blocking OTP, waking someone at 3am, or sending after they unsubscribed — those are red flags. The limiter algorithm stays in its own chapter. Here you only say which layer, and why transactional and marketing cannot share a queue.</p>
+        <p class="say">Per-user and per-channel limits both belong. OTP gets its own high-priority queue. Marketing respects quiet hours and unsubscribe: send when the window ends, do not throw it away. I will not wake the user in the name of must-deliver.</p>
+        <p>Four layers are enough: a per-user daily or hourly cap; per-channel, with SMS the strictest; a short window on the same template; a global cap that protects the FCM and aggregator quotas. Social notices can coalesce, ten likes into one message. Preferences are read-heavy: a short TTL cache, source of truth in the database. Say the trade-off out loud: anti-spam lowers marketing reach, and aggressive retry raises duplicates. More arrows do not say that.</p>
+      </div>
+    </div>
+    <figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img">
+          <g>
+            <rect x="350" y="150" width="260" height="100" rx="12" class="box"/>
+            <text x="480" y="184" text-anchor="middle" class="label">Per user</text>
+            <text x="480" y="208" text-anchor="middle" class="sub">daily cap</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">先画用户级。每人每天或每小时有上限，挡住对同一个人连轰。</span><span class="lang-en">Start with the person. A daily or hourly cap stops a hammer on one user.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img">
+          <g>
+            <rect x="190" y="150" width="260" height="100" rx="12" class="box"/>
+            <text x="320" y="184" text-anchor="middle" class="label">Per user</text>
+            <text x="320" y="208" text-anchor="middle" class="sub">daily cap</text>
+          </g>
+          <g>
+            <rect x="510" y="150" width="260" height="100" rx="12" class="box alt"/>
+            <text x="640" y="184" text-anchor="middle" class="label">Per channel</text>
+            <text x="640" y="208" text-anchor="middle" class="sub">SMS strictest</text>
+          </g>
+          <line x1="456" y1="200" x2="499" y2="200" class="wire"/>
+          <polygon points="499,195 508,200 499,205" class="head"/>
+        </svg>
+        <figcaption><span class="lang-zh">再加上通道级。SMS 又贵又有合规，限额最紧。Push 松一些。这层也保住三方配额。</span><span class="lang-en">Add the channel cap. SMS is expensive and regulated, so its cap is the tightest. Push is looser. This layer also protects the vendor quota.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img">
+          <g>
+            <rect x="190" y="150" width="260" height="100" rx="12" class="box ok"/>
+            <text x="320" y="184" text-anchor="middle" class="label">OTP queue</text>
+            <text x="320" y="208" text-anchor="middle" class="sub">high priority</text>
+          </g>
+          <g>
+            <rect x="510" y="150" width="260" height="100" rx="12" class="box bad"/>
+            <text x="640" y="184" text-anchor="middle" class="label">Shared queue</text>
+            <text x="640" y="208" text-anchor="middle" class="sub">marketing blocks OTP</text>
+          </g>
+          <line x1="456" y1="200" x2="499" y2="200" class="wire"/>
+          <polygon points="499,195 508,200 499,205" class="head"/>
+        </svg>
+        <figcaption><span class="lang-zh">验证码和支付走独立高优 topic 和 worker。营销群发若跟它们挤在一个队列里，验证码会排在十万条广告后面。</span><span class="lang-en">OTP and payments get a dedicated high-priority topic and workers. Share that queue with a marketing blast, and the code waits behind a hundred thousand ads.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img">
+          <g>
+            <rect x="190" y="150" width="260" height="100" rx="12" class="box ok"/>
+            <text x="320" y="184" text-anchor="middle" class="label">Delay</text>
+            <text x="320" y="208" text-anchor="middle" class="sub">until window ends</text>
+          </g>
+          <g>
+            <rect x="510" y="150" width="260" height="100" rx="12" class="box bad"/>
+            <text x="640" y="184" text-anchor="middle" class="label">Send at 3am</text>
+            <text x="640" y="208" text-anchor="middle" class="sub">wakes the user</text>
+          </g>
+          <line x1="456" y1="200" x2="499" y2="200" class="wire"/>
+          <polygon points="499,195 508,200 499,205" class="head"/>
+        </svg>
+        <figcaption><span class="lang-zh">营销撞上静默时段就延后到结束，不要默默丢掉，除非产品明确说丢。验证码和安全通知立即发。时区存 IANA，在发送路径上按用户当地时间判，不要用机房时间。退订之后该通道的营销停止，验证码通常仍允许。</span><span class="lang-en">Marketing that lands in quiet hours waits until the window ends. Do not silently drop it unless product said drop. OTP and security send now. Store an IANA timezone and evaluate the user's local time on the send path, not the datacenter clock. After unsubscribe, marketing on that channel stops. OTP is usually still allowed.</span></figcaption>
+      </div>
+    </figure>
+    <p class="cite"><span class="lang-zh">令牌桶和滑动窗口在 <span class="chip soon">Ch04 · 设计限流器</span>。这题只讲放哪一层。</span><span class="lang-en">Token bucket and sliding window are <span class="chip soon">Ch04 · rate limiter</span>. This chapter only says which layer.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">收尾，不要说完美</span><span class="lang-en">Close without saying perfect</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">中文</p>
+        <table>
+          <thead><tr><th>bottleneck</th><th>你怎么接</th></tr></thead>
+          <tbody>
+            <tr><td>三方速率 / 营销突发</td><td>MQ 削峰；worker 按配额漏；SMS 更严</td></tr>
+            <tr><td>失效 token 仍在推</td><td>反馈环标 inactive；这是可达的最大杠杆</td></tr>
+            <tr><td>营销堵住验证码</td><td>高优独立 topic；静默只约束营销</td></tr>
+          </tbody>
+        </table>
+        <details class="fold">
+          <summary>原书当时的默认（不要当第一答案）</summary>
+          <p>骨架还能用：多通道，API → MQ → worker。过时的是这几条。</p>
+          <table>
+            <thead><tr><th>当时</th><th>现在</th></tr></thead>
+            <tbody>
+              <tr><td>FCM legacy server key</td><td>HTTP v1 + OAuth。legacy 发送接口 2024 年已停</td></tr>
+              <tr><td>APNS 画在图中央</td><td>FCM HTTP v1 覆盖 Android / Web；iOS 才是 APNS</td></tr>
+              <tr><td>token 当永久</td><td>UNREGISTERED / 410 必须清掉</td></tr>
+              <tr><td>去重一笔带过</td><td>notification_id，再加窗口去重</td></tr>
+              <tr><td>暗示 exactly-once</td><td>声明 at-least-once。跨三方 exactly-once 是 over-engineering</td></tr>
+              <tr><td>SMS 点名一家云</td><td>聚合商选路和 failover。国内还有签名、模板、退订</td></tr>
+            </tbody>
+          </table>
+        </details>
+        <p>自测：合上这一页，用开场那 30 秒把 FCM HTTP v1、at-least-once 加 idempotency、失效 token 讲一遍。哪句卡，回哪一套幻灯片。</p>
+        <p>下一道是新闻 Feed。通知是服务推向用户的 fan-out；Feed 是反过来的聚合，以及推还是拉。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">English</p>
+        <table>
+          <thead><tr><th>Bottleneck</th><th>What you say</th></tr></thead>
+          <tbody>
+            <tr><td>Vendor rate / marketing burst</td><td>The queue absorbs it; workers leak at quota; SMS is stricter</td></tr>
+            <tr><td>Still pushing dead tokens</td><td>The feedback loop marks them inactive. Biggest lever on reach</td></tr>
+            <tr><td>Marketing blocking OTP</td><td>A dedicated high-priority topic. Quiet hours bind marketing only</td></tr>
+          </tbody>
+        </table>
+        <details class="fold">
+          <summary>What the book used to default to</summary>
+          <p>The skeleton still works: many channels, API to a queue to workers. What aged is the following.</p>
+          <table>
+            <thead><tr><th>Then</th><th>Now</th></tr></thead>
+            <tbody>
+              <tr><td>FCM legacy server key</td><td>HTTP v1 + OAuth. The legacy send API stopped in 2024</td></tr>
+              <tr><td>APNS drawn in the center</td><td>FCM HTTP v1 for Android and Web. APNS is the iOS leg</td></tr>
+              <tr><td>Token treated as forever</td><td>UNREGISTERED and 410 have to be cleaned</td></tr>
+              <tr><td>Dedup waved through</td><td>notification_id, plus a windowed dedup</td></tr>
+              <tr><td>Quietly implying exactly-once</td><td>Declare at-least-once. Cross-vendor exactly-once is over-engineering</td></tr>
+              <tr><td>SMS named as one cloud</td><td>Aggregator routing and failover. China still needs signature, template, unsubscribe</td></tr>
+            </tbody>
+          </table>
+        </details>
+        <p>Check yourself: close the page and give the 30-second open, including FCM HTTP v1, at-least-once plus idempotency, and dead tokens. Wherever you stumble, go back to that deck.</p>
+        <p>Next is a news feed. Notifications are fan-out from the service to the user. A feed is the reverse: aggregation, and push versus pull.</p>
+      </div>
+    </div>
+    <p class="cite"><span class="lang-zh">下一章 <span class="chip soon">Ch11 · 设计新闻 Feed</span>。</span><span class="lang-en">Next chapter: <span class="chip soon">Ch11 · news feed</span>.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">闪卡</span><span class="lang-en">Flashcards</span></h2>
+    <p class="cite"><span class="lang-zh">点一下翻面。能讲出来才算会。</span><span class="lang-en">Click to flip. If you can say it, you know it.</span></p>
+    <div class="cards-grid">
+      <button type="button" class="flip">
+        <span class="q"><span class="lang-zh">通知三个 hard part 是什么？</span><span class="lang-en">What are the three hard parts?</span></span>
+        <span class="a"><span class="lang-zh">通道不一样；不丢不重；别骚扰。</span><span class="lang-en">Channels differ; don't drop and don't duplicate; don't spam.</span></span>
+      </button>
+      <button type="button" class="flip">
+        <span class="q"><span class="lang-zh">2026 的 Push 默认怎么说？</span><span class="lang-en">What is the 2026 Push default?</span></span>
+        <span class="a"><span class="lang-zh">FCM HTTP v1，覆盖 Android 和 Web。短时 OAuth，不是 legacy server key。</span><span class="lang-en">FCM HTTP v1 for Android and Web. Short-lived OAuth, not a legacy server key.</span></span>
+      </button>
+      <button type="button" class="flip">
+        <span class="q"><span class="lang-zh">APNS 放在哪？</span><span class="lang-en">Where does APNS sit?</span></span>
+        <span class="a"><span class="lang-zh">iOS 通道。可以直连，也可以 FCM 代发。不是整题的默认出口。</span><span class="lang-en">The iOS leg. Direct, or FCM as a proxy. Not the default door for the whole prompt.</span></span>
+      </button>
+      <button type="button" class="flip">
+        <span class="q"><span class="lang-zh">高层链路怎么画？</span><span class="lang-en">What is the high-level path?</span></span>
+        <span class="a"><span class="lang-zh">业务方 → 通知 API → 先写 PENDING 再入 MQ → 分通道 worker → 三方。营销 fan-out 进队列，按配额漏。</span><span class="lang-en">Product services, notification API, PENDING then the queue, a worker pool per channel, then vendors. Marketing fan-out goes into the queue and leaks at quota.</span></span>
+      </button>
+      <button type="button" class="flip">
+        <span class="q"><span class="lang-zh">为什么声明 at-least-once？</span><span class="lang-en">Why declare at-least-once?</span></span>
+        <span class="a"><span class="lang-zh">队列会重投，三方也会重试。跨厂商 exactly-once 做不到。</span><span class="lang-en">The queue redelivers, and the vendors retry. Exactly-once across vendors does not exist.</span></span>
+      </button>
+      <button type="button" class="flip">
+        <span class="q"><span class="lang-zh">idempotency 怎么做？</span><span class="lang-en">How do you do idempotency?</span></span>
+        <span class="a"><span class="lang-zh">notification_id 做 SET NX。再加 user + template + 窗口。客户端按 id 再滤。</span><span class="lang-en">SET NX on notification_id. Also user + template + window. The client filters by id again.</span></span>
+      </button>
+      <button type="button" class="flip">
+        <span class="q"><span class="lang-zh">token 失效看什么信号？</span><span class="lang-en">What signals a dead token?</span></span>
+        <span class="a"><span class="lang-zh">FCM 的 UNREGISTERED，APNS 常见 410。标 inactive，停止再推。</span><span class="lang-en">FCM UNREGISTERED, and APNS often 410. Mark inactive and stop pushing.</span></span>
+      </button>
+      <button type="button" class="flip">
+        <span class="q"><span class="lang-zh">静默时段里验证码发不发？</span><span class="lang-en">Does OTP send during quiet hours?</span></span>
+        <span class="a"><span class="lang-zh">立即发。营销延后到时段结束，不默默丢。按用户时区判。</span><span class="lang-en">Send it now. Marketing waits until the window ends. Do not silently drop it. Use the user's timezone.</span></span>
+      </button>
+    </div>
+  </section>
+  <p><button type="button" class="read-toggle">
+    <span class="when-off"><span class="lang-zh">我已学完本章</span><span class="lang-en">Mark this chapter done</span></span>
+    <span class="when-on"><span class="lang-zh">已学完本章</span><span class="lang-en">Completed</span></span>
+  </button></p>
+  <p class="cite"><span class="lang-zh">进度存在这台浏览器里。</span><span class="lang-en">Saved in this browser only.</span></p>
+</article>
+</main>
+<script src="../assets/js/nav.js"></script>
+<script src="../assets/js/lang.js"></script>
+<script src="../assets/js/slides.js"></script>
+<script src="../assets/js/progress.js"></script>
+</body>
+</html>

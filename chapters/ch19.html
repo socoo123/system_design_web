@@ -1,0 +1,907 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="parchment" data-locale="zh">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ch19 · 邻近服务 / LBS</title>
+  <link rel="icon" href="../favicon.ico" sizes="48x48">
+  <link rel="stylesheet" href="../assets/css/style.css">
+  <script src="../assets/js/boot.js"></script>
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="../index.html"><span class="brand-logo">SD</span><span class="lang-zh">系统设计面试</span><span class="lang-en">System Design Interview</span></a>
+  <span class="spacer"></span>
+  <a class="map-link" href="../index.html"><span class="lang-zh">课程地图</span><span class="lang-en">Map</span></a>
+  <div class="seg" role="group" aria-label="language">
+    <button type="button" data-locale-set="zh">中文</button>
+    <button type="button" data-locale-set="both"><span class="lang-zh">对照</span><span class="lang-en">Both</span></button>
+    <button type="button" data-locale-set="en">EN</button>
+  </div>
+  <div class="seg" role="group" aria-label="theme">
+    <button type="button" data-theme-set="parchment"><span class="lang-zh">护眼</span><span class="lang-en">Paper</span></button>
+    <button type="button" data-theme-set="dracula"><span class="lang-zh">深色</span><span class="lang-en">Dark</span></button>
+  </div>
+</header>
+<main class="wrap">
+<article class="chapter" id="ch19" data-ch="ch19">
+  <header>
+    <div class="ch-kicker"><span class="lang-zh">CHAPTER 19 · 设计题</span><span class="lang-en">CHAPTER 19 · case</span></div>
+    <h1><span class="lang-zh">邻近服务 / LBS</span><span class="lang-en">Nearby / LBS</span></h1>
+    <p class="ch-meta-line"><span class="lang-zh">约 35 分钟 · 前置：Ch01。哈希和存储可以后读</span><span class="lang-en">~35 min · after Ch01. Hashing and storage can wait</span></p>
+  </header>
+
+  <section class="goal">
+    <h2><span class="lang-zh">这一章结束你能做什么</span><span class="lang-en">What you can do after this chapter</span></h2>
+    <div class="bilingual">
+  <div class="lang-zh"><p class="col-kicker">中文</p>
+<ul>
+<li>用 30 秒说出三个 hard part，并把范围收在附近 POI。</li>
+<li>白板默认 <strong>geohash</strong>，讲清和 <strong>quadtree</strong> 的 trade-off，查询时加上邻格。</li>
+<li>热格按前缀分片。位置更新频率和隐私各留一句。</li>
+</ul>
+  </div>
+  <div class="lang-en"><p class="col-kicker">English</p>
+<ul>
+<li>Name the three hard parts in 30 seconds, and keep the scope on nearby POI.</li>
+<li>Default the board to <strong>geohash</strong>, state the <strong>quadtree</strong> trade-off, and query neighbor cells.</li>
+<li>Shard hotspot cells by prefix. One sentence each for update frequency and privacy.</li>
+</ul>
+  </div>
+</div>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">先问半径和实时性</span><span class="lang-en">Radius and freshness first</span></h2>
+    <div class="bilingual">
+  <div class="lang-zh"><p class="col-kicker">中文</p>
+<p class="say">邻近服务三个 hard part：二维收成格子键、半径查询要带邻格、热点格子要分片。默认是附近的商家和 POI，按距离排序。白板先画 geohash 前缀。Quadtree 是 trade-off，H3 六边形是备选。</p>
+<p>第一问是范围。半径用 0.5、1、2、5 km 这几档，它决定 geohash 多长。实时性决定写路径：静态 POI 的改动很少；附近的人会把位置上报变成写 hotspot。距离要排。类型和营业时间后置过滤。DAU 写成教学假设，大约一千万，用来谈热格。问过 10 分钟还在问，也该停。地图瓦片和骑手匹配先收口，前者是选修，后者是 <span class="chip soon">Ch27 · 配送</span>。</p>
+<p class="say">我假设：附近商家 / POI，半径 0.5–5 km，按距离排序。索引用 geohash 前缀，查当前格加 8 个邻居。位置只存粗格子、短 TTL。方向不对你打断我。</p>
+  </div>
+  <div class="lang-en"><p class="col-kicker">English</p>
+<p class="say">Nearby has three hard parts: turn 2D into a cell key, query a radius with neighbor cells, and shard the hotspot cells. Default is nearby businesses and POI, ranked by distance. Draw a geohash prefix first. Quadtree is the trade-off. H3 hexagons are the backup.</p>
+<p>The first question is scope. A radius of 0.5, 1, 2, or 5 km is what sets the geohash length. Freshness sets the write path: a static POI catalog changes rarely; nearby people turn location reports into a write hotspot. You rank by distance. Type and opening hours are a post-filter. Write DAU as a teaching assumption, about 10 million, so you can talk about hot cells. Still asking after 10 minutes is its own red flag. Close map tiles and rider matching early. Tiles are elective. Matching is <span class="chip soon">Ch27 · delivery</span>.</p>
+<p class="say">I'll assume nearby businesses and POI, radius 0.5–5 km, ranked by distance. The index is a geohash prefix. Query the current cell plus 8 neighbors. Store a coarse cell and a short TTL. Stop me if that direction is wrong.</p>
+  </div>
+</div>
+    <figure class="deck">
+<div class="slide">
+  <svg class="board" viewBox="0 0 960 420" role="img">
+  <g>
+    <rect x="350" y="150" width="260" height="96" rx="12" class="box ok"/>
+    <text x="480" y="184" text-anchor="middle" class="label">Nearby POI</text>
+    <text x="480" y="208" text-anchor="middle" class="sub">businesses in a radius</text>
+  </g>
+</svg>
+  <figcaption><span class="lang-zh">第一笔先写范围：附近的商家和 POI。实时性先空着，下一笔再问。</span><span class="lang-en">First stroke is scope: nearby businesses and POI. Freshness is the next question.</span></figcaption>
+</div>
+<div class="slide">
+  <svg class="board" viewBox="0 0 960 420" role="img">
+  <g>
+    <rect x="185" y="150" width="260" height="96" rx="12" class="box ok"/>
+    <text x="315" y="184" text-anchor="middle" class="label">Nearby POI</text>
+    <text x="315" y="208" text-anchor="middle" class="sub">businesses in a radius</text>
+  </g>
+  <g>
+    <rect x="515" y="150" width="260" height="96" rx="12" class="box"/>
+    <text x="645" y="184" text-anchor="middle" class="label">Radius</text>
+    <text x="645" y="208" text-anchor="middle" class="sub">0.5 to 5 km</text>
+  </g>
+  <line x1="451" y1="198" x2="504" y2="198" class="wire"/>
+  <polygon points="504,193 513,198 504,203" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">半径定档。0.5 到 5 km 后面会映射成 geohash 长度，现在先写在边上。</span><span class="lang-en">Lock a radius band. 0.5 to 5 km becomes a geohash length later. Write it in the margin for now.</span></figcaption>
+</div>
+<div class="slide">
+  <svg class="board" viewBox="0 0 960 420" role="img">
+  <g>
+    <rect x="62" y="150" width="260" height="96" rx="12" class="box ok"/>
+    <text x="192" y="184" text-anchor="middle" class="label">Nearby POI</text>
+    <text x="192" y="208" text-anchor="middle" class="sub">businesses in a radius</text>
+  </g>
+  <g>
+    <rect x="350" y="150" width="260" height="96" rx="12" class="box"/>
+    <text x="480" y="184" text-anchor="middle" class="label">Radius</text>
+    <text x="480" y="208" text-anchor="middle" class="sub">0.5 to 5 km</text>
+  </g>
+  <line x1="328" y1="198" x2="339" y2="198" class="wire"/>
+  <polygon points="339,193 348,198 339,203" class="head"/>
+  <g>
+    <rect x="638" y="150" width="260" height="96" rx="12" class="box alt"/>
+    <text x="768" y="184" text-anchor="middle" class="label">Freshness</text>
+    <text x="768" y="208" text-anchor="middle" class="sub">static POI first</text>
+  </g>
+  <line x1="616" y1="198" x2="627" y2="198" class="wire"/>
+  <polygon points="627,193 636,198 627,203" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">实时性：默认定静态目录。附近的人同一套键，只是写会变热，后面单独画。</span><span class="lang-en">Freshness: default to a static catalog. Nearby people use the same keys, but the writes get hot. That drawing comes later.</span></figcaption>
+</div>
+<div class="slide">
+  <svg class="board" viewBox="0 0 960 420" role="img">
+  <g>
+    <rect x="38" y="150" width="200" height="96" rx="12" class="box ok"/>
+    <text x="138" y="184" text-anchor="middle" class="label">Nearby POI</text>
+    <text x="138" y="208" text-anchor="middle" class="sub">in a radius</text>
+  </g>
+  <g>
+    <rect x="266" y="150" width="200" height="96" rx="12" class="box"/>
+    <text x="366" y="184" text-anchor="middle" class="label">Radius</text>
+    <text x="366" y="208" text-anchor="middle" class="sub">0.5 to 5 km</text>
+  </g>
+  <line x1="244" y1="198" x2="255" y2="198" class="wire"/>
+  <polygon points="255,193 264,198 255,203" class="head"/>
+  <g>
+    <rect x="494" y="150" width="200" height="96" rx="12" class="box alt"/>
+    <text x="594" y="184" text-anchor="middle" class="label">Freshness</text>
+    <text x="594" y="208" text-anchor="middle" class="sub">static POI first</text>
+  </g>
+  <line x1="472" y1="198" x2="483" y2="198" class="wire"/>
+  <polygon points="483,193 492,198 483,203" class="head"/>
+  <g>
+    <rect x="722" y="150" width="200" height="96" rx="12" class="box"/>
+    <text x="822" y="184" text-anchor="middle" class="label">Rank</text>
+    <text x="822" y="208" text-anchor="middle" class="sub">by distance</text>
+  </g>
+  <line x1="700" y1="198" x2="711" y2="198" class="wire"/>
+  <polygon points="711,193 720,198 711,203" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">要按真实距离排序。格子只是粗筛，不能把格里的 ID 无序扔回去。</span><span class="lang-en">Rank by true distance. A cell is only a coarse filter. Do not return unordered IDs from inside it.</span></figcaption>
+</div>
+<div class="slide">
+  <svg class="board" viewBox="0 0 960 420" role="img">
+  <g>
+    <rect x="62" y="150" width="260" height="96" rx="12" class="box ok"/>
+    <text x="192" y="184" text-anchor="middle" class="label">Geohash</text>
+    <text x="192" y="208" text-anchor="middle" class="sub">prefix key</text>
+  </g>
+  <g>
+    <rect x="350" y="150" width="260" height="96" rx="12" class="box ok"/>
+    <text x="480" y="184" text-anchor="middle" class="label">8 neighbors</text>
+    <text x="480" y="208" text-anchor="middle" class="sub">query with current</text>
+  </g>
+  <line x1="328" y1="198" x2="339" y2="198" class="wire"/>
+  <polygon points="339,193 348,198 339,203" class="head"/>
+  <g>
+    <rect x="638" y="150" width="260" height="96" rx="12" class="box ok"/>
+    <text x="768" y="184" text-anchor="middle" class="label">Short TTL</text>
+    <text x="768" y="208" text-anchor="middle" class="sub">coarse cell</text>
+  </g>
+  <line x1="616" y1="198" x2="627" y2="198" class="wire"/>
+  <polygon points="627,193 636,198 627,203" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">假设写上白板再往下画：geohash 前缀、当前格加 8 邻格、粗格子加短 TTL。</span><span class="lang-en">Write the assumptions, then keep drawing: geohash prefix, current cell plus 8 neighbors, coarse cell and a short TTL.</span></figcaption>
+</div>
+</figure>
+    <p class="cite"><span class="lang-zh">时间盒在 <a class="chip" href="ch01.html">Ch01</a>。澄清加估算大约 10 分钟，然后才画图。</span><span class="lang-en">The clock is in <a class="chip" href="ch01.html">Ch01</a>. Clarifying plus the estimate is about 10 minutes, then you draw.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">数量级</span><span class="lang-en">Orders of magnitude</span></h2>
+    <div class="bilingual">
+  <div class="lang-zh"><p class="col-kicker">中文</p>
+<p>公式在 <span class="chip soon">Ch03 · 粗略估算</span>。这里只证明一件事：瓶颈是热格子上的半径读，不是全国 POI 的写入。下面全是教学假设。</p>
+<p>大约 1000 万 DAU，每人每天搜附近约 5 次，目录大约两千万条 POI。1e7 × 5 / 86400 大约 600 QPS，峰值再乘 5 仍是千级。一条详情按 0.5–1 KB，详情大约 10–20 GB，geo 键更小。写入远小于读，隔夜可见也可以接受。饭点会反复打同一批 downtown 前缀。只报全国平均，等于把沙漠和市中心说成一样空。</p>
+  </div>
+  <div class="lang-en"><p class="col-kicker">English</p>
+<p>The formulas live in <span class="chip soon">Ch03 · estimates</span>. Here you only prove one thing: the bottleneck is radius reads on hot cells, not nationwide POI writes. Everything below is a teaching assumption.</p>
+<p>About 10 million DAU, about 5 nearby searches a person a day, about 20 million POI. 1e7 × 5 / 86400 is about 600 QPS. A 5× peak is still thousands. At 0.5–1 KB a detail row, details are about 10–20 GB, and the geo keys are smaller. Writes sit far below reads. Next-day visibility is acceptable. Lunch hits the same downtown prefixes again and again. A national average pretends the desert and downtown are equally empty.</p>
+  </div>
+</div>
+    <figure class="deck">
+<div class="slide">
+  <svg class="board" viewBox="0 0 960 420" role="img">
+  <g>
+    <rect x="185" y="150" width="260" height="96" rx="12" class="box"/>
+    <text x="315" y="184" text-anchor="middle" class="label">10M DAU</text>
+    <text x="315" y="208" text-anchor="middle" class="sub">teaching assumption</text>
+  </g>
+  <g>
+    <rect x="515" y="150" width="260" height="96" rx="12" class="box"/>
+    <text x="645" y="184" text-anchor="middle" class="label">5 searches</text>
+    <text x="645" y="208" text-anchor="middle" class="sub">per person / day</text>
+  </g>
+  <line x1="451" y1="198" x2="504" y2="198" class="wire"/>
+  <polygon points="504,193 513,198 504,203" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">先写下两个输入，并标成假设。不要背某家地图公司的峰值。</span><span class="lang-en">Write the two inputs and label them as assumptions. Do not recite a map company's peak.</span></figcaption>
+</div>
+<div class="slide">
+  <svg class="board" viewBox="0 0 960 420" role="img">
+  <g>
+    <rect x="185" y="150" width="260" height="96" rx="12" class="box ok"/>
+    <text x="315" y="184" text-anchor="middle" class="label">~600 QPS</text>
+    <text x="315" y="208" text-anchor="middle" class="sub">average search</text>
+  </g>
+  <g>
+    <rect x="515" y="150" width="260" height="96" rx="12" class="box alt"/>
+    <text x="645" y="184" text-anchor="middle" class="label">Thousands</text>
+    <text x="645" y="208" text-anchor="middle" class="sub">peak, about 5x</text>
+  </g>
+  <line x1="451" y1="198" x2="504" y2="198" class="wire"/>
+  <polygon points="504,193 513,198 504,203" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">日均大约 600，峰值仍是千级。这不是「入口百万 QPS」那种题。</span><span class="lang-en">About 600 on average, thousands at peak. This is not a "million QPS at the front door" prompt.</span></figcaption>
+</div>
+<div class="slide">
+  <svg class="board" viewBox="0 0 960 420" role="img">
+  <g>
+    <rect x="185" y="150" width="260" height="96" rx="12" class="box"/>
+    <text x="315" y="184" text-anchor="middle" class="label">Writes</text>
+    <text x="315" y="208" text-anchor="middle" class="sub">far below reads</text>
+  </g>
+  <g>
+    <rect x="515" y="150" width="260" height="96" rx="12" class="box"/>
+    <text x="645" y="184" text-anchor="middle" class="label">10–20 GB</text>
+    <text x="645" y="208" text-anchor="middle" class="sub">POI details</text>
+  </g>
+  <line x1="451" y1="198" x2="504" y2="198" class="wire"/>
+  <polygon points="504,193 513,198 504,203" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">目录详情大约 10–20 GB。商家改动少，第二天生效也能接受。Geo 键比详情小。</span><span class="lang-en">Details are about 10–20 GB. Merchant edits are rare, and next-day apply is fine. Geo keys are smaller than the details.</span></figcaption>
+</div>
+<div class="slide">
+  <svg class="board" viewBox="0 0 960 420" role="img">
+  <g>
+    <rect x="185" y="150" width="260" height="96" rx="12" class="box"/>
+    <text x="315" y="184" text-anchor="middle" class="label">Average</text>
+    <text x="315" y="208" text-anchor="middle" class="sub">~600 QPS</text>
+  </g>
+  <g>
+    <rect x="515" y="150" width="260" height="96" rx="12" class="box bad"/>
+    <text x="645" y="184" text-anchor="middle" class="label">Hot cell</text>
+    <text x="645" y="208" text-anchor="middle" class="sub">lunch prefix</text>
+  </g>
+  <line x1="451" y1="198" x2="504" y2="198" class="wire"/>
+  <polygon points="504,193 513,198 504,203" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">读近似 Zipf。怕的是市中心那一格，不是全国平均。热格后面单独分片。</span><span class="lang-en">Reads are roughly Zipf. Fear downtown's cell, not the national average. That cell gets its own shard later.</span></figcaption>
+</div>
+</figure>
+    <p class="cite"><span class="lang-zh">口径沿用 <span class="chip soon">Ch03 · 粗略估算</span>。数字旁边写「假设」。</span><span class="lang-en">The habit is <span class="chip soon">Ch03 · estimates</span>. Write "assumption" next to the numbers.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">高层，一条读路径</span><span class="lang-en">High-level, one read path</span></h2>
+    <div class="bilingual">
+  <div class="lang-zh"><p class="col-kicker">中文</p>
+<p>从左到右只画一条读路径。Client 带 <code>lat</code>、<code>lng</code>、<code>radius</code>。Nearby API 编出当前格，算出邻居，向 geo index 取候选 ID，再按 <code>poi_id</code> 到 POI store 补全，最后用真实距离排 top-K。列表只回名称、距离、坐标。Geo index 是 <strong>geohash 前缀 → ID 列表</strong>。</p>
+<p>隐私一句就停：位置截断到格子，短 TTL，不留轨迹。瓦片、路网、配送调度、多 Region 都先不画。画完问一句：方向可以的话，下一笔是格子键怎么选。</p>
+  </div>
+  <div class="lang-en"><p class="col-kicker">English</p>
+<p>Left to right, one read path. The client sends <code>lat</code>, <code>lng</code>, and <code>radius</code>. Nearby API encodes the current cell, computes the neighbors, loads candidate IDs from the geo index, hydrates them from the POI store by <code>poi_id</code>, then ranks top-K by true distance. The list is name, distance, and coordinates. The geo index is <strong>geohash prefix to ID list</strong>.</p>
+<p>Privacy, then stop: truncate location to the cell, short TTL, no trace. Leave tiles, road networks, delivery dispatch, and multi-region off this picture. Ask before you continue: if the direction is fine, the next stroke is which cell key you pick.</p>
+  </div>
+</div>
+    <figure class="deck">
+<div class="slide">
+  <svg class="board" viewBox="0 0 960 420" role="img">
+  <g>
+    <rect x="350" y="150" width="260" height="96" rx="12" class="box"/>
+    <text x="480" y="184" text-anchor="middle" class="label">Client</text>
+    <text x="480" y="208" text-anchor="middle" class="sub">lat, lng, radius</text>
+  </g>
+</svg>
+  <figcaption><span class="lang-zh">读路径从一次「附近」开始。先只画 Client 和它带的三个参数。</span><span class="lang-en">The read path starts at one nearby search. Draw only the client and the three parameters it sends.</span></figcaption>
+</div>
+<div class="slide">
+  <svg class="board" viewBox="0 0 960 420" role="img">
+  <g>
+    <rect x="185" y="150" width="260" height="96" rx="12" class="box"/>
+    <text x="315" y="184" text-anchor="middle" class="label">Client</text>
+    <text x="315" y="208" text-anchor="middle" class="sub">lat, lng, radius</text>
+  </g>
+  <g>
+    <rect x="515" y="150" width="260" height="96" rx="12" class="box"/>
+    <text x="645" y="184" text-anchor="middle" class="label">Nearby API</text>
+    <text x="645" y="208" text-anchor="middle" class="sub">encode the cell</text>
+  </g>
+  <line x1="451" y1="198" x2="504" y2="198" class="wire"/>
+  <polygon points="504,193 513,198 504,203" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">API 无状态。它负责把点编成格子，再去问索引。服务可以水平加。</span><span class="lang-en">The API is stateless. It turns the point into a cell, then asks the index. You can add instances.</span></figcaption>
+</div>
+<div class="slide">
+  <svg class="board" viewBox="0 0 960 420" role="img">
+  <g>
+    <rect x="62" y="150" width="260" height="96" rx="12" class="box"/>
+    <text x="192" y="184" text-anchor="middle" class="label">Client</text>
+    <text x="192" y="208" text-anchor="middle" class="sub">lat, lng, radius</text>
+  </g>
+  <g>
+    <rect x="350" y="150" width="260" height="96" rx="12" class="box"/>
+    <text x="480" y="184" text-anchor="middle" class="label">Nearby API</text>
+    <text x="480" y="208" text-anchor="middle" class="sub">encode the cell</text>
+  </g>
+  <line x1="328" y1="198" x2="339" y2="198" class="wire"/>
+  <polygon points="339,193 348,198 339,203" class="head"/>
+  <g>
+    <rect x="638" y="150" width="260" height="96" rx="12" class="box alt"/>
+    <text x="768" y="184" text-anchor="middle" class="label">Geo index</text>
+    <text x="768" y="208" text-anchor="middle" class="sub">prefix to ids</text>
+  </g>
+  <line x1="616" y1="198" x2="627" y2="198" class="wire"/>
+  <polygon points="627,193 636,198 627,203" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">索引只回答「这些格子里有哪些 ID」。详情先不放进这一个键。</span><span class="lang-en">The index only answers which IDs sit in these cells. Details do not live in that same key.</span></figcaption>
+</div>
+<div class="slide">
+  <svg class="board" viewBox="0 0 960 420" role="img">
+  <g>
+    <rect x="38" y="150" width="200" height="96" rx="12" class="box"/>
+    <text x="138" y="184" text-anchor="middle" class="label">Client</text>
+    <text x="138" y="208" text-anchor="middle" class="sub">lat, lng, r</text>
+  </g>
+  <g>
+    <rect x="266" y="150" width="200" height="96" rx="12" class="box"/>
+    <text x="366" y="184" text-anchor="middle" class="label">Nearby API</text>
+    <text x="366" y="208" text-anchor="middle" class="sub">encode the cell</text>
+  </g>
+  <line x1="244" y1="198" x2="255" y2="198" class="wire"/>
+  <polygon points="255,193 264,198 255,203" class="head"/>
+  <g>
+    <rect x="494" y="150" width="200" height="96" rx="12" class="box alt"/>
+    <text x="594" y="184" text-anchor="middle" class="label">Geo index</text>
+    <text x="594" y="208" text-anchor="middle" class="sub">prefix to ids</text>
+  </g>
+  <line x1="472" y1="198" x2="483" y2="198" class="wire"/>
+  <polygon points="483,193 492,198 483,203" class="head"/>
+  <g>
+    <rect x="722" y="150" width="200" height="96" rx="12" class="box"/>
+    <text x="822" y="184" text-anchor="middle" class="label">POI store</text>
+    <text x="822" y="208" text-anchor="middle" class="sub">hydrate</text>
+  </g>
+  <line x1="700" y1="198" x2="711" y2="198" class="wire"/>
+  <polygon points="711,193 720,198 711,203" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">候选 ID 再到 POI 表补全。点进详情才读全行，列表保持短。</span><span class="lang-en">Candidate IDs hydrate from the POI table. The full row waits until someone opens the place. The list stays short.</span></figcaption>
+</div>
+<div class="slide">
+  <svg class="board" viewBox="0 0 960 420" role="img">
+  <g>
+    <rect x="44" y="150" width="152" height="96" rx="12" class="box"/>
+    <text x="120" y="184" text-anchor="middle" class="label">Client</text>
+    <text x="120" y="208" text-anchor="middle" class="sub">lat, lng, r</text>
+  </g>
+  <g>
+    <rect x="224" y="150" width="152" height="96" rx="12" class="box"/>
+    <text x="300" y="184" text-anchor="middle" class="label">Nearby API</text>
+    <text x="300" y="208" text-anchor="middle" class="sub">neighbors</text>
+  </g>
+  <line x1="202" y1="198" x2="213" y2="198" class="wire"/>
+  <polygon points="213,193 222,198 213,203" class="head"/>
+  <g>
+    <rect x="404" y="150" width="152" height="96" rx="12" class="box alt"/>
+    <text x="480" y="184" text-anchor="middle" class="label">Geo index</text>
+    <text x="480" y="208" text-anchor="middle" class="sub">candidate ids</text>
+  </g>
+  <line x1="382" y1="198" x2="393" y2="198" class="wire"/>
+  <polygon points="393,193 402,198 393,203" class="head"/>
+  <g>
+    <rect x="584" y="150" width="152" height="96" rx="12" class="box"/>
+    <text x="660" y="184" text-anchor="middle" class="label">POI store</text>
+    <text x="660" y="208" text-anchor="middle" class="sub">hydrate</text>
+  </g>
+  <line x1="562" y1="198" x2="573" y2="198" class="wire"/>
+  <polygon points="573,193 582,198 573,203" class="head"/>
+  <g>
+    <rect x="764" y="150" width="152" height="96" rx="12" class="box ok"/>
+    <text x="840" y="184" text-anchor="middle" class="label">Rank</text>
+    <text x="840" y="208" text-anchor="middle" class="sub">true distance</text>
+  </g>
+  <line x1="742" y1="198" x2="753" y2="198" class="wire"/>
+  <polygon points="753,193 762,198 753,203" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">最后按真实距离截断 top-K。隐私停在这一句：粗格子、短 TTL，不留轨迹。</span><span class="lang-en">Cut top-K by true distance. Privacy stops at one line: coarse cell, short TTL, no trace.</span></figcaption>
+</div>
+</figure>
+    <p class="cite"><span class="lang-zh">索引放哪见 <span class="chip soon">Ch37 · 存储选型</span>。前缀以后挂到 <span class="chip soon">Ch05 · 一致性哈希</span>。</span><span class="lang-en">Where the index lives is <span class="chip soon">Ch37 · storage</span>. Prefixes later hang on <span class="chip soon">Ch05 · consistent hashing</span>.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">Hard part：geohash 还是 quadtree</span><span class="lang-en">Hard part: geohash or quadtree</span></h2>
+    <div class="bilingual">
+  <div class="lang-zh"><p class="col-kicker">中文</p>
+<p>B-tree 吃的是一维有序键。给 <code>lat</code> 一棵、给 <code>lng</code> 一棵，两个范围相交仍然很大，附近没有变成 seek。2026 白板第一句：<strong>平面切成格子，格子 ID 当键。</strong></p>
+<p><strong>Geohash</strong> 把经纬度的比特交错，编成 base32。多一位，格子更小。公共前缀越长，越可能靠近。白板映射够用：大约 0.5 km 用长度 6，1–2 km 用 5，5–20 km 用 4。能做前缀扫描的库都能存，<code>WHERE geohash LIKE 'wx4g%'</code> 就是这个意思。Redis GEO 把 geohash 当成 sorted-set 的 score，命令是 <code>GEOADD</code> 和 <code>GEOSEARCH</code>。</p>
+<p><strong>Quadtree</strong> 在密的地方继续切、疏的地方留粗，适合单机内存。邻居要往树上走。静态 POI 一上来自研四叉树，是 over-engineering。trade-off：geohash 哪里都能存前缀，高纬会拉长，角上的邻居更远；quadtree 密度自适应，却不好当成前缀分片键。</p>
+<p><strong>H3</strong> 是六边形备选。6 个边邻居到中心等距，半径用 k-ring 往外扩。讲不清 resolution，就不要把它换成唯一答案。PostGIS 的 GiST 点到即可。S2 和均匀网格等追问再提。邻格怎么漏，放在失败路径里画。</p>
+  </div>
+  <div class="lang-en"><p class="col-kicker">English</p>
+<p>A B-tree wants a one-dimensional ordered key. One index on <code>lat</code> and one on <code>lng</code> still leaves a huge intersection, so nearby never becomes a seek. The 2026 first sentence: <strong>tile the plane, and use the cell ID as the key.</strong></p>
+<p><strong>Geohash</strong> interleaves lat and lng bits into base32. One more character, a smaller cell. A longer shared prefix usually means close. Enough for the board: about 0.5 km is length 6, 1–2 km is 5, 5–20 km is 4. Any store that can prefix-scan works. <code>WHERE geohash LIKE 'wx4g%'</code> is that idea. Redis GEO stores the geohash as a sorted-set score. The commands are <code>GEOADD</code> and <code>GEOSEARCH</code>.</p>
+<p>A <strong>quadtree</strong> keeps splitting where it is dense and stays coarse where it is sparse. That fits one process in memory. Neighbors mean walking up the tree. Leading with a quadtree you wrote yourself, for static POI, is over-engineering. trade-off: geohash stores anywhere as a prefix; cells stretch at high latitude, and corner neighbors sit farther out. A quadtree adapts to density, and it is a poor prefix shard key.</p>
+<p><strong>H3</strong> is the hexagon backup. Six edge neighbors are equidistant from the center, and you grow the radius with a k-ring. If you cannot say the resolution, do not make H3 the only answer. PostGIS and GiST, mention and stop. S2 and a uniform grid wait for a follow-up. How a missing neighbor leaks results is the failure path, drawn on its own.</p>
+  </div>
+</div>
+    <figure class="deck">
+<div class="slide">
+  <svg class="board" viewBox="0 0 960 420" role="img">
+  <g>
+    <rect x="62" y="150" width="260" height="96" rx="12" class="box bad"/>
+    <text x="192" y="184" text-anchor="middle" class="label">lat index</text>
+    <text x="192" y="208" text-anchor="middle" class="sub">one B-tree</text>
+  </g>
+  <g>
+    <rect x="350" y="150" width="260" height="96" rx="12" class="box bad"/>
+    <text x="480" y="184" text-anchor="middle" class="label">lng index</text>
+    <text x="480" y="208" text-anchor="middle" class="sub">another B-tree</text>
+  </g>
+  <line x1="328" y1="198" x2="339" y2="198" class="wire"/>
+  <polygon points="339,193 348,198 339,203" class="head"/>
+  <g>
+    <rect x="638" y="150" width="260" height="96" rx="12" class="box bad"/>
+    <text x="768" y="184" text-anchor="middle" class="label">Intersect</text>
+    <text x="768" y="208" text-anchor="middle" class="sub">still a scan</text>
+  </g>
+  <line x1="616" y1="198" x2="627" y2="198" class="wire"/>
+  <polygon points="627,193 636,198 627,203" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">两棵 B-tree 求交，范围仍然巨大。附近没有变成键上的 seek。</span><span class="lang-en">Intersecting two B-trees still leaves a huge range. Nearby never becomes a seek on the key.</span></figcaption>
+</div>
+<div class="slide">
+  <svg class="board" viewBox="0 0 960 420" role="img">
+  <g>
+    <rect x="350" y="150" width="260" height="96" rx="12" class="box ok"/>
+    <text x="480" y="184" text-anchor="middle" class="label">Cell ID</text>
+    <text x="480" y="208" text-anchor="middle" class="sub">the seek key</text>
+  </g>
+</svg>
+  <figcaption><span class="lang-zh">换成格子 ID。平面先被切开，查询才能落到少数几个键上。</span><span class="lang-en">Switch to a cell ID. Once the plane is tiled, the query lands on a few keys.</span></figcaption>
+</div>
+<div class="slide">
+  <svg class="board" viewBox="0 0 960 420" role="img">
+  <g>
+    <rect x="185" y="150" width="260" height="96" rx="12" class="box ok"/>
+    <text x="315" y="184" text-anchor="middle" class="label">Geohash</text>
+    <text x="315" y="208" text-anchor="middle" class="sub">prefix is the zoom</text>
+  </g>
+  <g>
+    <rect x="515" y="150" width="260" height="96" rx="12" class="box alt"/>
+    <text x="645" y="184" text-anchor="middle" class="label">Redis GEO</text>
+    <text x="645" y="208" text-anchor="middle" class="sub">GEOADD / GEOSEARCH</text>
+  </g>
+  <line x1="451" y1="198" x2="504" y2="198" class="wire"/>
+  <polygon points="504,193 513,198 504,203" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">白板默认 geohash。Redis GEO 就是它：geohash 当 ZSET 的 score。</span><span class="lang-en">Geohash is the whiteboard default. Redis GEO is that design: the geohash is the ZSET score.</span></figcaption>
+</div>
+<div class="slide">
+  <svg class="board" viewBox="0 0 960 420" role="img">
+  <g>
+    <rect x="185" y="150" width="260" height="96" rx="12" class="box alt"/>
+    <text x="315" y="184" text-anchor="middle" class="label">Quadtree</text>
+    <text x="315" y="208" text-anchor="middle" class="sub">dense areas split</text>
+  </g>
+  <g>
+    <rect x="515" y="150" width="260" height="96" rx="12" class="box alt"/>
+    <text x="645" y="184" text-anchor="middle" class="label">One process</text>
+    <text x="645" y="208" text-anchor="middle" class="sub">in memory</text>
+  </g>
+  <line x1="451" y1="198" x2="504" y2="198" class="wire"/>
+  <polygon points="504,193 513,198 504,203" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">Quadtree 按密度切，适合单机内存。邻居靠往上走，不好当跨机器的前缀键。</span><span class="lang-en">A quadtree splits by density and fits in one process. Neighbors walk up the tree. It is a weak prefix key across machines.</span></figcaption>
+</div>
+<div class="slide">
+  <svg class="board" viewBox="0 0 960 420" role="img">
+  <g>
+    <rect x="62" y="150" width="260" height="96" rx="12" class="box ok"/>
+    <text x="192" y="184" text-anchor="middle" class="label">Geohash</text>
+    <text x="192" y="208" text-anchor="middle" class="sub">default, any store</text>
+  </g>
+  <g>
+    <rect x="350" y="150" width="260" height="96" rx="12" class="box alt"/>
+    <text x="480" y="184" text-anchor="middle" class="label">Quadtree</text>
+    <text x="480" y="208" text-anchor="middle" class="sub">density, one box</text>
+  </g>
+  <line x1="328" y1="198" x2="339" y2="198" class="wire"/>
+  <polygon points="339,193 348,198 339,203" class="head"/>
+  <g>
+    <rect x="638" y="150" width="260" height="96" rx="12" class="box alt"/>
+    <text x="768" y="184" text-anchor="middle" class="label">H3 backup</text>
+    <text x="768" y="208" text-anchor="middle" class="sub">k-ring, not only</text>
+  </g>
+  <line x1="616" y1="198" x2="627" y2="198" class="wire"/>
+  <polygon points="627,193 636,198 627,203" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">trade-off 收在这一笔：默认 geohash。Quadtree 讲密度。H3 等他们问六边形，6 个邻居等距，不要只答 H3。</span><span class="lang-en">The trade-off lands here: geohash is the default. Quadtree is the density story. H3 waits until they ask for hexagons. Six neighbors are equidistant. Do not answer H3 only.</span></figcaption>
+</div>
+</figure>
+    <p class="cite"><span class="lang-zh">键落在哪种存储上，回 <span class="chip soon">Ch37 · 存储选型</span> 看一眼即可。</span><span class="lang-en">Which store holds the key is a glance at <span class="chip soon">Ch37 · storage</span>.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">位置多久写一次</span><span class="lang-en">How often location is written</span></h2>
+    <div class="bilingual">
+  <div class="lang-zh"><p class="col-kicker">中文</p>
+<p>静态目录：商家改一条，写详情，再更新这一行的 geohash，或者 <code>GEOADD</code>。隔夜重建 index 也可以，第二天可见就接受。请求线程里不要扫全表算距离。</p>
+<p>附近的人用同一套格子键。每个 GPS 点都写，写路径变成 hotspot，而且你在存一条轨迹。写得太稀，人还在上一格里。中间那档是格子变了再写。缓存 key 用格子 ID。原始经纬度一抖就会打出无数缓存项。短 TTL。讲到这里就停，不要改成轨迹系统，也不要改成 <span class="chip soon">Ch27 · 配送</span> 的匹配。</p>
+  </div>
+  <div class="lang-en"><p class="col-kicker">English</p>
+<p>Static catalog: a merchant edits one row, you write the details, then update that geohash row, or <code>GEOADD</code>. A nightly rebuild is fine when next-day visibility is acceptable. Do not scan the table and compute distance on the request thread.</p>
+<p>Nearby people use the same cell keys. A write on every GPS sample turns the write path into a hotspot, and you have stored a trace. Write too rarely and the person is still in the previous cell. The middle setting is: write when the cell changes. Cache on the cell ID. Raw lat/lng jitter explodes the key space. Short TTL. Stop there. This does not become a trace store, and it does not become matching in <span class="chip soon">Ch27 · delivery</span>.</p>
+  </div>
+</div>
+    <figure class="deck">
+<div class="slide">
+  <svg class="board" viewBox="0 0 960 420" role="img">
+  <g>
+    <rect x="350" y="150" width="260" height="96" rx="12" class="box ok"/>
+    <text x="480" y="184" text-anchor="middle" class="label">Static POI</text>
+    <text x="480" y="208" text-anchor="middle" class="sub">rare CRUD</text>
+  </g>
+</svg>
+  <figcaption><span class="lang-zh">默认定静态 POI。改一条店，写详情，再改这一行的格子键。</span><span class="lang-en">Default to static POI. One shop edit writes the details, then updates that row's cell key.</span></figcaption>
+</div>
+<div class="slide">
+  <svg class="board" viewBox="0 0 960 420" role="img">
+  <g>
+    <rect x="185" y="150" width="260" height="96" rx="12" class="box ok"/>
+    <text x="315" y="184" text-anchor="middle" class="label">Static POI</text>
+    <text x="315" y="208" text-anchor="middle" class="sub">rare CRUD</text>
+  </g>
+  <g>
+    <rect x="515" y="150" width="260" height="96" rx="12" class="box ok"/>
+    <text x="645" y="184" text-anchor="middle" class="label">Nightly index</text>
+    <text x="645" y="208" text-anchor="middle" class="sub">next day is ok</text>
+  </g>
+  <line x1="451" y1="198" x2="504" y2="198" class="wire"/>
+  <polygon points="504,193 513,198 504,203" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">目录可以隔夜重建。把「第二天可见」说成假设。在线请求不要全表算距离。</span><span class="lang-en">The catalog can rebuild overnight. Say "visible next day" as the assumption. Do not compute distance over the whole table on the request.</span></figcaption>
+</div>
+<div class="slide">
+  <svg class="board" viewBox="0 0 960 420" role="img">
+  <g>
+    <rect x="62" y="150" width="260" height="96" rx="12" class="box bad"/>
+    <text x="192" y="184" text-anchor="middle" class="label">Every tick</text>
+    <text x="192" y="208" text-anchor="middle" class="sub">trace, hotspot</text>
+  </g>
+  <g>
+    <rect x="350" y="150" width="260" height="96" rx="12" class="box ok"/>
+    <text x="480" y="184" text-anchor="middle" class="label">Cell change</text>
+    <text x="480" y="208" text-anchor="middle" class="sub">write then</text>
+  </g>
+  <line x1="328" y1="198" x2="339" y2="198" class="wire"/>
+  <polygon points="339,193 348,198 339,203" class="head"/>
+  <g>
+    <rect x="638" y="150" width="260" height="96" rx="12" class="box bad"/>
+    <text x="768" y="184" text-anchor="middle" class="label">Too rare</text>
+    <text x="768" y="208" text-anchor="middle" class="sub">stale people</text>
+  </g>
+  <line x1="616" y1="198" x2="627" y2="198" class="wire"/>
+  <polygon points="627,193 636,198 627,203" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">附近的人：每个 GPS 点都写会留下轨迹；写太稀人还在旧格。格子变了再写。</span><span class="lang-en">Nearby people: every GPS sample stores a trace; too rarely and they sit in the old cell. Write when the cell changes.</span></figcaption>
+</div>
+<div class="slide">
+  <svg class="board" viewBox="0 0 960 420" role="img">
+  <g>
+    <rect x="185" y="150" width="260" height="96" rx="12" class="box bad"/>
+    <text x="315" y="184" text-anchor="middle" class="label">Raw lat/lng</text>
+    <text x="315" y="208" text-anchor="middle" class="sub">jitter blows keys</text>
+  </g>
+  <g>
+    <rect x="515" y="150" width="260" height="96" rx="12" class="box ok"/>
+    <text x="645" y="184" text-anchor="middle" class="label">Cell ID</text>
+    <text x="645" y="208" text-anchor="middle" class="sub">cache key, short TTL</text>
+  </g>
+  <line x1="451" y1="198" x2="504" y2="198" class="wire"/>
+  <polygon points="504,193 513,198 504,203" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">缓存键用格子，不用原始坐标。隐私仍是那一句：粗粒度，短保留，不留轨迹。</span><span class="lang-en">The cache key is the cell, not the raw coordinates. Privacy is still that one line: coarse, short retention, no trace.</span></figcaption>
+</div>
+</figure>
+    <p class="cite"><span class="lang-zh">写频率讲完就收口。供需匹配留给 <span class="chip soon">Ch27 · 配送</span>。</span><span class="lang-en">Stop once the write cadence is clear. Supply and demand matching waits for <span class="chip soon">Ch27 · delivery</span>.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">热点区域</span><span class="lang-en">Hotspot cells</span></h2>
+    <div class="bilingual">
+  <div class="lang-zh"><p class="col-kicker">中文</p>
+<p>POI 和流量都偏在地理上。市中心一格又挤又热，郊区几乎空。全国一个 Redis GEO key，写和 <code>GEOSEARCH</code> 堆在同一个 ZSET 上。按 <code>poi_id</code> 哈希，一次附近查询变成对所有分片的 fan-out。</p>
+<p>分片键用格子前缀。一次查询打当前格和少数邻居，多数落在一到两个 shard。长度 3 会装下半个省。和半径同级的 5 到 6 用来路由。再长，一次查询 fan-out 几十片。市中心在长度 6 仍满，就该区域改用长度 7，或者只给这个前缀加读副本。前缀挂到一致性哈希的环上，用虚拟节点，避免对 N 取模。</p>
+<p>数据量小的时候，单机加副本仍然成立，把这个假设说出来。原书「geo 索引很小所以绝不切分」不要当 2026 的第一张图。缓存只点到：热前缀的 ID 列表可以短 TTL。就近部署一句够，不要展开多 Region。</p>
+  </div>
+  <div class="lang-en"><p class="col-kicker">English</p>
+<p>POI and traffic both skew by place. Downtown is one packed, hot cell. A suburb is almost empty. One nationwide Redis GEO key piles writes and <code>GEOSEARCH</code> onto one ZSET. Hashing by <code>poi_id</code> turns one nearby query into a fan-out across every shard.</p>
+<p>The shard key is the cell prefix. One query hits the current cell and a few neighbors, and most of those land on one or two shards. Length 3 holds half a province. Route at length 5 or 6, the same scale as the radius. Much longer, and one query fans out across dozens of shards. If downtown is still hot at length 6, store that area at length 7, or add a read replica only on that prefix. Hang prefixes on a consistent-hash ring, with virtual nodes, so you are not doing modulo N.</p>
+<p>A small dataset on one box plus replicas still holds. Say that assumption if they push. The book's "the geo index is small, so never split it" is not the 2026 first picture. Cache, one line: a hot prefix's ID list can take a short TTL. "Deploy nearby" is enough. Do not open a multi-region lecture.</p>
+  </div>
+</div>
+    <figure class="deck">
+<div class="slide">
+  <svg class="board" viewBox="0 0 960 420" role="img">
+  <g>
+    <rect x="185" y="150" width="260" height="96" rx="12" class="box bad"/>
+    <text x="315" y="184" text-anchor="middle" class="label">Downtown</text>
+    <text x="315" y="208" text-anchor="middle" class="sub">lunch QPS</text>
+  </g>
+  <g>
+    <rect x="515" y="150" width="260" height="96" rx="12" class="box"/>
+    <text x="645" y="184" text-anchor="middle" class="label">Suburb</text>
+    <text x="645" y="208" text-anchor="middle" class="sub">almost empty</text>
+  </g>
+  <line x1="451" y1="198" x2="504" y2="198" class="wire"/>
+  <polygon points="504,193 513,198 504,203" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">先承认倾斜。同一套全国平均，解释不了市中心这一格。</span><span class="lang-en">Name the skew first. One national average does not explain downtown's cell.</span></figcaption>
+</div>
+<div class="slide">
+  <svg class="board" viewBox="0 0 960 420" role="img">
+  <g>
+    <rect x="350" y="150" width="260" height="96" rx="12" class="box bad"/>
+    <text x="480" y="184" text-anchor="middle" class="label">One GEO key</text>
+    <text x="480" y="208" text-anchor="middle" class="sub">one ZSET</text>
+  </g>
+</svg>
+  <figcaption><span class="lang-zh">一个 key 就是一个 sorted set。写和 GEOSEARCH 都挤在同一个点上。</span><span class="lang-en">One key is one sorted set. Writes and GEOSEARCH all pile onto that same point.</span></figcaption>
+</div>
+<div class="slide">
+  <svg class="board" viewBox="0 0 960 420" role="img">
+  <g>
+    <rect x="185" y="150" width="260" height="96" rx="12" class="box bad"/>
+    <text x="315" y="184" text-anchor="middle" class="label">By poi_id</text>
+    <text x="315" y="208" text-anchor="middle" class="sub">fan-out all</text>
+  </g>
+  <g>
+    <rect x="515" y="150" width="260" height="96" rx="12" class="box ok"/>
+    <text x="645" y="184" text-anchor="middle" class="label">By prefix</text>
+    <text x="645" y="208" text-anchor="middle" class="sub">query stays local</text>
+  </g>
+  <line x1="451" y1="198" x2="504" y2="198" class="wire"/>
+  <polygon points="504,193 513,198 504,203" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">分片键用 geohash 前缀，或 H3 cell。按 poi_id 打散，附近一次查询就要问遍所有片。</span><span class="lang-en">Shard on the geohash prefix, or on an H3 cell. Scatter by poi_id and one nearby search has to ask every shard.</span></figcaption>
+</div>
+<div class="slide">
+  <svg class="board" viewBox="0 0 960 420" role="img">
+  <g>
+    <rect x="62" y="150" width="260" height="96" rx="12" class="box bad"/>
+    <text x="192" y="184" text-anchor="middle" class="label">Length 3</text>
+    <text x="192" y="208" text-anchor="middle" class="sub">half a province</text>
+  </g>
+  <g>
+    <rect x="350" y="150" width="260" height="96" rx="12" class="box ok"/>
+    <text x="480" y="184" text-anchor="middle" class="label">Length 5–6</text>
+    <text x="480" y="208" text-anchor="middle" class="sub">matches radius</text>
+  </g>
+  <line x1="328" y1="198" x2="339" y2="198" class="wire"/>
+  <polygon points="339,193 348,198 339,203" class="head"/>
+  <g>
+    <rect x="638" y="150" width="260" height="96" rx="12" class="box bad"/>
+    <text x="768" y="184" text-anchor="middle" class="label">Too long</text>
+    <text x="768" y="208" text-anchor="middle" class="sub">fan-out dozens</text>
+  </g>
+  <line x1="616" y1="198" x2="627" y2="198" class="wire"/>
+  <polygon points="627,193 636,198 627,203" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">路由长度跟半径走。太短，热区仍在一片里；太长，一次查询打到几十片。</span><span class="lang-en">Route at a length that matches the radius. Too short and the hot zone is still one shard. Too long and one query hits dozens.</span></figcaption>
+</div>
+<div class="slide">
+  <svg class="board" viewBox="0 0 960 420" role="img">
+  <g>
+    <rect x="185" y="150" width="260" height="96" rx="12" class="box ok"/>
+    <text x="315" y="184" text-anchor="middle" class="label">Length 7</text>
+    <text x="315" y="208" text-anchor="middle" class="sub">this downtown only</text>
+  </g>
+  <g>
+    <rect x="515" y="150" width="260" height="96" rx="12" class="box ok"/>
+    <text x="645" y="184" text-anchor="middle" class="label">Replica</text>
+    <text x="645" y="208" text-anchor="middle" class="sub">this prefix only</text>
+  </g>
+  <line x1="451" y1="198" x2="504" y2="198" class="wire"/>
+  <polygon points="504,193 513,198 504,203" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">热前缀再切细，或只给这一前缀加读副本。整张表只做副本、绝不切分，是另一句话。</span><span class="lang-en">Split that hot prefix finer, or add a read replica only there. "Replicas of the whole table, never split" is a different sentence.</span></figcaption>
+</div>
+</figure>
+    <p class="cite"><span class="lang-zh">前缀挂到环上的方式在 <span class="chip soon">Ch05 · 一致性哈希</span>。</span><span class="lang-en">How a prefix sits on the ring is <span class="chip soon">Ch05 · consistent hashing</span>.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">失败路径</span><span class="lang-en">Failure path</span></h2>
+    <div class="bilingual">
+  <div class="lang-zh"><p class="col-kicker">中文</p>
+<p>这条单独走，不要塞进成功路径的最后一笔。格子是粗筛。圆压在边上，只查当前格，对面的点前缀不同，结果就漏了。这是功能 bug。公共前缀长，往往近；近，不一定前缀长。跨格边、赤道、本初子午线，都要自己算出 8 个邻居，O(1)，和当前格一起查。</p>
+<p>格子比圆大，会召回圈外的点。再用球面距离排序，截断 top-K。不要默写公式，也不要假装格里的点都在半径内。半径里不够：geohash 丢掉最后一位再查一圈，H3 加大 k。先约定只返回半径内。为了不漏去扫全表，半径查询就变成扫描。</p>
+<p>一行 <code>GEOSEARCH BYRADIUS</code> 做原型很好。一个 key 不能分片。API 对 <code>geo:{prefix}</code> 做 fan-out，合并后再排。邻居可能跨 shard，仍然是一到两个，不是把所有片问一遍。</p>
+  </div>
+  <div class="lang-en"><p class="col-kicker">English</p>
+<p>Walk this on its own. Do not hide it as the last stroke of the happy path. A cell is a coarse filter. The circle sits on an edge. Query only the current cell and the point on the other side has a different prefix, so you miss it. That is a functional bug. A long shared prefix usually means close. Close does not mean a long shared prefix. Across a cell edge, the equator, or the prime meridian, compute the 8 neighbor geohashes, O(1), and query them with the current cell.</p>
+<p>A cell bigger than the circle recalls points outside it. Then sort by spherical distance and cut to top-K. Do not recite the formula. Do not pretend every point in the cell is inside the radius. Not enough inside the radius: drop the last geohash character and query again, or bump the H3 k. Agree first that you only return points inside the radius. Scanning the table so you never miss turns the radius query into a scan.</p>
+<p>One <code>GEOSEARCH BYRADIUS</code> line is a good prototype. One key cannot shard. The API fans out to <code>geo:{prefix}</code>, merges, then ranks. Neighbors may cross a shard. That is still one or two shards, not a question to every shard.</p>
+  </div>
+</div>
+    <figure class="deck">
+<div class="slide">
+  <svg class="board" viewBox="0 0 960 420" role="img">
+  <g>
+    <rect x="185" y="150" width="260" height="96" rx="12" class="box bad"/>
+    <text x="315" y="184" text-anchor="middle" class="label">One cell</text>
+    <text x="315" y="208" text-anchor="middle" class="sub">miss the edge</text>
+  </g>
+  <g>
+    <rect x="515" y="150" width="260" height="96" rx="12" class="box ok"/>
+    <text x="645" y="184" text-anchor="middle" class="label">8 neighbors</text>
+    <text x="645" y="208" text-anchor="middle" class="sub">query both sides</text>
+  </g>
+  <line x1="451" y1="198" x2="504" y2="198" class="wire"/>
+  <polygon points="504,193 513,198 504,203" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">只 <code>LIKE</code> 当前前缀会漏边。8 个邻居和当前格一起查。近不等于前缀相同。</span><span class="lang-en">A LIKE on only the current prefix misses the edge. Query the 8 neighbors with the current cell. Close is not the same as a shared prefix.</span></figcaption>
+</div>
+<div class="slide">
+  <svg class="board" viewBox="0 0 960 420" role="img">
+  <g>
+    <rect x="185" y="150" width="260" height="96" rx="12" class="box bad"/>
+    <text x="315" y="184" text-anchor="middle" class="label">In-cell hits</text>
+    <text x="315" y="208" text-anchor="middle" class="sub">outside the circle</text>
+  </g>
+  <g>
+    <rect x="515" y="150" width="260" height="96" rx="12" class="box ok"/>
+    <text x="645" y="184" text-anchor="middle" class="label">Distance</text>
+    <text x="645" y="208" text-anchor="middle" class="sub">then top-K</text>
+  </g>
+  <line x1="451" y1="198" x2="504" y2="198" class="wire"/>
+  <polygon points="504,193 513,198 504,203" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">召回之后按球面距离丢掉圈外的点，再截断。格内的点不保证在半径里。</span><span class="lang-en">After recall, drop points outside the circle by spherical distance, then truncate. An in-cell point is not guaranteed inside the radius.</span></figcaption>
+</div>
+<div class="slide">
+  <svg class="board" viewBox="0 0 960 420" role="img">
+  <g>
+    <rect x="185" y="150" width="260" height="96" rx="12" class="box bad"/>
+    <text x="315" y="184" text-anchor="middle" class="label">Full scan</text>
+    <text x="315" y="208" text-anchor="middle" class="sub">so you never miss</text>
+  </g>
+  <g>
+    <rect x="515" y="150" width="260" height="96" rx="12" class="box ok"/>
+    <text x="645" y="184" text-anchor="middle" class="label">Coarser cell</text>
+    <text x="645" y="208" text-anchor="middle" class="sub">or a larger k</text>
+  </g>
+  <line x1="451" y1="198" x2="504" y2="198" class="wire"/>
+  <polygon points="504,193 513,198 504,203" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">半径里空了：geohash 丢掉最后一位，或把 H3 的 k 加大。扩搜是加分。全表扫描不是答案。</span><span class="lang-en">Empty inside the radius: drop the last geohash character, or bump H3's k. Expanding is extra credit. A full scan is not the answer.</span></figcaption>
+</div>
+<div class="slide">
+  <svg class="board" viewBox="0 0 960 420" role="img">
+  <g>
+    <rect x="185" y="150" width="260" height="96" rx="12" class="box bad"/>
+    <text x="315" y="184" text-anchor="middle" class="label">One GEO key</text>
+    <text x="315" y="208" text-anchor="middle" class="sub">lunch melts it</text>
+  </g>
+  <g>
+    <rect x="515" y="150" width="260" height="96" rx="12" class="box ok"/>
+    <text x="645" y="184" text-anchor="middle" class="label">geo:{prefix}</text>
+    <text x="645" y="208" text-anchor="middle" class="sub">fan-out, then merge</text>
+  </g>
+  <line x1="451" y1="198" x2="504" y2="198" class="wire"/>
+  <polygon points="504,193 513,198 504,203" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">原型可以一行 GEOSEARCH。规模上来之后按格拆 key，API 自己 fan-out 邻格再合并。</span><span class="lang-en">A prototype can be one GEOSEARCH line. At scale, split keys by cell. The API fans out to the neighbors and merges.</span></figcaption>
+</div>
+<div class="slide">
+  <svg class="board" viewBox="0 0 960 420" role="img">
+  <g>
+    <rect x="185" y="150" width="260" height="96" rx="12" class="box bad"/>
+    <text x="315" y="184" text-anchor="middle" class="label">Every shard</text>
+    <text x="315" y="208" text-anchor="middle" class="sub">fan-out all</text>
+  </g>
+  <g>
+    <rect x="515" y="150" width="260" height="96" rx="12" class="box ok"/>
+    <text x="645" y="184" text-anchor="middle" class="label">1–2 shards</text>
+    <text x="645" y="208" text-anchor="middle" class="sub">neighbors only</text>
+  </g>
+  <line x1="451" y1="198" x2="504" y2="198" class="wire"/>
+  <polygon points="504,193 513,198 504,203" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">邻居可能跨片，通常仍是一两片。问遍所有分片，半径查询又变成广播。</span><span class="lang-en">Neighbors may cross a shard, and it is usually still one or two. Asking every shard turns the radius query into a broadcast.</span></figcaption>
+</div>
+</figure>
+    <p class="cite"><span class="lang-zh">收尾就用漏边、单 key、热格这三句。存储和环分别在 <span class="chip soon">Ch37 · 存储选型</span><span class="chip soon">Ch05 · 一致性哈希</span>。</span><span class="lang-en">Close on three lines: the missed edge, the single key, the hot cell. Storage and the ring are <span class="chip soon">Ch37 · storage</span><span class="chip soon">Ch05 · consistent hashing</span>.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">收尾，不要说完美</span><span class="lang-en">Close without saying perfect</span></h2>
+    <div class="bilingual">
+  <div class="lang-zh"><p class="col-kicker">中文</p>
+<table>
+<thead><tr><th>bottleneck</th><th>你怎么接</th></tr></thead>
+<tbody>
+<tr><td>漏边 / 二维无法 seek</td><td>geohash 或 H3 当键；当前格加邻格；再按距离排</td></tr>
+<tr><td>单 GEO key，或按 ID 分片</td><td>按 geohash 前缀拆 key 和 shard</td></tr>
+<tr><td>市中心热格</td><td>更长前缀切细，或只给该前缀加副本</td></tr>
+</tbody>
+</table>
+<ol>
+<li>这是地图还是配送？附近 POI，按半径排序。瓦片是选修，骑手匹配是 Ch27。</li>
+<li>为什么不能给 lat 和 lng 各建一棵索引？一维范围相交仍然大，要格子键才能 seek。</li>
+<li>为什么必须查 8 个邻居？圆压在格边上，对面的前缀不同。漏边是功能 bug。</li>
+<li>只答 H3 行不行？当备选可以。白板默认 geohash / Redis GEO。H3 讲等距邻居和 k-ring。</li>
+<li>按 poi_id 分片呢？一次附近查询变成 fan-out。分片键用格子前缀。</li>
+<li>位置隐私讲到哪？粗格子、短保留，不留轨迹。不是合规专章。</li>
+</ol>
+<details class="fold"><summary>原书把 quadtree 和「绝不切分」放在第一张图</summary>
+<p>边界、邻格、读远多于写，这些还在。过时的是把 quadtree 的内存估算当成必挖、geo 索引只做读副本、以及完全不提 Redis GEO 和 H3。2026 先画 geohash 前缀，热前缀再分片。H3 等他们问六边形。Quadtree 用来讲密度，一句就停。隐私是粗格子加短保留。数量级标成假设。地图渲染和配送匹配不在这张白板上。</p>
+</details>
+<p>合上这一页，用开场 30 秒把 geohash、邻格、前缀分片讲一遍。H3 只用一格对比。卡在哪句就回哪一节。下一章是 <span class="chip soon">Ch20 · 分布式消息队列</span>：从「附近怎么查」换成「事件怎么可靠地传」。</p>
+  </div>
+  <div class="lang-en"><p class="col-kicker">English</p>
+<table>
+<thead><tr><th>bottleneck</th><th>What you say</th></tr></thead>
+<tbody>
+<tr><td>Missed edge / 2D cannot seek</td><td>geohash or H3 as the key; current cell plus neighbors; then rank by distance</td></tr>
+<tr><td>One GEO key, or shard by ID</td><td>Split keys and shards by geohash prefix</td></tr>
+<tr><td>Downtown hot cell</td><td>A longer prefix, or a replica only on that prefix</td></tr>
+</tbody>
+</table>
+<ol>
+<li>Maps or delivery? Nearby POI, ranked by radius. Tiles are elective. Rider matching is Ch27.</li>
+<li>Why not an index on lat and another on lng? The 1D intersection is still huge. You need a cell key to seek.</li>
+<li>Why 8 neighbors? The circle sits on a cell edge, and the other side has a different prefix. Missing the edge is a functional bug.</li>
+<li>Can you answer H3 only? Fine as a backup. The board default is geohash / Redis GEO. On H3, say equidistant neighbors and a k-ring.</li>
+<li>Shard by poi_id? One nearby query becomes a fan-out. The shard key is the cell prefix.</li>
+<li>How far does privacy go? A coarse cell, short retention, no trace. Not a compliance chapter.</li>
+</ol>
+<details class="fold"><summary>The book led with a quadtree and "never shard"</summary>
+<p>Edges, neighbor cells, and reads over writes still hold. What aged is treating a quadtree memory estimate as a must-dig, leaving the geo index as read replicas only, and never mentioning Redis GEO or H3. In 2026 you draw a geohash prefix first, then shard the hot prefix. H3 waits until they ask for hexagons. Quadtree is the density trade-off, one sentence. Privacy is a coarse cell and a short retention. Label the magnitudes as assumptions. Map rendering and delivery matching stay off this board.</p>
+</details>
+<p>Close the page and give the 30-second open: geohash, neighbor cells, prefix shards. H3 is one comparison cell. Whichever line snags, go back to that section. Next is <span class="chip soon">Ch20 · a message queue</span>: from "how you query nearby" to "how events travel reliably."</p>
+  </div>
+</div>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">闪卡</span><span class="lang-en">Flashcards</span></h2>
+    <p class="cite"><span class="lang-zh">点一下翻面。能讲出来才算会。</span><span class="lang-en">Click to flip. If you can say it, you know it.</span></p>
+    <div class="cards-grid">
+<button type="button" class="flip">
+  <span class="q"><span class="lang-zh">LBS 三个 hard part 是什么？</span><span class="lang-en">What are the three hard parts of LBS?</span></span>
+  <span class="a"><span class="lang-zh">二维收成格子键；半径查询加邻格；热点格子分片。隐私一句。</span><span class="lang-en">Turn 2D into a cell key; radius query plus neighbor cells; shard hotspot cells. Privacy in one sentence.</span></span>
+</button>
+<button type="button" class="flip">
+  <span class="q"><span class="lang-zh">默认范围是什么？</span><span class="lang-en">What is the default scope?</span></span>
+  <span class="a"><span class="lang-zh">附近商家 / POI，按距离排序。地图渲染、配送匹配、推荐都不是这题。</span><span class="lang-en">Nearby businesses / POI, ranked by distance. Map rendering, delivery matching, and a recommender are other prompts.</span></span>
+</button>
+<button type="button" class="flip">
+  <span class="q"><span class="lang-zh">geohash 和 quadtree 怎么选？</span><span class="lang-en">How do you choose geohash versus quadtree?</span></span>
+  <span class="a"><span class="lang-zh">白板默认 geohash 前缀，Redis GEO 就是它。Quadtree 按密度切，适合单机内存，不要当第一答案。H3 是六边形备选。</span><span class="lang-en">Default to a geohash prefix. Redis GEO is that. A quadtree splits by density and fits one process; it is not the first answer. H3 is the hexagon backup.</span></span>
+</button>
+<button type="button" class="flip">
+  <span class="q"><span class="lang-zh">为什么要查 8 个邻居？</span><span class="lang-en">Why query 8 neighbors?</span></span>
+  <span class="a"><span class="lang-zh">圆会压在格边上。前缀长往往近，近不一定前缀长。只查当前格会漏掉对面的点。</span><span class="lang-en">The circle sits on a cell edge. A long prefix usually means close. Close does not mean a long prefix. The current cell alone misses the other side.</span></span>
+</button>
+<button type="button" class="flip">
+  <span class="q"><span class="lang-zh">位置多久写一次？</span><span class="lang-en">How often do you write location?</span></span>
+  <span class="a"><span class="lang-zh">静态 POI 可以隔夜重建。附近的人在格子变化时写。每个 GPS 点都 GEOADD 会变成轨迹和写 hotspot。</span><span class="lang-en">Static POI can rebuild overnight. Nearby people write when the cell changes. GEOADD on every GPS sample stores a trace and a write hotspot.</span></span>
+</button>
+<button type="button" class="flip">
+  <span class="q"><span class="lang-zh">Redis GEO 用到哪一步？</span><span class="lang-en">How far does Redis GEO go?</span></span>
+  <span class="a"><span class="lang-zh">原型用 GEOADD / GEOSEARCH，底层是 geohash 加 ZSET。一个 key 不能分片，按格拆成 geo:{prefix}。</span><span class="lang-en">A prototype uses GEOADD / GEOSEARCH. Under the hood that is geohash plus a ZSET. One key cannot shard. Split it into geo:{prefix}.</span></span>
+</button>
+<button type="button" class="flip">
+  <span class="q"><span class="lang-zh">热格子怎么接？</span><span class="lang-en">What do you do with a hot cell?</span></span>
+  <span class="a"><span class="lang-zh">按 geohash 前缀分片，别按 poi_id。路由用长度 5–6。市中心改更长前缀，或只给该前缀加副本。</span><span class="lang-en">Shard by geohash prefix, not by poi_id. Route at length 5–6. Downtown gets a longer prefix, or a replica only on that prefix.</span></span>
+</button>
+<button type="button" class="flip">
+  <span class="q"><span class="lang-zh">隐私讲到哪一句？</span><span class="lang-en">Where do you stop on privacy?</span></span>
+  <span class="a"><span class="lang-zh">粗粒度格子，短保留，不留轨迹。缓存键用格子 ID，不用原始经纬度。</span><span class="lang-en">A coarse cell, short retention, no trace. The cache key is the cell ID, not raw lat/lng.</span></span>
+</button>
+    </div>
+  </section>
+<p><button type="button" class="read-toggle">
+  <span class="when-off"><span class="lang-zh">我已学完本章</span><span class="lang-en">Mark this chapter done</span></span>
+  <span class="when-on"><span class="lang-zh">已学完本章</span><span class="lang-en">Completed</span></span>
+</button></p>
+<p class="cite"><span class="lang-zh">进度存在这台浏览器里。</span><span class="lang-en">Saved in this browser only.</span></p>
+</article>
+</main>
+<script src="../assets/js/nav.js"></script>
+<script src="../assets/js/lang.js"></script>
+<script src="../assets/js/slides.js"></script>
+<script src="../assets/js/progress.js"></script>
+</body>
+</html>

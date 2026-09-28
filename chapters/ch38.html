@@ -1,0 +1,1100 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="parchment" data-locale="zh">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ch38 · 缓存与 CDN</title>
+  <link rel="icon" href="../favicon.ico" sizes="48x48">
+  <link rel="stylesheet" href="../assets/css/style.css">
+  <script src="../assets/js/boot.js"></script>
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="../index.html"><span class="brand-logo">SD</span><span class="lang-zh">系统设计面试</span><span class="lang-en">System Design Interview</span></a>
+  <span class="spacer"></span>
+  <a class="map-link" href="../index.html"><span class="lang-zh">课程地图</span><span class="lang-en">Map</span></a>
+  <div class="seg" role="group" aria-label="language">
+    <button type="button" data-locale-set="zh">中文</button>
+    <button type="button" data-locale-set="both"><span class="lang-zh">对照</span><span class="lang-en">Both</span></button>
+    <button type="button" data-locale-set="en">EN</button>
+  </div>
+  <div class="seg" role="group" aria-label="theme">
+    <button type="button" data-theme-set="parchment"><span class="lang-zh">护眼</span><span class="lang-en">Paper</span></button>
+    <button type="button" data-theme-set="dracula"><span class="lang-zh">深色</span><span class="lang-en">Dark</span></button>
+  </div>
+</header>
+<main class="wrap">
+<article class="chapter" id="ch38" data-ch="ch38">
+  <header>
+    <div class="ch-kicker"><span class="lang-zh">CHAPTER 38 · 基础深读</span><span class="lang-en">CHAPTER 38 · foundation</span></div>
+    <h1><span class="lang-zh">缓存与 CDN</span><span class="lang-en">Cache and CDN</span></h1>
+    <p class="ch-meta-line"><span class="lang-zh">约 45 分钟 · 前置：Ch37 存储选型</span><span class="lang-en">~45 min · after Ch37, storage choices</span></p>
+  </header>
+
+  <section class="goal">
+    <h2><span class="lang-zh">这一章结束你能做什么</span><span class="lang-en">What you can do after this chapter</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">中文</p>
+        <ul>
+          <li>先问读多还是写多，再按进程内、Redis、CDN 的顺序把层加上去。</li>
+          <li>默认说出 Cache-Aside：DB 是 source of truth，写后删 key，TTL 封住 stale。Through 和 Back 当 trade-off。</li>
+          <li>把穿透、击穿、雪崩、hot key 拆开各说一句，并点出 CDN 的 cache key、origin shield、stale-while-revalidate。</li>
+        </ul>
+      </div>
+      <div class="lang-en"><p class="col-kicker">English</p>
+        <ul>
+          <li>Ask whether reads or writes dominate, then add in-process, Redis, and CDN in that order.</li>
+          <li>Default to Cache-Aside: the DB is the source of truth, delete the key after a write, and let TTL cap stale data. Through and Back are trade-offs.</li>
+          <li>Split penetration, stampede, avalanche, and a hot key into one line each, and name cache key, origin shield, and stale-while-revalidate on the CDN.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">20 秒：先问读多还是写多</span><span class="lang-en">20 seconds: ask reads or writes</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">中文</p>
+        <p>这是词典，不是又一道 4 步设计题。权威放哪，上一章已经定了。这一章只回答：热路径别每次打那份权威。<a class="chip" href="ch09.html">Ch09 · 短链</a> 的 redirect，和 <span class="chip soon">Ch11 · 新闻 Feed</span> 的 timeline，都会用到这一句。设计题里引用，然后回到题目。</p>
+        <p class="say">读多还是写多。读多写少，默认 Cache-Aside：应用查缓存，miss 打 DB 再回填。DB 是 source of truth。写库之后 invalidation，删 key，TTL 封住 stale。Write-Through 用写延迟换读到新值。Write-Back 先写缓存再异步刷库，吞吐高，可能丢数。穿透是不存在的 key，negative cache 或 bloom。击穿是 stampede，single-flight。雪崩是 TTL jitter。特别热的 key 再 replica。CDN 是 Client → Edge → Origin 上的 HTTP 缓存，点 cache key、origin shield、stale-while-revalidate。语义缓存回 LLM 网关那一章。</p>
+        <p>念完就停。让面试官选：挖策略、挖三种失败，还是挖 CDN。一上来报云产品名，是 red flag。</p>
+        <table>
+          <thead><tr><th>面试官问</th><th>你落在哪</th></tr></thead>
+          <tbody>
+            <tr><td>系统里怎么用缓存？</td><td>先 Cache-Aside + TTL + 写后删，再问要不要 Through / Back</td></tr>
+            <tr><td>缓存挂了，或热点过期？</td><td>穿透、击穿、雪崩分开说，不要合成一句「加锁」</td></tr>
+            <tr><td>要不要上 CDN？</td><td>公开的 HTTP 走边缘；带登录态的 JSON 留在应用缓存</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="lang-en"><p class="col-kicker">English</p>
+        <p>This is a dictionary, not another 4-step design. Where the source of truth lives was the previous chapter. This one answers a narrower question: don't punch that authority on every hot read. The redirect in <a class="chip" href="ch09.html">Ch09 · URL shortener</a> and the timeline in <span class="chip soon">Ch11 · news feed</span> both use that one line. Cite it inside the design problem, then go back to the problem.</p>
+        <p class="say">Reads or writes? Read-heavy, write-light defaults to Cache-Aside: the app checks the cache, and on a miss it reads the DB and fills. The DB is the source of truth. After the write, invalidation: delete the key. TTL caps how long stale data can live. Write-Through spends write latency so the next read is fresh. Write-Back writes the cache first and flushes the DB async: high throughput, and you can lose data. Penetration is a key that never existed: negative cache or a bloom filter. Breakdown is a stampede: single-flight. Avalanche is TTL jitter. An extra-hot key gets a replica. CDN is HTTP cache on Client → Edge → Origin. Name cache key, origin shield, and stale-while-revalidate. Semantic cache goes back to the LLM gateway chapter.</p>
+        <p>Say that, then stop. Let them pick: the policy, the three failures, or the CDN. Leading with a cloud product name is a red flag.</p>
+        <table>
+          <thead><tr><th>They ask</th><th>You land here</th></tr></thead>
+          <tbody>
+            <tr><td>How does the system use cache?</td><td>Cache-Aside + TTL + delete after write, then whether Through or Back belongs</td></tr>
+            <tr><td>Cache dies, or a hot key expires?</td><td>Penetration, stampede, avalanche as three lines. Not one sentence, "add a lock"</td></tr>
+            <tr><td>Do we need a CDN?</td><td>Public HTTP goes to the edge. Logged-in JSON stays in the app cache</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <figure class="deck">
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="350" y="162" width="260" height="96" rx="12" class="box"/>
+            <text x="480" y="196" text-anchor="middle" class="label">Read : write</text>
+            <text x="480" y="220" text-anchor="middle" class="sub">which side dominates</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">第一笔不是 Redis，也不是 CDN。先问读多还是写多。</span><span class="lang-en">The first stroke is not Redis and not a CDN. Ask whether reads or writes dominate.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="185" y="162" width="260" height="96" rx="12" class="box ok"/>
+            <text x="315" y="196" text-anchor="middle" class="label">Read-heavy</text>
+            <text x="315" y="220" text-anchor="middle" class="sub">same key, many gets</text>
+          </g>
+          <line x1="451" y1="210" x2="504" y2="210" class="wire"/>
+          <polygon points="504,205 513,210 504,215" class="head"/>
+          <g>
+            <rect x="515" y="162" width="260" height="96" rx="12" class="box"/>
+            <text x="645" y="196" text-anchor="middle" class="label">Cache</text>
+            <text x="645" y="220" text-anchor="middle" class="sub">now it is in play</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">读多写少，缓存才上台。同一个 key 被反复读，才值得放一份副本。</span><span class="lang-en">Cache comes onto the board when reads dominate. A key is worth a copy when it is read over and over.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="185" y="162" width="260" height="96" rx="12" class="box"/>
+            <text x="315" y="196" text-anchor="middle" class="label">Money path</text>
+            <text x="315" y="220" text-anchor="middle" class="sub">balance, stock, order</text>
+          </g>
+          <line x1="451" y1="210" x2="504" y2="210" class="wire"/>
+          <polygon points="504,205 513,210 504,215" class="head"/>
+          <g>
+            <rect x="515" y="162" width="260" height="96" rx="12" class="box ok"/>
+            <text x="645" y="196" text-anchor="middle" class="label">DB</text>
+            <text x="645" y="220" text-anchor="middle" class="sub">source of truth</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">余额、库存、订单的权威仍在 DB。缓存是加速器，不是第二本账本。</span><span class="lang-en">Balances, stock, and orders stay authoritative in the DB. The cache is an accelerator, not a second ledger.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="185" y="162" width="260" height="96" rx="12" class="box ok"/>
+            <text x="315" y="196" text-anchor="middle" class="label">Read-heavy</text>
+            <text x="315" y="220" text-anchor="middle" class="sub">API, object, count</text>
+          </g>
+          <line x1="451" y1="210" x2="504" y2="210" class="wire"/>
+          <polygon points="504,205 513,210 504,215" class="head"/>
+          <g>
+            <rect x="515" y="162" width="260" height="96" rx="12" class="box ok"/>
+            <text x="645" y="196" text-anchor="middle" class="label">Cache-Aside</text>
+            <text x="645" y="220" text-anchor="middle" class="sub">lazy load, app fills</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">默认策略就这一个名字：Cache-Aside。应用自己管 miss 回填。三种策略都画上，不是加分。</span><span class="lang-en">The default has one name: Cache-Aside. The app owns the miss fill. Drawing all three policies is not extra credit.</span></figcaption>
+      </div>
+    </figure>
+    <p class="cite"><span class="lang-zh">DB 为什么是权威，在 <a class="chip" href="ch37.html">Ch37 · 存储选型</a>。语义缓存一句回到 <span class="chip soon">Ch32 · LLM API 网关</span>。</span><span class="lang-en">Why the DB is the authority is <a class="chip" href="ch37.html">Ch37 · storage choices</a>. Semantic cache is one line back to <span class="chip soon">Ch32 · LLM API gateway</span>.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">一层层加上去</span><span class="lang-en">Add one layer at a time</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">中文</p>
+        <p>白板上先只有 App 和 DB。然后按这个顺序加：进程内，远程 Redis，最后才是 CDN。层数不是分数。五层一起画出来、却说不清谁是权威，是 over-engineering。</p>
+        <p>进程内是微秒级，没有网络。它只服务本进程。一发布，每台都是冷的。失效也难：每台各持一份，要么逐台删，要么等一个很短的 TTL。它适合挡 hot key 的第一拳，只放极热、可以 stale 的只读。本地 TTL 必须短，否则每台各执一份旧值。</p>
+        <p>Redis 是跨实例的那一份热集。一处 <code>DEL</code>，大家一起 miss。代价是同一次网络 RTT，容量可以分片。常见组合是 L1 本地加 L2 Redis，不是套娃。少一次 RTT，换来的是失效变难。这就是 trade-off。</p>
+        <p>要数据结构、TTL、持久化、集群，开口用 Redis，或协议兼容的远程缓存。只要纯 KV 的 lookaside，Memcached 仍是 Facebook 那篇论文里的砖。一句选型就够，不要开骂战，也不要把许可证当系统设计答案。淘汰：远程缓存 LRU 够开口。进程内常见 W-TinyLFU，准入看频率，用来抗扫描污染。Belady 最优不是实现。</p>
+        <p>CDN 最后加，因为它缓存的是 HTTP 响应，不是又一个 Redis。公开的字节走边缘。对象和渲染过的 JSON 仍走应用缓存。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">English</p>
+        <p>The board starts as App and DB. Then you add, in this order: in-process, remote Redis, and only then a CDN. Layer count is not the score. Five layers drawn at once, with nobody able to say who is authoritative, is over-engineering.</p>
+        <p>In-process is microseconds, no network. It serves this process only. The moment you ship, every box is cold. Invalidation is hard: each box holds its own copy, so you delete on every box or you wait out a very short TTL. It is the first punch against a hot key. Keep it for extra-hot, stale-OK, read-only data. The local TTL has to be short, or every box keeps its own old value.</p>
+        <p>Redis is the hot set shared across instances. One <code>DEL</code>, and everyone misses. You pay a network RTT, and you can shard the capacity. The usual pair is L1 local plus L2 Redis, not a nesting doll. One less RTT, and invalidation gets harder. That is the trade-off.</p>
+        <p>If they want data structures, TTL, persistence, and a cluster, say Redis, or a protocol-compatible remote cache. If you only need a pure KV lookaside, Memcached is still the brick in the Facebook paper. One selection line is enough. Don't start a flame war, and don't treat a license as the system-design answer. Eviction: LRU is enough to open on a remote cache. In-process, W-TinyLFU is the common admission policy: frequency, so a scan doesn't flush the hot set. Belady-optimal is not an implementation.</p>
+        <p>CDN is the last box, because it caches HTTP responses, not another Redis. Public bytes go to the edge. Objects and rendered JSON stay in the app cache.</p>
+      </div>
+    </div>
+    <figure class="deck">
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="185" y="162" width="260" height="96" rx="12" class="box"/>
+            <text x="315" y="196" text-anchor="middle" class="label">App</text>
+            <text x="315" y="220" text-anchor="middle" class="sub">every read hits DB</text>
+          </g>
+          <line x1="451" y1="210" x2="504" y2="210" class="wire"/>
+          <polygon points="504,205 513,210 504,215" class="head"/>
+          <g>
+            <rect x="515" y="162" width="260" height="96" rx="12" class="box ok"/>
+            <text x="645" y="196" text-anchor="middle" class="label">DB</text>
+            <text x="645" y="220" text-anchor="middle" class="sub">source of truth</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">先只有权威。读多，但还没加任何缓存。</span><span class="lang-en">Authority first. Reads dominate, and there is still no cache on the board.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="87" y="162" width="230" height="96" rx="12" class="box"/>
+            <text x="202" y="196" text-anchor="middle" class="label">App</text>
+            <text x="202" y="220" text-anchor="middle" class="sub">this process</text>
+          </g>
+          <line x1="323" y1="210" x2="353" y2="210" class="wire"/>
+          <polygon points="353,205 362,210 353,215" class="head"/>
+          <g>
+            <rect x="365" y="162" width="230" height="96" rx="12" class="box ok"/>
+            <text x="480" y="196" text-anchor="middle" class="label">Local</text>
+            <text x="480" y="220" text-anchor="middle" class="sub">in-process, µs</text>
+          </g>
+          <line x1="601" y1="210" x2="631" y2="210" class="wire"/>
+          <polygon points="631,205 640,210 631,215" class="head"/>
+          <g>
+            <rect x="643" y="162" width="230" height="96" rx="12" class="box"/>
+            <text x="758" y="196" text-anchor="middle" class="label">DB</text>
+            <text x="758" y="220" text-anchor="middle" class="sub">on local miss</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">第一层是进程内。极热的只读放这里。它不共享，发布之后每台都是冷的。</span><span class="lang-en">First layer: in-process. Extra-hot read-only data lives here. It is not shared, and every box is cold right after you ship.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="36" y="162" width="204" height="96" rx="12" class="box"/>
+            <text x="138" y="196" text-anchor="middle" class="label">App</text>
+            <text x="138" y="220" text-anchor="middle" class="sub">owns the miss</text>
+          </g>
+          <line x1="244" y1="210" x2="253" y2="210" class="wire"/>
+          <polygon points="253,205 262,210 253,215" class="head"/>
+          <g>
+            <rect x="264" y="162" width="204" height="96" rx="12" class="box"/>
+            <text x="366" y="196" text-anchor="middle" class="label">Local</text>
+            <text x="366" y="220" text-anchor="middle" class="sub">L1, short TTL</text>
+          </g>
+          <line x1="472" y1="210" x2="481" y2="210" class="wire"/>
+          <polygon points="481,205 490,210 481,215" class="head"/>
+          <g>
+            <rect x="492" y="162" width="204" height="96" rx="12" class="box ok"/>
+            <text x="594" y="196" text-anchor="middle" class="label">Redis</text>
+            <text x="594" y="220" text-anchor="middle" class="sub">L2, one DEL</text>
+          </g>
+          <line x1="700" y1="210" x2="709" y2="210" class="wire"/>
+          <polygon points="709,205 718,210 709,215" class="head"/>
+          <g>
+            <rect x="720" y="162" width="204" height="96" rx="12" class="box"/>
+            <text x="822" y="196" text-anchor="middle" class="label">DB</text>
+            <text x="822" y="220" text-anchor="middle" class="sub">still authority</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">第二层是 Redis。所有副本共享一份热集。写路径仍以这里的 invalidation 为准，本地只是更短的 TTL。</span><span class="lang-en">Second layer: Redis. Every replica shares one hot set. The write path still invalidates here. Local is only a shorter TTL in front.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="36" y="162" width="160" height="96" rx="12" class="box alt"/>
+            <text x="116" y="196" text-anchor="middle" class="label">CDN</text>
+            <text x="116" y="220" text-anchor="middle" class="sub">HTTP edge</text>
+          </g>
+          <line x1="200" y1="210" x2="208" y2="210" class="wire"/>
+          <polygon points="208,205 216,210 208,215" class="head"/>
+          <g>
+            <rect x="218" y="162" width="160" height="96" rx="12" class="box"/>
+            <text x="298" y="196" text-anchor="middle" class="label">App</text>
+            <text x="298" y="220" text-anchor="middle" class="sub">owns miss</text>
+          </g>
+          <line x1="382" y1="210" x2="390" y2="210" class="wire"/>
+          <polygon points="390,205 398,210 390,215" class="head"/>
+          <g>
+            <rect x="400" y="162" width="160" height="96" rx="12" class="box"/>
+            <text x="480" y="196" text-anchor="middle" class="label">Local</text>
+            <text x="480" y="220" text-anchor="middle" class="sub">in-process</text>
+          </g>
+          <line x1="564" y1="210" x2="572" y2="210" class="wire"/>
+          <polygon points="572,205 580,210 572,215" class="head"/>
+          <g>
+            <rect x="582" y="162" width="160" height="96" rx="12" class="box ok"/>
+            <text x="662" y="196" text-anchor="middle" class="label">Redis</text>
+            <text x="662" y="220" text-anchor="middle" class="sub">shared set</text>
+          </g>
+          <line x1="746" y1="210" x2="754" y2="210" class="wire"/>
+          <polygon points="754,205 762,210 754,215" class="head"/>
+          <g>
+            <rect x="764" y="162" width="160" height="96" rx="12" class="box"/>
+            <text x="844" y="196" text-anchor="middle" class="label">DB</text>
+            <text x="844" y="220" text-anchor="middle" class="sub">authority</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">最后加 CDN，加在最前面。它挡的是可缓存的 HTTP，不是把 Redis 换个名字。</span><span class="lang-en">CDN is the last box, and it sits in front. It holds cacheable HTTP. It is not Redis under another name.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="185" y="162" width="260" height="96" rx="12" class="box ok"/>
+            <text x="315" y="196" text-anchor="middle" class="label">Local TTL</text>
+            <text x="315" y="220" text-anchor="middle" class="sub">short, stale-OK</text>
+          </g>
+          <line x1="451" y1="210" x2="504" y2="210" class="wire"/>
+          <polygon points="504,205 513,210 504,215" class="head"/>
+          <g>
+            <rect x="515" y="162" width="260" height="96" rx="12" class="box bad"/>
+            <text x="645" y="196" text-anchor="middle" class="label">Stale per box</text>
+            <text x="645" y="220" text-anchor="middle" class="sub">long local TTL</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">本地换来少一次 RTT。TTL 一长，每台就各拿一份旧值。失效以 Redis 和 DB 为准。</span><span class="lang-en">Local buys you one less RTT. A long local TTL means each box keeps its own old value. Invalidation still comes from Redis and the DB.</span></figcaption>
+      </div>
+    </figure>
+    <p class="cite"><span class="lang-zh">扩展链上先缓存、再 CDN，不要第一步就画全球边缘。那句话在 <a class="chip" href="ch02.html">Ch02 · 从零到百万</a>。</span><span class="lang-en">On the growth path, cache first, then CDN. Don't draw a global edge on step one. That line is <a class="chip" href="ch02.html">Ch02 · zero to a million</a>.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">CDN 在读路径上干什么</span><span class="lang-en">What the CDN does on the read path</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">中文</p>
+        <p>CDN 把可缓存的 HTTP 响应放到离用户近的 edge，降低 RTT，挡住源站。这一章是 HTTP 边缘缓存。转码、切片、对象存储里面怎么存字节，不在这里设计。浏览器拿到的 URL 往往先打到 edge。</p>
+        <p>Client 问最近的 Edge。hit 就返回。miss 不要让每个 PoP 各自打 Origin。中间加 origin shield，把全球 miss 折叠成少数次回源。这和击穿的 single-flight 是同一件事，发生在 HTTP 边缘。</p>
+        <p><strong>cache key</strong> 决定什么算同一份对象：路径、选定的 query、选定的 header（<code>Vary</code>）。语言、编码、登录态该进 key 却漏了，会串用户。广告 click id 塞进 key，命中率会碎掉。<code>utm_</code> 不要进 key。个性化 API 默认 private，不进共享缓存。</p>
+        <p><strong>stale-while-revalidate</strong> 在 RFC 5861。<code>max-age</code> 管新鲜；过期后一段窗口可以先吐旧的，后台再回源。兄弟指令 stale-if-error：源 5xx 或超时，继续用旧的换可用。两者都是故意的 stale，要对齐业务能接受的窗口。面试默认 pull：第一次 miss 回源，再填边缘。预推是视频题，留在视频那一章。</p>
+        <p>短链的 302 不要在 CDN 里长期缓存。效果接近 301，点击不再回到你，Analytics 没了。图、JS、可公开的 GET 才上边缘。有 CDN 所以不需要 Redis，这句话不成立。</p>
+        <table>
+          <thead><tr><th></th><th>应用缓存</th><th>CDN edge</th></tr></thead>
+          <tbody>
+            <tr><td>缓存什么</td><td>对象、计数、渲染过的 JSON</td><td>HTTP 响应、静态字节、公开 GET</td></tr>
+            <tr><td>谁失效</td><td>应用 <code>DEL</code> / TTL</td><td>TTL、purge、改 cache key 版本</td></tr>
+            <tr><td>个性化</td><td>per-user key 可以</td><td>带 cookie 的私人页不要共享</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="lang-en"><p class="col-kicker">English</p>
+        <p>A CDN puts a cacheable HTTP response on an edge close to the user, cuts RTT, and shields origin. This chapter is HTTP edge cache. Transcoding, chunking, and how object storage keeps the bytes are not designed here. The URL the browser gets often hits the edge first.</p>
+        <p>The client asks the nearest edge. A hit returns. On a miss, don't let every PoP punch origin on its own. Put an origin shield in the middle and collapse worldwide misses into a few origin fetches. Same idea as single-flight for a stampede, happening at the HTTP edge.</p>
+        <p>The <strong>cache key</strong> decides what counts as the same object: path, selected query, selected headers (<code>Vary</code>). Leave out language, encoding, or login state, and you leak across users. Stuff an ad click id into the key, and the hit rate turns to dust. Keep <code>utm_</code> out of the key. A personalized API defaults to private: no shared cache.</p>
+        <p><strong>stale-while-revalidate</strong> is RFC 5861. <code>max-age</code> owns freshness. After expiry, for a window, you can serve the old response while you revalidate in the background. The sibling, stale-if-error, keeps serving stale when origin returns 5xx or times out. Both are intentional stale. They have to fit the window the product can accept. The interview default is pull: the first miss fetches origin, then fills the edge. Push is a video problem. Leave it in the video chapter.</p>
+        <p>Don't long-cache a short-URL 302 on the CDN. That behaves like a 301: later clicks never come back, and analytics disappears. Images, JS, and public GETs go to the edge. "We have a CDN, so we don't need Redis" does not hold.</p>
+        <table>
+          <thead><tr><th></th><th>App cache</th><th>CDN edge</th></tr></thead>
+          <tbody>
+            <tr><td>What</td><td>objects, counters, rendered JSON</td><td>HTTP responses, static bytes, public GETs</td></tr>
+            <tr><td>Who invalidates</td><td>the app <code>DEL</code> / TTL</td><td>TTL, purge, bump the cache-key version</td></tr>
+            <tr><td>Personal</td><td>a per-user key is fine</td><td>don't share a private page that carries a cookie</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <figure class="deck">
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="185" y="162" width="260" height="96" rx="12" class="box"/>
+            <text x="315" y="196" text-anchor="middle" class="label">Client</text>
+            <text x="315" y="220" text-anchor="middle" class="sub">nearest edge</text>
+          </g>
+          <line x1="451" y1="210" x2="504" y2="210" class="wire"/>
+          <polygon points="504,205 513,210 504,215" class="head"/>
+          <g>
+            <rect x="515" y="162" width="260" height="96" rx="12" class="box ok"/>
+            <text x="645" y="196" text-anchor="middle" class="label">Edge</text>
+            <text x="645" y="220" text-anchor="middle" class="sub">hit returns</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">hit 停在边缘。这一笔先不要画源站。</span><span class="lang-en">A hit stops at the edge. Don't draw origin on this stroke.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="87" y="162" width="230" height="96" rx="12" class="box"/>
+            <text x="202" y="196" text-anchor="middle" class="label">Client</text>
+            <text x="202" y="220" text-anchor="middle" class="sub">miss at edge</text>
+          </g>
+          <line x1="323" y1="210" x2="353" y2="210" class="wire"/>
+          <polygon points="353,205 362,210 353,215" class="head"/>
+          <g>
+            <rect x="365" y="162" width="230" height="96" rx="12" class="box"/>
+            <text x="480" y="196" text-anchor="middle" class="label">Edge</text>
+            <text x="480" y="220" text-anchor="middle" class="sub">one PoP</text>
+          </g>
+          <line x1="601" y1="210" x2="631" y2="210" class="wire"/>
+          <polygon points="631,205 640,210 631,215" class="head"/>
+          <g>
+            <rect x="643" y="162" width="230" height="96" rx="12" class="box bad"/>
+            <text x="758" y="196" text-anchor="middle" class="label">Origin</text>
+            <text x="758" y="220" text-anchor="middle" class="sub">every PoP fetches</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">miss 如果每个 PoP 都直接回源，源站会被 stampede。</span><span class="lang-en">If every PoP fetches origin on a miss, origin takes a stampede.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="36" y="162" width="204" height="96" rx="12" class="box"/>
+            <text x="138" y="196" text-anchor="middle" class="label">Client</text>
+            <text x="138" y="220" text-anchor="middle" class="sub">nearest edge</text>
+          </g>
+          <line x1="244" y1="210" x2="253" y2="210" class="wire"/>
+          <polygon points="253,205 262,210 253,215" class="head"/>
+          <g>
+            <rect x="264" y="162" width="204" height="96" rx="12" class="box"/>
+            <text x="366" y="196" text-anchor="middle" class="label">Edge</text>
+            <text x="366" y="220" text-anchor="middle" class="sub">many PoPs</text>
+          </g>
+          <line x1="472" y1="210" x2="481" y2="210" class="wire"/>
+          <polygon points="481,205 490,210 481,215" class="head"/>
+          <g>
+            <rect x="492" y="162" width="204" height="96" rx="12" class="box ok"/>
+            <text x="594" y="196" text-anchor="middle" class="label">Shield</text>
+            <text x="594" y="220" text-anchor="middle" class="sub">collapse misses</text>
+          </g>
+          <line x1="700" y1="210" x2="709" y2="210" class="wire"/>
+          <polygon points="709,205 718,210 709,215" class="head"/>
+          <g>
+            <rect x="720" y="162" width="204" height="96" rx="12" class="box"/>
+            <text x="822" y="196" text-anchor="middle" class="label">Origin</text>
+            <text x="822" y="220" text-anchor="middle" class="sub">few fetches</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">加上 origin shield。各边缘的 miss 先打这层，再打源。源站只看见少数回源。</span><span class="lang-en">Add an origin shield. Misses from the edges hit this layer first, then origin. Origin sees a few fetches.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="185" y="162" width="260" height="96" rx="12" class="box ok"/>
+            <text x="315" y="196" text-anchor="middle" class="label">Cache key</text>
+            <text x="315" y="220" text-anchor="middle" class="sub">path, vary, login</text>
+          </g>
+          <line x1="451" y1="210" x2="504" y2="210" class="wire"/>
+          <polygon points="504,205 513,210 504,215" class="head"/>
+          <g>
+            <rect x="515" y="162" width="260" height="96" rx="12" class="box bad"/>
+            <text x="645" y="196" text-anchor="middle" class="label">utm in key</text>
+            <text x="645" y="220" text-anchor="middle" class="sub">hit rate to dust</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">cache key 是正确性开关。该进的漏了会串用户。不该进的塞进去，缓存变成雪花。</span><span class="lang-en">The cache key is the correctness switch. Omit what belongs, and you leak across users. Stuff in what doesn't, and the cache shards into snowflakes.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="185" y="162" width="260" height="96" rx="12" class="box ok"/>
+            <text x="315" y="196" text-anchor="middle" class="label">SWR</text>
+            <text x="315" y="220" text-anchor="middle" class="sub">serve, then refresh</text>
+          </g>
+          <line x1="451" y1="210" x2="504" y2="210" class="wire"/>
+          <polygon points="504,205 513,210 504,215" class="head"/>
+          <g>
+            <rect x="515" y="162" width="260" height="96" rx="12" class="box bad"/>
+            <text x="645" y="196" text-anchor="middle" class="label">Forever stale</text>
+            <text x="645" y="220" text-anchor="middle" class="sub">no window</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">stale-while-revalidate：过期先吐旧的，后台再验证。源挂了靠 stale-if-error。这不是永远可以脏。</span><span class="lang-en">stale-while-revalidate: after expiry, serve stale, then revalidate. Origin down leans on stale-if-error. That is not a license to stay dirty forever.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="87" y="162" width="230" height="96" rx="12" class="box ok"/>
+            <text x="202" y="196" text-anchor="middle" class="label">Public GET</text>
+            <text x="202" y="220" text-anchor="middle" class="sub">JS, image</text>
+          </g>
+          <line x1="323" y1="210" x2="353" y2="210" class="wire"/>
+          <polygon points="353,205 362,210 353,215" class="head"/>
+          <g>
+            <rect x="365" y="162" width="230" height="96" rx="12" class="box bad"/>
+            <text x="480" y="196" text-anchor="middle" class="label">Private JSON</text>
+            <text x="480" y="220" text-anchor="middle" class="sub">no shared edge</text>
+          </g>
+          <line x1="601" y1="210" x2="631" y2="210" class="wire"/>
+          <polygon points="631,205 640,210 631,215" class="head"/>
+          <g>
+            <rect x="643" y="162" width="230" height="96" rx="12" class="box bad"/>
+            <text x="758" y="196" text-anchor="middle" class="label">302 cached</text>
+            <text x="758" y="220" text-anchor="middle" class="sub">analytics dies</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">公开 GET 上边缘。登录 JSON 留在应用缓存。短链 302 长期放 CDN，点击就不再经过你。</span><span class="lang-en">Public GETs go to the edge. Logged-in JSON stays in the app cache. Long-cache a short-URL 302 and later clicks skip you.</span></figcaption>
+      </div>
+    </figure>
+    <p class="cite"><span class="lang-zh">302 和 Analytics 在 <a class="chip" href="ch09.html">Ch09 · 短链</a>。切片在 <span class="chip soon">Ch14 · 视频</span>。字节在 <span class="chip soon">Ch22 · 对象存储</span>，CDN 缓存的是 GET，不是再做一套存储。</span><span class="lang-en">302 and analytics are <a class="chip" href="ch09.html">Ch09 · URL shortener</a>. Chunking is <span class="chip soon">Ch14 · video</span>. The bytes are <span class="chip soon">Ch22 · object storage</span>. The CDN caches the GET. It is not a second storage system.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">失效和一致性的 trade-off</span><span class="lang-en">Invalidation and the consistency trade-off</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">中文</p>
+        <p>2026 上场，会背六种策略不如会选默认。读多写少的 API，开口就是 Cache-Aside，也叫 lazy load、lookaside。缓存是加速器。它挂了，读穿到 DB，变慢，仍然正确。这是降级。正确性不押在缓存上。只缓存真正被请求过的 key，冷数据不占内存。</p>
+        <p>写路径删，不改。并发下常见的 bug 是：读到旧值，写库已经完成，慢请求再把旧值 <code>SET</code> 回去。删了 key，下一拍 miss，用 DB 的新行回填。漏删用 TTL 封顶。你不保证线性一致。短链和 Feed 这够用。钱和库存不放进缓存当账本。</p>
+        <p>Read-Through 和 Aside 差在谁去填：缓存库自己回源，还是应用自己打 DB。面试仍说 Aside，因为常见的 Redis / Memcached 用法就是应用管。Write-Around 点一句：写一次几乎不读的数据别污染热集。Refresh-ahead 是冷启动，不是第三种写入策略。</p>
+        <p><strong>Write-Through</strong>：缓存和 DB 同步都写完才返回。下一读是新的。写变成两跳，写更慢。写了却从不读的 key 会污染缓存。双写仍可能一半成功，不要说成分布式事务。</p>
+        <p><strong>Write-Back</strong>：先写缓存，异步刷 DB。同一个计数可以合并成一次刷盘，吞吐好。进程挂了、节点没把未 flush 的写留下，数就丢了。播放次数、点赞粗计数、监控指标可以。余额、订单、库存是 red flag。</p>
+        <table>
+          <thead><tr><th></th><th>Cache-Aside</th><th>Write-Through</th><th>Write-Back</th></tr></thead>
+          <tbody>
+            <tr><td>写</td><td>写 DB，再 DEL</td><td>缓存和 DB 同步写完</td><td>先写缓存，异步刷 DB</td></tr>
+            <tr><td>权威</td><td>DB</td><td>双写成功才算写完</td><td>短窗口里缓存说了算</td></tr>
+            <tr><td>挂了</td><td>变慢，读仍正确</td><td>要定义半成功怎么回滚</td><td>未刷盘的写可能丢</td></tr>
+            <tr><td>何时</td><td>读多写少的默认</td><td>写完要立刻读到新，写 QPS 不高</td><td>可丢的计数和指标</td></tr>
+          </tbody>
+        </table>
+        <p class="say">这题读多写少，我用 Cache-Aside，加 TTL，写后删 key。要写完立刻读到新、而且写不多，再考虑 Through。Back 只给可丢的计数。三种不是满分套餐。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">English</p>
+        <p>In a 2026 interview, picking a default beats reciting six policies. A read-heavy, write-light API opens on Cache-Aside, also called lazy load or lookaside. The cache is an accelerator. If it dies, reads fall through to the DB. Slower, still correct. That is degradation. Correctness is not riding on the cache. You only cache keys that were actually requested. Cold data does not sit in memory.</p>
+        <p>On the write path, delete. Don't update. The common bug under concurrency: a read already holds the old value, the DB write has committed, and a slow request <code>SET</code>s the old value back. Delete the key. The next beat misses and fills from the new row. TTL caps a delete you missed. You do not promise linearizability. That is enough for a short URL and a feed. Money and inventory do not live in the cache as a ledger.</p>
+        <p>Read-Through versus Aside is who fills: the cache library goes to origin, or the app hits the DB. In the interview you still say Aside, because the usual Redis or Memcached setup is the app owning it. Write-Around gets one line: data you write once and almost never read should not pollute the hot set. Refresh-ahead is a cold start, not a third write policy.</p>
+        <p><strong>Write-Through:</strong> you return only after the cache and the DB are both written. The next read is fresh. The write is two hops, so it is slower. Keys that are written and never read pollute the cache. A dual-write can still succeed on one side only. Don't sell that as a distributed transaction.</p>
+        <p><strong>Write-Back:</strong> write the cache first, flush the DB async. The same counter can coalesce into one flush, and throughput feels good. If the process dies and the node never kept the unflushed write, the count is gone. Play counts, coarse like counts, and metrics can live here. Balances, orders, and stock are a red flag.</p>
+        <table>
+          <thead><tr><th></th><th>Cache-Aside</th><th>Write-Through</th><th>Write-Back</th></tr></thead>
+          <tbody>
+            <tr><td>Write</td><td>write the DB, then DEL</td><td>cache and DB both finish</td><td>cache first, flush the DB async</td></tr>
+            <tr><td>Authority</td><td>the DB</td><td>done when both succeed</td><td>for a short window, the cache</td></tr>
+            <tr><td>It dies</td><td>slower, reads still correct</td><td>define the half-success rollback</td><td>unflushed writes can be lost</td></tr>
+            <tr><td>When</td><td>read-heavy default</td><td>next read must be fresh, write QPS is low</td><td>counters and metrics you can lose</td></tr>
+          </tbody>
+        </table>
+        <p class="say">This problem is read-heavy and write-light, so I use Cache-Aside, plus TTL, and I delete the key after the write. If the next read must be fresh and writes are rare, I'll consider Through. Back is only for counters I can lose. The three are not a combo meal.</p>
+      </div>
+    </div>
+    <figure class="deck">
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="87" y="162" width="230" height="96" rx="12" class="box"/>
+            <text x="202" y="196" text-anchor="middle" class="label">App</text>
+            <text x="202" y="220" text-anchor="middle" class="sub">write path</text>
+          </g>
+          <line x1="323" y1="210" x2="353" y2="210" class="wire"/>
+          <polygon points="353,205 362,210 353,215" class="head"/>
+          <g>
+            <rect x="365" y="162" width="230" height="96" rx="12" class="box ok"/>
+            <text x="480" y="196" text-anchor="middle" class="label">DB</text>
+            <text x="480" y="220" text-anchor="middle" class="sub">UPDATE first</text>
+          </g>
+          <line x1="601" y1="210" x2="631" y2="210" class="wire"/>
+          <polygon points="631,205 640,210 631,215" class="head"/>
+          <g>
+            <rect x="643" y="162" width="230" height="96" rx="12" class="box"/>
+            <text x="758" y="196" text-anchor="middle" class="label">Cache</text>
+            <text x="758" y="220" text-anchor="middle" class="sub">then DEL</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">Aside 的写：先更新 DB，再删 key。不要在这张上再叠一条 Through。</span><span class="lang-en">The Aside write: update the DB, then delete the key. Don't stack a Through path on this picture.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="185" y="162" width="260" height="96" rx="12" class="box"/>
+            <text x="315" y="196" text-anchor="middle" class="label">Read miss</text>
+            <text x="315" y="220" text-anchor="middle" class="sub">GET, then SELECT</text>
+          </g>
+          <line x1="451" y1="210" x2="504" y2="210" class="wire"/>
+          <polygon points="504,205 513,210 504,215" class="head"/>
+          <g>
+            <rect x="515" y="162" width="260" height="96" rx="12" class="box ok"/>
+            <text x="645" y="196" text-anchor="middle" class="label">SET + TTL</text>
+            <text x="645" y="220" text-anchor="middle" class="sub">fill from the row</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">读 miss 就三步：GET 缓存，SELECT 权威，SET 带回 TTL。命中就停在缓存，DB 不是每次必经。</span><span class="lang-en">A read miss is three steps: GET the cache, SELECT the authority, SET it back with a TTL. On a hit you stop at the cache. The DB is not a hop you always take.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="185" y="162" width="260" height="96" rx="12" class="box bad"/>
+            <text x="315" y="196" text-anchor="middle" class="label">Slow SET</text>
+            <text x="315" y="220" text-anchor="middle" class="sub">old value returns</text>
+          </g>
+          <line x1="451" y1="210" x2="504" y2="210" class="wire"/>
+          <polygon points="504,205 513,210 504,215" class="head"/>
+          <g>
+            <rect x="515" y="162" width="260" height="96" rx="12" class="box ok"/>
+            <text x="645" y="196" text-anchor="middle" class="label">DEL key</text>
+            <text x="645" y="220" text-anchor="middle" class="sub">next beat fills</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">所以写完是删，不是更新。慢请求会把旧值写回去。TTL 再封住一次漏删。</span><span class="lang-en">So after the write you delete, you don't update. A slow request would write the old value back. TTL then caps a delete you missed.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="185" y="162" width="260" height="96" rx="12" class="box alt"/>
+            <text x="315" y="196" text-anchor="middle" class="label">Write-Through</text>
+            <text x="315" y="220" text-anchor="middle" class="sub">cache + DB sync</text>
+          </g>
+          <line x1="451" y1="210" x2="504" y2="210" class="wire"/>
+          <polygon points="504,205 513,210 504,215" class="head"/>
+          <g>
+            <rect x="515" y="162" width="260" height="96" rx="12" class="box"/>
+            <text x="645" y="196" text-anchor="middle" class="label">Fresh read</text>
+            <text x="645" y="220" text-anchor="middle" class="sub">slower write</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">Through 用写延迟买下一读就是新的。双写一半成功仍要处理。它不是事务。</span><span class="lang-en">Through buys a fresh next read with write latency. A half-successful dual-write still has to be handled. It is not a transaction.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="185" y="162" width="260" height="96" rx="12" class="box ok"/>
+            <text x="315" y="196" text-anchor="middle" class="label">Counter</text>
+            <text x="315" y="220" text-anchor="middle" class="sub">Back, loss OK</text>
+          </g>
+          <line x1="451" y1="210" x2="504" y2="210" class="wire"/>
+          <polygon points="504,205 513,210 504,215" class="head"/>
+          <g>
+            <rect x="515" y="162" width="260" height="96" rx="12" class="box bad"/>
+            <text x="645" y="196" text-anchor="middle" class="label">Balance</text>
+            <text x="645" y="220" text-anchor="middle" class="sub">Back loses money</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">Back 先写缓存。计数可以丢几下。余额不行。要持久，就不要走 Back。</span><span class="lang-en">Back writes the cache first. A counter can lose a few increments. A balance cannot. If you need durability, don't use Back.</span></figcaption>
+      </div>
+    </figure>
+    <p class="cite"><span class="lang-zh">账本仍回 <a class="chip" href="ch37.html">Ch37 · 存储选型</a>。订单在 <span class="chip soon">Ch18 · 电商订单</span>，支付在 <span class="chip soon">Ch24 · 支付</span>。</span><span class="lang-en">The ledger still goes back to <a class="chip" href="ch37.html">Ch37 · storage choices</a>. Orders are <span class="chip soon">Ch18 · orders</span>. Payments are <span class="chip soon">Ch24 · payments</span>.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">穿透：key 根本不存在</span><span class="lang-en">Penetration: the key never existed</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">中文</p>
+        <p>三种失败先拆开。穿透是查一个缓存和 DB 都没有的 key：随机 id、已经删掉的资源、拼错的短码。缓存永远 miss，每次都打到 DB，无效查询把库打满。</p>
+        <p>默认是 negative cache：空值也缓存，TTL 比正常条目短，避免「不存在」永久占着内存。流量再大，加 bloom。bloom 说不在，就一定不在，直接挡掉。说可能在，才查库，假阳性才会回源。bloom 要随写入更新，否则刚插入的合法 key 会被误杀。这是 trade-off，不是魔法。锁不是穿透的答案。永不过期也不是。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">English</p>
+        <p>Split the three failures before you answer. Penetration is a lookup of a key that is in neither the cache nor the DB: a random id, a deleted resource, a mistyped short code. The cache always misses, every request hits the DB, and useless queries flood it.</p>
+        <p>The default is a negative cache: cache the empty value too, with a TTL shorter than a real entry, so "does not exist" does not occupy memory forever. If the traffic is large, add a bloom filter. "Not in" means definitely not in, and you block it. "Maybe" is when you query the DB. Only a false positive hits origin. The bloom filter has to be updated on writes, or a key you just inserted gets rejected. That is the trade-off. It is not magic. A lock is not the answer to penetration. Never-expire is not either.</p>
+      </div>
+    </div>
+    <figure class="deck">
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="350" y="162" width="260" height="96" rx="12" class="box bad"/>
+            <text x="480" y="196" text-anchor="middle" class="label">Missing key</text>
+            <text x="480" y="220" text-anchor="middle" class="sub">never in cache or DB</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">穿透的 key 从来就不存在。它和热点过期不是同一个词。</span><span class="lang-en">A penetration key never existed. That is a different word from a hot key expiring.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="185" y="162" width="260" height="96" rx="12" class="box"/>
+            <text x="315" y="196" text-anchor="middle" class="label">Always miss</text>
+            <text x="315" y="220" text-anchor="middle" class="sub">cache has no row</text>
+          </g>
+          <line x1="451" y1="210" x2="504" y2="210" class="wire"/>
+          <polygon points="504,205 513,210 504,215" class="head"/>
+          <g>
+            <rect x="515" y="162" width="260" height="96" rx="12" class="box bad"/>
+            <text x="645" y="196" text-anchor="middle" class="label">DB flood</text>
+            <text x="645" y="220" text-anchor="middle" class="sub">useless queries</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">每次 miss 都打到 DB。恶意随机 id 可以把库打满。</span><span class="lang-en">Every miss hits the DB. Random ids can fill the database with useless queries.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="185" y="162" width="260" height="96" rx="12" class="box ok"/>
+            <text x="315" y="196" text-anchor="middle" class="label">Empty value</text>
+            <text x="315" y="220" text-anchor="middle" class="sub">negative cache</text>
+          </g>
+          <line x1="451" y1="210" x2="504" y2="210" class="wire"/>
+          <polygon points="504,205 513,210 504,215" class="head"/>
+          <g>
+            <rect x="515" y="162" width="260" height="96" rx="12" class="box"/>
+            <text x="645" y="196" text-anchor="middle" class="label">Short TTL</text>
+            <text x="645" y="220" text-anchor="middle" class="sub">shorter than a row</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">空值也缓存，TTL 比正常条目短。下一拍同样的垃圾 id 停在缓存。</span><span class="lang-en">Cache the empty value, with a TTL shorter than a real row. The next junk id stops at the cache.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="185" y="162" width="260" height="96" rx="12" class="box ok"/>
+            <text x="315" y="196" text-anchor="middle" class="label">Bloom: not in</text>
+            <text x="315" y="220" text-anchor="middle" class="sub">block, no false neg</text>
+          </g>
+          <line x1="451" y1="210" x2="504" y2="210" class="wire"/>
+          <polygon points="504,205 513,210 504,215" class="head"/>
+          <g>
+            <rect x="515" y="162" width="260" height="96" rx="12" class="box alt"/>
+            <text x="645" y="196" text-anchor="middle" class="label">Bloom: maybe</text>
+            <text x="645" y="220" text-anchor="middle" class="sub">then query DB</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">bloom 说不在就拦截。说可能在才查库。写入要更新它，否则新 key 会被误杀。</span><span class="lang-en">"Not in" blocks. "Maybe" is when you query the DB. Update the filter on write, or a new key gets rejected.</span></figcaption>
+      </div>
+    </figure>
+    <p class="cite"><span class="lang-zh">拼错的短码就是这个形状，业务仍在 <a class="chip" href="ch09.html">Ch09 · 短链</a>。这里只回收这一句。</span><span class="lang-en">A mistyped short code is this shape. The product still lives in <a class="chip" href="ch09.html">Ch09 · URL shortener</a>. Here you only recycle the one line.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">击穿：一个热点过期</span><span class="lang-en">Stampede: one hot key expires</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">中文</p>
+        <p>击穿和穿透相反。key 存在，而且极热。TTL 一到，N 个请求同时 miss，同时打 DB，再同时 SET。英文里的 stampede、thundering herd，多半说的就是这个。</p>
+        <p>默认 single-flight。同一进程里合并成一个回源。跨进程用短锁：<code>SET</code> 带 NX 和过期写在同一条命令里，不要拆成 SETNX 再 EXPIRE。没抢到锁的等一小会儿再 GET。业务允许 stale，就可以先读旧值。</p>
+        <p>逻辑过期是升级版：key 本身不过期，value 里带 expireAt，一个线程异步刷新。和 Facebook 论文里的 serve stale 是一个意思。Nishtala 等人 NSDI 2013，<em>Scaling Memcache at Facebook</em>：memcache 是 demand-filled lookaside，它不知道 DB 的存在，应用 miss 之后自己填；写库之后 delete。leased get 在 miss 时发一个 lease token，<code>set</code> 要带上。中途如果已经 delete，token 作废，慢请求就不能把旧行写回。同一个 key 的 token 限速发放，其余客户端稍后重试。白板说到 single-flight，可以点这一句。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">English</p>
+        <p>A stampede is the opposite of penetration. The key exists, and it is extremely hot. The moment the TTL hits, N requests miss together, hit the DB together, and SET together. In English, stampede and thundering herd mostly mean this.</p>
+        <p>The default is single-flight. Inside one process, coalesce to a single origin fetch. Across processes, a short lock: <code>SET</code> with NX and expiry in the same command. Don't split it into SETNX and then EXPIRE. Whoever didn't get the lock waits briefly and GETs again. If the product allows stale, they can read the old value.</p>
+        <p>Logical expiry is the upgrade: the key itself has no TTL, the value carries expireAt, and one thread refreshes async. Same idea as serve stale in the Facebook paper. Nishtala et al., NSDI 2013, <em>Scaling Memcache at Facebook</em>: memcache is a demand-filled lookaside. It does not know the DB exists. The app fills after a miss, and deletes after it writes the DB. A leased get issues a lease token on miss, and <code>set</code> has to carry it. If a delete happened in between, the token is void, so a slow request cannot write the old row back. Tokens for the same key are rate-limited. Other clients retry later. When the board says single-flight, you can name that line.</p>
+      </div>
+    </div>
+    <figure class="deck">
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="350" y="162" width="260" height="96" rx="12" class="box"/>
+            <text x="480" y="196" text-anchor="middle" class="label">One hot key</text>
+            <text x="480" y="220" text-anchor="middle" class="sub">TTL hits zero</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">这一张只有一个热点。它存在，而且刚刚过期。</span><span class="lang-en">This picture is one hot key. It exists, and it just expired.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="185" y="162" width="260" height="96" rx="12" class="box bad"/>
+            <text x="315" y="196" text-anchor="middle" class="label">N misses</text>
+            <text x="315" y="220" text-anchor="middle" class="sub">same key, together</text>
+          </g>
+          <line x1="451" y1="210" x2="504" y2="210" class="wire"/>
+          <polygon points="504,205 513,210 504,215" class="head"/>
+          <g>
+            <rect x="515" y="162" width="260" height="96" rx="12" class="box bad"/>
+            <text x="645" y="196" text-anchor="middle" class="label">DB stampede</text>
+            <text x="645" y="220" text-anchor="middle" class="sub">N selects, N sets</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">并发一起回源，再一起 SET。单 key 把 DB 打满。</span><span class="lang-en">Concurrent requests all go back to origin, then all SET. One key floods the DB.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="87" y="162" width="230" height="96" rx="12" class="box"/>
+            <text x="202" y="196" text-anchor="middle" class="label">Waiters</text>
+            <text x="202" y="220" text-anchor="middle" class="sub">retry GET</text>
+          </g>
+          <line x1="323" y1="210" x2="353" y2="210" class="wire"/>
+          <polygon points="353,205 362,210 353,215" class="head"/>
+          <g>
+            <rect x="365" y="162" width="230" height="96" rx="12" class="box ok"/>
+            <text x="480" y="196" text-anchor="middle" class="label">single-flight</text>
+            <text x="480" y="220" text-anchor="middle" class="sub">one origin fetch</text>
+          </g>
+          <line x1="601" y1="210" x2="631" y2="210" class="wire"/>
+          <polygon points="631,205 640,210 631,215" class="head"/>
+          <g>
+            <rect x="643" y="162" width="230" height="96" rx="12" class="box"/>
+            <text x="758" y="196" text-anchor="middle" class="label">DB</text>
+            <text x="758" y="220" text-anchor="middle" class="sub">one select</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">只让一个回源。同进程合并，跨进程用带过期的短锁。没拿到锁的等一等再 GET。</span><span class="lang-en">Only one goes back to origin. Coalesce in-process. Across processes, a short lock that expires. The rest wait and GET again.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="185" y="162" width="260" height="96" rx="12" class="box ok"/>
+            <text x="315" y="196" text-anchor="middle" class="label">Leased get</text>
+            <text x="315" y="220" text-anchor="middle" class="sub">token on SET</text>
+          </g>
+          <line x1="451" y1="210" x2="504" y2="210" class="wire"/>
+          <polygon points="504,205 513,210 504,215" class="head"/>
+          <g>
+            <rect x="515" y="162" width="260" height="96" rx="12" class="box alt"/>
+            <text x="645" y="196" text-anchor="middle" class="label">Serve stale</text>
+            <text x="645" y="220" text-anchor="middle" class="sub">while one fills</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">论文里的 leased get 挡住 stale set。允许短暂 stale，等拿租约的那个把新值填上。</span><span class="lang-en">The paper's leased get blocks a stale set. Brief stale is allowed, until the lease holder fills the new value.</span></figcaption>
+      </div>
+    </figure>
+    <p class="cite"><span class="lang-zh">爆款短码在 <a class="chip" href="ch09.html">Ch09 · 短链</a>。Feed 大 V 的时间线在 <span class="chip soon">Ch11 · 新闻 Feed</span>。题不要在这里重做。</span><span class="lang-en">A viral short code is <a class="chip" href="ch09.html">Ch09 · URL shortener</a>. A celebrity timeline is <span class="chip soon">Ch11 · news feed</span>. Don't redo those problems here.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">雪崩：一批一起过期</span><span class="lang-en">Avalanche: a batch expires together</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">中文</p>
+        <p>雪崩是另一张图。一批 key 用了同一个 TTL，整点一起死；或者缓存集群在 failover 期间整层消失。回源从 1 变成 N，或者缓存层直接没了。它不是「那一个热点过期」。</p>
+        <p>同时过期的默认是 TTL jitter：<code>TTL = base + random(0, 0.1×base)</code> 这种形状就够，不要背函数。缓存层本身要有副本。集群真的没了，jitter 帮不上：读会穿到 DB，DB 吃不住就要限流和降级。只说「Redis 高可用」、却解释不了同时过期，是 red flag。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">English</p>
+        <p>Avalanche is a different picture. A batch of keys was written with the same TTL and they all die on the hour, or the cache cluster disappears during failover. Origin fan-out goes from 1 to N, or the cache layer is simply gone. It is not "that one hot key expired".</p>
+        <p>The default for expire-together is TTL jitter: a shape like <code>TTL = base + random(0, 0.1×base)</code> is enough. Don't memorize a function. The cache layer itself needs replicas. If the cluster is actually gone, jitter does nothing: reads fall through, and if the DB cannot take them you rate-limit and degrade. "Redis HA" with no account of expire-together is a red flag.</p>
+      </div>
+    </div>
+    <figure class="deck">
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="350" y="162" width="260" height="96" rx="12" class="box bad"/>
+            <text x="480" y="196" text-anchor="middle" class="label">Same TTL</text>
+            <text x="480" y="220" text-anchor="middle" class="sub">a batch, one expiry</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">预热时写了同一个 TTL。这一张先只画「一批，同一个到期时间」。</span><span class="lang-en">Warmup wrote one TTL. This stroke is only "a batch, one expiry".</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="185" y="162" width="260" height="96" rx="12" class="box bad"/>
+            <text x="315" y="196" text-anchor="middle" class="label">Expire together</text>
+            <text x="315" y="220" text-anchor="middle" class="sub">on the hour</text>
+          </g>
+          <line x1="451" y1="210" x2="504" y2="210" class="wire"/>
+          <polygon points="504,205 513,210 504,215" class="head"/>
+          <g>
+            <rect x="515" y="162" width="260" height="96" rx="12" class="box bad"/>
+            <text x="645" y="196" text-anchor="middle" class="label">DB</text>
+            <text x="645" y="220" text-anchor="middle" class="sub">N misses at once</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">整点一起 miss。回源面积从一条 key 变成一批。</span><span class="lang-en">They miss together on the hour. Origin fan-out goes from one key to a batch.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="185" y="162" width="260" height="96" rx="12" class="box"/>
+            <text x="315" y="196" text-anchor="middle" class="label">Base TTL</text>
+            <text x="315" y="220" text-anchor="middle" class="sub">same for the batch</text>
+          </g>
+          <line x1="451" y1="210" x2="504" y2="210" class="wire"/>
+          <polygon points="504,205 513,210 504,215" class="head"/>
+          <g>
+            <rect x="515" y="162" width="260" height="96" rx="12" class="box ok"/>
+            <text x="645" y="196" text-anchor="middle" class="label">TTL jitter</text>
+            <text x="645" y="220" text-anchor="middle" class="sub">base + random</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">加一段随机，把到期时间打散。jitter 解决的是同时过期。</span><span class="lang-en">Add a random slice so expiry spreads out. Jitter solves expire-together.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="185" y="162" width="260" height="96" rx="12" class="box bad"/>
+            <text x="315" y="196" text-anchor="middle" class="label">Cluster down</text>
+            <text x="315" y="220" text-anchor="middle" class="sub">cache layer gone</text>
+          </g>
+          <line x1="451" y1="210" x2="504" y2="210" class="wire"/>
+          <polygon points="504,205 513,210 504,215" class="head"/>
+          <g>
+            <rect x="515" y="162" width="260" height="96" rx="12" class="box ok"/>
+            <text x="645" y="196" text-anchor="middle" class="label">Rate limit</text>
+            <text x="645" y="220" text-anchor="middle" class="sub">degrade the read</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">集群没了，改 TTL 没用。读穿到 DB 之前要限流、降级。副本是另一件事。</span><span class="lang-en">If the cluster is gone, changing TTL does nothing. Rate-limit and degrade before the reads fall through. Replicas are a separate point.</span></figcaption>
+      </div>
+    </figure>
+    <p class="cite"><span class="lang-zh">限流在 <span class="chip soon">Ch04 · 限流器</span>。降级和弹性在 <span class="chip soon">Ch42 · 消息、弹性、容器心智</span>。</span><span class="lang-en">Rate limit is <span class="chip soon">Ch04 · rate limiter</span>. Degrade and resilience are <span class="chip soon">Ch42 · messaging, resilience, containers</span>.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">热点：一个分片被打满</span><span class="lang-en">Hot key: one shard is saturated</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">中文</p>
+        <p>热点是第三张图，不要和击穿、雪崩画在一起。key 一直很热，即使没过期，单分片的 CPU 或网卡也是 bottleneck。single-flight 解决的是过期那一瞬间的回源。它不解决「这个分片一直被打满」。</p>
+        <p>默认两拳。第一拳是进程内 L1，把极热的只读挡在本机。第二拳是 replica：把同一个 key 复制到多个缓存节点，读打散。短链爆款、Feed 大 V 的 outbox 都是这个形状。全局把所有 key 设成永不过期，是热点的特例被误用成策略。那不是答案。</p>
+        <p class="say">穿透是不存在的 key，空值短 TTL，流量大再加 bloom。击穿是热点过期，single-flight 只让一个回源。雪崩是同时过期或缓存挂了，TTL jitter 打散过期，挂了要限流。特别热再 replica，再加本地 L1。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">English</p>
+        <p>A hot key is a third picture. Don't draw it on the stampede slide or the avalanche slide. The key stays hot even when it has not expired, and one shard's CPU or NIC is the bottleneck. single-flight covers the instant of expiry. It does not cover "this shard is saturated the whole time".</p>
+        <p>Two punches. First, in-process L1, so the extra-hot read-only value stops on the box. Second, a replica: copy the same key onto several cache nodes and spread the reads. A viral short code and a celebrity outbox are this shape. Never-expire on every key is a hotspot special case mistaken for a global policy. That is not the answer.</p>
+        <p class="say">Penetration is a key that never existed: empty value, short TTL, and a bloom filter if the traffic is large. Breakdown is a hot key expiring: single-flight lets only one go back to origin. Avalanche is expire-together or the cache dying: TTL jitter spreads expiry, and if it's down you rate-limit. Extra hot: replica, plus a local L1.</p>
+      </div>
+    </div>
+    <figure class="deck">
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="350" y="162" width="260" height="96" rx="12" class="box bad"/>
+            <text x="480" y="196" text-anchor="middle" class="label">One shard</text>
+            <text x="480" y="220" text-anchor="middle" class="sub">CPU or NIC full</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">先画瓶颈：一个分片。key 没过期，读仍然打满它。</span><span class="lang-en">Draw the bottleneck first: one shard. The key has not expired, and reads still saturate it.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="87" y="162" width="230" height="96" rx="12" class="box"/>
+            <text x="202" y="196" text-anchor="middle" class="label">Hot key</text>
+            <text x="202" y="220" text-anchor="middle" class="sub">one value</text>
+          </g>
+          <line x1="323" y1="210" x2="353" y2="210" class="wire"/>
+          <polygon points="353,205 362,210 353,215" class="head"/>
+          <g>
+            <rect x="365" y="162" width="230" height="96" rx="12" class="box ok"/>
+            <text x="480" y="196" text-anchor="middle" class="label">Replica</text>
+            <text x="480" y="220" text-anchor="middle" class="sub">copy on N nodes</text>
+          </g>
+          <line x1="601" y1="210" x2="631" y2="210" class="wire"/>
+          <polygon points="631,205 640,210 631,215" class="head"/>
+          <g>
+            <rect x="643" y="162" width="230" height="96" rx="12" class="box"/>
+            <text x="758" y="196" text-anchor="middle" class="label">Reads</text>
+            <text x="758" y="220" text-anchor="middle" class="sub">spread out</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">把同一个 key 复制到多个缓存节点。读被打散，单分片不再独扛。</span><span class="lang-en">Copy the same key onto several cache nodes. Reads spread out. One shard no longer takes all of them.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="185" y="162" width="260" height="96" rx="12" class="box ok"/>
+            <text x="315" y="196" text-anchor="middle" class="label">L1 local</text>
+            <text x="315" y="220" text-anchor="middle" class="sub">first punch</text>
+          </g>
+          <line x1="451" y1="210" x2="504" y2="210" class="wire"/>
+          <polygon points="504,205 513,210 504,215" class="head"/>
+          <g>
+            <rect x="515" y="162" width="260" height="96" rx="12" class="box"/>
+            <text x="645" y="196" text-anchor="middle" class="label">Redis</text>
+            <text x="645" y="220" text-anchor="middle" class="sub">still the shared set</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">进程内再挡一层。只放极热、可 stale 的只读。权威的失效仍在 Redis。</span><span class="lang-en">In-process takes another layer. Extra-hot, stale-OK, read-only only. Authoritative invalidation still lives in Redis.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="185" y="162" width="260" height="96" rx="12" class="box ok"/>
+            <text x="315" y="196" text-anchor="middle" class="label">Replica</text>
+            <text x="315" y="220" text-anchor="middle" class="sub">this hot key only</text>
+          </g>
+          <line x1="451" y1="210" x2="504" y2="210" class="wire"/>
+          <polygon points="504,205 513,210 504,215" class="head"/>
+          <g>
+            <rect x="515" y="162" width="260" height="96" rx="12" class="box bad"/>
+            <text x="645" y="196" text-anchor="middle" class="label">Never-expire</text>
+            <text x="645" y="220" text-anchor="middle" class="sub">every key</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">永不过期最多是这一个热点的特例。把它做成全局策略，漏删就永远留下。</span><span class="lang-en">Never-expire is at most a special case for this one hot key. As a global policy, a missed delete stays forever.</span></figcaption>
+      </div>
+    </figure>
+    <p class="cite"><span class="lang-zh">同一句热点：<a class="chip" href="ch09.html">Ch09 · 短链</a> 的爆款码，<span class="chip soon">Ch11 · 新闻 Feed</span> 的大 V。媒体 URL 走 CDN，这题不设计 PoP。</span><span class="lang-en">The same hot-key line: a viral code in <a class="chip" href="ch09.html">Ch09 · URL shortener</a>, a celebrity in <span class="chip soon">Ch11 · news feed</span>. Media URLs go to the CDN. You don't design PoPs on that problem.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">点名就够的论文</span><span class="lang-en">Papers you only need to name</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">中文</p>
+        <p>面试用哪一句，不背页码，也不编服务器台数。两篇必点，两篇选读。</p>
+        <table>
+          <thead><tr><th>文献</th><th>你说的那一句</th></tr></thead>
+          <tbody>
+            <tr><td>Nishtala 等，NSDI 2013，<em>Scaling Memcache at Facebook</em></td><td>demand-filled lookaside；写后 delete；leased get 防 stale set 和 thundering herd</td></tr>
+            <tr><td>Nottingham，RFC 5861</td><td>stale-while-revalidate 先吐旧的；stale-if-error 在源出错时仍可用旧响应</td></tr>
+            <tr><td>Einziger 等，ACM TOS 2017，TinyLFU（选读）</td><td>进程内准入看频率。Caffeine 走这条。不是 Redis 必答题</td></tr>
+            <tr><td>Nygren 等，OSR 2010，Akamai（选读）</td><td>对象放在近用户的边缘，DNS 映射选点。用来证明 edge HTTP cache 是正经系统</td></tr>
+          </tbody>
+        </table>
+        <p>论文里还可以点一句：他们按工作负载分 pool，热 key 会复制。UDP get、region、mcrouter 的拓扑不要展开。语义缓存、embedding 近邻不是这篇，也不是本章，一句回到 <span class="chip soon">Ch32 · LLM API 网关</span>。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">English</p>
+        <p>Say the interview line. Don't memorize page numbers, and don't invent a server count. Two you should be able to name, two are optional.</p>
+        <table>
+          <thead><tr><th>Paper</th><th>The line you say</th></tr></thead>
+          <tbody>
+            <tr><td>Nishtala et al., NSDI 2013, <em>Scaling Memcache at Facebook</em></td><td>demand-filled lookaside; delete after the write; leased get stops stale set and thundering herd</td></tr>
+            <tr><td>Nottingham, RFC 5861</td><td>stale-while-revalidate serves stale first; stale-if-error keeps the old response when origin fails</td></tr>
+            <tr><td>Einziger et al., ACM TOS 2017, TinyLFU (optional)</td><td>in-process admission looks at frequency. Caffeine walks this line. Not a Redis required question</td></tr>
+            <tr><td>Nygren et al., OSR 2010, Akamai (optional)</td><td>objects sit on an edge close to the user; DNS mapping picks a site. Proof that edge HTTP cache is a real system</td></tr>
+          </tbody>
+        </table>
+        <p>One more line from the Memcache paper is enough: they split pools by workload, and they replicate hot keys. Leave UDP get, regions, and the mcrouter topology closed. Semantic cache and embedding nearest-neighbor are not that paper, and not this chapter. One line back to <span class="chip soon">Ch32 · LLM API gateway</span>.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">哪些题会用到</span><span class="lang-en">Which problems use this</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">中文</p>
+        <p>主线先做题，卡壳再跳进来。这里只回收缓存和 CDN 那一句。</p>
+        <ul>
+          <li><a class="chip" href="ch02.html">Ch02 · 从零到百万</a> 读路径先缓存再 CDN，第一步不要画全球边缘。</li>
+          <li><a class="chip" href="ch09.html">Ch09 · 短链</a> 读多写少用 Aside；热点码 L1 加 L2；302 不要长期放 CDN；stampede 合并回源。</li>
+          <li><span class="chip soon">Ch11 · 新闻 Feed</span> timeline 是应用缓存；媒体 URL 走 CDN；大 V 是 hot key。</li>
+          <li><span class="chip soon">Ch13 · 搜索</span> 自动补全和热 query 可缓存；倒排不是 Redis 能替代的权威。</li>
+          <li><span class="chip soon">Ch14 · 视频</span> HTTP 边缘加切片在那章。这里只提供 shield、cache key、SWR。</li>
+          <li><span class="chip soon">Ch16 · 评论</span> 计数和热帖用 Aside；删帖要 invalidation。</li>
+          <li><a class="chip" href="ch10.html">Ch10 · 通知</a> 未读数可以缓存。会话也可以。余额和库存扣减的权威仍在 DB。</li>
+        </ul>
+      </div>
+      <div class="lang-en"><p class="col-kicker">English</p>
+        <p>Do the spine problems first. Jump here when you get stuck. Recycle only the cache and CDN line.</p>
+        <ul>
+          <li><a class="chip" href="ch02.html">Ch02 · zero to a million</a>: cache on the read path, then CDN. Don't draw a global edge on step one.</li>
+          <li><a class="chip" href="ch09.html">Ch09 · URL shortener</a>: read-heavy Aside; hot codes on L1 plus L2; don't long-cache the 302; a stampede coalesces origin.</li>
+          <li><span class="chip soon">Ch11 · news feed</span>: the timeline is app cache; media URLs go to the CDN; a celebrity is a hot key.</li>
+          <li><span class="chip soon">Ch13 · search</span>: autocomplete and hot queries can be cached; the inverted index is not an authority Redis replaces.</li>
+          <li><span class="chip soon">Ch14 · video</span>: HTTP edge plus chunking live there. Here you only supply shield, cache key, and SWR.</li>
+          <li><span class="chip soon">Ch16 · comments</span>: counts and hot threads are Aside; deleting a post needs invalidation.</li>
+          <li><a class="chip" href="ch10.html">Ch10 · notifications</a>: an unread count can be cached. A session can too. Authority for a balance or a stock decrement still lives in the DB.</li>
+        </ul>
+      </div>
+    </div>
+    <p class="cite"><span class="lang-zh"><span class="chip soon">Ch22 · 对象存储</span><span class="chip soon">Ch32 · LLM API 网关</span><span class="chip soon">Ch18 · 电商订单</span><span class="chip soon">Ch24 · 支付</span></span><span class="lang-en"><span class="chip soon">Ch22 · object storage</span><span class="chip soon">Ch32 · LLM API gateway</span><span class="chip soon">Ch18 · orders</span><span class="chip soon">Ch24 · payments</span></span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">追问</span><span class="lang-en">Follow-ups</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">中文</p>
+        <ol>
+          <li>默认哪种策略？Cache-Aside。DB 是 source of truth。写后 DEL，TTL 封顶。</li>
+          <li>为什么删而不是更新？慢读会把旧值 SET 回去。下一拍 miss 回填。</li>
+          <li>Through 和 Back？Through 同步双写，写更慢，下一读是新的。Back 可能丢数，只给可丢的计数。</li>
+          <li>穿透和击穿？穿透：key 从不存在，空值或 bloom。击穿：一个热点过期，single-flight。</li>
+          <li>雪崩只改 TTL 够吗？jitter 管同时过期。集群没了要限流和降级。</li>
+          <li>CDN 能换掉 Redis 吗？不能。边缘是 HTTP。Redis 是应用对象。</li>
+          <li>cache key 错了会怎样？串用户，或者命中率碎掉。私人响应不要共享。302 不要长期放 CDN。</li>
+          <li>Memcache 那篇怎么点？demand-filled lookaside；leased get 防 herd 和 stale set。</li>
+        </ol>
+        <details class="fold">
+          <summary>2026 和旧笔记差在哪</summary>
+          <p>旧笔记把缓存写成六种策略的目录，外加淘汰算法全书和云产品对照。上场只带 Aside 默认、三种失败各一句、CDN 三个点。Through 和 Back 是 trade-off。Read-Through、Write-Around、预热各点一句。穿透、击穿、雪崩要会开口，不要合成一把锁。远程缓存一句选型就够，不要骂战，也不要把许可证当答案。机制是 HTTP edge 加远程 KV，不要报产品名，边缘函数也不是 hard part。语义缓存一句回到 Ch32。延迟双删不是银弹：Aside 是写库然后 DEL，再加 TTL；lease 和 single-flight 防 stale set 与 stampede。LRU 够开口，进程内 W-TinyLFU 选读。</p>
+        </details>
+      </div>
+      <div class="lang-en"><p class="col-kicker">English</p>
+        <ol>
+          <li>Default policy? Cache-Aside. The DB is the source of truth. DEL after the write, TTL caps the window.</li>
+          <li>Why delete instead of updating? A slow read SETs the old value back. The next beat misses and fills.</li>
+          <li>Through and Back? Through dual-writes in sync, the write is slower, the next read is fresh. Back can lose data, and only for counters you can lose.</li>
+          <li>Penetration versus stampede? Penetration: the key never existed, empty value or bloom. Stampede: one hot key expires, single-flight.</li>
+          <li>Is a TTL change enough for avalanche? Jitter covers expire-together. A dead cluster needs rate limit and degrade.</li>
+          <li>Can a CDN replace Redis? No. The edge is HTTP. Redis is application objects.</li>
+          <li>Wrong cache key? You leak across users, or the hit rate turns to dust. Don't share a private response. Don't long-cache a 302.</li>
+          <li>The Memcache paper in one line? demand-filled lookaside; leased get stops the herd and a stale set.</li>
+        </ol>
+        <details class="fold">
+          <summary>What changed since the old notes</summary>
+          <p>Old notes turned cache into a catalog of six policies, plus an eviction encyclopedia and a cloud-product comparison. You walk in with Aside as the default, one line for each of the three failures, and three CDN points. Through and Back are trade-offs. Read-Through, Write-Around, and warmup each get one line. Penetration, stampede, and avalanche have to be opened separately, not as one lock. One line picks the remote cache. No flame war, and a license is not the answer. The mechanisms are HTTP edge plus a remote KV. Don't recite a product name. Edge functions are not the hard part. Semantic cache is one line back to Ch32. Delayed double-delete is not the silver bullet: Aside is write the DB, then DEL, plus TTL; a lease and single-flight stop stale set and stampede. LRU is enough to open. In-process W-TinyLFU is optional.</p>
+        </details>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">下一步</span><span class="lang-en">Next</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">中文</p>
+        <p>合上页，用 20 秒走一遍：Aside 默认，DB 为准，TTL 加写后删；穿透是空值或 bloom，击穿是 single-flight，雪崩是 jitter；CDN 是 Client → Edge → Origin，点 cache key、shield、SWR。能把短链 302、Feed 媒体、LLM 缓存放回各自的章，这一章就过关。</p>
+        <p>下一章是负载均衡与无状态：L4 / L7、会话、Maglev 和一致性哈希 LB。缓存让单机读得快。无状态让你可以加机器。两边一起，才是扩展链上「web 可以水平扩」的那一截。Maglev 论文留在那边。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">English</p>
+        <p>Close the page and walk it in 20 seconds: Aside is the default, the DB is authority, TTL plus delete after write; penetration is an empty value or a bloom filter, stampede is single-flight, avalanche is jitter; CDN is Client → Edge → Origin, and you name cache key, shield, and SWR. If you can drop the short-URL 302, feed media, and the LLM cache back onto their own chapters, this chapter is done.</p>
+        <p>Next is load balancing and statelessness: L4 / L7, sessions, Maglev and consistent-hash LB. Cache makes one box read fast. Stateless lets you add machines. Together they are the "the web can scale out" link on the growth path. The Maglev paper stays over there.</p>
+      </div>
+    </div>
+    <p class="cite"><span class="lang-zh">下一章 <span class="chip soon">Ch39 · 负载均衡与无状态</span>。扩展链的前半在 <a class="chip" href="ch02.html">Ch02 · 从零到百万</a>。</span><span class="lang-en">Next is <span class="chip soon">Ch39 · load balancing and statelessness</span>. The front half of the growth path is <a class="chip" href="ch02.html">Ch02 · zero to a million</a>.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">闪卡</span><span class="lang-en">Flashcards</span></h2>
+    <p class="cite"><span class="lang-zh">点一下翻面。能讲出来才算会。</span><span class="lang-en">Click to flip. If you can say it, you know it.</span></p>
+    <div class="cards-grid">
+      <button type="button" class="flip">
+        <span class="q"><span class="lang-zh">读多写少，默认哪一种？</span><span class="lang-en">Read-heavy, write-light: what is the default?</span></span>
+        <span class="a"><span class="lang-zh">Cache-Aside。DB 是 source of truth。写后 DEL，TTL 封住 stale。</span><span class="lang-en">Cache-Aside. The DB is the source of truth. DEL after the write. TTL caps stale data.</span></span>
+      </button>
+      <button type="button" class="flip">
+        <span class="q"><span class="lang-zh">写完为什么删缓存？</span><span class="lang-en">After a write, why delete the cache?</span></span>
+        <span class="a"><span class="lang-zh">慢请求会把旧值 SET 回去。删了，下一拍 miss 再回填。</span><span class="lang-en">A slow request SETs the old value back. Delete, and the next beat misses and fills.</span></span>
+      </button>
+      <button type="button" class="flip">
+        <span class="q"><span class="lang-zh">Through 和 Back 各一句？</span><span class="lang-en">Through and Back, one line each?</span></span>
+        <span class="a"><span class="lang-zh">Through 同步双写，写更慢，下一读是新的。Back 先写缓存，可能丢数，只给可丢的计数。</span><span class="lang-en">Through dual-writes in sync: slower write, fresh next read. Back writes the cache first and can lose data. Counters you can lose only.</span></span>
+      </button>
+      <button type="button" class="flip">
+        <span class="q"><span class="lang-zh">穿透、击穿、雪崩怎么拆？</span><span class="lang-en">Penetration, stampede, avalanche?</span></span>
+        <span class="a"><span class="lang-zh">不存在的 key；一个热点过期；一批同时过期，或缓存层没了。</span><span class="lang-en">A key that never existed; one hot key expires; a batch expires together, or the cache layer is gone.</span></span>
+      </button>
+      <button type="button" class="flip">
+        <span class="q"><span class="lang-zh">击穿默认怎么说？</span><span class="lang-en">What do you say for a stampede?</span></span>
+        <span class="a"><span class="lang-zh">single-flight，只让一个回源。可 stale 就先读旧值。论文里点 leased get。</span><span class="lang-en">single-flight: only one goes back to origin. If stale is OK, read the old value. Name leased get from the paper.</span></span>
+      </button>
+      <button type="button" class="flip">
+        <span class="q"><span class="lang-zh">雪崩和热点差在哪？</span><span class="lang-en">Avalanche versus a hot key?</span></span>
+        <span class="a"><span class="lang-zh">雪崩用 TTL jitter；集群没了要限流。热点是单分片被打满，replica 加 L1，不是全局永不过期。</span><span class="lang-en">Avalanche is TTL jitter; a dead cluster needs a rate limit. A hot key saturates one shard: replica plus L1, not never-expire on every key.</span></span>
+      </button>
+      <button type="button" class="flip">
+        <span class="q"><span class="lang-zh">CDN 读路径怎么画？</span><span class="lang-en">How do you draw the CDN read path?</span></span>
+        <span class="a"><span class="lang-zh">Client → Edge → Shield → Origin。点 cache key 和 stale-while-revalidate。302 不要长期缓存。</span><span class="lang-en">Client → Edge → Shield → Origin. Name cache key and stale-while-revalidate. Don't long-cache a 302.</span></span>
+      </button>
+      <button type="button" class="flip">
+        <span class="q"><span class="lang-zh">进程内和 Redis 怎么配？</span><span class="lang-en">How do in-process and Redis fit?</span></span>
+        <span class="a"><span class="lang-zh">L1 挡极热，TTL 短，不共享。L2 跨实例，一处 DEL。CDN 不替代 Redis。</span><span class="lang-en">L1 blocks the extra-hot, short TTL, not shared. L2 is cross-instance, one DEL. A CDN does not replace Redis.</span></span>
+      </button>
+    </div>
+  </section>
+  <p><button type="button" class="read-toggle">
+    <span class="when-off"><span class="lang-zh">我已学完本章</span><span class="lang-en">Mark this chapter done</span></span>
+    <span class="when-on"><span class="lang-zh">已学完本章</span><span class="lang-en">Completed</span></span>
+  </button></p>
+  <p class="cite"><span class="lang-zh">进度存在这台浏览器里。</span><span class="lang-en">Saved in this browser only.</span></p>
+</article>
+</main>
+<script src="../assets/js/nav.js"></script>
+<script src="../assets/js/lang.js"></script>
+<script src="../assets/js/slides.js"></script>
+<script src="../assets/js/progress.js"></script>
+</body>
+</html>

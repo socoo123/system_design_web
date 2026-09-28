@@ -1,0 +1,748 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="parchment" data-locale="zh">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ch01 · 世界地图与 4 步法</title>
+  <link rel="icon" href="../favicon.ico" sizes="48x48">
+  <link rel="stylesheet" href="../assets/css/style.css">
+  <script src="../assets/js/boot.js"></script>
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="../index.html"><span class="brand-logo">SD</span><span class="lang-zh">系统设计面试</span><span class="lang-en">System Design Interview</span></a>
+  <span class="spacer"></span>
+  <a class="map-link" href="../index.html"><span class="lang-zh">课程地图</span><span class="lang-en">Map</span></a>
+  <div class="seg" role="group" aria-label="language">
+    <button type="button" data-locale-set="zh">中文</button>
+    <button type="button" data-locale-set="both"><span class="lang-zh">对照</span><span class="lang-en">Both</span></button>
+    <button type="button" data-locale-set="en">EN</button>
+  </div>
+  <div class="seg" role="group" aria-label="theme">
+    <button type="button" data-theme-set="parchment"><span class="lang-zh">护眼</span><span class="lang-en">Paper</span></button>
+    <button type="button" data-theme-set="dracula"><span class="lang-zh">深色</span><span class="lang-en">Dark</span></button>
+  </div>
+</header>
+<main class="wrap">
+<!--
+样板骨架（计划 2 照抄结构，业务按各章重写）：
+- article.chapter#chNN + data-ch
+- 双语：.bilingual > .lang-zh / .lang-en。标题用 span.lang-zh + span.lang-en
+- 幻灯片：figure.deck 的直接子元素 .slide，里面 svg.board（viewBox 宽大于高）+ figcaption
+- 一组 3 到 6 张，顺序是白板上落笔的顺序。svg 里只写短英文，中文放在 figcaption。颜色只用 class：box / box.alt / box.ok / box.bad / wire / head / label / sub
+- 一组讲完用 p.cite 链到 M6。已有 html 的相关章用 a.chip，还没写的用 span.chip.soon
+- head 里加 <link rel="icon" href="../favicon.ico" sizes="48x48">
+- 章末 button.flip 闪卡，以及 button.read-toggle
+-->
+<article class="chapter" id="ch01" data-ch="ch01">
+  <header>
+    <div class="ch-kicker"><span class="lang-zh">CHAPTER 01 · 面试方法</span><span class="lang-en">CHAPTER 01 · method</span></div>
+    <h1><span class="lang-zh">世界地图与 4 步法</span><span class="lang-en">World map and the 4-step method</span></h1>
+    <p class="ch-meta-line"><span class="lang-zh">约 30 分钟 · 前置：无</span><span class="lang-en">~30 min · no prerequisite</span></p>
+  </header>
+  
+  <section class="goal">
+    <h2><span class="lang-zh">这一章结束你能做什么</span><span class="lang-en">What you can do after this chapter</span></h2>
+    <div class="bilingual">
+  <div class="lang-zh"><p class="col-kicker">中文</p>
+<ul><li>用 3–10 / 10–15 / 10–25 / 3–5 分钟走完四步。</li><li>认出沉默、抢答、over-engineering。</li><li>卡住时出声，而不是在白板上发呆。</li></ul>
+  </div>
+  <div class="lang-en"><p class="col-kicker">English</p>
+<ul><li>Spend the hour as 3–10 / 10–15 / 10–25 / 3–5 minutes.</li><li>Spot silence, jumping ahead, and over-engineering.</li><li>Talk when you stall, instead of staring at the board.</li></ul>
+  </div>
+</div>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">面试在评什么</span><span class="lang-en">What the interview scores</span></h2>
+    <div class="bilingual">
+  <div class="lang-zh"><p class="col-kicker">中文</p>
+<p>它不是 45 分钟造出微信，也不是知识竞赛。两个工程师把一个模糊问题收成可落地的设计。<strong>过程比终图重要。</strong>终图漂亮但中途沉默，是低分。过程清楚、图有意做简，是高分。</p>
+  </div>
+  <div class="lang-en"><p class="col-kicker">English</p>
+<p>You are not building WeChat in 45 minutes, and it is not a quiz. Two engineers turn a fuzzy prompt into a design you could ship. <strong>The process outranks the final picture.</strong> A pretty diagram with a silent middle is a low score. A clear process and a deliberately small diagram is a high one.</p>
+  </div>
+</div>
+    <figure class="deck">
+<div class="slide">
+  <svg viewBox="0 0 960 420" class="board" role="img">
+  <g>
+    <rect x="185" y="150" width="260" height="96" rx="12" class="box"/>
+    <text x="315" y="184" text-anchor="middle" class="label">You</text>
+    <text x="315" y="208" text-anchor="middle" class="sub">think out loud</text>
+  </g>
+  <g>
+    <rect x="515" y="150" width="260" height="96" rx="12" class="box alt"/>
+    <text x="645" y="184" text-anchor="middle" class="label">Interviewer</text>
+    <text x="645" y="208" text-anchor="middle" class="sub">asks and hints</text>
+  </g>
+  <line x1="451" y1="198" x2="504" y2="198" class="wire"/>
+  <polygon points="504,193 513,198 504,203" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">这是一场协作，不是闭卷考试。你卡住时出声，面试官才会把你往下带。</span><span class="lang-en">It is a working session. Say what you are thinking, or they cannot help you.</span></figcaption>
+</div>
+<div class="slide">
+  <svg viewBox="0 0 960 420" class="board" role="img">
+  <g>
+    <rect x="185" y="150" width="260" height="96" rx="12" class="box ok"/>
+    <text x="315" y="184" text-anchor="middle" class="label">Process</text>
+    <text x="315" y="208" text-anchor="middle" class="sub">clarify, estimate</text>
+  </g>
+  <g>
+    <rect x="515" y="150" width="260" height="96" rx="12" class="box"/>
+    <text x="645" y="184" text-anchor="middle" class="label">Final diagram</text>
+    <text x="645" y="208" text-anchor="middle" class="sub">clear is enough</text>
+  </g>
+  <line x1="451" y1="198" x2="504" y2="198" class="wire"/>
+  <polygon points="504,193 513,198 504,203" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">分在过程上。终图清楚、有意做简，比一张很满但没人跟得上的图分高。</span><span class="lang-en">They score the process. A clear, deliberately small diagram beats a dense one nobody can follow.</span></figcaption>
+</div>
+<div class="slide">
+  <svg viewBox="0 0 960 420" class="board" role="img">
+  <g>
+    <rect x="62" y="150" width="260" height="96" rx="12" class="box bad"/>
+    <text x="192" y="184" text-anchor="middle" class="label">Silence</text>
+    <text x="192" y="208" text-anchor="middle" class="sub">worst</text>
+  </g>
+  <g>
+    <rect x="350" y="150" width="260" height="96" rx="12" class="box bad"/>
+    <text x="480" y="184" text-anchor="middle" class="label">Jump in</text>
+    <text x="480" y="208" text-anchor="middle" class="sub">draw first</text>
+  </g>
+  <line x1="328" y1="198" x2="339" y2="198" class="wire"/>
+  <polygon points="339,193 348,198 339,203" class="head"/>
+  <g>
+    <rect x="638" y="150" width="260" height="96" rx="12" class="box bad"/>
+    <text x="768" y="184" text-anchor="middle" class="label">Over-engineer</text>
+    <text x="768" y="208" text-anchor="middle" class="sub">too much</text>
+  </g>
+  <line x1="616" y1="198" x2="627" y2="198" class="wire"/>
+  <polygon points="627,193 636,198 627,203" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">三个 red flag：沉默、抢答、over-engineering。后两个常常一起出现。</span><span class="lang-en">Three red flags: going quiet, jumping to a design, and over-engineering. The last two travel together.</span></figcaption>
+</div>
+</figure>
+    <p class="cite"><span class="lang-zh">原书那句仍然成立：最终设计和你在过程里做的工作相比，没那么重要。</span><span class="lang-en">The line from the book still holds: the final design matters less than the work you do in the process.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">这个站按什么顺序读</span><span class="lang-en">How to read this site</span></h2>
+    <div class="bilingual">
+  <div class="lang-zh"><p class="col-kicker">中文</p>
+<p>六块模块。主线是 <strong>M1–M5</strong>。M6 后置，当词典。M5 只做大模型推理、RAG、Agent 基建，<strong>不做推荐系统</strong>。</p><p>推荐路径：本章 → Ch02 从零扩到百万 → Ch03 粗略估算 → M2 把 4 步法跑熟 → M3、M4 设计题 → M5。第一道完整设计题样板是 <a href="ch09.html">Ch09 短链</a>。</p>
+  </div>
+  <div class="lang-en"><p class="col-kicker">English</p>
+<p>Six modules. The main line is <strong>M1–M5</strong>. M6 comes later, as a dictionary. M5 is LLM inference, RAG, and Agent infrastructure. <strong>No recommender system.</strong></p><p>Path: this chapter, then Ch02 (zero to a million users), Ch03 (estimates), M2 until the four steps feel automatic, then M3–M4 cases, then M5. The first full case sample is <a href="ch09.html">Ch09, a URL shortener</a>.</p>
+  </div>
+</div>
+    <figure class="deck">
+<div class="slide">
+  <svg viewBox="0 0 960 420" class="board" role="img">
+  <g>
+    <rect x="350" y="156" width="260" height="90" rx="12" class="box"/>
+    <text x="480" y="190" text-anchor="middle" class="label">M1</text>
+    <text x="480" y="214" text-anchor="middle" class="sub">method, estimates</text>
+  </g>
+</svg>
+  <figcaption><span class="lang-zh">先把 4 步法和时间盒装进脑子。后面每道题都是同一具骨架。</span><span class="lang-en">Learn the four steps and the clock first. Every later question uses the same skeleton.</span></figcaption>
+</div>
+<div class="slide">
+  <svg viewBox="0 0 960 420" class="board" role="img">
+  <g>
+    <rect x="208" y="156" width="260" height="90" rx="12" class="box"/>
+    <text x="338" y="190" text-anchor="middle" class="label">M1</text>
+    <text x="338" y="214" text-anchor="middle" class="sub">method, estimates</text>
+  </g>
+  <g>
+    <rect x="492" y="156" width="260" height="90" rx="12" class="box"/>
+    <text x="622" y="190" text-anchor="middle" class="label">M2</text>
+    <text x="622" y="214" text-anchor="middle" class="sub">limit, KV, lock</text>
+  </g>
+  <line x1="472" y1="201" x2="481" y2="201" class="wire"/>
+  <polygon points="481,196 490,201 481,206" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">M2 用小题把骨架跑熟：限流、一致性哈希、KV、唯一 ID、锁。</span><span class="lang-en">M2 runs the skeleton on small problems: rate limit, consistent hashing, KV, IDs, locks.</span></figcaption>
+</div>
+<div class="slide">
+  <svg viewBox="0 0 960 420" class="board" role="img">
+  <g>
+    <rect x="66" y="156" width="260" height="90" rx="12" class="box"/>
+    <text x="196" y="190" text-anchor="middle" class="label">M1</text>
+    <text x="196" y="214" text-anchor="middle" class="sub">method, estimates</text>
+  </g>
+  <g>
+    <rect x="350" y="156" width="260" height="90" rx="12" class="box"/>
+    <text x="480" y="190" text-anchor="middle" class="label">M2</text>
+    <text x="480" y="214" text-anchor="middle" class="sub">limit, KV, lock</text>
+  </g>
+  <line x1="330" y1="201" x2="339" y2="201" class="wire"/>
+  <polygon points="339,196 348,201 339,206" class="head"/>
+  <g>
+    <rect x="634" y="156" width="260" height="90" rx="12" class="box"/>
+    <text x="764" y="190" text-anchor="middle" class="label">M3–M5</text>
+    <text x="764" y="214" text-anchor="middle" class="sub">cases, agents</text>
+  </g>
+  <line x1="614" y1="201" x2="623" y2="201" class="wire"/>
+  <polygon points="623,196 632,201 623,206" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">然后才是短链、Feed、订单、支付，以及 LLM / Agent 基建。不做推荐系统。</span><span class="lang-en">Then the cases: short URL, feed, orders, payments, and LLM / Agent infrastructure. No recommender system.</span></figcaption>
+</div>
+<div class="slide">
+  <svg viewBox="0 0 960 420" class="board" role="img">
+  <g>
+    <rect x="36" y="156" width="204" height="90" rx="12" class="box"/>
+    <text x="138" y="190" text-anchor="middle" class="label">M1</text>
+    <text x="138" y="214" text-anchor="middle" class="sub">method, estimates</text>
+  </g>
+  <g>
+    <rect x="264" y="156" width="204" height="90" rx="12" class="box"/>
+    <text x="366" y="190" text-anchor="middle" class="label">M2</text>
+    <text x="366" y="214" text-anchor="middle" class="sub">limit, KV, lock</text>
+  </g>
+  <line x1="244" y1="201" x2="253" y2="201" class="wire"/>
+  <polygon points="253,196 262,201 253,206" class="head"/>
+  <g>
+    <rect x="492" y="156" width="204" height="90" rx="12" class="box"/>
+    <text x="594" y="190" text-anchor="middle" class="label">M3–M5</text>
+    <text x="594" y="214" text-anchor="middle" class="sub">cases, agents</text>
+  </g>
+  <line x1="472" y1="201" x2="481" y2="201" class="wire"/>
+  <polygon points="481,196 490,201 481,206" class="head"/>
+  <g>
+    <rect x="720" y="156" width="204" height="90" rx="12" class="box alt"/>
+    <text x="822" y="190" text-anchor="middle" class="label">M6</text>
+    <text x="822" y="214" text-anchor="middle" class="sub">dictionary</text>
+  </g>
+  <line x1="700" y1="201" x2="709" y2="201" class="wire"/>
+  <polygon points="709,196 718,201 709,206" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">M6 不是预习。做到缓存、复制、CAP 时再点芯片。假期不要求读完。</span><span class="lang-en">M6 is not homework you finish first. Open it when a design names cache, replication, or CAP.</span></figcaption>
+</div>
+</figure>
+    <p class="cite"><span class="lang-zh">图里的 M6 现在还是占位。计划 2 会写成 <span class="chip soon">Ch36–Ch45</span>。</span><span class="lang-en">M6 on the slide is still a placeholder. Plan 2 writes <span class="chip soon">Ch36–Ch45</span>.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">四步和时间盒</span><span class="lang-en">The four steps and the clock</span></h2>
+    <div class="bilingual">
+  <div class="lang-zh"><p class="col-kicker">中文</p>
+<p>45 分钟怎么切，就是这四步。估算公式在 Ch03，这一章只要求你在 Step 2 之前留出 back-of-envelope 的位置。</p>
+  </div>
+  <div class="lang-en"><p class="col-kicker">English</p>
+<p>How you slice 45 minutes is these four steps. The estimate formulas live in Ch03. Here you only have to leave a slot for a back-of-the-envelope check before step 2 ends.</p>
+  </div>
+</div>
+    <figure class="deck">
+<div class="slide">
+  <svg viewBox="0 0 960 420" class="board" role="img">
+  <g>
+    <rect x="350" y="150" width="260" height="96" rx="12" class="box"/>
+    <text x="480" y="184" text-anchor="middle" class="label">1 · Scope</text>
+    <text x="480" y="208" text-anchor="middle" class="sub">3–10 min</text>
+  </g>
+</svg>
+  <figcaption><span class="lang-zh">先定范围。没问清楚就画图，后面全是返工。</span><span class="lang-en">Set scope first. A diagram before the questions is rework.</span></figcaption>
+</div>
+<div class="slide">
+  <svg viewBox="0 0 960 420" class="board" role="img">
+  <g>
+    <rect x="210" y="150" width="260" height="96" rx="12" class="box"/>
+    <text x="340" y="184" text-anchor="middle" class="label">1 · Scope</text>
+    <text x="340" y="208" text-anchor="middle" class="sub">3–10 min</text>
+  </g>
+  <g>
+    <rect x="490" y="150" width="260" height="96" rx="12" class="box"/>
+    <text x="620" y="184" text-anchor="middle" class="label">2 · High-level</text>
+    <text x="620" y="208" text-anchor="middle" class="sub">10–15 min</text>
+  </g>
+  <line x1="470" y1="198" x2="479" y2="198" class="wire"/>
+  <polygon points="479,193 488,198 479,203" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">高层图只要买到 buy-in：方向对了再往下挖。</span><span class="lang-en">The high-level picture only has to earn buy-in. Go deep after they nod.</span></figcaption>
+</div>
+<div class="slide">
+  <svg viewBox="0 0 960 420" class="board" role="img">
+  <g>
+    <rect x="70" y="150" width="260" height="96" rx="12" class="box"/>
+    <text x="200" y="184" text-anchor="middle" class="label">1 · Scope</text>
+    <text x="200" y="208" text-anchor="middle" class="sub">3–10 min</text>
+  </g>
+  <g>
+    <rect x="350" y="150" width="260" height="96" rx="12" class="box"/>
+    <text x="480" y="184" text-anchor="middle" class="label">2 · High-level</text>
+    <text x="480" y="208" text-anchor="middle" class="sub">10–15 min</text>
+  </g>
+  <line x1="330" y1="198" x2="339" y2="198" class="wire"/>
+  <polygon points="339,193 348,198 339,203" class="head"/>
+  <g>
+    <rect x="630" y="150" width="260" height="96" rx="12" class="box ok"/>
+    <text x="760" y="184" text-anchor="middle" class="label">3 · Deep dive</text>
+    <text x="760" y="208" text-anchor="middle" class="sub">10–25 min</text>
+  </g>
+  <line x1="610" y1="198" x2="619" y2="198" class="wire"/>
+  <polygon points="619,193 628,198 619,203" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">时间大头在 deep dive。挖 hard part，不要把每个框都点名一遍。</span><span class="lang-en">Spend the block on the deep dive. Dig the hard part, not a tour of every box.</span></figcaption>
+</div>
+<div class="slide">
+  <svg viewBox="0 0 960 420" class="board" role="img">
+  <g>
+    <rect x="28" y="150" width="211" height="96" rx="12" class="box"/>
+    <text x="134" y="184" text-anchor="middle" class="label">1 · Scope</text>
+    <text x="134" y="208" text-anchor="middle" class="sub">3–10 min</text>
+  </g>
+  <g>
+    <rect x="259" y="150" width="211" height="96" rx="12" class="box"/>
+    <text x="364" y="184" text-anchor="middle" class="label">2 · High-level</text>
+    <text x="364" y="208" text-anchor="middle" class="sub">10–15 min</text>
+  </g>
+  <line x1="239" y1="198" x2="248" y2="198" class="wire"/>
+  <polygon points="248,193 257,198 248,203" class="head"/>
+  <g>
+    <rect x="490" y="150" width="211" height="96" rx="12" class="box ok"/>
+    <text x="596" y="184" text-anchor="middle" class="label">3 · Deep dive</text>
+    <text x="596" y="208" text-anchor="middle" class="sub">10–25 min</text>
+  </g>
+  <line x1="470" y1="198" x2="479" y2="198" class="wire"/>
+  <polygon points="479,193 488,198 479,203" class="head"/>
+  <g>
+    <rect x="721" y="150" width="211" height="96" rx="12" class="box"/>
+    <text x="826" y="184" text-anchor="middle" class="label">4 · Wrap-up</text>
+    <text x="826" y="208" text-anchor="middle" class="sub">3–5 min</text>
+  </g>
+  <line x1="701" y1="198" x2="710" y2="198" class="wire"/>
+  <polygon points="710,193 719,198 710,203" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">最后 3 到 5 分钟收尾。挑 bottleneck，不要说设计完美。</span><span class="lang-en">Leave 3–5 minutes to close. Name bottlenecks. Do not call the design perfect.</span></figcaption>
+</div>
+</figure>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">Step 1 · 定范围</span><span class="lang-en">Step 1 · Set scope</span></h2>
+    <div class="bilingual">
+  <div class="lang-zh"><p class="col-kicker">中文</p>
+<p>别当 Jimmy：题面一出就抢答，零加分，而且是 red flag。短链、Feed 这种题，5 到 7 个问题就停，其余写成你自己的假设。</p>
+        <table><thead><tr><th>你问</th><th>Feed 上的典型回答</th></tr></thead><tbody>
+        <tr><td>App、Web，还是都要？</td><td>都要</td></tr>
+        <tr><td>最重要的功能？</td><td>发帖，看 feed</td></tr>
+        <tr><td>按时间还是有权重？</td><td>这一轮按时间</td></tr>
+        <tr><td>规模和读:写？</td><td>读远多于写</td></tr>
+        </tbody></table>
+  </div>
+  <div class="lang-en"><p class="col-kicker">English</p>
+<p>Do not be Jimmy, the student who answers before the question is finished. That scores nothing, and it is a red flag. On a short-URL or feed prompt, stop after five to seven questions and write the rest as your assumptions.</p>
+        <table><thead><tr><th>You ask</th><th>A typical feed answer</th></tr></thead><tbody>
+        <tr><td>App, web, or both?</td><td>Both</td></tr>
+        <tr><td>The features that matter?</td><td>Post, and read the feed</td></tr>
+        <tr><td>Time order or ranked?</td><td>Time order for this round</td></tr>
+        <tr><td>Scale and read:write?</td><td>Reads dwarf writes</td></tr>
+        </tbody></table>
+  </div>
+</div>
+    <figure class="deck">
+<div class="slide">
+  <svg viewBox="0 0 960 420" class="board" role="img">
+  <g>
+    <rect x="350" y="150" width="260" height="96" rx="12" class="box"/>
+    <text x="480" y="184" text-anchor="middle" class="label">Users</text>
+    <text x="480" y="208" text-anchor="middle" class="sub">who, which client</text>
+  </g>
+</svg>
+  <figcaption><span class="lang-zh">先问谁在用、是 App 还是 Web。Feed 这种题，端不同，fan-out 完全不一样。</span><span class="lang-en">Ask who uses it, and whether it is app, web, or both. For a feed, the client changes the fan-out.</span></figcaption>
+</div>
+<div class="slide">
+  <svg viewBox="0 0 960 420" class="board" role="img">
+  <g>
+    <rect x="210" y="150" width="260" height="96" rx="12" class="box"/>
+    <text x="340" y="184" text-anchor="middle" class="label">Users</text>
+    <text x="340" y="208" text-anchor="middle" class="sub">who, which client</text>
+  </g>
+  <g>
+    <rect x="490" y="150" width="260" height="96" rx="12" class="box"/>
+    <text x="620" y="184" text-anchor="middle" class="label">Features</text>
+    <text x="620" y="208" text-anchor="middle" class="sub">this round only</text>
+  </g>
+  <line x1="470" y1="198" x2="479" y2="198" class="wire"/>
+  <polygon points="479,193 488,198 479,203" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">把功能收成这一轮能画完的几件。News Feed 可以先只做发帖和按时间看。</span><span class="lang-en">Cut features to what you can draw this round. A feed can be post plus a time-ordered read.</span></figcaption>
+</div>
+<div class="slide">
+  <svg viewBox="0 0 960 420" class="board" role="img">
+  <g>
+    <rect x="70" y="150" width="260" height="96" rx="12" class="box"/>
+    <text x="200" y="184" text-anchor="middle" class="label">Users</text>
+    <text x="200" y="208" text-anchor="middle" class="sub">who, which client</text>
+  </g>
+  <g>
+    <rect x="350" y="150" width="260" height="96" rx="12" class="box"/>
+    <text x="480" y="184" text-anchor="middle" class="label">Features</text>
+    <text x="480" y="208" text-anchor="middle" class="sub">this round only</text>
+  </g>
+  <line x1="330" y1="198" x2="339" y2="198" class="wire"/>
+  <polygon points="339,193 348,198 339,203" class="head"/>
+  <g>
+    <rect x="630" y="150" width="260" height="96" rx="12" class="box"/>
+    <text x="760" y="184" text-anchor="middle" class="label">Scale</text>
+    <text x="760" y="208" text-anchor="middle" class="sub">QPS, read:write</text>
+  </g>
+  <line x1="610" y1="198" x2="619" y2="198" class="wire"/>
+  <polygon points="619,193 628,198 619,203" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">规模问数量级：DAU、读和写谁多、延迟能不能到秒。精确字节留给 Ch03。</span><span class="lang-en">Scale is an order of magnitude: DAU, read versus write, and whether latency can be seconds. Exact bytes wait for Ch03.</span></figcaption>
+</div>
+<div class="slide">
+  <svg viewBox="0 0 960 420" class="board" role="img">
+  <g>
+    <rect x="28" y="150" width="211" height="96" rx="12" class="box"/>
+    <text x="134" y="184" text-anchor="middle" class="label">Users</text>
+    <text x="134" y="208" text-anchor="middle" class="sub">who, which client</text>
+  </g>
+  <g>
+    <rect x="259" y="150" width="211" height="96" rx="12" class="box"/>
+    <text x="364" y="184" text-anchor="middle" class="label">Features</text>
+    <text x="364" y="208" text-anchor="middle" class="sub">this round only</text>
+  </g>
+  <line x1="239" y1="198" x2="248" y2="198" class="wire"/>
+  <polygon points="248,193 257,198 248,203" class="head"/>
+  <g>
+    <rect x="490" y="150" width="211" height="96" rx="12" class="box"/>
+    <text x="596" y="184" text-anchor="middle" class="label">Scale</text>
+    <text x="596" y="208" text-anchor="middle" class="sub">QPS, read:write</text>
+  </g>
+  <line x1="470" y1="198" x2="479" y2="198" class="wire"/>
+  <polygon points="479,193 488,198 479,203" class="head"/>
+  <g>
+    <rect x="721" y="150" width="211" height="96" rx="12" class="box alt"/>
+    <text x="826" y="184" text-anchor="middle" class="label">Non-goals</text>
+    <text x="826" y="208" text-anchor="middle" class="sub">out of scope</text>
+  </g>
+  <line x1="701" y1="198" x2="710" y2="198" class="wire"/>
+  <polygon points="710,193 719,198 710,203" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">把不做的写在白板边上。自定义排序、推荐、多区域，往往是 non-goal，除非他们追问。</span><span class="lang-en">Write non-goals on the side of the board. Ranking, recommendations, and multi-region stay out unless they ask.</span></figcaption>
+</div>
+</figure>
+    <p class="cite"><span class="lang-zh">估算怎么开口，去 <span class="chip soon">Ch03 · 粗略估算</span>。</span><span class="lang-en">How to say the numbers out loud: <span class="chip soon">Ch03 · estimates</span>.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">Step 2 · 高层，换 buy-in</span><span class="lang-en">Step 2 · High-level, then buy-in</span></h2>
+    <div class="bilingual">
+  <div class="lang-zh"><p class="col-kicker">中文</p>
+<p>四个动作：画初始蓝图，边画边问，用数量级看它撑不撑得住，再走通 1 到 2 个用例。</p>
+        <p class="say">我先用 5 分钟画高层，确认方向。Client 进来，LB 后面是无状态 Web，读多的话前面放 Cache，权威数据在 DB。这一步方向可以吗？</p>
+        <p>大题（设计搜索）可以先不写 API。中小题在这一步列出 endpoint。拿不准就问一句要不要写。</p>
+  </div>
+  <div class="lang-en"><p class="col-kicker">English</p>
+<p>Four moves: sketch the blueprint, ask as you draw, check that the orders of magnitude fit, then walk one or two use cases.</p>
+        <p class="say">I will spend five minutes on a high-level picture and check the direction. Clients hit a load balancer and a stateless web tier. Reads go through a cache. The database is the source of truth. Is that direction all right?</p>
+        <p>On a huge prompt such as search, you can skip the API. On a medium one, list the endpoints here. If you are unsure, ask whether they want them.</p>
+  </div>
+</div>
+    <figure class="deck">
+<div class="slide">
+  <svg viewBox="0 0 960 420" class="board" role="img">
+  <g>
+    <rect x="350" y="148" width="260" height="92" rx="12" class="box"/>
+    <text x="480" y="182" text-anchor="middle" class="label">Client</text>
+    <text x="480" y="206" text-anchor="middle" class="sub">App / Web</text>
+  </g>
+</svg>
+  <figcaption><span class="lang-zh">第一笔只画用户从哪进来。</span><span class="lang-en">The first stroke is only where the user comes in.</span></figcaption>
+</div>
+<div class="slide">
+  <svg viewBox="0 0 960 420" class="board" role="img">
+  <g>
+    <rect x="211" y="148" width="260" height="92" rx="12" class="box"/>
+    <text x="341" y="182" text-anchor="middle" class="label">Client</text>
+    <text x="341" y="206" text-anchor="middle" class="sub">App / Web</text>
+  </g>
+  <g>
+    <rect x="489" y="148" width="260" height="92" rx="12" class="box"/>
+    <text x="619" y="182" text-anchor="middle" class="label">LB</text>
+    <text x="619" y="206" text-anchor="middle" class="sub">entry</text>
+  </g>
+  <line x1="469" y1="194" x2="478" y2="194" class="wire"/>
+  <polygon points="478,189 487,194 478,199" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">加上 LB，入口和业务分开。</span><span class="lang-en">Add a load balancer so the entry is not the web process itself.</span></figcaption>
+</div>
+<div class="slide">
+  <svg viewBox="0 0 960 420" class="board" role="img">
+  <g>
+    <rect x="72" y="148" width="260" height="92" rx="12" class="box"/>
+    <text x="202" y="182" text-anchor="middle" class="label">Client</text>
+    <text x="202" y="206" text-anchor="middle" class="sub">App / Web</text>
+  </g>
+  <g>
+    <rect x="350" y="148" width="260" height="92" rx="12" class="box"/>
+    <text x="480" y="182" text-anchor="middle" class="label">LB</text>
+    <text x="480" y="206" text-anchor="middle" class="sub">entry</text>
+  </g>
+  <line x1="330" y1="194" x2="339" y2="194" class="wire"/>
+  <polygon points="339,189 348,194 339,199" class="head"/>
+  <g>
+    <rect x="628" y="148" width="260" height="92" rx="12" class="box"/>
+    <text x="758" y="182" text-anchor="middle" class="label">Web</text>
+    <text x="758" y="206" text-anchor="middle" class="sub">stateless API</text>
+  </g>
+  <line x1="608" y1="194" x2="617" y2="194" class="wire"/>
+  <polygon points="617,189 626,194 617,199" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">Web 无状态，确认可以水平加机器。</span><span class="lang-en">The web tier is stateless, so you can add machines.</span></figcaption>
+</div>
+<div class="slide">
+  <svg viewBox="0 0 960 420" class="board" role="img">
+  <g>
+    <rect x="21" y="148" width="216" height="92" rx="12" class="box"/>
+    <text x="129" y="182" text-anchor="middle" class="label">Client</text>
+    <text x="129" y="206" text-anchor="middle" class="sub">App / Web</text>
+  </g>
+  <g>
+    <rect x="255" y="148" width="216" height="92" rx="12" class="box"/>
+    <text x="363" y="182" text-anchor="middle" class="label">LB</text>
+    <text x="363" y="206" text-anchor="middle" class="sub">entry</text>
+  </g>
+  <line x1="235" y1="194" x2="244" y2="194" class="wire"/>
+  <polygon points="244,189 253,194 244,199" class="head"/>
+  <g>
+    <rect x="489" y="148" width="216" height="92" rx="12" class="box"/>
+    <text x="597" y="182" text-anchor="middle" class="label">Web</text>
+    <text x="597" y="206" text-anchor="middle" class="sub">stateless API</text>
+  </g>
+  <line x1="469" y1="194" x2="478" y2="194" class="wire"/>
+  <polygon points="478,189 487,194 478,199" class="head"/>
+  <g>
+    <rect x="723" y="148" width="216" height="92" rx="12" class="box alt"/>
+    <text x="831" y="182" text-anchor="middle" class="label">Cache</text>
+    <text x="831" y="206" text-anchor="middle" class="sub">hot keys</text>
+  </g>
+  <line x1="703" y1="194" x2="712" y2="194" class="wire"/>
+  <polygon points="712,189 721,194 712,199" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">读多就补 Cache，热点不要直接打到 DB。</span><span class="lang-en">If reads dominate, add a cache. Hot keys should not hit the database every time.</span></figcaption>
+</div>
+<div class="slide">
+  <svg viewBox="0 0 960 420" class="board" role="img">
+  <g>
+    <rect x="22" y="148" width="169" height="92" rx="12" class="box"/>
+    <text x="106" y="182" text-anchor="middle" class="label">Client</text>
+    <text x="106" y="206" text-anchor="middle" class="sub">App / Web</text>
+  </g>
+  <g>
+    <rect x="208" y="148" width="169" height="92" rx="12" class="box"/>
+    <text x="293" y="182" text-anchor="middle" class="label">LB</text>
+    <text x="293" y="206" text-anchor="middle" class="sub">entry</text>
+  </g>
+  <line x1="188" y1="194" x2="198" y2="194" class="wire"/>
+  <polygon points="198,189 206,194 198,199" class="head"/>
+  <g>
+    <rect x="396" y="148" width="169" height="92" rx="12" class="box"/>
+    <text x="480" y="182" text-anchor="middle" class="label">Web</text>
+    <text x="480" y="206" text-anchor="middle" class="sub">stateless API</text>
+  </g>
+  <line x1="376" y1="194" x2="384" y2="194" class="wire"/>
+  <polygon points="384,189 394,194 384,199" class="head"/>
+  <g>
+    <rect x="582" y="148" width="169" height="92" rx="12" class="box alt"/>
+    <text x="667" y="182" text-anchor="middle" class="label">Cache</text>
+    <text x="667" y="206" text-anchor="middle" class="sub">hot keys</text>
+  </g>
+  <line x1="562" y1="194" x2="572" y2="194" class="wire"/>
+  <polygon points="572,189 580,194 572,199" class="head"/>
+  <g>
+    <rect x="770" y="148" width="169" height="92" rx="12" class="box"/>
+    <text x="854" y="182" text-anchor="middle" class="label">DB</text>
+    <text x="854" y="206" text-anchor="middle" class="sub">source of truth</text>
+  </g>
+  <line x1="750" y1="194" x2="758" y2="194" class="wire"/>
+  <polygon points="758,189 768,194 758,199" class="head"/>
+  <text x="480" y="78" text-anchor="middle" class="clock">Buy-in?</text>
+</svg>
+  <figcaption><span class="lang-zh">DB 只放权威数据。停下来问：这个方向可以吗？</span><span class="lang-en">The database is the source of truth. Stop and ask whether this direction is right.</span></figcaption>
+</div>
+</figure>
+    <p class="cite"><span class="lang-zh">这一层后面会拆开讲：<span class="chip soon">Ch39 · 负载均衡</span><span class="chip soon">Ch38 · 缓存</span><span class="chip soon">Ch37 · 存储</span>。</span><span class="lang-en">Later chapters split this tier: <span class="chip soon">Ch39 · load balancing</span><span class="chip soon">Ch38 · cache</span><span class="chip soon">Ch37 · storage</span>.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">Step 3 和收尾</span><span class="lang-en">Step 3 and the close</span></h2>
+    <div class="bilingual">
+  <div class="lang-zh"><p class="col-kicker">中文</p>
+<p>Deep dive 只挖一块：这题的 <strong>hard part</strong>（短链是跳转和短码，聊天是连接和 fan-out），或者面试官刚指的那块。深度大于广度。最隐蔽的失败是每个组件点名一遍，哪块都不深。</p>
+        <p>初级岗把组件、API、schema 讲清。Senior 讲 bottleneck、扩展和失败。Staff 再加 trade-off、多区域和成本。别用资深岗的词堆给初级岗。</p>
+        <p>2026 的白板多半是共享文档，不是教室里的黑板。中小题主动列 endpoint。收尾时补一句可观测性：延迟、流量、错误、饱和。</p>
+  </div>
+  <div class="lang-en"><p class="col-kicker">English</p>
+<p>The deep dive covers one slice: the <strong>hard part</strong> (redirect and short code for a URL shortener, connection and fan-out for chat), or whatever they just pointed at. Depth beats breadth. The quiet failure is naming every box and going deep on none.</p>
+        <p>A junior answer makes the components, API, and schema clear. A senior answer adds bottlenecks, scale-out, and failure. Staff adds trade-offs, multi-region, and cost. Do not dump staff vocabulary on a junior loop.</p>
+        <p>In 2026 the board is usually a shared doc, not a classroom whiteboard. On a medium problem, offer the endpoints. In the wrap-up, add observability: latency, traffic, errors, saturation.</p>
+  </div>
+</div>
+    <figure class="deck">
+<div class="slide">
+  <svg viewBox="0 0 960 420" class="board" role="img">
+  <g>
+    <rect x="350" y="156" width="260" height="90" rx="12" class="box bad"/>
+    <text x="480" y="190" text-anchor="middle" class="label">Silence</text>
+    <text x="480" y="214" text-anchor="middle" class="sub">long pause</text>
+  </g>
+</svg>
+  <figcaption><span class="lang-zh">卡住时最忌讳沉默。安静几十秒，过程分就没了。</span><span class="lang-en">The costly move when you stall is silence. A long pause spends the process score.</span></figcaption>
+</div>
+<div class="slide">
+  <svg viewBox="0 0 960 420" class="board" role="img">
+  <g>
+    <rect x="350" y="156" width="260" height="90" rx="12" class="box ok"/>
+    <text x="480" y="190" text-anchor="middle" class="label">Name it</text>
+    <text x="480" y="214" text-anchor="middle" class="sub">say where</text>
+  </g>
+</svg>
+  <figcaption><span class="lang-zh">先说你卡在哪。例如：我理一下，目前卡在消息 fan-out。</span><span class="lang-en">Name the stuck point. For example: I am stuck on message fan-out, let me place it.</span></figcaption>
+</div>
+<div class="slide">
+  <svg viewBox="0 0 960 420" class="board" role="img">
+  <g>
+    <rect x="62" y="150" width="260" height="96" rx="12" class="box"/>
+    <text x="192" y="184" text-anchor="middle" class="label">Step back</text>
+    <text x="192" y="208" text-anchor="middle" class="sub">go up a level</text>
+  </g>
+  <g>
+    <rect x="350" y="150" width="260" height="96" rx="12" class="box alt"/>
+    <text x="480" y="184" text-anchor="middle" class="label">Ask</text>
+    <text x="480" y="208" text-anchor="middle" class="sub">request a hint</text>
+  </g>
+  <line x1="328" y1="198" x2="339" y2="198" class="wire"/>
+  <polygon points="339,193 348,198 339,203" class="head"/>
+  <g>
+    <rect x="638" y="150" width="260" height="96" rx="12" class="box"/>
+    <text x="768" y="184" text-anchor="middle" class="label">Switch</text>
+    <text x="768" y="208" text-anchor="middle" class="sub">another design</text>
+  </g>
+  <line x1="616" y1="198" x2="627" y2="198" class="wire"/>
+  <polygon points="627,193 636,198 627,203" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">三条出路：退回高层、向面试官要提示、换一个你能讲完的方案。要提示不扣分。</span><span class="lang-en">Three ways out: step back up, ask for a hint, or switch to a design you can finish. Asking is fine.</span></figcaption>
+</div>
+<div class="slide">
+  <svg viewBox="0 0 960 420" class="board" role="img">
+  <g>
+    <rect x="62" y="150" width="260" height="96" rx="12" class="box"/>
+    <text x="192" y="184" text-anchor="middle" class="label">SPOF</text>
+    <text x="192" y="208" text-anchor="middle" class="sub">replica</text>
+  </g>
+  <g>
+    <rect x="350" y="150" width="260" height="96" rx="12" class="box"/>
+    <text x="480" y="184" text-anchor="middle" class="label">Hot key</text>
+    <text x="480" y="208" text-anchor="middle" class="sub">shard, cache</text>
+  </g>
+  <line x1="328" y1="198" x2="339" y2="198" class="wire"/>
+  <polygon points="339,193 348,198 339,203" class="head"/>
+  <g>
+    <rect x="638" y="150" width="260" height="96" rx="12" class="box"/>
+    <text x="768" y="184" text-anchor="middle" class="label">Stale cache</text>
+    <text x="768" y="208" text-anchor="middle" class="sub">TTL</text>
+  </g>
+  <line x1="616" y1="198" x2="627" y2="198" class="wire"/>
+  <polygon points="627,193 636,198 627,203" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">Wrap-up 准备三个 bottleneck 口播。流量翻 10 倍、机房挂了、怎么监控，都从这里接。</span><span class="lang-en">Keep three bottleneck lines for the wrap-up. 10× traffic, a dead datacenter, and monitoring all hang off these.</span></figcaption>
+</div>
+</figure>
+    <p class="cite"><span class="lang-zh">失败和多区域的机制在 <span class="chip soon">Ch36 · CAP / SLO</span><span class="chip soon">Ch42 · 弹性</span>。面试先用上面三个 bottleneck 开口。</span><span class="lang-en">Failure and multi-region mechanisms are in <span class="chip soon">Ch36 · CAP / SLO</span><span class="chip soon">Ch42 · resilience</span>. In the interview, start from the three bottlenecks above.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">追问时怎么接</span><span class="lang-en">How to take the follow-ups</span></h2>
+    <div class="bilingual">
+  <div class="lang-zh"><p class="col-kicker">中文</p>
+<ol>
+        <li>还有什么问题？挑两个 bottleneck 和改进，不要说完美。</li>
+        <li>流量翻 10 倍？分片、读写分离、缓存。故事在 Ch02。</li>
+        <li>一个机房挂了？先说多副本和你愿意牺牲哪一种一致性，再提多区域。</li>
+        <li>怎么监控？四个黄金信号，外加一条请求能追下去。</li>
+        <li>为什么选 A 不选 B？必须有一句 trade-off，不能只说业界都这么做。</li>
+        </ol>
+        <details class="fold"><summary>2026 和原书差在哪</summary>
+        <p>原书默认物理白板，现在虚拟白板是常态，提前练共享文档。原书不太推 API，中小题你应该在 Step 2 自己列出来。原书几乎不提模型，现在可能追问向量检索，那是 M5，不是这一章的第一答案。</p>
+        </details>
+  </div>
+  <div class="lang-en"><p class="col-kicker">English</p>
+<ol>
+        <li>Anything else? Name two bottlenecks and a fix. Do not say perfect.</li>
+        <li>10× traffic? Shard, split reads and writes, add cache. That story is Ch02.</li>
+        <li>One datacenter dies? Start with replicas and which consistency you will give up, then multi-region.</li>
+        <li>How do you monitor? The four golden signals, plus a way to follow one request.</li>
+        <li>Why A and not B? You need a trade-off, not "the industry does this".</li>
+        </ol>
+        <details class="fold"><summary>2026 versus the book</summary>
+        <p>The book assumes a physical whiteboard. A shared doc is the normal board now, so practice that. The book is light on APIs; on a medium problem you should list endpoints in step 2. The book barely mentions models. A vector-search follow-up belongs to M5, not to your first answer here.</p>
+        </details>
+  </div>
+</div>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">下一步</span><span class="lang-en">Next</span></h2>
+    <div class="bilingual">
+  <div class="lang-zh"><p class="col-kicker">中文</p>
+<p>合上这一页，把 45 分钟剧本对着空气走一遍：复述、问需求、估一个数量级、画高层并问 buy-in、挖一块 hard part、用两个 bottleneck 收尾。哪一步说不利索，就回哪一节。</p><p>下一章是从零扩到百万用户（计划 2）。想直接看一道完整题，打开 <a href="ch09.html">Ch09 短链</a>。</p>
+  </div>
+  <div class="lang-en"><p class="col-kicker">English</p>
+<p>Close the page and walk the 45 minutes out loud: restate, ask, one order-of-magnitude estimate, a high-level picture plus buy-in, one hard part, two bottlenecks to close. Whichever step snags, go back to that section.</p><p>Next is scaling from zero to a million users (plan 2). To see a full case now, open <a href="ch09.html">Ch09, the URL shortener</a>.</p>
+  </div>
+</div>
+  </section>
+<section>
+  <h2><span class="lang-zh">闪卡</span><span class="lang-en">Flashcards</span></h2>
+  <p class="cite"><span class="lang-zh">点一下翻面。能讲出来才算会。</span><span class="lang-en">Click to flip. If you can say it, you know it.</span></p>
+  <div class="cards-grid">
+<button type="button" class="flip">
+  <span class="q"><span class="lang-zh">系统设计面试主要考终图吗？</span><span class="lang-en">Do they mainly grade the final diagram?</span></span>
+  <span class="a"><span class="lang-zh">不考。考澄清、估算、trade-off，以及你卡定时还说不说话。</span><span class="lang-en">No. They grade clarifying, estimates, trade-offs, and whether you still talk when you stall.</span></span>
+</button>
+<button type="button" class="flip">
+  <span class="q"><span class="lang-zh">四步各给几分钟？</span><span class="lang-en">How many minutes for each step?</span></span>
+  <span class="a"><span class="lang-zh">定范围 3–10，高层 10–15，deep dive 10–25，wrap-up 3–5。</span><span class="lang-en">Scope 3–10, high-level 10–15, deep dive 10–25, wrap-up 3–5.</span></span>
+</button>
+<button type="button" class="flip">
+  <span class="q"><span class="lang-zh">最大的 red flag 是什么？</span><span class="lang-en">What is the biggest red flag?</span></span>
+  <span class="a"><span class="lang-zh">沉默，以及没问需求就画图。over-engineering 紧跟在后面。</span><span class="lang-en">Silence, and drawing before you ask. Over-engineering is right behind those.</span></span>
+</button>
+<button type="button" class="flip">
+  <span class="q"><span class="lang-zh">Step 2 结束的标志是什么？</span><span class="lang-en">What marks the end of step 2?</span></span>
+  <span class="a"><span class="lang-zh">面试官对方向点头。没有 buy-in 不要往下挖。</span><span class="lang-en">They agree with the direction. No buy-in, no deep dive.</span></span>
+</button>
+<button type="button" class="flip">
+  <span class="q"><span class="lang-zh">Deep dive 挖哪里？</span><span class="lang-en">Where does the deep dive go?</span></span>
+  <span class="a"><span class="lang-zh">这题的 hard part，或他们刚问的那块。深度大于广度。</span><span class="lang-en">The hard part of this question, or whatever they just asked. Depth over breadth.</span></span>
+</button>
+<button type="button" class="flip">
+  <span class="q"><span class="lang-zh">Wrap-up 第一句不要说什么？</span><span class="lang-en">What do you not say first in the wrap-up?</span></span>
+  <span class="a"><span class="lang-zh">不要说设计完美。准备单点、热点、缓存不一致这三类 bottleneck。</span><span class="lang-en">Do not say the design is perfect. Keep single point of failure, hot key, and stale cache ready.</span></span>
+</button>
+<button type="button" class="flip">
+  <span class="q"><span class="lang-zh">M6 什么时候读？</span><span class="lang-en">When do you read M6?</span></span>
+  <span class="a"><span class="lang-zh">当词典。设计题点到缓存、CAP、复制时再跳，不必先读完。</span><span class="lang-en">As a dictionary. Jump in when a design names cache, CAP, or replication. Do not read it all first.</span></span>
+</button>
+<button type="button" class="flip">
+  <span class="q"><span class="lang-zh">M5 做什么，不做什么？</span><span class="lang-en">What is M5, and what is it not?</span></span>
+  <span class="a"><span class="lang-zh">LLM 推理、RAG、Agent 基建。不做推荐系统。</span><span class="lang-en">LLM inference, RAG, and Agent infrastructure. Not a recommender system.</span></span>
+</button>
+  </div>
+</section><p><button type="button" class="read-toggle">
+  <span class="when-off"><span class="lang-zh">我已学完本章</span><span class="lang-en">Mark this chapter done</span></span>
+  <span class="when-on"><span class="lang-zh">已学完本章</span><span class="lang-en">Completed</span></span>
+</button></p>
+<p class="cite"><span class="lang-zh">进度存在这台浏览器里。</span><span class="lang-en">Saved in this browser only.</span></p>
+</article>
+</main>
+<script src="../assets/js/nav.js"></script>
+<script src="../assets/js/lang.js"></script>
+<script src="../assets/js/slides.js"></script>
+<script src="../assets/js/progress.js"></script>
+</body>
+</html>

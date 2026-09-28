@@ -1,0 +1,896 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="parchment" data-locale="zh">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ch37 · 存储选型</title>
+  <link rel="icon" href="../favicon.ico" sizes="48x48">
+  <link rel="stylesheet" href="../assets/css/style.css">
+  <script src="../assets/js/boot.js"></script>
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="../index.html"><span class="brand-logo">SD</span><span class="lang-zh">系统设计面试</span><span class="lang-en">System Design Interview</span></a>
+  <span class="spacer"></span>
+  <a class="map-link" href="../index.html"><span class="lang-zh">课程地图</span><span class="lang-en">Map</span></a>
+  <div class="seg" role="group" aria-label="language">
+    <button type="button" data-locale-set="zh">中文</button>
+    <button type="button" data-locale-set="both"><span class="lang-zh">对照</span><span class="lang-en">Both</span></button>
+    <button type="button" data-locale-set="en">EN</button>
+  </div>
+  <div class="seg" role="group" aria-label="theme">
+    <button type="button" data-theme-set="parchment"><span class="lang-zh">护眼</span><span class="lang-en">Paper</span></button>
+    <button type="button" data-theme-set="dracula"><span class="lang-zh">深色</span><span class="lang-en">Dark</span></button>
+  </div>
+</header>
+<main class="wrap">
+<article class="chapter" id="ch37" data-ch="ch37">
+  <header>
+    <div class="ch-kicker"><span class="lang-zh">CHAPTER 37 · 基础深读</span><span class="lang-en">CHAPTER 37 · foundation</span></div>
+    <h1><span class="lang-zh">存储选型</span><span class="lang-en">Storage choices</span></h1>
+    <p class="ch-meta-line"><span class="lang-zh">约 45 分钟 · 前置：Ch06 KV / LSM，Ch36 CAP / PACELC</span><span class="lang-en">~45 min · after Ch06 (KV / LSM) and Ch36 (CAP / PACELC)</span></p>
+  </header>
+
+  <section class="goal">
+    <h2><span class="lang-zh">这一章结束你能做什么</span><span class="lang-en">What you can do after this chapter</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">中文</p>
+        <ul>
+          <li>用四问开口：读写比、查询形状、要不要事务、一条数据有多大。然后才说库的类型。</li>
+          <li>按这个顺序把关系库、KV、wide-column、对象存储、搜索加到白板上。</li>
+          <li>把 B+Tree 和 LSM 的 trade-off 说清楚，并且不把 wide-column、分析列存、对象、向量叫成同一种东西。</li>
+        </ul>
+      </div>
+      <div class="lang-en"><p class="col-kicker">English</p>
+        <ul>
+          <li>Open with four questions: read/write ratio, query shape, whether you need a transaction, and how big one value is. Then name a kind of store.</li>
+          <li>Add relational, KV, wide-column, object storage, and search to the board in that order.</li>
+          <li>Say the B+Tree versus LSM trade-off, and keep wide-column, analytic column-store, object, and vector apart.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">20 秒：先问访问模式</span><span class="lang-en">20 seconds: ask the access pattern</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">中文</p>
+        <p>这是词典，不是又一道 4 步设计题。Ch36 决定你偏 AP 还是偏 CP；这一章决定模型和引擎怎么接上去。短链、订单、视频、网盘、搜索卡在「用什么库」时跳过来，引用一句就回到题目。</p>
+        <p class="say">四问，然后停。读写谁多。查询是 point lookup、join，还是 scan。这条路径要不要一次 commit。一条 value 有多大、key 有多少。要事务、join、约束，关系库是默认，这不是 SQL 过时不过时的问题。只有 get/put 而且 value 小，用 KV。写很重的稀疏宽行用 wide-column，引擎多半是 LSM。大块字节用对象存储，元数据仍常在关系库。关键词用倒排。读延迟紧的 OLTP 用 B+Tree，写吞吐用 LSM，compaction 是税。</p>
+        <p>念完让面试官选：挖选型、挖引擎，还是挖「别混」。一上来报云产品名，是 red flag。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">English</p>
+        <p>This is a dictionary, not another 4-step design. Ch36 decides AP versus CP. This chapter decides how the model and the engine plug into that grid. When a short URL, an order, a video, a drive, or search gets stuck on "which store", you jump here, cite one line, and go back to the problem.</p>
+        <p class="say">Four questions, then stop. Which of read or write dominates. Is the query a point lookup, a join, or a scan. Does this path need one commit. How big is one value, and how many keys are there. If you need a transaction, a join, and constraints, relational is the default. That is not a question about whether SQL is old. Point get/put of a small value is a KV. A write-heavy sparse row is wide-column, usually on an LSM. Large blobs go to object storage, and the metadata usually stays relational. Keywords use an inverted index. Tight OLTP reads use a B+Tree. Write throughput uses an LSM, and compaction is the tax.</p>
+        <p>Then let them choose: the choice, the engine, or "don't mix those up". Leading with a cloud product name is a red flag.</p>
+      </div>
+    </div>
+    <figure class="deck">
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="350" y="162" width="260" height="96" rx="12" class="box"/>
+            <text x="480" y="196" text-anchor="middle" class="label">Read : write</text>
+            <text x="480" y="220" text-anchor="middle" class="sub">which side dominates</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">第一笔不是产品名。先问读多还是写多。</span><span class="lang-en">The first stroke is not a product name. Ask whether reads or writes dominate.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="185" y="162" width="260" height="96" rx="12" class="box"/>
+            <text x="315" y="196" text-anchor="middle" class="label">Read : write</text>
+            <text x="315" y="220" text-anchor="middle" class="sub">which side dominates</text>
+          </g>
+          <line x1="451" y1="210" x2="504" y2="210" class="wire"/>
+          <polygon points="504,205 513,210 504,215" class="head"/>
+          <g>
+            <rect x="515" y="162" width="260" height="96" rx="12" class="box alt"/>
+            <text x="645" y="196" text-anchor="middle" class="label">Query shape</text>
+            <text x="645" y="220" text-anchor="middle" class="sub">point, join, scan</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">第二问是查询形状：点查、join，还是扫很多列做聚合。</span><span class="lang-en">Second: point lookup, a join, or a scan that aggregates across many rows.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="87" y="162" width="230" height="96" rx="12" class="box"/>
+            <text x="202" y="196" text-anchor="middle" class="label">Read : write</text>
+            <text x="202" y="220" text-anchor="middle" class="sub">which side</text>
+          </g>
+          <line x1="323" y1="210" x2="353" y2="210" class="wire"/>
+          <polygon points="353,205 362,210 353,215" class="head"/>
+          <g>
+            <rect x="365" y="162" width="230" height="96" rx="12" class="box"/>
+            <text x="480" y="196" text-anchor="middle" class="label">Query</text>
+            <text x="480" y="220" text-anchor="middle" class="sub">point, join, scan</text>
+          </g>
+          <line x1="601" y1="210" x2="631" y2="210" class="wire"/>
+          <polygon points="631,205 640,210 631,215" class="head"/>
+          <g>
+            <rect x="643" y="162" width="230" height="96" rx="12" class="box alt"/>
+            <text x="758" y="196" text-anchor="middle" class="label">Transaction</text>
+            <text x="758" y="220" text-anchor="middle" class="sub">one commit, or not</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">第三问：这条路径要不要一次 commit。账本要，会话往往不要。</span><span class="lang-en">Third: does this path need one commit? A ledger does. A session often does not.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="185" y="162" width="260" height="96" rx="12" class="box"/>
+            <text x="315" y="196" text-anchor="middle" class="label">Transaction</text>
+            <text x="315" y="220" text-anchor="middle" class="sub">one commit, or not</text>
+          </g>
+          <line x1="451" y1="210" x2="504" y2="210" class="wire"/>
+          <polygon points="504,205 513,210 504,215" class="head"/>
+          <g>
+            <rect x="515" y="162" width="260" height="96" rx="12" class="box alt"/>
+            <text x="645" y="196" text-anchor="middle" class="label">Volume</text>
+            <text x="645" y="220" text-anchor="middle" class="sub">bytes per value, key count</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">第四问是体量。一条 value 有多大、key 有多少。大文件和小映射不是同一种库。</span><span class="lang-en">Fourth: volume. How big is one value, and how many keys. A large file and a small map are different stores.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="185" y="162" width="260" height="96" rx="12" class="box ok"/>
+            <text x="315" y="196" text-anchor="middle" class="label">Four answers</text>
+            <text x="315" y="220" text-anchor="middle" class="sub">ratio, query, txn, size</text>
+          </g>
+          <line x1="451" y1="210" x2="504" y2="210" class="wire"/>
+          <polygon points="504,205 513,210 504,215" class="head"/>
+          <g>
+            <rect x="515" y="162" width="260" height="96" rx="12" class="box"/>
+            <text x="645" y="196" text-anchor="middle" class="label">Model</text>
+            <text x="645" y="220" text-anchor="middle" class="sub">name it now</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">四问答完，模型几乎定了。然后再说类型。底下的块设备、共享文件，不是这章的目录。</span><span class="lang-en">After the four answers the model is almost decided. Then you name the kind of store. Block devices and shared files are not this chapter's outline.</span></figcaption>
+      </div>
+    </figure>
+    <p class="cite"><span class="lang-zh">AP 还是 CP 的格子在 <span class="chip soon">Ch36 · CAP / PACELC</span>。点查的机制在 <span class="chip soon">Ch06 · 键值存储</span>。</span><span class="lang-en">The AP versus CP grid is <span class="chip soon">Ch36 · CAP / PACELC</span>. Point-lookup mechanics are <span class="chip soon">Ch06 · key-value store</span>.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">第一笔候选：关系库</span><span class="lang-en">First candidate: relational</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">中文</p>
+        <p>订单、库存、支付账本、网盘目录，要的是原子提交、跨表一致、唯一和外键。第一句仍是关系库。面试官若问「SQL 是不是太老了」，你回到访问模式：要事务、join、约束，它就是默认。</p>
+        <p>隔离级别不要开课。你真会碰到的引擎是 MVCC。PostgreSQL 的默认隔离级别是 Read Committed，InnoDB 的默认是 Repeatable Read，两条默认都读不到未提交的写。钱的路径如果要 Serializable，代价是吞吐和回滚，不要给全站当默认。五种级别的对照表在复制与事务那一章。分片、跨库事务、Saga、Outbox 也在那边。</p>
+        <p>还有一句就够：想要 SQL、又要水平扩展时，SQL 加分布式共识这条线存在。不要开成产品巡礼。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">English</p>
+        <p>Orders, inventory, a payment ledger, a drive directory: you need an atomic commit, consistency across tables, and unique or foreign keys. The first sentence is still a relational store. If they ask whether SQL is too old, go back to the access pattern. Transactions, joins, and constraints make it the default.</p>
+        <p>Do not teach the isolation ladder. The engines you will actually meet are MVCC. PostgreSQL's default isolation is Read Committed. InnoDB's default is Repeatable Read. Neither default returns an uncommitted write. Serializable on a money path costs throughput and aborts. Do not make it the default for the whole product. The comparison table, plus sharding, cross-store transactions, Saga, and Outbox, belong to the replication and transactions chapter.</p>
+        <p>One more sentence is enough. If you still want SQL and you need to scale out, the line "SQL plus distributed consensus" exists. Do not turn that into a product tour.</p>
+      </div>
+    </div>
+    <figure class="deck">
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="350" y="162" width="260" height="96" rx="12" class="box"/>
+            <text x="480" y="196" text-anchor="middle" class="label">Txn + join + FK</text>
+            <text x="480" y="220" text-anchor="middle" class="sub">orders, money</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">先写下需求：原子提交、跨表一致、唯一和外键。订单和钱走这里。</span><span class="lang-en">Write the need first: atomic commit, cross-table consistency, unique keys and foreign keys. Orders and money land here.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="185" y="162" width="260" height="96" rx="12" class="box"/>
+            <text x="315" y="196" text-anchor="middle" class="label">Txn + join + FK</text>
+            <text x="315" y="220" text-anchor="middle" class="sub">orders, money</text>
+          </g>
+          <line x1="451" y1="210" x2="504" y2="210" class="wire"/>
+          <polygon points="504,205 513,210 504,215" class="head"/>
+          <g>
+            <rect x="515" y="162" width="260" height="96" rx="12" class="box ok"/>
+            <text x="645" y="196" text-anchor="middle" class="label">Relational</text>
+            <text x="645" y="220" text-anchor="middle" class="sub">OLTP default</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">这种访问模式的默认是关系库。理由是事务和约束，不是年代。</span><span class="lang-en">That access pattern defaults to relational. The reason is transactions and constraints, not the age of SQL.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="185" y="162" width="260" height="96" rx="12" class="box"/>
+            <text x="315" y="196" text-anchor="middle" class="label">Relational</text>
+            <text x="315" y="220" text-anchor="middle" class="sub">OLTP default</text>
+          </g>
+          <line x1="451" y1="210" x2="504" y2="210" class="wire"/>
+          <polygon points="504,205 513,210 504,215" class="head"/>
+          <g>
+            <rect x="515" y="162" width="260" height="96" rx="12" class="box alt"/>
+            <text x="645" y="196" text-anchor="middle" class="label">MVCC</text>
+            <text x="645" y="220" text-anchor="middle" class="sub">no dirty read</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">隔离只留一句：引擎是 MVCC，默认读不到未提交的写。更严的级别单独谈钱的路径。</span><span class="lang-en">Isolation in one line: the engine is MVCC, and the default does not return uncommitted writes. A stricter level is a money-path conversation.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="185" y="162" width="260" height="96" rx="12" class="box ok"/>
+            <text x="315" y="196" text-anchor="middle" class="label">Relational</text>
+            <text x="315" y="220" text-anchor="middle" class="sub">source of truth</text>
+          </g>
+          <line x1="451" y1="210" x2="504" y2="210" class="wire"/>
+          <polygon points="504,205 513,210 504,215" class="head"/>
+          <g>
+            <rect x="515" y="162" width="260" height="96" rx="12" class="box bad"/>
+            <text x="645" y="196" text-anchor="middle" class="label">AP KV ledger</text>
+            <text x="645" y="220" text-anchor="middle" class="sub">wrong authority</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">AP KV 可以站在前面当缓存。它不能当账本。</span><span class="lang-en">An AP KV can sit in front as a cache. It cannot be the ledger.</span></figcaption>
+      </div>
+    </figure>
+    <p class="cite"><span class="lang-zh">订单在 <span class="chip soon">Ch18 · 电商订单</span>，支付在 <span class="chip soon">Ch24 · 支付</span>。隔离级别和 Saga 在 <span class="chip soon">Ch41 · 复制、分片、事务</span>。</span><span class="lang-en">Orders are <span class="chip soon">Ch18 · e-commerce orders</span>. Payments are <span class="chip soon">Ch24 · payments</span>. Isolation levels and Saga are <span class="chip soon">Ch41 · replication, sharding, transactions</span>.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">加上 KV</span><span class="lang-en">Add a KV</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">中文</p>
+        <p>查询收成 <code>get(key)</code> / <code>put(key, value)</code>，而且 value 小，就选 KV。会话、购物车、短链的 code 到 url，都是高 QPS 的点查。没有 join。跨 key 的事务也不在这里当权威。</p>
+        <p>它还经常站在关系库前面，做 cache-aside。那是热路径少打一次权威，不是第二本账本。穿透、击穿、雪崩在缓存那一章展开。quorum、LWW、节点内部的 LSM 写路径已经在键值存储那一章，这里只回答何时选它。</p>
+        <p>有主从、按 slot 切分的内存集群，和论文里那种分区时仍要 put 的 AP KV，不是同一个框。不要因为名字里都有 key 就画在一起。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">English</p>
+        <p>When the query collapses to <code>get(key)</code> / <code>put(key, value)</code> and the value is small, pick a KV. Sessions, carts, and a short URL's code-to-url map are high-QPS point lookups. There is no join. A cross-key transaction is not the source of truth here.</p>
+        <p>A KV also often sits in front of a relational store as cache-aside. That is "don't hit the authority on every hot read", not a second ledger. Penetration, breakdown, and avalanche belong to the cache chapter. Quorum, LWW, and the LSM write path inside a node are already in the key-value chapter. Here you only answer when to pick it.</p>
+        <p>An in-memory cluster with a primary and hash slots is a different box from the paper's AP KV, the one that still accepts a put during a partition. Sharing the word "key" does not make them the same drawing.</p>
+      </div>
+    </div>
+    <figure class="deck">
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="350" y="162" width="260" height="96" rx="12" class="box"/>
+            <text x="480" y="196" text-anchor="middle" class="label">Point get / put</text>
+            <text x="480" y="220" text-anchor="middle" class="sub">small value</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">先确认查询：单个 key，value 小。大文件在这一笔就出局。</span><span class="lang-en">Confirm the query first: one key, a small value. A large file is already out on this stroke.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="185" y="162" width="260" height="96" rx="12" class="box"/>
+            <text x="315" y="196" text-anchor="middle" class="label">Point get / put</text>
+            <text x="315" y="220" text-anchor="middle" class="sub">small value</text>
+          </g>
+          <line x1="451" y1="210" x2="504" y2="210" class="wire"/>
+          <polygon points="504,205 513,210 504,215" class="head"/>
+          <g>
+            <rect x="515" y="162" width="260" height="96" rx="12" class="box ok"/>
+            <text x="645" y="196" text-anchor="middle" class="label">KV</text>
+            <text x="645" y="220" text-anchor="middle" class="sub">no join</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">加上 KV。没有 join，跨 key 事务也不在这里当权威。</span><span class="lang-en">Add the KV. No join, and no cross-key transaction as the source of truth.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="87" y="162" width="230" height="96" rx="12" class="box"/>
+            <text x="202" y="196" text-anchor="middle" class="label">code to url</text>
+            <text x="202" y="220" text-anchor="middle" class="sub">short URL</text>
+          </g>
+          <line x1="323" y1="210" x2="353" y2="210" class="wire"/>
+          <polygon points="353,205 362,210 353,215" class="head"/>
+          <g>
+            <rect x="365" y="162" width="230" height="96" rx="12" class="box ok"/>
+            <text x="480" y="196" text-anchor="middle" class="label">KV</text>
+            <text x="480" y="220" text-anchor="middle" class="sub">source of truth</text>
+          </g>
+          <line x1="601" y1="210" x2="631" y2="210" class="wire"/>
+          <polygon points="631,205 640,210 631,215" class="head"/>
+          <g>
+            <rect x="643" y="162" width="230" height="96" rx="12" class="box alt"/>
+            <text x="758" y="196" text-anchor="middle" class="label">Cache-aside</text>
+            <text x="758" y="220" text-anchor="middle" class="sub">not a ledger</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">短链就是这种点查。前面的缓存是 cache-aside，映射的权威仍是 KV。</span><span class="lang-en">A short URL is this point lookup. The cache in front is cache-aside. The KV remains the authority for the map.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="185" y="162" width="260" height="96" rx="12" class="box ok"/>
+            <text x="315" y="196" text-anchor="middle" class="label">Small value</text>
+            <text x="315" y="220" text-anchor="middle" class="sub">session, code</text>
+          </g>
+          <line x1="451" y1="210" x2="504" y2="210" class="wire"/>
+          <polygon points="504,205 513,210 504,215" class="head"/>
+          <g>
+            <rect x="515" y="162" width="260" height="96" rx="12" class="box bad"/>
+            <text x="645" y="196" text-anchor="middle" class="label">Blob in KV</text>
+            <text x="645" y="220" text-anchor="middle" class="sub">value too big</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">视频这种 value 不要塞进 KV。KV 的前提是 value 小。</span><span class="lang-en">Do not put a video-sized value in a KV. A KV assumes the value is small.</span></figcaption>
+      </div>
+    </figure>
+    <p class="cite"><span class="lang-zh">机制在 <span class="chip soon">Ch06 · 键值存储</span>。短链样板是 <a class="chip" href="ch09.html">Ch09 · 短链</a>。cache-aside 在 <span class="chip soon">Ch38 · 缓存与 CDN</span>。</span><span class="lang-en">Mechanics are <span class="chip soon">Ch06 · key-value store</span>. The short-URL sample is <a class="chip" href="ch09.html">Ch09 · URL shortener</a>. Cache-aside is <span class="chip soon">Ch38 · cache and CDN</span>.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">加上 wide-column</span><span class="lang-en">Add wide-column</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">中文</p>
+        <p>写远重于读，一行又宽又稀疏，查询是按分区键找到这一行、再按聚簇键扫行里的列。这是 wide-column。写是追加，引擎几乎总是 LSM。行内原子常见。跨行 ACID 不是它的卖点。</p>
+        <p>时间线、按用户堆出来的事件，可以落在这里，也可以落在 KV，看你要不要「一行里按时间排开很多列」。账户、权限、钱仍然留在关系库。按数据拆，不要全站一个引擎。</p>
+        <p>下一组 trade-off 会把分析列存拆开。这里先钉住：wide-column 的「列」是稀疏行上的动态列，不是把同一字段竖着排好去扫表。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">English</p>
+        <p>Writes dominate, the row is wide and sparse, and the query finds that row by a partition key, then walks columns inside it by a clustering key. That is wide-column. Writes append. The engine is almost always an LSM. Atomicity inside the row is common. Cross-row ACID is not the selling point.</p>
+        <p>A timeline, or a pile of events per user, can live here or in a KV, depending on whether you need many time-ordered columns inside one row. Accounts, permissions, and money stay relational. Split by data. Do not run the product on one engine.</p>
+        <p>The trade-off group splits off the analytic column-store. Nail this first: a wide-column "column" is a dynamic column on a sparse row. It is not the same field stacked vertically so you can scan a table.</p>
+      </div>
+    </div>
+    <figure class="deck">
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="350" y="162" width="260" height="96" rx="12" class="box"/>
+            <text x="480" y="196" text-anchor="middle" class="label">Sparse wide row</text>
+            <text x="480" y="220" text-anchor="middle" class="sub">writes dominate</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">先写访问模式：一行又宽又稀疏，写远多于读。</span><span class="lang-en">Write the access pattern first: a wide sparse row, and writes dominate.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="185" y="162" width="260" height="96" rx="12" class="box"/>
+            <text x="315" y="196" text-anchor="middle" class="label">Partition key</text>
+            <text x="315" y="220" text-anchor="middle" class="sub">finds the row</text>
+          </g>
+          <line x1="451" y1="210" x2="504" y2="210" class="wire"/>
+          <polygon points="504,205 513,210 504,215" class="head"/>
+          <g>
+            <rect x="515" y="162" width="260" height="96" rx="12" class="box ok"/>
+            <text x="645" y="196" text-anchor="middle" class="label">Wide-column</text>
+            <text x="645" y="220" text-anchor="middle" class="sub">clustering key</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">加上 wide-column。分区键定位行，聚簇键排这一行里的列。</span><span class="lang-en">Add wide-column. The partition key finds the row. The clustering key orders columns inside it.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="185" y="162" width="260" height="96" rx="12" class="box"/>
+            <text x="315" y="196" text-anchor="middle" class="label">Wide-column</text>
+            <text x="315" y="220" text-anchor="middle" class="sub">sparse row</text>
+          </g>
+          <line x1="451" y1="210" x2="504" y2="210" class="wire"/>
+          <polygon points="504,205 513,210 504,215" class="head"/>
+          <g>
+            <rect x="515" y="162" width="260" height="96" rx="12" class="box alt"/>
+            <text x="645" y="196" text-anchor="middle" class="label">LSM</text>
+            <text x="645" y="220" text-anchor="middle" class="sub">append writes</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">引擎几乎总是 LSM。热路径是追加，不是原地改页。</span><span class="lang-en">The engine is almost always an LSM. The hot path appends. It does not update a page in place.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="185" y="162" width="260" height="96" rx="12" class="box ok"/>
+            <text x="315" y="196" text-anchor="middle" class="label">Scan this row</text>
+            <text x="315" y="220" text-anchor="middle" class="sub">columns in the row</text>
+          </g>
+          <line x1="451" y1="210" x2="504" y2="210" class="wire"/>
+          <polygon points="504,205 513,210 504,215" class="head"/>
+          <g>
+            <rect x="515" y="162" width="260" height="96" rx="12" class="box bad"/>
+            <text x="645" y="196" text-anchor="middle" class="label">OLAP scan</text>
+            <text x="645" y="220" text-anchor="middle" class="sub">wrong model</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">扫的是这一行里的列。把整表拉去聚合，是另一种布局，下一组再拆。</span><span class="lang-en">The scan is columns inside this row. Pulling a whole table to aggregate is a different layout. The next group splits that.</span></figcaption>
+      </div>
+    </figure>
+    <p class="cite"><span class="lang-zh">节点里的 LSM 写路径在 <span class="chip soon">Ch06 · 键值存储</span>。时间线会在 Feed、聊天那类题里碰到，权威账户仍回关系库。</span><span class="lang-en">The LSM write path inside a node is <span class="chip soon">Ch06 · key-value store</span>. Timelines show up in feed and chat problems. The account of record still goes back to relational.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">加上对象存储</span><span class="lang-en">Add object storage</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">中文</p>
+        <p>视频原片和分片、网盘的块、备份、静态资源：不可变字节，写一次，之后按 id 读整段或一段 Range。这是对象存储。目录、ACL、时长、版本号是小记录，仍进元数据库，多半是关系库。</p>
+        <p>顺序要说清。先把字节落地，再 commit 元数据。库里不能指向一个还不存在的对象。API 只交换 object id，不把大文件从自己的进程里转发过去。</p>
+        <p>介质只点一句，不当脊梁。库盘常见是块设备。多机共享一个目录，才是文件。对象是 HTTP 语义的 blob，不是一块 POSIX 盘。上传、分片和一致性的展开在对象存储那一章。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">English</p>
+        <p>Video source and chunks, drive blocks, backups, static assets: immutable bytes, written once, then read whole or by range from an id. That is object storage. Directory, ACL, duration, and version are small records. They stay in a metadata store, usually relational.</p>
+        <p>Say the order. Land the bytes, then commit the metadata. The store must not point at an object that does not exist yet. The API exchanges an object id. It does not proxy the large file through its own process.</p>
+        <p>The medium gets one sentence, and it is not the spine of the chapter. A database disk is usually a block device. A directory shared across machines is a file system. Object storage is an HTTP blob, not a POSIX disk. Upload, multipart, and consistency are unpacked in the object-storage chapter.</p>
+      </div>
+    </div>
+    <figure class="deck">
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="350" y="162" width="260" height="96" rx="12" class="box"/>
+            <text x="480" y="196" text-anchor="middle" class="label">Large blob</text>
+            <text x="480" y="220" text-anchor="middle" class="sub">write once, read by id</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">字节大、写一次、之后按 id 读。视频、网盘块、备份都是这种形状。</span><span class="lang-en">The bytes are large, written once, then read by id. Video, drive blocks, and backups have this shape.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="185" y="162" width="260" height="96" rx="12" class="box"/>
+            <text x="315" y="196" text-anchor="middle" class="label">App</text>
+            <text x="315" y="220" text-anchor="middle" class="sub">holds an object id</text>
+          </g>
+          <line x1="451" y1="210" x2="504" y2="210" class="wire"/>
+          <polygon points="504,205 513,210 504,215" class="head"/>
+          <g>
+            <rect x="515" y="162" width="260" height="96" rx="12" class="box ok"/>
+            <text x="645" y="196" text-anchor="middle" class="label">Object store</text>
+            <text x="645" y="220" text-anchor="middle" class="sub">immutable bytes</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">加上对象存储。API 拿的是 object id，不转发文件本身。</span><span class="lang-en">Add object storage. The API holds an object id. It does not forward the file.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="87" y="162" width="230" height="96" rx="12" class="box"/>
+            <text x="202" y="196" text-anchor="middle" class="label">App</text>
+            <text x="202" y="220" text-anchor="middle" class="sub">object id</text>
+          </g>
+          <line x1="323" y1="210" x2="353" y2="210" class="wire"/>
+          <polygon points="353,205 362,210 353,215" class="head"/>
+          <g>
+            <rect x="365" y="162" width="230" height="96" rx="12" class="box ok"/>
+            <text x="480" y="196" text-anchor="middle" class="label">Object store</text>
+            <text x="480" y="220" text-anchor="middle" class="sub">bytes landed</text>
+          </g>
+          <line x1="601" y1="210" x2="631" y2="210" class="wire"/>
+          <polygon points="631,205 640,210 631,215" class="head"/>
+          <g>
+            <rect x="643" y="162" width="230" height="96" rx="12" class="box alt"/>
+            <text x="758" y="196" text-anchor="middle" class="label">Metadata</text>
+            <text x="758" y="220" text-anchor="middle" class="sub">usually relational</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">再加上元数据库。目录、ACL、时长、版本在这边，多半仍是关系库。</span><span class="lang-en">Add the metadata store. Directory, ACL, duration, and version live here, usually still relational.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="185" y="162" width="260" height="96" rx="12" class="box ok"/>
+            <text x="315" y="196" text-anchor="middle" class="label">Bytes first</text>
+            <text x="315" y="220" text-anchor="middle" class="sub">object exists</text>
+          </g>
+          <line x1="451" y1="210" x2="504" y2="210" class="wire"/>
+          <polygon points="504,205 513,210 504,215" class="head"/>
+          <g>
+            <rect x="515" y="162" width="260" height="96" rx="12" class="box"/>
+            <text x="645" y="196" text-anchor="middle" class="label">Then commit</text>
+            <text x="645" y="220" text-anchor="middle" class="sub">metadata points at it</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">顺序是先落字节，再 commit 元数据。库里不能指向还不存在的对象。</span><span class="lang-en">Land the bytes first, then commit metadata. The store must not point at an object that is not there yet.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="185" y="162" width="260" height="96" rx="12" class="box bad"/>
+            <text x="315" y="196" text-anchor="middle" class="label">Proxy the file</text>
+            <text x="315" y="220" text-anchor="middle" class="sub">API in the path</text>
+          </g>
+          <line x1="451" y1="210" x2="504" y2="210" class="wire"/>
+          <polygon points="504,205 513,210 504,215" class="head"/>
+          <g>
+            <rect x="515" y="162" width="260" height="96" rx="12" class="box ok"/>
+            <text x="645" y="196" text-anchor="middle" class="label">GET by id</text>
+            <text x="645" y="220" text-anchor="middle" class="sub">client to object</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">失败笔是让 API 中转大文件，或者元数据先写、字节还没落地。</span><span class="lang-en">The failure stroke is proxying the large file through the API, or committing metadata before the bytes exist.</span></figcaption>
+      </div>
+    </figure>
+    <p class="cite"><span class="lang-zh">视频在 <span class="chip soon">Ch14 · 视频</span>，网盘在 <span class="chip soon">Ch15 · 网盘</span>。上传和一致性在 <span class="chip soon">Ch22 · 对象存储</span>。</span><span class="lang-en">Video is <span class="chip soon">Ch14 · video</span>. A drive is <span class="chip soon">Ch15 · cloud drive</span>. Upload and consistency are <span class="chip soon">Ch22 · object storage</span>.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">加上搜索</span><span class="lang-en">Add search</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">中文</p>
+        <p>查询是词，不是主键。倒排把 term 指到文档列表，正文或对象另存。精确 id、普通的 SQL 条件，仍然走 KV 或关系库。倒排不是通用库，也不是账本。</p>
+        <p>同一套四问把剩下的模型收掉，不必再报品牌。JSON 的形状还在变，可以用文档模型，约束挪到应用层；schemaless 不是许可证，脏数据会进来，后来加上的校验才是实话。关注关系一两跳，join 或闭包表就够；反复多跳、路径本身是查询，才用图。指标是 append 加降采样加过期，不要拿时序库存订单。排行榜的热列表是有序的 top-k 读路径，权威分数仍可以在库里，这不是再买一个图数据库。</p>
+        <p>查询变成「和这条 embedding 最像的 k 条」，才上向量。行已经在关系库里、还要和行 join，先用库内向量索引。ANN 自己就是产品，过滤和副本成了 bottleneck，引擎那一章再展开。没问有多少条，就不要上专用集群。关键词搜索不要换成向量装门面。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">English</p>
+        <p>The query is a term, not a primary key. An inverted index points the term at a posting list. The body lives in another store, or in an object. An exact id, or an ordinary SQL predicate, still goes to a KV or a relational store. The index is not a general-purpose database, and it is not the ledger.</p>
+        <p>The same four questions close the remaining models. You do not need another brand. JSON whose shape is still moving can be a document, with constraints moved into the app. Schemaless is not a license: dirty data gets in, and the honest story is the validation you add later. One or two hops of a follow graph are a join, or a closure table. A graph store is for repeated multi-hop, when the path itself is the query. Metrics are append, downsample, and expiry. Do not store orders in a time-series store. A leaderboard's hot list is an ordered top-k read path. The authoritative score can still live in a database. That is not a reason to add a graph store.</p>
+        <p>You add a vector index when the query is "the k nearest embeddings". If the rows already live in the relational store and you need to join them, start with an in-database vector index. When ANN is the product, and filters and replicas are the bottleneck, the engine chapter takes over. Do not stand up a dedicated cluster before you know how many vectors you have. Do not dress keyword search up as vectors.</p>
+      </div>
+    </div>
+    <figure class="deck">
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="350" y="162" width="260" height="96" rx="12" class="box"/>
+            <text x="480" y="196" text-anchor="middle" class="label">Keyword query</text>
+            <text x="480" y="220" text-anchor="middle" class="sub">a term, not a key</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">查询是词。精确 id 仍然走 KV 或关系库。</span><span class="lang-en">The query is a term. An exact id still goes to a KV or a relational store.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="185" y="162" width="260" height="96" rx="12" class="box"/>
+            <text x="315" y="196" text-anchor="middle" class="label">Term</text>
+            <text x="315" y="220" text-anchor="middle" class="sub">the word they typed</text>
+          </g>
+          <line x1="451" y1="210" x2="504" y2="210" class="wire"/>
+          <polygon points="504,205 513,210 504,215" class="head"/>
+          <g>
+            <rect x="515" y="162" width="260" height="96" rx="12" class="box ok"/>
+            <text x="645" y="196" text-anchor="middle" class="label">Inverted index</text>
+            <text x="645" y="220" text-anchor="middle" class="sub">term to postings</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">加上倒排：term 指向文档列表。这不是通用数据库。</span><span class="lang-en">Add an inverted index: a term points at a posting list. It is not a general-purpose database.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="87" y="162" width="230" height="96" rx="12" class="box"/>
+            <text x="202" y="196" text-anchor="middle" class="label">Term</text>
+            <text x="202" y="220" text-anchor="middle" class="sub">query</text>
+          </g>
+          <line x1="323" y1="210" x2="353" y2="210" class="wire"/>
+          <polygon points="353,205 362,210 353,215" class="head"/>
+          <g>
+            <rect x="365" y="162" width="230" height="96" rx="12" class="box ok"/>
+            <text x="480" y="196" text-anchor="middle" class="label">Index</text>
+            <text x="480" y="220" text-anchor="middle" class="sub">which docs</text>
+          </g>
+          <line x1="601" y1="210" x2="631" y2="210" class="wire"/>
+          <polygon points="631,205 640,210 631,215" class="head"/>
+          <g>
+            <rect x="643" y="162" width="230" height="96" rx="12" class="box alt"/>
+            <text x="758" y="196" text-anchor="middle" class="label">Body store</text>
+            <text x="758" y="220" text-anchor="middle" class="sub">elsewhere</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">正文或对象另存。索引只回答「哪些文档含这个词」。</span><span class="lang-en">The body lives elsewhere. The index only answers which documents contain the term.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="185" y="162" width="260" height="96" rx="12" class="box ok"/>
+            <text x="315" y="196" text-anchor="middle" class="label">Keyword index</text>
+            <text x="315" y="220" text-anchor="middle" class="sub">search path</text>
+          </g>
+          <line x1="451" y1="210" x2="504" y2="210" class="wire"/>
+          <polygon points="504,205 513,210 504,215" class="head"/>
+          <g>
+            <rect x="515" y="162" width="260" height="96" rx="12" class="box bad"/>
+            <text x="645" y="196" text-anchor="middle" class="label">Index as ledger</text>
+            <text x="645" y="220" text-anchor="middle" class="sub">wrong job</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">不要把倒排当成账本。没有 ANN，也不要换成向量装门面。</span><span class="lang-en">Do not make the inverted index the ledger. With no ANN, do not swap in a vector index for show.</span></figcaption>
+      </div>
+    </figure>
+    <p class="cite"><span class="lang-zh">站内搜索在 <span class="chip soon">Ch13 · 搜索</span>。向量引擎在 <span class="chip soon">Ch31 · 向量检索</span>，RAG 在 <span class="chip soon">Ch30 · RAG</span>。热列表在 <span class="chip soon">Ch23 · 排行榜</span>。</span><span class="lang-en">On-site search is <span class="chip soon">Ch13 · search</span>. The vector engine is <span class="chip soon">Ch31 · vector search</span>. RAG is <span class="chip soon">Ch30 · RAG</span>. A hot list is <span class="chip soon">Ch23 · leaderboard</span>.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">Trade-off：引擎，以及别混</span><span class="lang-en">Trade-off: the engine, and don't mix them</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">中文</p>
+        <p>第二个 hard part 是引擎，不是再背一条 WAL 到 memtable 到 SSTable 的链。那条热路径键值存储那一章画过。这里要能推导 trade-off。</p>
+        <p>B+Tree 把数据放在页里，查找从根走到叶，高度通常很小，点查和沿叶节点的范围都稳。更新是原地改页，加 WAL 对付崩溃。代价是随机写页：改很小一块，也可能把整页刷下去。关系库的 OLTP 索引走这个家族。</p>
+        <p>LSM 的热路径不改旧页。写按顺序进 WAL，再进内存里的 memtable，满了 flush 成不可变的 SSTable。后台 compaction 合并文件、丢掉旧版本。盘上是顺序追加，所以写吞吐高。wide-column 和不少 AP KV 的节点内部就是它。</p>
+        <p>写放大是：用户写了一小段，盘上实际写了多少。B+Tree 已经有一截，因为页比行大，但它不会把同一条 key 在后台合并中重写多遍。LSM 会。同一条 key 从 memtable flush 出去，再被 compaction 往下推，层越多，重写越多。这就是 compaction 税：用额外的写，换更少的文件、更干净的读。所以「LSM 写得快」说的是热路径吞吐，不是写放大低。两句并成一句，是 red flag。compaction 之前，旧版本还占着盘，那是空间上的放大。</p>
+        <p>读放大是：一次 point get 碰了多少页或文件。B+Tree 大约是树的高度，可预期。LSM 要看 memtable，再加上若干部 SSTable，文件越多越疼。Bloom filter 一句：过滤器说不在，这个 SSTable 可以跳过，没有假阴性；说可能在，才打开文件，允许假阳性。compaction 用写放大换读放大。合并完，要查的层变少。</p>
+        <p>读极多、写很少、延迟又紧，不要因为「大家都用 LSM」就把 LSM 当主 OLTP。那是配错。写极多、扛得住 compaction 的毛刺，用 LSM。混合负载在白板上点到「用写放大换读放大」就停，不要开成调参课。短链读多写少，权威映射可以是 KV，但引擎要回头问读写比：读的延迟极严时，B+Tree 家族是说得通的答案。</p>
+        <table>
+          <thead><tr><th></th><th>B+Tree</th><th>LSM</th></tr></thead>
+          <tbody>
+            <tr><td>写热路径</td><td>改页 + WAL</td><td>WAL + memtable，顺序写</td></tr>
+            <tr><td>读热路径</td><td>树高次查找，稳</td><td>多层 + Bloom</td></tr>
+            <tr><td>税</td><td>页比行大</td><td>compaction，外加旧版本占盘</td></tr>
+            <tr><td>适合</td><td>OLTP，点查和范围，事务</td><td>写重的 KV，wide-column 灌入</td></tr>
+          </tbody>
+        </table>
+        <p>第三个 hard part 是用词。wide-column 存稀疏行，查询是分区键点查或短范围，写引擎是 LSM。分析列存把一列连续放好，利于压缩，查询是扫列做聚合。对象是不可变字节加 object id，查询是 GET 整段或 Range。向量是 embedding，查询是 ANN 的 top-k。把 wide-column 和数仓列存都叫 columnar，是这章最大的用词 red flag。对象没有「列」。向量索引也不是 B+Tree 点查。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">English</p>
+        <p>The second hard part is the engine. You are not reciting WAL, then memtable, then SSTable again. The key-value chapter already drew that hot path. Here you derive the trade-off.</p>
+        <p>A B+Tree keeps data in pages. Lookup walks from the root to a leaf. The height is usually small, so point lookups and ranges along the linked leaves are both stable. An update rewrites the page in place, and a WAL covers a crash. The cost is random page IO: a tiny change can still flush a whole page. OLTP indexes in a relational store are this family.</p>
+        <p>An LSM does not mutate old pages on the hot path. The write goes sequentially into the WAL, then into an in-memory memtable. When that fills, it flushes to an immutable SSTable. Background compaction merges files and drops old versions. Disk IO is sequential append, so write throughput is high. Wide-column stores, and the inside of many AP KV nodes, are this.</p>
+        <p>Write amplification: the user writes a small change, and you ask how much actually hits disk. A B+Tree already has some, because a page is much larger than a row. It does not rewrite the same key over and over in the background. An LSM does. The key flushes out of the memtable, then compaction pushes it down. More levels, more rewrites. That is the compaction tax: extra writes in exchange for fewer files and cleaner reads. So "an LSM writes fast" means hot-path throughput. It does not mean write amplification is low. Collapsing those two sentences is a red flag. Before compaction, old versions still occupy disk. That is space amplification.</p>
+        <p>Read amplification: how many pages or files one point get touches. A B+Tree is about the height of the tree, which you can predict. An LSM checks the memtable plus several SSTables. More files, more pain. Bloom filter, one line: if it says "not in", skip that SSTable. There is no false negative. If it says "maybe", open the file. False positives are allowed. Compaction trades write amplification for read amplification. After the merge, fewer layers to check.</p>
+        <p>If reads dominate, writes are rare, and the latency target is tight, do not pick an LSM as the primary OLTP store just because it is popular. That is a mismatch. If writes dominate and you can live with compaction spikes, pick an LSM. On a mixed load, point at "trade write amplification for read amplification" and stop. Do not start a tuning lecture. A short URL is read-heavy. The authoritative map can still be a KV, but ask the read/write ratio before you freeze the engine. If read latency is extremely tight, a B+Tree family is a fair answer.</p>
+        <table>
+          <thead><tr><th></th><th>B+Tree</th><th>LSM</th></tr></thead>
+          <tbody>
+            <tr><td>Write hot path</td><td>mutate the page + WAL</td><td>WAL + memtable, sequential</td></tr>
+            <tr><td>Read hot path</td><td>tree height, stable</td><td>several levels + Bloom</td></tr>
+            <tr><td>Tax</td><td>a page is bigger than a row</td><td>compaction, plus old versions on disk</td></tr>
+            <tr><td>Fits</td><td>OLTP, point and range, transactions</td><td>write-heavy KV, wide-column ingest</td></tr>
+          </tbody>
+        </table>
+        <p>The third hard part is vocabulary. Wide-column stores a sparse row. The query is a point lookup or a short range on the partition key, and the write engine is an LSM. An analytic column-store lays one column out contiguously so it compresses, and the query scans columns to aggregate. Object storage is immutable bytes plus an object id. The query is a GET of the whole object or a range. A vector index stores embeddings. The query is ANN top-k. Calling wide-column and a warehouse column-store both "columnar" is this chapter's biggest vocabulary red flag. An object has no column. A vector index is not a B+Tree point lookup.</p>
+      </div>
+    </div>
+    <figure class="deck">
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="185" y="162" width="260" height="96" rx="12" class="box ok"/>
+            <text x="315" y="196" text-anchor="middle" class="label">B+Tree</text>
+            <text x="315" y="220" text-anchor="middle" class="sub">in-place page, stable read</text>
+          </g>
+          <line x1="451" y1="210" x2="504" y2="210" class="wire"/>
+          <polygon points="504,205 513,210 504,215" class="head"/>
+          <g>
+            <rect x="515" y="162" width="260" height="96" rx="12" class="box alt"/>
+            <text x="645" y="196" text-anchor="middle" class="label">LSM</text>
+            <text x="645" y="220" text-anchor="middle" class="sub">sequential write</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">一张只放这一对。读延迟紧用 B+Tree，写吞吐用 LSM。不要问谁绝对更快。</span><span class="lang-en">One pair on this slide. Tight read latency is a B+Tree. Write throughput is an LSM. Do not ask which is absolutely faster.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="185" y="162" width="260" height="96" rx="12" class="box ok"/>
+            <text x="315" y="196" text-anchor="middle" class="label">Hot-path write</text>
+            <text x="315" y="220" text-anchor="middle" class="sub">sequential, in memory</text>
+          </g>
+          <line x1="451" y1="210" x2="504" y2="210" class="wire"/>
+          <polygon points="504,205 513,210 504,215" class="head"/>
+          <g>
+            <rect x="515" y="162" width="260" height="96" rx="12" class="box bad"/>
+            <text x="645" y="196" text-anchor="middle" class="label">Write amp</text>
+            <text x="645" y="220" text-anchor="middle" class="sub">compaction rewrites</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">热路径快，和写放大小，是两句话。compaction 会把同一条 key 重写多遍。</span><span class="lang-en">A fast hot path and low write amplification are two sentences. Compaction rewrites the same key many times.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="185" y="162" width="260" height="96" rx="12" class="box ok"/>
+            <text x="315" y="196" text-anchor="middle" class="label">Bloom: not in</text>
+            <text x="315" y="220" text-anchor="middle" class="sub">skip that SSTable</text>
+          </g>
+          <line x1="451" y1="210" x2="504" y2="210" class="wire"/>
+          <polygon points="504,205 513,210 504,215" class="head"/>
+          <g>
+            <rect x="515" y="162" width="260" height="96" rx="12" class="box alt"/>
+            <text x="645" y="196" text-anchor="middle" class="label">Bloom: maybe</text>
+            <text x="645" y="220" text-anchor="middle" class="sub">then open the file</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">说不在就跳过，没有假阴性。说可能在才读盘。这是在用写放大换更低的读放大。</span><span class="lang-en">"Not in" skips the file, with no false negative. "Maybe" is when you read disk. Compaction spends write amplification to lower read amplification.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="185" y="162" width="260" height="96" rx="12" class="box"/>
+            <text x="315" y="196" text-anchor="middle" class="label">Wide-column</text>
+            <text x="315" y="220" text-anchor="middle" class="sub">columns on the row</text>
+          </g>
+          <line x1="451" y1="210" x2="504" y2="210" class="wire"/>
+          <polygon points="504,205 513,210 504,215" class="head"/>
+          <g>
+            <rect x="515" y="162" width="260" height="96" rx="12" class="box alt"/>
+            <text x="645" y="196" text-anchor="middle" class="label">Column-store</text>
+            <text x="645" y="220" text-anchor="middle" class="sub">scan to aggregate</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">一张只拆这一对。wide-column 的列聚在行上。分析列存把同一字段竖着排，用来扫列聚合。</span><span class="lang-en">This slide splits one pair. Wide-column clusters columns on the row. An analytic column-store stacks one field vertically so you can scan and aggregate.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="185" y="162" width="260" height="96" rx="12" class="box"/>
+            <text x="315" y="196" text-anchor="middle" class="label">Object blob</text>
+            <text x="315" y="220" text-anchor="middle" class="sub">bytes plus an id</text>
+          </g>
+          <line x1="451" y1="210" x2="504" y2="210" class="wire"/>
+          <polygon points="504,205 513,210 504,215" class="head"/>
+          <g>
+            <rect x="515" y="162" width="260" height="96" rx="12" class="box alt"/>
+            <text x="645" y="196" text-anchor="middle" class="label">Vector ANN</text>
+            <text x="645" y="220" text-anchor="middle" class="sub">nearest embeddings</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">对象是字节。向量是 embedding，查询是 ANN。blob 不是向量。</span><span class="lang-en">An object is bytes. A vector index is embeddings, and the query is ANN. A blob is not a vector.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg class="board" viewBox="0 0 960 420" role="img">
+          <g>
+            <rect x="185" y="162" width="260" height="96" rx="12" class="box bad"/>
+            <text x="315" y="196" text-anchor="middle" class="label">One engine</text>
+            <text x="315" y="220" text-anchor="middle" class="sub">whole product</text>
+          </g>
+          <line x1="451" y1="210" x2="504" y2="210" class="wire"/>
+          <polygon points="504,205 513,210 504,215" class="head"/>
+          <g>
+            <rect x="515" y="162" width="260" height="96" rx="12" class="box ok"/>
+            <text x="645" y="196" text-anchor="middle" class="label">Split by data</text>
+            <text x="645" y="220" text-anchor="middle" class="sub">money, blob, search</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">收口：钱、短链、文件、搜索可以是不同的库。一种引擎打全站，是 over-engineering。</span><span class="lang-en">Close by splitting on the data. Money, short URLs, files, and search can be different stores. One engine for the whole product is over-engineering.</span></figcaption>
+      </div>
+    </figure>
+    <p class="cite"><span class="lang-zh">写路径的图在 <span class="chip soon">Ch06 · 键值存储</span>。HNSW 一类的索引结构在 <span class="chip soon">Ch31 · 向量检索</span>，不在这里展开。</span><span class="lang-en">The write-path drawing is <span class="chip soon">Ch06 · key-value store</span>. Index structures such as HNSW are <span class="chip soon">Ch31 · vector search</span>. They are not unpacked here.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">三篇必读，两篇选读</span><span class="lang-en">Three papers to name, two optional</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">中文</p>
+        <p>能点名，不要背页码，也不要编论文里的内部数字。教学顺序是 AP KV，再到写引擎，再到 wide-column 系统。这不是发表年表：LSM 那篇早于 Bigtable，Bigtable 早于 Dynamo。</p>
+        <table>
+          <thead><tr><th>文献</th><th></th><th>面试用哪一句</th></tr></thead>
+          <tbody>
+            <tr><td>DeCandia 等，SOSP 2007，<em>Dynamo</em></td><td>必读</td><td>AP KV：分区时仍要 put。可以点 hinted handoff。生产冲突默认 LWW。不要把论文全家桶讲成实现说明书。</td></tr>
+            <tr><td>O'Neil 等，1996，Acta Informatica，<em>LSM-tree</em></td><td>必读</td><td>为高插入设计：内存组件加盘上组件，merge 成顺序写。读可能更贵。今天的 SSTable 和 compaction 从这里来。</td></tr>
+            <tr><td>Chang 等，OSDI 2006，<em>Bigtable</em></td><td>必读</td><td>稀疏、多维、有序的 map，tablet 加 memtable / SSTable。wide-column 的谱系。不是数仓，也不是关系库。</td></tr>
+            <tr><td>Stonebraker 与 Çetintemel，ICDE 2005，<em>One Size Fits All</em></td><td>选读</td><td>一种引擎打天下的时代过了。OLTP、数仓、流会拆成专用引擎。用来收口本章。</td></tr>
+            <tr><td>Corbett 等，OSDI 2012，<em>Spanner</em></td><td>选读</td><td>TrueTime 把时钟不确定度暴露出来，用来做 external consistency。不要开成专章。CAP 的格子在 Ch36。</td></tr>
+          </tbody>
+        </table>
+        <p>Dynamo 论文里的向量时钟，是用来找因果上并发的版本。2026 的生产默认仍是 LWW，键值存储那一章已经钉过。quorum 的手算、Merkle、Gossip 不要在这里重讲。Bigtable 的 SSTable 和 LSM 论文对得上：不可变的有序文件，加上一张内存表。分析列存是另一条故事，不要塞进 Bigtable 那一句。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">English</p>
+        <p>You should be able to name them. Do not memorize page numbers, and do not invent internal figures from the papers. The teaching order is AP KV, then the write engine, then the wide-column system. That is not publication order. The LSM paper is earlier than Bigtable, and Bigtable is earlier than Dynamo.</p>
+        <table>
+          <thead><tr><th>Paper</th><th></th><th>The line you say</th></tr></thead>
+          <tbody>
+            <tr><td>DeCandia et al., SOSP 2007, <em>Dynamo</em></td><td>Required</td><td>AP KV: still accept a put during a partition. You can name hinted handoff. The production conflict default is LWW. Do not turn the paper's full kit into an implementation spec.</td></tr>
+            <tr><td>O'Neil et al., 1996, Acta Informatica, <em>LSM-tree</em></td><td>Required</td><td>Built for high insert rate: a memory component plus a disk component, merged into sequential writes. Reads can cost more. Today's SSTable and compaction come from here.</td></tr>
+            <tr><td>Chang et al., OSDI 2006, <em>Bigtable</em></td><td>Required</td><td>A sparse, multidimensional, sorted map, with tablets plus memtable / SSTable. Wide-column lineage. Not a warehouse, and not a relational store.</td></tr>
+            <tr><td>Stonebraker and Çetintemel, ICDE 2005, <em>One Size Fits All</em></td><td>Optional</td><td>The era of one engine for everything is over. OLTP, warehouse, and streaming split into specialized engines. Use it to close this chapter.</td></tr>
+            <tr><td>Corbett et al., OSDI 2012, <em>Spanner</em></td><td>Optional</td><td>TrueTime exposes clock uncertainty and uses it for external consistency. Do not open a Spanner chapter. The CAP grid is Ch36.</td></tr>
+          </tbody>
+        </table>
+        <p>Vector clocks in the Dynamo paper find versions that are causally concurrent. The 2026 production default is still LWW, already nailed in the key-value chapter. Do not re-derive quorum arithmetic, Merkle trees, or gossip here. Bigtable's SSTable lines up with the LSM paper: immutable sorted files plus an in-memory table. Analytic column-stores are a different story. Do not stuff them into the Bigtable sentence.</p>
+      </div>
+    </div>
+    <p class="cite"><span class="lang-zh">冲突默认和 quorum 在 <span class="chip soon">Ch06 · 键值存储</span>。external consistency 接到 <span class="chip soon">Ch36 · CAP / PACELC</span>。</span><span class="lang-en">The conflict default and quorum are <span class="chip soon">Ch06 · key-value store</span>. External consistency connects to <span class="chip soon">Ch36 · CAP / PACELC</span>.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">哪些题会用到</span><span class="lang-en">Which problems use this</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">中文</p>
+        <p>短链的 code 到 url、订单和支付账本、视频和网盘的字节、站内搜索的倒排，都会回到这一章选库；设计题里引用一句，不要在白板上开目录。</p>
+        <p>聊天和 Feed 的时间线可以是 wide-column 或 KV。账户、权限、钱仍是关系库。Agent 的 run state 若是按 id 点查并且必须留下，按这个标准选，不要在编排白板上挑品牌。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">English</p>
+        <p>A short URL's code-to-url map, an order and payment ledger, video and drive bytes, and the inverted index for on-site search all come back here to pick a store; cite one line inside the design problem, and do not turn the board into a catalog.</p>
+        <p>A chat or feed timeline can be wide-column or a KV. Accounts, permissions, and money stay relational. If an agent run state is a point lookup by id and it must persist, choose it by that test. Do not pick a brand on the orchestration board.</p>
+      </div>
+    </div>
+    <p class="cite"><span class="lang-zh"><a class="chip" href="ch09.html">Ch09 · 短链</a><span class="chip soon">Ch18 · 订单</span><span class="chip soon">Ch24 · 支付</span><span class="chip soon">Ch14 · 视频</span><span class="chip soon">Ch15 · 网盘</span><span class="chip soon">Ch13 · 搜索</span><span class="chip soon">Ch34 · Agent 运行时</span></span><span class="lang-en"><a class="chip" href="ch09.html">Ch09 · URL shortener</a><span class="chip soon">Ch18 · orders</span><span class="chip soon">Ch24 · payments</span><span class="chip soon">Ch14 · video</span><span class="chip soon">Ch15 · drive</span><span class="chip soon">Ch13 · search</span><span class="chip soon">Ch34 · agent runtime</span></span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">追问</span><span class="lang-en">Follow-ups</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">中文</p>
+        <ol>
+          <li>为什么还用关系库？因为要事务、join、约束。账本不要用 AP KV 当权威。</li>
+          <li>访问模式怎么问？读写比、point / join / scan、要不要一次 commit、value 多大。答完再报模型。</li>
+          <li>文档库是不是没有 schema？约束在应用层。形状还在变才适合文档。脏数据是风险，不是卖点。</li>
+          <li>wide-column 和分析列存？稀疏宽行加 LSM 灌入，对上扫列做聚合。不要都叫 columnar。</li>
+          <li>关注关系要不要图数据库？一两跳用 join。多跳路径才是理由。时序库是 append 加降采样，不要存订单。</li>
+          <li>视频为什么不放 KV？value 太大。对象加元数据小库。API 不中转文件。</li>
+          <li>B+Tree 和 LSM 谁更快？看读写。读稳走 B+Tree，写吞吐走 LSM。写得快不等于写放大小。compaction 用重写换更少的 SSTable。</li>
+          <li>Bloom、Dynamo、隔离级别？Bloom 说不在就跳过 SSTable。Dynamo 可以点 hinted handoff，生产冲突默认 LWW。隔离默认是 MVCC 那条线，细表不在这章。</li>
+        </ol>
+        <details class="fold">
+          <summary>2026 和旧笔记差在哪</summary>
+          <p>旧笔记把存储写成云盘和托管数据库的目录，又把 wide-column 和数仓都叫成列式。上场只带四问、模型和引擎。块设备、共享文件、对象，只在讲 blob 时点一句，不当目录。隔离级别不背五种；PostgreSQL 默认 Read Committed，InnoDB 默认 Repeatable Read，都是 MVCC，都读不到脏数据。向量时钟留在 Dynamo 论文里，生产冲突默认 LWW。一种引擎打全站，是 over-engineering。</p>
+        </details>
+      </div>
+      <div class="lang-en"><p class="col-kicker">English</p>
+        <ol>
+          <li>Why a relational store at all? You need a transaction, a join, and constraints. Do not make an AP KV the ledger of record.</li>
+          <li>How do you ask the access pattern? Read/write ratio, point versus join versus scan, whether you need one commit, and how big the value is. Name the model after that.</li>
+          <li>Does a document store have no schema? Constraints live in the app. Pick it when the shape is still moving. Dirty data is a risk, not a feature.</li>
+          <li>Wide-column versus an analytic column-store? Sparse wide rows plus LSM ingest, versus scanning columns to aggregate. Do not call both columnar.</li>
+          <li>Does a follow graph need a graph store? One or two hops: a join. Multi-hop paths are the reason. A time-series store is append plus downsample. Do not store orders there.</li>
+          <li>Why not put video in a KV? The value is too big. Object storage plus a small metadata store. The API does not proxy the file.</li>
+          <li>Which is faster, B+Tree or LSM? It depends on read versus write. Stable reads: B+Tree. Write throughput: LSM. Fast writes are not low write amplification. Compaction rewrites keys to end up with fewer SSTables.</li>
+          <li>Bloom, Dynamo, isolation? A Bloom filter that says "not in" skips that SSTable. You can name hinted handoff on Dynamo. The production conflict default is LWW. Isolation stays on the MVCC line. The detail table is not this chapter.</li>
+        </ol>
+        <details class="fold">
+          <summary>What changed since the old notes</summary>
+          <p>Old notes turned storage into a catalog of cloud disks and managed databases, and they called both wide-column and a warehouse "columnar". You walk in with the four questions, the model, and the engine. Block devices, shared files, and objects get one sentence when you are talking about blobs. They are not the outline. You do not recite five isolation levels. PostgreSQL defaults to Read Committed, InnoDB defaults to Repeatable Read, both are MVCC, and neither returns dirty data. Vector clocks stay in the Dynamo paper. The production conflict default is LWW. One engine for the whole product is over-engineering.</p>
+        </details>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">下一步</span><span class="lang-en">Next</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">中文</p>
+        <p>合上页，用 20 秒走一遍：四问，关系库何时默认，KV、wide-column、对象、倒排各加在什么查询上，B+Tree 对 LSM 以及 compaction 税，四件东西不要混。能把短链、订单、网盘放进这些格子，这一章就过关。</p>
+        <p>下一章是缓存与 CDN。这一章回答权威数据放哪。下一章回答热路径别每次都打权威。短链前面的缓存、视频的 CDN、搜索的 query cache 都在那边。语义缓存先不要开。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">English</p>
+        <p>Close the page and walk it in 20 seconds: the four questions, when relational is the default, which query gets a KV, wide-column, object, or an inverted index, B+Tree versus LSM and the compaction tax, and the four things you do not mix. If you can drop a short URL, an order, and a drive into those cells, this chapter is done.</p>
+        <p>Next is cache and CDN. This chapter answers where the source of truth lives. The next one answers "don't hit that source on every hot-path request". The cache in front of a short URL, the CDN in front of video, and a search query cache all unpack there. Leave semantic cache closed for now.</p>
+      </div>
+    </div>
+    <p class="cite"><span class="lang-zh">下一章 <span class="chip soon">Ch38 · 缓存与 CDN</span>。语义缓存在 <span class="chip soon">Ch32 · LLM API 网关</span>。</span><span class="lang-en">Next is <span class="chip soon">Ch38 · cache and CDN</span>. Semantic cache is <span class="chip soon">Ch32 · LLM API gateway</span>.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">闪卡</span><span class="lang-en">Flashcards</span></h2>
+    <p class="cite"><span class="lang-zh">点一下翻面。能讲出来才算会。</span><span class="lang-en">Click to flip. If you can say it, you know it.</span></p>
+    <div class="cards-grid">
+      <button type="button" class="flip">
+        <span class="q"><span class="lang-zh">上场先问哪四件？</span><span class="lang-en">Which four things do you ask first?</span></span>
+        <span class="a"><span class="lang-zh">读写比、查询形状、要不要事务、一条 value 有多大。然后才说模型。</span><span class="lang-en">Read/write ratio, query shape, whether you need a transaction, and how big one value is. Then you name the model.</span></span>
+      </button>
+      <button type="button" class="flip">
+        <span class="q"><span class="lang-zh">什么时候默认关系库？</span><span class="lang-en">When is relational the default?</span></span>
+        <span class="a"><span class="lang-zh">要事务、join、约束。订单和账本不要用 AP KV 当权威。</span><span class="lang-en">When you need a transaction, a join, and constraints. Do not make an AP KV the ledger.</span></span>
+      </button>
+      <button type="button" class="flip">
+        <span class="q"><span class="lang-zh">什么时候用 KV？</span><span class="lang-en">When do you pick a KV?</span></span>
+        <span class="a"><span class="lang-zh">小 value 的 point get/put。短链、会话。没有 join。cache-aside 不是第二本账本。</span><span class="lang-en">Point get/put of a small value: a short URL, a session. No join. Cache-aside is not a second ledger.</span></span>
+      </button>
+      <button type="button" class="flip">
+        <span class="q"><span class="lang-zh">wide-column 和分析列存差在哪？</span><span class="lang-en">Wide-column versus an analytic column-store?</span></span>
+        <span class="a"><span class="lang-zh">wide-column 是稀疏宽行加 LSM。分析列存把一列竖着排，用来扫列聚合。不要都叫 columnar。</span><span class="lang-en">Wide-column is a sparse row plus an LSM. An analytic column-store stacks one field vertically for scan-and-aggregate. Do not call both columnar.</span></span>
+      </button>
+      <button type="button" class="flip">
+        <span class="q"><span class="lang-zh">大文件和元数据怎么拆？</span><span class="lang-en">How do you split a large file from its metadata?</span></span>
+        <span class="a"><span class="lang-zh">字节进对象存储，目录和 ACL 进关系库。先落字节再 commit。API 不中转文件。</span><span class="lang-en">Bytes go to object storage. Directory and ACL stay relational. Land the bytes, then commit. The API does not proxy the file.</span></span>
+      </button>
+      <button type="button" class="flip">
+        <span class="q"><span class="lang-zh">搜索用什么？</span><span class="lang-en">What do you use for search?</span></span>
+        <span class="a"><span class="lang-zh">倒排，term 到 posting。正文另存。没有 ANN 不上向量。</span><span class="lang-en">An inverted index, term to postings. The body lives elsewhere. No ANN, no vector index.</span></span>
+      </button>
+      <button type="button" class="flip">
+        <span class="q"><span class="lang-zh">B+Tree 和 LSM 怎么选？</span><span class="lang-en">How do you choose B+Tree or LSM?</span></span>
+        <span class="a"><span class="lang-zh">读稳、原地改页用 B+Tree。写吞吐用 LSM。写得快是热路径，不等于写放大小。税在 compaction。</span><span class="lang-en">Stable reads and in-place pages: B+Tree. Write throughput: LSM. A fast hot path is not low write amplification. The tax is compaction.</span></span>
+      </button>
+      <button type="button" class="flip">
+        <span class="q"><span class="lang-zh">Bloom filter 一句怎么说？</span><span class="lang-en">Bloom filter in one line?</span></span>
+        <span class="a"><span class="lang-zh">说不在就跳过这个 SSTable，没有假阴性。说可能在才打开文件。</span><span class="lang-en">"Not in" skips that SSTable. There is no false negative. "Maybe" is when you open the file.</span></span>
+      </button>
+    </div>
+  </section>
+  <p><button type="button" class="read-toggle">
+    <span class="when-off"><span class="lang-zh">我已学完本章</span><span class="lang-en">Mark this chapter done</span></span>
+    <span class="when-on"><span class="lang-zh">已学完本章</span><span class="lang-en">Completed</span></span>
+  </button></p>
+  <p class="cite"><span class="lang-zh">进度存在这台浏览器里。</span><span class="lang-en">Saved in this browser only.</span></p>
+</article>
+</main>
+<script src="../assets/js/nav.js"></script>
+<script src="../assets/js/lang.js"></script>
+<script src="../assets/js/slides.js"></script>
+<script src="../assets/js/progress.js"></script>
+</body>
+</html>

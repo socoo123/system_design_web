@@ -1,0 +1,849 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="parchment" data-locale="zh">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ch11 · 设计新闻 Feed</title>
+  <link rel="icon" href="../favicon.ico" sizes="48x48">
+  <link rel="stylesheet" href="../assets/css/style.css">
+  <script src="../assets/js/boot.js"></script>
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="../index.html"><span class="brand-logo">SD</span><span class="lang-zh">系统设计面试</span><span class="lang-en">System Design Interview</span></a>
+  <span class="spacer"></span>
+  <a class="map-link" href="../index.html"><span class="lang-zh">课程地图</span><span class="lang-en">Map</span></a>
+  <div class="seg" role="group" aria-label="language">
+    <button type="button" data-locale-set="zh">中文</button>
+    <button type="button" data-locale-set="both"><span class="lang-zh">对照</span><span class="lang-en">Both</span></button>
+    <button type="button" data-locale-set="en">EN</button>
+  </div>
+  <div class="seg" role="group" aria-label="theme">
+    <button type="button" data-theme-set="parchment"><span class="lang-zh">护眼</span><span class="lang-en">Paper</span></button>
+    <button type="button" data-theme-set="dracula"><span class="lang-zh">深色</span><span class="lang-en">Dark</span></button>
+  </div>
+</header>
+<main class="wrap">
+<article class="chapter" id="ch11" data-ch="ch11">
+  <header>
+    <div class="ch-kicker"><span class="lang-zh">CHAPTER 11 · 设计题</span><span class="lang-en">CHAPTER 11 · case</span></div>
+    <h1><span class="lang-zh">设计新闻 Feed</span><span class="lang-en">Design a news feed</span></h1>
+    <p class="ch-meta-line"><span class="lang-zh">约 35 分钟 · 前置：Ch01。缓存和消息可以后读</span><span class="lang-en">~35 min · after Ch01. Cache and messaging can wait</span></p>
+  </header>
+
+  <section class="goal">
+    <h2><span class="lang-zh">这一章结束你能做什么</span><span class="lang-en">What you can do after this chapter</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">中文</p>
+        <ul>
+          <li>30 秒讲完三个 hard part，默认 <strong>hybrid fan-out</strong>。</li>
+          <li>写放大开口算成帖子数 × 粉丝数。发帖 QPS 很小。</li>
+          <li>按白板画关注流：发帖，按时间看。这一轮不做推荐排序。</li>
+        </ul>
+      </div>
+      <div class="lang-en"><p class="col-kicker">English</p>
+        <ul>
+          <li>Give the three hard parts in 30 seconds. Default to <strong>hybrid fan-out</strong>.</li>
+          <li>Say write amplification out loud: posts × followers. Post QPS is small.</li>
+          <li>Draw a follow feed: post, then read by time. No ranking model on this round.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">先问清楚</span><span class="lang-en">Ask before you draw</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">中文</p>
+        <p>Feed 三个 hard part：fan-out 发生在写时还是读时，大 V 的写放大，timeline 里存什么。系统看起来就是发帖和刷列表。<a href="ch09.html">短链</a>是读多写少的 KV，<a href="ch10.html">通知</a>是服务推向用户的 fan-out。这题反过来：一条帖要出现在粉丝的 timeline 里，写会被粉丝数放大。</p>
+        <p>五个问题就停，其余写成假设。问过 10 分钟也是 red flag。没问流类型就画召回和精排，是把推荐系统整章搬上来。</p>
+        <p class="say">我假设这是关注流：用户发帖，粉丝按时间看。推荐是另一道题，这一轮不做排序模型。秒级最终一致，不保证全世界同一秒看到。媒体是对象存储里的 URL，CDN 不在这题展开。分页用 cursor。我按这个画，不对你打断我。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">English</p>
+        <p>Feed has three hard parts: whether fan-out happens on write or on read, celebrity write amplification, and what the timeline stores. The product looks like post and scroll. A <a href="ch09.html">URL shortener</a> is read-heavy KV. <a href="ch10.html">Notifications</a> are fan-out from the service to the user. This prompt is the reverse: one post has to show up on every follower's timeline, so writes scale with follower count.</p>
+        <p>Five questions, then stop. Write the rest as assumptions. Past ten minutes of questions is a red flag too. Drawing recall and ranking before you asked which feed this is means you imported a recommender.</p>
+        <p class="say">I'll assume a follow feed: people post, followers read by time. A recommender is a different problem. No ranking model this round. Seconds, eventual consistency. I will not promise the whole world sees it in the same second. Media is a URL in object storage. CDN stays off this board. Pagination is a cursor. I'll draw on that — cut me off if it's wrong.</p>
+      </div>
+    </div>
+    <figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img">
+          <g>
+            <rect x="350" y="150" width="260" height="100" rx="12" class="box"/>
+            <text x="480" y="184" text-anchor="middle" class="label">Post</text>
+            <text x="480" y="208" text-anchor="middle" class="sub">one write</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">第一笔只画发帖。先确认用户在创造一条帖，后面所有放大都从这里开始。</span><span class="lang-en">First stroke is the post. Confirm the user is creating one post. Every later amplification starts here.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img">
+          <g>
+            <rect x="190" y="150" width="260" height="100" rx="12" class="box"/>
+            <text x="320" y="184" text-anchor="middle" class="label">Post</text>
+            <text x="320" y="208" text-anchor="middle" class="sub">one write</text>
+          </g>
+          <g>
+            <rect x="510" y="150" width="260" height="100" rx="12" class="box ok"/>
+            <text x="640" y="184" text-anchor="middle" class="label">Timeline</text>
+            <text x="640" y="208" text-anchor="middle" class="sub">read by time</text>
+          </g>
+          <line x1="456" y1="200" x2="499" y2="200" class="wire"/>
+          <polygon points="499,195 508,200 499,205" class="head"/>
+        </svg>
+        <figcaption><span class="lang-zh">第二笔是粉丝的 timeline，按时间看。关注流默认这条序，ZSET 的 score 就是时间戳。</span><span class="lang-en">Second stroke is the follower timeline, read by time. A follow feed defaults to that order. The ZSET score is the timestamp.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img">
+          <g>
+            <rect x="190" y="70" width="260" height="100" rx="12" class="box"/>
+            <text x="320" y="104" text-anchor="middle" class="label">Post</text>
+            <text x="320" y="128" text-anchor="middle" class="sub">one write</text>
+          </g>
+          <g>
+            <rect x="510" y="70" width="260" height="100" rx="12" class="box ok"/>
+            <text x="640" y="104" text-anchor="middle" class="label">Timeline</text>
+            <text x="640" y="128" text-anchor="middle" class="sub">read by time</text>
+          </g>
+          <line x1="456" y1="120" x2="499" y2="120" class="wire"/>
+          <polygon points="499,115 508,120 499,125" class="head"/>
+          <g>
+            <rect x="350" y="236" width="260" height="100" rx="12" class="box bad"/>
+            <text x="480" y="270" text-anchor="middle" class="label">Ranking</text>
+            <text x="480" y="294" text-anchor="middle" class="sub">not this round</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">排序模型不要接到这支箭头上。面试官问到推荐流：承认是另一道题，马上收回来，本场继续讲关注流。</span><span class="lang-en">Do not attach a ranking model to this arrow. If they ask about recommendations, say it is a different problem, close it, and stay on the follow feed.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img">
+          <g>
+            <rect x="62" y="150" width="260" height="100" rx="12" class="box"/>
+            <text x="192" y="184" text-anchor="middle" class="label">Post</text>
+            <text x="192" y="208" text-anchor="middle" class="sub">one write</text>
+          </g>
+          <g>
+            <rect x="350" y="150" width="260" height="100" rx="12" class="box ok"/>
+            <text x="480" y="184" text-anchor="middle" class="label">By time</text>
+            <text x="480" y="208" text-anchor="middle" class="sub">eventual, seconds</text>
+          </g>
+          <line x1="328" y1="200" x2="339" y2="200" class="wire"/>
+          <polygon points="339,195 348,200 339,205" class="head"/>
+          <g>
+            <rect x="638" y="150" width="260" height="100" rx="12" class="box"/>
+            <text x="768" y="184" text-anchor="middle" class="label">Cursor</text>
+            <text x="768" y="208" text-anchor="middle" class="sub">not offset</text>
+          </g>
+          <line x1="616" y1="200" x2="627" y2="200" class="wire"/>
+          <polygon points="627,195 636,200 627,205" class="head"/>
+        </svg>
+        <figcaption><span class="lang-zh">把留在白板上的假设写全：按时间、秒级最终一致、cursor 翻页。排序那一格已经拿掉了。</span><span class="lang-en">Write the assumptions that stay: by time, seconds-level eventual consistency, cursor pagination. The ranking box is already off the board.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img">
+          <g>
+            <rect x="38" y="150" width="200" height="100" rx="12" class="box"/>
+            <text x="138" y="184" text-anchor="middle" class="label">Post</text>
+            <text x="138" y="208" text-anchor="middle" class="sub">one write</text>
+          </g>
+          <g>
+            <rect x="266" y="150" width="200" height="100" rx="12" class="box ok"/>
+            <text x="366" y="184" text-anchor="middle" class="label">By time</text>
+            <text x="366" y="208" text-anchor="middle" class="sub">follow feed</text>
+          </g>
+          <line x1="244" y1="200" x2="255" y2="200" class="wire"/>
+          <polygon points="255,195 264,200 255,205" class="head"/>
+          <g>
+            <rect x="494" y="150" width="200" height="100" rx="12" class="box"/>
+            <text x="594" y="184" text-anchor="middle" class="label">Cursor</text>
+            <text x="594" y="208" text-anchor="middle" class="sub">not offset</text>
+          </g>
+          <line x1="472" y1="200" x2="483" y2="200" class="wire"/>
+          <polygon points="483,195 492,200 483,205" class="head"/>
+          <g>
+            <rect x="722" y="150" width="200" height="100" rx="12" class="box alt"/>
+            <text x="822" y="184" text-anchor="middle" class="label">Media URL</text>
+            <text x="822" y="208" text-anchor="middle" class="sub">CDN later</text>
+          </g>
+          <line x1="700" y1="200" x2="711" y2="200" class="wire"/>
+          <polygon points="711,195 720,200 711,205" class="head"/>
+        </svg>
+        <figcaption><span class="lang-zh">媒体只留 URL。二进制不进 feed svc，CDN 不在这张图上设计。删帖是否瞬间从所有 timeline 消失，先假设读的时候滤掉，细节放到失败那一套。</span><span class="lang-en">Media stays a URL. Bytes never enter the feed service, and you do not design the CDN on this picture. Whether a delete vanishes from every timeline instantly: assume you filter on read. The failure pass covers that.</span></figcaption>
+      </div>
+    </figure>
+    <p class="cite"><span class="lang-zh">提问的习惯在 <a class="chip" href="ch01.html">Ch01</a>。问关键的，写下假设，继续画。</span><span class="lang-en">The habit of asking lives in <a class="chip" href="ch01.html">Ch01</a>. Ask the key ones, write the assumptions, keep drawing.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">数量级</span><span class="lang-en">Orders of magnitude</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">中文</p>
+        <p>公式在估算章。这里只要证明：发帖本身不贵，贵的是 fan-out。下面全是白板假设，用公开量级，不是某家公司的内部数字。中位数粉丝更低，均值被大 V 拉高，所以平均按 200 来讲。</p>
+        <p>约 1000 万 DAU，约 10% 的人每天发 1 帖，就是一天约 1e6 帖。每人每天打开 feed 约 20 次。文本大约 1 KB × 1e6，一天约 1 GB，权威在 post 库。timeline 只缓存活跃用户最近约 1000 个 id，内存是几十到一百 GB 这个量级。</p>
+        <p class="say">千万 DAU：发帖日均大约十几 QPS，读 feed 是千到万。平均 200 个粉丝，纯 push 就是每秒几千次 ZADD。一个百万粉的号发一条，是瞬时一百万次写，摊不进日均。所以不能纯 push。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">English</p>
+        <p>The formulas live in the estimates chapter. Here you only show that posting is cheap and fan-out is what costs. Every number below is a board assumption from public-scale teaching numbers, not a company's internals. The median follower count is lower. Celebrities pull the mean up, so say about 200.</p>
+        <p>About 10 million DAU, about 10% posting once a day, is about 1e6 posts a day. About 20 feed opens per person per day. Text is about 1 KB × 1e6, about 1 GB a day, and the post store is the source of truth. The timeline caches about the last 1000 ids for active users, on the order of tens to about 100 GB.</p>
+        <p class="say">On a 10-million DAU board, posts are about a dozen QPS on a daily average. Reading the feed is thousands to tens of thousands. At 200 followers, pure push is thousands of ZADDs per second. One post from a million-follower account is an instant million writes. That does not average into the daily mean. You cannot pure-push.</p>
+      </div>
+    </div>
+    <figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img">
+          <g>
+            <rect x="350" y="150" width="260" height="100" rx="12" class="box"/>
+            <text x="480" y="184" text-anchor="middle" class="label">10M DAU</text>
+            <text x="480" y="208" text-anchor="middle" class="sub">10% post, 200 fans</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">先把假设写上。1000 万 DAU，一成的人每天一条，平均粉丝按 200。这是教学量级。</span><span class="lang-en">Write the assumption first. 10 million DAU, a tenth of them post once a day, about 200 followers on average. Teaching scale.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img">
+          <g>
+            <rect x="190" y="150" width="260" height="100" rx="12" class="box"/>
+            <text x="320" y="184" text-anchor="middle" class="label">~12 post QPS</text>
+            <text x="320" y="208" text-anchor="middle" class="sub">1e6 / 86400</text>
+          </g>
+          <g>
+            <rect x="510" y="150" width="260" height="100" rx="12" class="box alt"/>
+            <text x="640" y="184" text-anchor="middle" class="label">~2e3 reads</text>
+            <text x="640" y="208" text-anchor="middle" class="sub">1e7 x 20 / 86400</text>
+          </g>
+          <line x1="456" y1="200" x2="499" y2="200" class="wire"/>
+          <polygon points="499,195 508,200 499,205" class="head"/>
+        </svg>
+        <figcaption><span class="lang-zh">发帖大约 12 QPS，峰值按 5 倍仍是几十。读 feed 大约 2e3，峰值大约 1e4。口播用量级，不报一长串小数。</span><span class="lang-en">Posts are about 12 QPS. A 5× peak is still tens. Feed reads are about 2e3, peak around 1e4. Speak orders of magnitude, not a long decimal.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img">
+          <g>
+            <rect x="190" y="150" width="260" height="100" rx="12" class="box"/>
+            <text x="320" y="184" text-anchor="middle" class="label">posts x fans</text>
+            <text x="320" y="208" text-anchor="middle" class="sub">1e6 x 200</text>
+          </g>
+          <g>
+            <rect x="510" y="150" width="260" height="100" rx="12" class="box ok"/>
+            <text x="640" y="184" text-anchor="middle" class="label">~2e3 ZADD/s</text>
+            <text x="640" y="208" text-anchor="middle" class="sub">pure push</text>
+          </g>
+          <line x1="456" y1="200" x2="499" y2="200" class="wire"/>
+          <polygon points="499,195 508,200 499,205" class="head"/>
+        </svg>
+        <figcaption><span class="lang-zh">写放大必须开口：fan-out 写次数 ≈ 帖子数 × 粉丝数。日均发帖只有十几 QPS，纯 push 乘上 200 就变成每秒几千次 ZADD，峰值大约 1e4/s。</span><span class="lang-en">Say write amplification out loud: fan-out writes ≈ posts × followers. A dozen post QPS times 200 followers is thousands of ZADDs per second. Peak is around 1e4/s.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img">
+          <g>
+            <rect x="190" y="150" width="260" height="100" rx="12" class="box"/>
+            <text x="320" y="184" text-anchor="middle" class="label">Daily mean</text>
+            <text x="320" y="208" text-anchor="middle" class="sub">~2e3 ZADD/s</text>
+          </g>
+          <g>
+            <rect x="510" y="150" width="260" height="100" rx="12" class="box bad"/>
+            <text x="640" y="184" text-anchor="middle" class="label">1e6 writes</text>
+            <text x="640" y="208" text-anchor="middle" class="sub">1M fans, instant</text>
+          </g>
+          <line x1="456" y1="200" x2="499" y2="200" class="wire"/>
+          <polygon points="499,195 508,200 499,205" class="head"/>
+        </svg>
+        <figcaption><span class="lang-zh">大 V 一条帖是瞬时 1e6 次写。千万粉就是 1e7。这个尖峰摊不进日均，也不是再加一台 fan-out worker 能抹平的。图片出站走对象存储和 CDN，不进 feed svc。</span><span class="lang-en">One celebrity post is an instant 1e6 writes. Ten million followers is 1e7. That spike does not fold into the daily mean, and another fan-out worker does not smooth it away. Image egress is object storage and CDN, not the feed service.</span></figcaption>
+      </div>
+    </figure>
+    <p class="cite"><span class="lang-zh">估算口径见 <span class="chip soon">Ch03 · 粗略估算</span>。</span><span class="lang-en">The estimate habit is <span class="chip soon">Ch03 · back-of-the-envelope</span>.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">高层：先落库，再 fan-out</span><span class="lang-en">High-level: persist, then fan-out</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">中文</p>
+        <p>从 App 一笔一笔加。post 库是权威，按作者分片。timeline 是每人一份预计算的 inbox，只存 <code>post_id</code>。写放大走 MQ 异步，API 先返回。请求线程里不扫粉丝列表。</p>
+        <p>schema 够用就停：<code>post</code>（post_id、author_id、text、media_url、created_at、deleted），<code>follow</code>（follower_id、followee_id），timeline 是 Redis ZSET，score 为时间，member 为 <code>post_id</code>。热点查询是「这个作者的粉丝」，索引在 <code>followee_id</code>。分区和 ISR 不要在这题展开。简单权重（互动 × 时间衰减）可以提一句，面试官说别太呆再加。这题不放模型。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">English</p>
+        <p>Start at the app and add one box per stroke. The post store is the source of truth, sharded by author. The timeline is a precomputed inbox per user, <code>post_id</code> only. Write amplification goes async on the queue, and the API returns first. The request thread does not scan the follower list.</p>
+        <p>Stop the schema when it is enough: <code>post</code> (post_id, author_id, text, media_url, created_at, deleted), <code>follow</code> (follower_id, followee_id), timeline as a Redis ZSET with time as the score and <code>post_id</code> as the member. The hot query is "this author's followers," indexed on <code>followee_id</code>. Leave partitions and ISR for the queue chapter. You can mention a simple score, engagement × time decay, in one sentence, and add it only if they say the feed is too dumb. No model on this prompt.</p>
+      </div>
+    </div>
+    <figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img">
+          <g>
+            <rect x="350" y="150" width="260" height="100" rx="12" class="box"/>
+            <text x="480" y="184" text-anchor="middle" class="label">App</text>
+            <text x="480" y="208" text-anchor="middle" class="sub">creates a post</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">第一笔只有 App。用户发出一条帖，图上先不要出现缓存和队列。</span><span class="lang-en">First stroke is only the app. The user creates a post. No cache and no queue on the board yet.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img">
+          <g>
+            <rect x="190" y="150" width="260" height="100" rx="12" class="box"/>
+            <text x="320" y="184" text-anchor="middle" class="label">App</text>
+            <text x="320" y="208" text-anchor="middle" class="sub">creates a post</text>
+          </g>
+          <g>
+            <rect x="510" y="150" width="260" height="100" rx="12" class="box"/>
+            <text x="640" y="184" text-anchor="middle" class="label">Feed svc</text>
+            <text x="640" y="208" text-anchor="middle" class="sub">API returns</text>
+          </g>
+          <line x1="456" y1="200" x2="499" y2="200" class="wire"/>
+          <polygon points="499,195 508,200 499,205" class="head"/>
+        </svg>
+        <figcaption><span class="lang-zh">加上 Feed svc。校验、落库、入队都从这里走。粉丝列表不在这条请求里扫。</span><span class="lang-en">Add the feed service. Validate, persist, and enqueue from here. The follower list is not scanned on this request.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img">
+          <g>
+            <rect x="62" y="150" width="260" height="100" rx="12" class="box"/>
+            <text x="192" y="184" text-anchor="middle" class="label">App</text>
+            <text x="192" y="208" text-anchor="middle" class="sub">creates a post</text>
+          </g>
+          <g>
+            <rect x="350" y="150" width="260" height="100" rx="12" class="box"/>
+            <text x="480" y="184" text-anchor="middle" class="label">Feed svc</text>
+            <text x="480" y="208" text-anchor="middle" class="sub">API returns</text>
+          </g>
+          <line x1="328" y1="200" x2="339" y2="200" class="wire"/>
+          <polygon points="339,195 348,200 339,205" class="head"/>
+          <g>
+            <rect x="638" y="150" width="260" height="100" rx="12" class="box alt"/>
+            <text x="768" y="184" text-anchor="middle" class="label">Post store</text>
+            <text x="768" y="208" text-anchor="middle" class="sub">persist first</text>
+          </g>
+          <line x1="616" y1="200" x2="627" y2="200" class="wire"/>
+          <polygon points="627,195 636,200 627,205" class="head"/>
+        </svg>
+        <figcaption><span class="lang-zh">先写 post 库。这是权威。媒体 URL 写在帖上，对象本身不在这个库里。</span><span class="lang-en">Write the post store first. That is the source of truth. The media URL sits on the post. The object itself is not in this store.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img">
+          <g>
+            <rect x="38" y="150" width="200" height="100" rx="12" class="box"/>
+            <text x="138" y="184" text-anchor="middle" class="label">App</text>
+            <text x="138" y="208" text-anchor="middle" class="sub">creates a post</text>
+          </g>
+          <g>
+            <rect x="266" y="150" width="200" height="100" rx="12" class="box"/>
+            <text x="366" y="184" text-anchor="middle" class="label">Feed svc</text>
+            <text x="366" y="208" text-anchor="middle" class="sub">API returns</text>
+          </g>
+          <line x1="244" y1="200" x2="255" y2="200" class="wire"/>
+          <polygon points="255,195 264,200 255,205" class="head"/>
+          <g>
+            <rect x="494" y="150" width="200" height="100" rx="12" class="box alt"/>
+            <text x="594" y="184" text-anchor="middle" class="label">Post store</text>
+            <text x="594" y="208" text-anchor="middle" class="sub">persist first</text>
+          </g>
+          <line x1="472" y1="200" x2="483" y2="200" class="wire"/>
+          <polygon points="483,195 492,200 483,205" class="head"/>
+          <g>
+            <rect x="722" y="150" width="200" height="100" rx="12" class="box alt"/>
+            <text x="822" y="184" text-anchor="middle" class="label">MQ</text>
+            <text x="822" y="208" text-anchor="middle" class="sub">then enqueue</text>
+          </g>
+          <line x1="700" y1="200" x2="711" y2="200" class="wire"/>
+          <polygon points="711,195 720,200 711,205" class="head"/>
+        </svg>
+        <figcaption><span class="lang-zh">落库之后再入队，然后 API 就返回。队列按 at-least-once 声明即可。fan-out worker 还没画。</span><span class="lang-en">Persist, then enqueue, then the API returns. Declare the queue at-least-once and stop. The fan-out worker is not on the board yet.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img">
+          <g>
+            <rect x="34" y="150" width="156" height="100" rx="12" class="box"/>
+            <text x="112" y="184" text-anchor="middle" class="label">App</text>
+            <text x="112" y="208" text-anchor="middle" class="sub">creates a post</text>
+          </g>
+          <g>
+            <rect x="218" y="150" width="156" height="100" rx="12" class="box"/>
+            <text x="296" y="184" text-anchor="middle" class="label">Feed svc</text>
+            <text x="296" y="208" text-anchor="middle" class="sub">API returns</text>
+          </g>
+          <line x1="196" y1="200" x2="207" y2="200" class="wire"/>
+          <polygon points="207,195 216,200 207,205" class="head"/>
+          <g>
+            <rect x="402" y="150" width="156" height="100" rx="12" class="box alt"/>
+            <text x="480" y="184" text-anchor="middle" class="label">Post store</text>
+            <text x="480" y="208" text-anchor="middle" class="sub">truth</text>
+          </g>
+          <line x1="380" y1="200" x2="391" y2="200" class="wire"/>
+          <polygon points="391,195 400,200 391,205" class="head"/>
+          <g>
+            <rect x="586" y="150" width="156" height="100" rx="12" class="box alt"/>
+            <text x="664" y="184" text-anchor="middle" class="label">MQ</text>
+            <text x="664" y="208" text-anchor="middle" class="sub">async</text>
+          </g>
+          <line x1="564" y1="200" x2="575" y2="200" class="wire"/>
+          <polygon points="575,195 584,200 575,205" class="head"/>
+          <g>
+            <rect x="770" y="150" width="156" height="100" rx="12" class="box ok"/>
+            <text x="848" y="184" text-anchor="middle" class="label">Timeline</text>
+            <text x="848" y="208" text-anchor="middle" class="sub">fan-out</text>
+          </g>
+          <line x1="748" y1="200" x2="759" y2="200" class="wire"/>
+          <polygon points="759,195 768,200 759,205" class="head"/>
+        </svg>
+        <figcaption><span class="lang-zh">最后一笔才是粉丝的 timeline。完整图就这五块。问一句：方向可以吗？接下来 trade-off、大 V、timeline 里存什么，分开画。失败路径最后单独讲。</span><span class="lang-en">The last stroke is the follower timeline. Leave these five boxes up. Ask: does this direction look right? Next, the trade-off, celebrities, and what the timeline stores, as separate passes. The failure path comes after those.</span></figcaption>
+      </div>
+    </figure>
+    <p class="cite"><span class="lang-zh">post 放哪一类存储，见 <a class="chip" href="ch37.html">Ch37 · 存储选型</a>。缓存和 CDN 在 <span class="chip soon">Ch38 · 缓存与 CDN</span>。分片在 <span class="chip soon">Ch41 · 复制与分片</span>。队列语义在 <span class="chip soon">Ch42 · 消息与弹性</span>。分区课是 <span class="chip soon">Ch20 · 分布式消息队列</span>，这题不展开。</span><span class="lang-en">Where a post lives is <a class="chip" href="ch37.html">Ch37 · storage choices</a>. Cache and CDN are <span class="chip soon">Ch38 · cache and CDN</span>. Sharding is <span class="chip soon">Ch41 · replication and sharding</span>. Queue semantics are <span class="chip soon">Ch42 · messaging</span>. The partition chapter is <span class="chip soon">Ch20 · message queue</span>. Not this board.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">Trade-off · push 还是 pull</span><span class="lang-en">Trade-off · push or pull</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">中文</p>
+        <p>这一套只讲 trade-off：fan-out 在写时还是读时。写放大和读延迟换位置，不是道德选择。失败路径下一套再画，不塞进同一张。</p>
+        <p>纯 push 对普通人合适：粉丝几十到几千，预计算让刷 feed 变成一次缓存读。纯 pull 对大 V 合适：发帖写一次，读摊在一天里。两边都会在规模上爆，所以 2026 的白板默认 hybrid，而不是先画纯 push、等对方问明星再改。小规模、没有大 V 时，可以说先纯 push，阈值到了再切。那是演进，不是这题的第一答案。</p>
+        <p class="say">普通人 push，大 V pull，读的时候 fan-in。阈值按粉丝数，教学大约十万，不是魔法数，看写放大和读延迟调。我不会第一笔把纯 push 画死。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">English</p>
+        <p>This pass is only the trade-off: fan-out on write or on read. You are swapping write amplification and read latency. The failure path is the next pass. It does not share these slides.</p>
+        <p>Pure push fits regular users: tens to thousands of followers, and a precomputed timeline turns the feed into one cache read. Pure pull fits celebrities: one write on post, and the reads spread across the day. Both sides explode at scale, so the 2026 board defaults to hybrid. You do not draw pure push and patch it when they mention a star. At small scale, with no celebrities, you can start on pure push and say you will cut over when the threshold trips. That is evolution, not the first answer on this prompt.</p>
+        <p class="say">Regular users push, celebrities pull, and the read is a fan-in. The threshold is follower count. Teaching uses about 100k. It is not a magic number. Tune it on write amplification and read latency. I will not lock the first picture to pure push.</p>
+      </div>
+    </div>
+    <figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img">
+          <g>
+            <rect x="350" y="150" width="260" height="100" rx="12" class="box"/>
+            <text x="480" y="184" text-anchor="middle" class="label">Fan-out</text>
+            <text x="480" y="208" text-anchor="middle" class="sub">write or read?</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">先把问题写上：fan-out 发生在发帖时，还是发生在别人刷 feed 时。</span><span class="lang-en">Write the question first: does fan-out happen when someone posts, or when someone else opens the feed?</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img">
+          <g>
+            <rect x="190" y="150" width="260" height="100" rx="12" class="box ok"/>
+            <text x="320" y="184" text-anchor="middle" class="label">Push</text>
+            <text x="320" y="208" text-anchor="middle" class="sub">read is one ZSET</text>
+          </g>
+          <g>
+            <rect x="510" y="150" width="260" height="100" rx="12" class="box"/>
+            <text x="640" y="184" text-anchor="middle" class="label">Write = fans</text>
+            <text x="640" y="208" text-anchor="middle" class="sub">on every post</text>
+          </g>
+          <line x1="456" y1="200" x2="499" y2="200" class="wire"/>
+          <polygon points="499,195 508,200 499,205" class="head"/>
+        </svg>
+        <figcaption><span class="lang-zh">Push：发帖时写入每个粉丝的 timeline。读是一次 ZREVRANGE。代价是写放大等于粉丝数。普通人这条很香。</span><span class="lang-en">Push: on post, write every follower's timeline. The read is one ZREVRANGE. The cost is write amplification equal to the follower count. That is a good fit for regular users.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img">
+          <g>
+            <rect x="190" y="150" width="260" height="100" rx="12" class="box ok"/>
+            <text x="320" y="184" text-anchor="middle" class="label">Pull</text>
+            <text x="320" y="208" text-anchor="middle" class="sub">write = 1</text>
+          </g>
+          <g>
+            <rect x="510" y="150" width="260" height="100" rx="12" class="box"/>
+            <text x="640" y="184" text-anchor="middle" class="label">Read = follows</text>
+            <text x="640" y="208" text-anchor="middle" class="sub">merge on read</text>
+          </g>
+          <line x1="456" y1="200" x2="499" y2="200" class="wire"/>
+          <polygon points="499,195 508,200 499,205" class="head"/>
+        </svg>
+        <figcaption><span class="lang-zh">Pull：发帖只写作者自己的 outbox。读的时候把每个关注对象的最近帖拉来再 merge。关注 5000 人就是 5000 次读。</span><span class="lang-en">Pull: the post writes only the author's outbox. On read you pull recent posts from each followee and merge. Following 5000 people is 5000 reads.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img">
+          <g>
+            <rect x="190" y="150" width="260" height="100" rx="12" class="box bad"/>
+            <text x="320" y="184" text-anchor="middle" class="label">Celeb storm</text>
+            <text x="320" y="208" text-anchor="middle" class="sub">pure push</text>
+          </g>
+          <g>
+            <rect x="510" y="150" width="260" height="100" rx="12" class="box bad"/>
+            <text x="640" y="184" text-anchor="middle" class="label">5000 reads</text>
+            <text x="640" y="208" text-anchor="middle" class="sub">pure pull</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">两张并列，不画箭头。纯 push 的失败是大 V 写风暴。纯 pull 的失败是关注数线性的读。所以默认答案不是二选一。</span><span class="lang-en">Two boxes side by side, so no arrow. Pure push fails as a celebrity write storm. Pure pull fails as reads linear in how many people you follow. The default is not one of these two.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img">
+          <g>
+            <rect x="62" y="150" width="260" height="100" rx="12" class="box ok"/>
+            <text x="192" y="184" text-anchor="middle" class="label">Push regular</text>
+            <text x="192" y="208" text-anchor="middle" class="sub">on write</text>
+          </g>
+          <g>
+            <rect x="350" y="150" width="260" height="100" rx="12" class="box alt"/>
+            <text x="480" y="184" text-anchor="middle" class="label">Celeb outbox</text>
+            <text x="480" y="208" text-anchor="middle" class="sub">write = 1</text>
+          </g>
+          <g>
+            <rect x="638" y="150" width="260" height="100" rx="12" class="box ok"/>
+            <text x="768" y="184" text-anchor="middle" class="label">Fan-in</text>
+            <text x="768" y="208" text-anchor="middle" class="sub">merge on read</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">Hybrid 是默认。普通人写时 push。大 V 只写 outbox。读的时候 fan-in：自己的 inbox，加上关注的大 V，按时间 merge，同一条帖去重。多一次 merge，换来写路径有上界。</span><span class="lang-en">Hybrid is the default. Regular users push on write. Celebrities write an outbox only. On read you fan-in: your inbox plus the celebrities you follow, merged by time, deduped. You pay an extra merge. You buy a bounded write path.</span></figcaption>
+      </div>
+    </figure>
+    <p class="cite"><span class="lang-zh">通知那道题的 fan-out 是服务推向用户，见 <a class="chip" href="ch10.html">Ch10</a>。队列怎么声明至少一次，在 <span class="chip soon">Ch42 · 消息与弹性</span>。</span><span class="lang-en">The notification fan-out is service to user, in <a class="chip" href="ch10.html">Ch10</a>. How you declare at-least-once is <span class="chip soon">Ch42 · messaging</span>.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">Hard part · 大 V</span><span class="lang-en">Hard part · celebrities</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">中文</p>
+        <p>第二个 hard part。粉丝数是幂律：极少账号贡献绝大部分 fan-out。一条百万粉的帖，纯 push 是瞬时 1e6 次 timeline 写。MQ 堆积、Redis CPU、粉丝看到的时间拉开，这是 hot key。再加消费者消不掉根因。写尖峰挤在同一毫秒；读是粉丝在一天里陆续打开 App。把瞬时写换成分散读，尖峰就没了。</p>
+        <p>教学线大约 10 万粉。低于这条走 push，跨过就停 push、改 outbox。生产按写放大和 p99 读延迟调。账号变成大 V 之后，旧的 push 停掉，已经在 inbox 里的 id 不必立刻清。长期不活跃的粉丝也可以不 push，他们回来时 pull 一页。活跃粉丝限速分批 push 是优化，不是第一张图。每人关注的大 V 通常远少于关注总数，所以 fan-in 的路数可预期。</p>
+        <p class="say">大 V 我不对全体粉丝 ZADD。只写 outbox，下次读 feed 时 merge。写热点变成读热点，同一份 outbox，缓存吃得下。不保证一亿个 inbox 在同一秒都有这条 id。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">English</p>
+        <p>Second hard part. Follower counts follow a power law: a tiny set of accounts produce most of the fan-out work. One post from a million-follower account, pure push, is an instant 1e6 timeline writes. Queue backlog, Redis CPU, followers seeing it at wildly different times: that is a hot key. More consumers do not remove the cause. The write spike arrives in the same millisecond. The reads are followers opening the app across a day. Swap the instant write for spread-out reads and the spike is gone.</p>
+        <p>The teaching line is about 100k followers. Below it, push. Cross it, stop the push and switch to an outbox. Production tunes on write amplification and p99 read latency. When an account becomes a celebrity, stop the old push. Ids already in inboxes do not need an instant purge. You can also skip long-inactive followers; when they return they pull one page. A rate-limited batched push to active followers is an optimization, not the first diagram. People follow far fewer celebrities than total accounts, so the fan-in width stays predictable.</p>
+        <p class="say">I will not ZADD every follower of a celebrity. I write the outbox, and the next feed read merges it. The write hotspot becomes a read hotspot: one shared outbox, and cache can eat that. I will not promise that a hundred million inboxes contain this id in the same second.</p>
+      </div>
+    </div>
+    <figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img">
+          <g>
+            <rect x="350" y="150" width="260" height="100" rx="12" class="box bad"/>
+            <text x="480" y="184" text-anchor="middle" class="label">1e6 ZADDs</text>
+            <text x="480" y="208" text-anchor="middle" class="sub">one celeb post</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">先把灾难写上。百万粉纯 push，一条帖等于瞬时一百万次 timeline 写。千万粉是 1e7。</span><span class="lang-en">Write the failure first. Pure push for a million followers is an instant million timeline writes for one post. Ten million followers is 1e7.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img">
+          <g>
+            <rect x="190" y="150" width="260" height="100" rx="12" class="box bad"/>
+            <text x="320" y="184" text-anchor="middle" class="label">MQ backlog</text>
+            <text x="320" y="208" text-anchor="middle" class="sub">same millisecond</text>
+          </g>
+          <g>
+            <rect x="510" y="150" width="260" height="100" rx="12" class="box bad"/>
+            <text x="640" y="184" text-anchor="middle" class="label">Redis hot key</text>
+            <text x="640" y="208" text-anchor="middle" class="sub">write spike</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">尖峰打在队列和 Redis 上。粉丝看到的时间也会拉开。这是写热点，加 worker 搬不走。</span><span class="lang-en">The spike hits the queue and Redis. Followers also see the post at very different times. It is a write hotspot. Adding workers does not move it.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img">
+          <g>
+            <rect x="190" y="150" width="260" height="100" rx="12" class="box"/>
+            <text x="320" y="184" text-anchor="middle" class="label">Celeb post</text>
+            <text x="320" y="208" text-anchor="middle" class="sub">one write</text>
+          </g>
+          <g>
+            <rect x="510" y="150" width="260" height="100" rx="12" class="box ok"/>
+            <text x="640" y="184" text-anchor="middle" class="label">Outbox</text>
+            <text x="640" y="208" text-anchor="middle" class="sub">ZSET, post_id</text>
+          </g>
+          <line x1="456" y1="200" x2="499" y2="200" class="wire"/>
+          <polygon points="499,195 508,200 499,205" class="head"/>
+        </svg>
+        <figcaption><span class="lang-zh">改成只写一份 outbox，写放大变成 1。outbox 也是 ZSET，member 仍是 post_id。读的成本摊到粉丝打开 App 的时间上。</span><span class="lang-en">Switch to one outbox write. Write amplification becomes 1. The outbox is a ZSET too, and the member is still the post_id. The read cost spreads across the day as followers open the app.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img">
+          <g>
+            <rect x="62" y="150" width="260" height="100" rx="12" class="box"/>
+            <text x="192" y="184" text-anchor="middle" class="label">Inbox</text>
+            <text x="192" y="208" text-anchor="middle" class="sub">regular posts</text>
+          </g>
+          <g>
+            <rect x="350" y="150" width="260" height="100" rx="12" class="box alt"/>
+            <text x="480" y="184" text-anchor="middle" class="label">Outbox</text>
+            <text x="480" y="208" text-anchor="middle" class="sub">celebrities</text>
+          </g>
+          <g>
+            <rect x="638" y="150" width="260" height="100" rx="12" class="box ok"/>
+            <text x="768" y="184" text-anchor="middle" class="label">Fan-in</text>
+            <text x="768" y="208" text-anchor="middle" class="sub">merge by time</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">读 feed 时 fan-in。inbox 里已有普通人的 id，再拉关注的大 V outbox 最近若干条，按时间 merge，用 (时间, post_id) 去重。长连接上推一条「有新帖」可以点到聊天那章，这题不展开。</span><span class="lang-en">On feed read you fan-in. The inbox already has ids from regular users. Pull the latest ids from celebrity outboxes you follow, merge by time, and dedupe on (time, post_id). A lightweight "new post" ping on a long-lived connection can point at the chat chapter. Not this board.</span></figcaption>
+      </div>
+    </figure>
+    <p class="cite"><span class="lang-zh">写热点为什么改成读热点更吃得下，见 <span class="chip soon">Ch38 · 缓存与 CDN</span>。</span><span class="lang-en">Why a read hotspot is easier to cache than a write hotspot: <span class="chip soon">Ch38 · cache and CDN</span>.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">Hard part · timeline 存什么</span><span class="lang-en">Hard part · what the timeline stores</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">中文</p>
+        <p>第三个 hard part。Feed 是往下翻，同时新帖还在插进来。页稳不稳看 cursor，内容对不对看 hydration。timeline 只存 <code>post_id</code>，读的时候再批量补全。全文塞进每人一份 ZSET，内存差两个数量级，改文案还要改千万份副本。</p>
+        <p>cursor 是不透明 token，服务端解成 <code>(created_at, post_id)</code>。雪花 id 自带时间序，也可以当这把键。下一页取严格更老的 20 条。首页没有 cursor。客户端不传 <code>page=3</code>。offset 深翻会变慢，翻页之间插入新帖会重复或漏。hybrid 的两路 merge 用同一把有序键切一刀。</p>
+        <p class="say">分页用 (时间, post_id) cursor。timeline 只存 id，读时 MGET hydrate。用户卡片和计数走各自的缓存，不 JOIN 成一张宽行。媒体只返回 URL。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">English</p>
+        <p>Third hard part. The feed is infinite scroll while new posts keep inserting. Whether the page stays stable is the cursor. Whether the content is right is hydration. The timeline stores <code>post_id</code> only, and you hydrate in batch on read. Stuffing full posts into a per-user ZSET costs about two orders of magnitude more memory, and an edit would have to patch tens of millions of copies.</p>
+        <p>The cursor is an opaque token. The server decodes it to <code>(created_at, post_id)</code>. A snowflake id already carries time order, so it can be that key. The next page is 20 items strictly older than the anchor. Home has no cursor. The client does not pass <code>page=3</code>. Offset gets slower as you go deep, and a post inserted between pages duplicates or skips. The hybrid merge uses one ordered key and one cut.</p>
+        <p class="say">Pagination is a (time, post_id) cursor. The timeline stores ids only. On read, MGET to hydrate. User cards and counters live in their own caches. Do not JOIN one fat row. Media comes back as a URL.</p>
+      </div>
+    </div>
+    <figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img">
+          <g>
+            <rect x="350" y="150" width="260" height="100" rx="12" class="box ok"/>
+            <text x="480" y="184" text-anchor="middle" class="label">Timeline</text>
+            <text x="480" y="208" text-anchor="middle" class="sub">post_id only</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">先写存储契约。ZSET 的 member 是 post_id，score 是时间。只留最近 N 条，教学大约 800 到 1000。</span><span class="lang-en">Write the storage contract first. The ZSET member is the post_id, the score is time. Keep the last N, teaching about 800 to 1000.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img">
+          <g>
+            <rect x="190" y="150" width="260" height="100" rx="12" class="box bad"/>
+            <text x="320" y="184" text-anchor="middle" class="label">Full copies</text>
+            <text x="320" y="208" text-anchor="middle" class="sub">per follower</text>
+          </g>
+          <g>
+            <rect x="510" y="150" width="260" height="100" rx="12" class="box ok"/>
+            <text x="640" y="184" text-anchor="middle" class="label">post_id</text>
+            <text x="640" y="208" text-anchor="middle" class="sub">one source of truth</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">全文副本和只存 id 并列，不画箭头。改文案只打 post 库和 post 缓存，id 不变。</span><span class="lang-en">Full copies and id-only sit side by side, so no arrow. An edit hits the post store and the post cache. The id stays.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img">
+          <g>
+            <rect x="190" y="150" width="260" height="100" rx="12" class="box"/>
+            <text x="320" y="184" text-anchor="middle" class="label">Timeline</text>
+            <text x="320" y="208" text-anchor="middle" class="sub">ZREVRANGE ids</text>
+          </g>
+          <g>
+            <rect x="510" y="150" width="260" height="100" rx="12" class="box alt"/>
+            <text x="640" y="184" text-anchor="middle" class="label">Post cache</text>
+            <text x="640" y="208" text-anchor="middle" class="sub">MGET hydrate</text>
+          </g>
+          <line x1="456" y1="200" x2="499" y2="200" class="wire"/>
+          <polygon points="499,195 508,200 499,205" class="head"/>
+        </svg>
+        <figcaption><span class="lang-zh">读路径：先取 id，再 MGET。miss 回 post 库再回填。同时 miss 要合并，回源风暴留给缓存那章。</span><span class="lang-en">Read path: ids first, then MGET. A miss goes to the post store and backfills. Collapse concurrent misses. The stampede chapter is the cache chapter.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img">
+          <g>
+            <rect x="190" y="150" width="260" height="100" rx="12" class="box bad"/>
+            <text x="320" y="184" text-anchor="middle" class="label">Offset</text>
+            <text x="320" y="208" text-anchor="middle" class="sub">dupes and skips</text>
+          </g>
+          <g>
+            <rect x="510" y="150" width="260" height="100" rx="12" class="box ok"/>
+            <text x="640" y="184" text-anchor="middle" class="label">Cursor</text>
+            <text x="640" y="208" text-anchor="middle" class="sub">(ts, post_id)</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">offset 是 red flag。深翻越来越慢，翻页时新帖插进来会重复或漏。cursor 锚在上一页最后一条，新帖只出现在刷新。</span><span class="lang-en">Offset is a red flag. Deep pages get slower, and a post inserted between pages duplicates or skips. The cursor anchors on the last item of the previous page. New posts show up on refresh.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img">
+          <g>
+            <rect x="190" y="150" width="260" height="100" rx="12" class="box"/>
+            <text x="320" y="184" text-anchor="middle" class="label">Anchor</text>
+            <text x="320" y="208" text-anchor="middle" class="sub">(ts, post_id)</text>
+          </g>
+          <g>
+            <rect x="510" y="150" width="260" height="100" rx="12" class="box ok"/>
+            <text x="640" y="184" text-anchor="middle" class="label">Next 20</text>
+            <text x="640" y="208" text-anchor="middle" class="sub">strictly older</text>
+          </g>
+          <line x1="456" y1="200" x2="499" y2="200" class="wire"/>
+          <polygon points="499,195 508,200 499,205" class="head"/>
+        </svg>
+        <figcaption><span class="lang-zh">下一页是严格小于这个锚的 20 条。返回一页，带上下一个 cursor。删掉的帖在 hydrate 时丢掉，不够一页就再取一段 id。那条失败路径下一套画。</span><span class="lang-en">The next page is 20 items strictly older than that anchor. Return the page plus the next cursor. Drop deleted posts at hydrate time. If the page is short, fetch another id chunk. That failure path is the next pass.</span></figcaption>
+      </div>
+    </figure>
+    <p class="cite"><span class="lang-zh">id 和正文分开放，存储选型见 <a class="chip" href="ch37.html">Ch37 · 存储选型</a>。hydrate 和回源见 <span class="chip soon">Ch38 · 缓存与 CDN</span>。</span><span class="lang-en">Ids and bodies live apart. Storage choices are <a class="chip" href="ch37.html">Ch37 · storage choices</a>. Hydrate and backfill are <span class="chip soon">Ch38 · cache and CDN</span>.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">失败路径</span><span class="lang-en">Failure path</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">中文</p>
+        <p>这一套只讲写到一半、删帖、冷用户。push 还是 pull 已经在 trade-off 那一套里讲完。</p>
+        <p>队列会重投。worker 写到一半挂了，重试再 ZADD 同一个 <code>post_id</code>，结果一样，所以 fan-out 幂等。删帖不要遍历全部粉丝 inbox。post 上打 tombstone，hydrate 时丢掉，后台慢慢摘 id。取关也一样：读的时候按 follow 集过滤，或异步摘。追求删帖后一亿份 inbox 强一致，是 over-engineering。</p>
+        <p class="say">我按 at-least-once 讲。删帖不扫粉丝的 timeline。冷用户平时不 push，回来时 pull 一页重建。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">English</p>
+        <p>This pass is only a half-finished write, deletes, and cold users. Push versus pull already had its own trade-off pass.</p>
+        <p>The queue redelivers. If a worker dies halfway, the retry ZADDs the same <code>post_id</code> again and the ZSET does not change, so fan-out is idempotent. A delete does not walk every follower inbox. Put a tombstone on the post, drop it at hydrate time, and strip ids in the background. Unfollow is the same idea: filter on read by the follow set, or strip async. Chasing strong consistency across a hundred million inboxes after one delete is over-engineering.</p>
+        <p class="say">I declare at-least-once. A delete does not scan follower timelines. Cold users are not pushed day to day. When they come back, they pull one page and rebuild.</p>
+      </div>
+    </div>
+    <figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img">
+          <g>
+            <rect x="350" y="150" width="260" height="100" rx="12" class="box"/>
+            <text x="480" y="184" text-anchor="middle" class="label">Redeliver</text>
+            <text x="480" y="208" text-anchor="middle" class="sub">at-least-once</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">失败从重投开始。MQ 不保证只到一次。fan-out 写到一半，消息还会再来。</span><span class="lang-en">Start the failure at redelivery. The queue does not promise once. A fan-out that dies halfway will see the message again.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img">
+          <g>
+            <rect x="190" y="150" width="260" height="100" rx="12" class="box"/>
+            <text x="320" y="184" text-anchor="middle" class="label">Retry</text>
+            <text x="320" y="208" text-anchor="middle" class="sub">same post_id</text>
+          </g>
+          <g>
+            <rect x="510" y="150" width="260" height="100" rx="12" class="box ok"/>
+            <text x="640" y="184" text-anchor="middle" class="label">ZADD again</text>
+            <text x="640" y="208" text-anchor="middle" class="sub">same member</text>
+          </g>
+          <line x1="456" y1="200" x2="499" y2="200" class="wire"/>
+          <polygon points="499,195 508,200 499,205" class="head"/>
+        </svg>
+        <figcaption><span class="lang-zh">同一个 post_id 再 ZADD 一次，ZSET 里还是那一个 member。幂等靠这个，不靠 exactly-once。</span><span class="lang-en">ZADD the same post_id again and the ZSET still has one member. Idempotency comes from that, not from exactly-once.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img">
+          <g>
+            <rect x="190" y="150" width="260" height="100" rx="12" class="box bad"/>
+            <text x="320" y="184" text-anchor="middle" class="label">Walk inboxes</text>
+            <text x="320" y="208" text-anchor="middle" class="sub">reverse fan-out</text>
+          </g>
+          <g>
+            <rect x="510" y="150" width="260" height="100" rx="12" class="box ok"/>
+            <text x="640" y="184" text-anchor="middle" class="label">Tombstone</text>
+            <text x="640" y="208" text-anchor="middle" class="sub">filter on hydrate</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">删帖的两条路并列。扫全部 inbox 是反向 fan-out，写放大又回来了。tombstone 打在 post 上，读的时候丢掉，页不够就再取一段 id。</span><span class="lang-en">Two delete paths, side by side. Walking every inbox is reverse fan-out, and the write amplification is back. The tombstone sits on the post. Drop it on read. If the page is short, fetch another id chunk.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img">
+          <g>
+            <rect x="190" y="150" width="260" height="100" rx="12" class="box bad"/>
+            <text x="320" y="184" text-anchor="middle" class="label">Push cold</text>
+            <text x="320" y="208" text-anchor="middle" class="sub">idle followers</text>
+          </g>
+          <g>
+            <rect x="510" y="150" width="260" height="100" rx="12" class="box ok"/>
+            <text x="640" y="184" text-anchor="middle" class="label">Pull a page</text>
+            <text x="640" y="208" text-anchor="middle" class="sub">when they return</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">冷用户也 push，timeline 内存和写放大一起涨。他们回来时 pull 一页就够。活跃用户才进预计算的 inbox，并且只留最近 N 条。</span><span class="lang-en">Pushing cold users grows both timeline memory and write amplification. When they return, one pulled page is enough. Only active users get a precomputed inbox, and only the last N ids.</span></figcaption>
+      </div>
+    </figure>
+    <p class="cite"><span class="lang-zh">重投和幂等的展开在 <span class="chip soon">Ch42 · 消息与弹性</span>。</span><span class="lang-en">The longer version of redelivery and idempotency is <span class="chip soon">Ch42 · messaging</span>.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">收尾，不要说完美</span><span class="lang-en">Close without saying perfect</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">中文</p>
+        <table>
+          <thead><tr><th>bottleneck</th><th>你怎么接</th></tr></thead>
+          <tbody>
+            <tr><td>大 V 写尖峰</td><td>hybrid：outbox + 读时 fan-in。不对全体粉丝 ZADD</td></tr>
+            <tr><td>timeline 内存 / 冷用户</td><td>只存 id，只缓存活跃用户，滑动窗口 N 条。冷用户回来再 pull 一页</td></tr>
+            <tr><td>删帖 / 缓存不一致</td><td>tombstone，hydrate 时丢掉。最终一致，不反向 fan-out</td></tr>
+          </tbody>
+        </table>
+        <details class="fold">
+          <summary>原书当时的默认（不要当第一答案）</summary>
+          <p>骨架还能用：写路径先落库再 fan-out，读路径是 inbox 再 hydrate。过时的是把推荐漏斗当这题的第一答案，以及不估写放大就纯 push。</p>
+          <table>
+            <thead><tr><th>当时</th><th>现在</th></tr></thead>
+            <tbody>
+              <tr><td>只讲 push / pull，等对方问大 V 再改</td><td>hybrid fan-out 当默认</td></tr>
+              <tr><td>排序往互动分和模型滑</td><td>关注流按时间。简单权重一句。不做推荐系统</td></tr>
+              <tr><td>分页很浅，offset 从 SQL 直觉混进来</td><td>必须 cursor，要讲插入漂移</td></tr>
+              <tr><td>明星问题一句话</td><td>开口就算帖子 × 粉丝。outbox + 读时 merge</td></tr>
+            </tbody>
+          </table>
+        </details>
+        <p>自测：合上这一页，用开场 30 秒把 hybrid、写放大、cursor 加 hydrate 讲一遍。哪句卡，回哪一套幻灯片。</p>
+        <p>下一道是聊天。Feed 是一对多的异步 timeline。聊天是低延迟双向：连接、消息状态、多端同步。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">English</p>
+        <table>
+          <thead><tr><th>Bottleneck</th><th>What you say</th></tr></thead>
+          <tbody>
+            <tr><td>Celebrity write spike</td><td>Hybrid: outbox plus fan-in on read. Do not ZADD every follower</td></tr>
+            <tr><td>Timeline memory / cold users</td><td>Ids only, cache active users, sliding window of N. Cold users pull one page on return</td></tr>
+            <tr><td>Delete / cache disagree</td><td>Tombstone, drop on hydrate. Eventual consistency, no reverse fan-out</td></tr>
+          </tbody>
+        </table>
+        <details class="fold">
+          <summary>What the book used to default to</summary>
+          <p>The skeleton still works: persist, then fan-out; on read, inbox then hydrate. What aged is treating a recommender funnel as the first answer, and pure push with no write-amplification estimate.</p>
+          <table>
+            <thead><tr><th>Then</th><th>Now</th></tr></thead>
+            <tbody>
+              <tr><td>Push / pull only, patch when they ask about celebrities</td><td>Hybrid fan-out as the default</td></tr>
+              <tr><td>Ranking slid into engagement scores and a model</td><td>Follow feed by time. One sentence of simple ranking. No recommender</td></tr>
+              <tr><td>Pagination was thin, and offset snuck in from SQL</td><td>Cursor is required. Speak insert drift</td></tr>
+              <tr><td>The celebrity problem in one sentence</td><td>Open with posts × followers. Outbox plus merge on read</td></tr>
+            </tbody>
+          </table>
+        </details>
+        <p>Check yourself: close the page and give the 30-second open, including hybrid, write amplification, and cursor plus hydrate. Wherever you stumble, go back to that deck.</p>
+        <p>Next is chat. A feed is a one-to-many async timeline. Chat is low-latency and bidirectional: the connection, message state, and multi-device sync.</p>
+      </div>
+    </div>
+    <p class="cite"><span class="lang-zh">下一章 <span class="chip soon">Ch12 · 设计聊天系统</span>。</span><span class="lang-en">Next chapter: <span class="chip soon">Ch12 · chat</span>.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">闪卡</span><span class="lang-en">Flashcards</span></h2>
+    <p class="cite"><span class="lang-zh">点一下翻面。能讲出来才算会。</span><span class="lang-en">Click to flip. If you can say it, you know it.</span></p>
+    <div class="cards-grid">
+      <button type="button" class="flip">
+        <span class="q"><span class="lang-zh">Feed 三个 hard part 是什么？</span><span class="lang-en">What are the three hard parts?</span></span>
+        <span class="a"><span class="lang-zh">fan-out 的 push / pull / hybrid；大 V 写放大；cursor 分页和 hydration。本场是关注流，不做推荐模型。</span><span class="lang-en">Push / pull / hybrid fan-out; celebrity write amplification; cursor pagination and hydration. This round is a follow feed, with no ranking model.</span></span>
+      </button>
+      <button type="button" class="flip">
+        <span class="q"><span class="lang-zh">2026 默认 fan-out 怎么说？</span><span class="lang-en">What is the 2026 default fan-out?</span></span>
+        <span class="a"><span class="lang-zh">hybrid。普通人写时 push。大 V 只写 outbox，读时 pull。读路径是 fan-in。</span><span class="lang-en">Hybrid. Regular users push on write. Celebrities write an outbox and get pulled on read. The read is a fan-in.</span></span>
+      </button>
+      <button type="button" class="flip">
+        <span class="q"><span class="lang-zh">写放大怎么估？</span><span class="lang-en">How do you estimate write amplification?</span></span>
+        <span class="a"><span class="lang-zh">帖子数 × 粉丝数。发帖 QPS 不是写路径的全部。百万粉一条是瞬时 1e6 次写。</span><span class="lang-en">Posts × followers. Post QPS is not the whole write path. One post to a million followers is an instant 1e6 writes.</span></span>
+      </button>
+      <button type="button" class="flip">
+        <span class="q"><span class="lang-zh">为什么大 V 不能纯 push？</span><span class="lang-en">Why can't a celebrity pure-push?</span></span>
+        <span class="a"><span class="lang-zh">一次发帖是瞬时 N 次 timeline 写，hot key。改写 outbox，读分散在一天里。</span><span class="lang-en">One post is an instant N timeline writes, a hot key. Write the outbox. Reads spread across the day.</span></span>
+      </button>
+      <button type="button" class="flip">
+        <span class="q"><span class="lang-zh">高层链路怎么画？</span><span class="lang-en">What is the high-level path?</span></span>
+        <span class="a"><span class="lang-zh">App → Feed svc → 先写 post 库再入 MQ → timeline。API 先返回，请求线程不扫粉丝。</span><span class="lang-en">App, feed service, post store then the queue, then the timeline. The API returns first. The request thread does not scan followers.</span></span>
+      </button>
+      <button type="button" class="flip">
+        <span class="q"><span class="lang-zh">timeline 存什么？</span><span class="lang-en">What does the timeline store?</span></span>
+        <span class="a"><span class="lang-zh">只存 post_id，ZSET。全文走 post 缓存 MGET hydrate。</span><span class="lang-en">post_id only, in a ZSET. Full posts hydrate with MGET from the post cache.</span></span>
+      </button>
+      <button type="button" class="flip">
+        <span class="q"><span class="lang-zh">为什么不用 offset？</span><span class="lang-en">Why not offset?</span></span>
+        <span class="a"><span class="lang-zh">深翻变慢。翻页之间插入会重复或漏。cursor 锚在 (时间, post_id)，下一页取严格更老的。</span><span class="lang-en">Deep pages get slower. Inserts between pages duplicate or skip. The cursor anchors on (time, post_id). The next page is strictly older.</span></span>
+      </button>
+      <button type="button" class="flip">
+        <span class="q"><span class="lang-zh">删帖怎么处理？</span><span class="lang-en">How do you handle a delete?</span></span>
+        <span class="a"><span class="lang-zh">post 上 tombstone，hydrate 时丢掉。不反向 fan-out 去扫每个 inbox。</span><span class="lang-en">Tombstone on the post, drop it at hydrate time. Do not reverse fan-out across every inbox.</span></span>
+      </button>
+    </div>
+  </section>
+  <p><button type="button" class="read-toggle">
+    <span class="when-off"><span class="lang-zh">我已学完本章</span><span class="lang-en">Mark this chapter done</span></span>
+    <span class="when-on"><span class="lang-zh">已学完本章</span><span class="lang-en">Completed</span></span>
+  </button></p>
+  <p class="cite"><span class="lang-zh">进度存在这台浏览器里。</span><span class="lang-en">Saved in this browser only.</span></p>
+</article>
+</main>
+<script src="../assets/js/nav.js"></script>
+<script src="../assets/js/lang.js"></script>
+<script src="../assets/js/slides.js"></script>
+<script src="../assets/js/progress.js"></script>
+</body>
+</html>

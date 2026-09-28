@@ -1,0 +1,1021 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="parchment" data-locale="zh">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ch28 · 配置中心</title>
+  <link rel="icon" href="../favicon.ico" sizes="48x48">
+  <link rel="stylesheet" href="../assets/css/style.css">
+  <script src="../assets/js/boot.js"></script>
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="../index.html"><span class="brand-logo">SD</span><span class="lang-zh">系统设计面试</span><span class="lang-en">System Design Interview</span></a>
+  <span class="spacer"></span>
+  <a class="map-link" href="../index.html"><span class="lang-zh">课程地图</span><span class="lang-en">Map</span></a>
+  <div class="seg" role="group" aria-label="language">
+    <button type="button" data-locale-set="zh">中文</button>
+    <button type="button" data-locale-set="both"><span class="lang-zh">对照</span><span class="lang-en">Both</span></button>
+    <button type="button" data-locale-set="en">EN</button>
+  </div>
+  <div class="seg" role="group" aria-label="theme">
+    <button type="button" data-theme-set="parchment"><span class="lang-zh">护眼</span><span class="lang-en">Paper</span></button>
+    <button type="button" data-theme-set="dracula"><span class="lang-zh">深色</span><span class="lang-en">Dark</span></button>
+  </div>
+</header>
+<main class="wrap">
+<article class="chapter" id="ch28" data-ch="ch28">
+  <header>
+    <div class="ch-kicker"><span class="lang-zh">CHAPTER 28 · 设计题</span><span class="lang-en">CHAPTER 28 · case</span></div>
+    <h1><span class="lang-zh">配置中心</span><span class="lang-en">Configuration center</span></h1>
+    <p class="ch-meta-line"><span class="lang-zh">约 35 分钟 · 前置：Ch01。协议、弹性和治理可以后读</span><span class="lang-en">~35 min · after Ch01. Protocols, resilience, and governance can wait</span></p>
+  </header>
+
+  <section class="goal">
+    <h2><span class="lang-zh">这一章结束你能做什么</span><span class="lang-en">What you can do after this chapter</span></h2>
+    <div class="bilingual">
+  <div class="lang-zh"><p class="col-kicker">中文</p>
+<ul>
+<li>30 秒说出三个 hard part：push/pull 怎么 watch、版本改了谁能看见、gray release。</li>
+<li>按白板顺序画完：读多写少、一条控制面、watch、gray release、版本与回滚。</li>
+<li>把失败路径单独讲清：推送会丢、本地缓存有一致性 trade-off、中心挂了读快照。</li>
+</ul>
+  </div>
+  <div class="lang-en"><p class="col-kicker">English</p>
+<ul>
+<li>Name the three hard parts in 30 seconds: how you watch (push/pull), who sees a version, and gray release.</li>
+<li>Draw in whiteboard order: read-heavy, one control plane, watch, gray release, versions and rollback.</li>
+<li>Keep the failure path on its own: a push can drop, local cache is a consistency trade-off, and an outage boots from a snapshot.</li>
+</ul>
+  </div>
+</div>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">30 秒开场</span><span class="lang-en">The 30-second open</span></h2>
+    <div class="bilingual">
+  <div class="lang-zh"><p class="col-kicker">中文</p>
+<p class="say">配置中心三个 hard part：push/pull 怎么 watch，版本改了谁能看见，配置怎么 gray release。默认是应用配置：feature flag、开关、超时和限流阈值。Client 启动拉一次，然后 long-poll 或长连接 push。通知只带 key 和版本，内容另拉。写路径用版本做乐观并发。持久化是 DB 加缓存。注册中心管实例列表，配置管 KV，发现只留一句。</p>
+<p>然后按四步走。终图和产品名都往后放。</p>
+<table><thead><tr><th>时间盒</th><th>你在做什么</th></tr></thead><tbody>
+<tr><td>3–10 min</td><td>澄清：应用配置，要不要 gray release，watch 用哪条通道</td></tr>
+<tr><td>接着 2 min</td><td>back-of-envelope：发布很少；贵的是 watch 连接和 notify fan-out</td></tr>
+<tr><td>10–15 min</td><td>高层：Client → Config API → Cache + DB，Admin 走同一条写路径</td></tr>
+<tr><td>10–20 min</td><td>deep dive：push/pull、谁能看见版本、gray release</td></tr>
+<tr><td>3–5 min</td><td>wrap-up：短轮询、只内存、全量一刀切，外加失败路径</td></tr>
+</tbody></table>
+<p><strong>red flag：</strong>还没问范围就画 Git 仓库、Ingress、sidecar；把每几秒短轮询当唯一方案；配置只放内存；通知里塞整份 payload；背两家产品功能表；把 gray release 画成网关切流量；把服务发现讲成一章。</p>
+  </div>
+  <div class="lang-en"><p class="col-kicker">English</p>
+<p class="say">Configuration center, three hard parts: how you watch, push versus pull; who sees a version change; how you gray-release config. Default is application config: feature flags, switches, timeouts, rate-limit thresholds. The client pulls once at startup, then long-polls or holds a long-lived push. Notify carries the key and the version. The body is a separate pull. Writes use optimistic concurrency on the version. Persist in a DB plus a cache. The registry owns the instance list. Config owns the KV. Discovery is one sentence.</p>
+<p>Then walk the four steps. The final picture and the product names wait.</p>
+<table><thead><tr><th>Time-box</th><th>What you are doing</th></tr></thead><tbody>
+<tr><td>3–10 min</td><td>Clarify: application config, gray release or not, which watch channel</td></tr>
+<tr><td>Next 2 min</td><td>back-of-envelope: publishes are rare; watches and notify fan-out cost</td></tr>
+<tr><td>10–15 min</td><td>High-level: Client → Config API → Cache + DB; Admin uses that write path</td></tr>
+<tr><td>10–20 min</td><td>deep dive: push/pull, who sees a version, gray release</td></tr>
+<tr><td>3–5 min</td><td>wrap-up: short-poll, memory only, all-at-once cutover, plus the failure path</td></tr>
+</tbody></table>
+<p><strong>Red flags:</strong> a Git repo, an ingress, or a sidecar before you asked scope; short-poll every few seconds as the only design; config in memory only; the full payload inside notify; a product feature table; gray release drawn as gateway traffic split; service discovery expanded into its own chapter.</p>
+  </div>
+</div>
+    <p class="cite"><span class="lang-zh">四步的钟在 <a class="chip" href="ch01.html">Ch01</a>。这一章按那个钟走，deep dive 只挖这三条 hard part。</span><span class="lang-en">The clock is in <a class="chip" href="ch01.html">Ch01</a>. This chapter runs on it. The deep dive stays on these three hard parts.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">先问范围</span><span class="lang-en">Ask scope first</span></h2>
+    <div class="bilingual">
+  <div class="lang-zh"><p class="col-kicker">中文</p>
+<p>没问清楚就画图，又是 Jimmy。这题 5–6 个问题就停，其余写成假设。第一问是范围。</p>
+<table><thead><tr><th>你问</th><th>假设</th><th>它改什么</th></tr></thead><tbody>
+<tr><td>动态应用配置，还是 Git / 部署清单？</td><td>应用配置中心</td><td>要 watch 和版本。发布是热更新</td></tr>
+<tr><td>配什么？</td><td>feature flag、超时、限流阈值</td><td>KV 加 callback。业务订单不进这里</td></tr>
+<tr><td>push 还是 pull？</td><td>启动拉，再 watch</td><td>短轮询留到被追问</td></tr>
+<tr><td>要 gray release 吗？</td><td>要。按实例、标签、百分比</td><td>和网关切流量分开画</td></tr>
+<tr><td>和注册中心是一个产品吗？</td><td>常被一起问，数据面不同</td><td>一句分工</td></tr>
+<tr><td>规模？</td><td>教学假设：约 1 万实例</td><td>用来估连接，标成假设</td></tr>
+</tbody></table>
+<p class="say">我假设：应用配置中心。Client 启动拉全量，之后 long-poll 或 gRPC watch。通知只带 key，再 GET 内容。写走版本 CAS，历史可回滚。先按实例 gray release，再全量。中心挂了读本地快照。注册发现只点一句。先按这个画，不对你打断我。</p>
+<p>问到具体产品：承认差别，立刻收口。一个公开客户端走 HTTP long-poll，另一个 2.x 走 gRPC 长连接。本场讲 watch、版本、gray release。问到 mesh：配置是 KV，发现是实例列表。问过 10 分钟还在问，也是 red flag。</p>
+  </div>
+  <div class="lang-en"><p class="col-kicker">English</p>
+<p>Drawing before you ask is Jimmy again. Stop at five or six questions. Write the rest as assumptions. The first question is scope.</p>
+<table><thead><tr><th>You ask</th><th>Assumption</th><th>What it changes</th></tr></thead><tbody>
+<tr><td>Dynamic app config, or Git / a deploy manifest?</td><td>An application config center</td><td>You need watch and versions. Publish is a hot reload</td></tr>
+<tr><td>What do you store?</td><td>Feature flags, timeouts, rate-limit thresholds</td><td>KV plus a callback. Orders stay out</td></tr>
+<tr><td>Push or pull?</td><td>Pull at startup, then watch</td><td>Short-poll waits until they ask</td></tr>
+<tr><td>Gray release?</td><td>Yes. By instance, tag, or percent</td><td>Draw it apart from gateway traffic split</td></tr>
+<tr><td>Same product as the registry?</td><td>Often asked together, different data</td><td>One sentence of split</td></tr>
+<tr><td>Scale?</td><td>Teaching assumption: about 10k instances</td><td>For connections. Label it as an assumption</td></tr>
+</tbody></table>
+<p class="say">I'll assume an application config center. The client pulls the full set at startup, then long-polls or opens a gRPC watch. Notify carries only the key, then GET the content. Writes go through version CAS. History can roll back. Gray-release by instance first, then full. If the center is down, read a local snapshot. Registry and discovery are one sentence. I'll draw this. Interrupt me if it's wrong.</p>
+<p>If they name a product, acknowledge the difference and close the scope. One public client path is HTTP long-poll. Another, in 2.x, is a gRPC stream. This loop is watch, versions, and gray release. If they want mesh: config is KV, discovery is the instance list. Asking past ten minutes is a red flag too.</p>
+  </div>
+</div>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">读多写少</span><span class="lang-en">Reads dwarf writes</span></h2>
+    <div class="bilingual">
+  <div class="lang-zh"><p class="col-kicker">中文</p>
+<p>先在白板上写数量级，证明 bottleneck 是挂着的 watch 和一次发布的 notify fan-out。配置读写 QPS 很安静。下面全是<strong>教学假设</strong>，方便开口。云控制台上的公开峰值留在公开文档里。</p>
+<p>约 1 万实例，每实例 watch 约 10 个 key。发布来自人和流水线。</p>
+<table><thead><tr><th>项</th><th>教学假设</th></tr></thead><tbody>
+<tr><td>发布 QPS</td><td>个位到百。峰值仍远小于业务读</td></tr>
+<tr><td>Watch 连接</td><td>约 1 万条长轮询或长连接</td></tr>
+<tr><td>一次 fan-out</td><td>热 key 可能叫醒千到万个订阅者，要分批</td></tr>
+<tr><td>启动拉</td><td>滚动发布时每实例几 KB，平时几乎不打</td></tr>
+<tr><td>存储</td><td>小 key 加历史版本，停在 GB 这一档。对象存储是另一道题</td></tr>
+</tbody></table>
+<p class="say">万实例白板：发布 QPS 可以忽略。怕的是 watch 连接，和一改热开关所有订阅者一起醒。通知只带版本，内容按需拉。</p>
+  </div>
+  <div class="lang-en"><p class="col-kicker">English</p>
+<p>Put an order of magnitude on the board first. The bottleneck is hung watches and notify fan-out on a publish. Config read and write QPS is quiet. Every number below is a <strong>teaching assumption</strong>, so you can talk. A peak on a cloud console stays in the public docs.</p>
+<p>About 10k instances. Each watches about 10 keys. Publishes come from humans and CI.</p>
+<table><thead><tr><th>Item</th><th>Teaching assumption</th></tr></thead><tbody>
+<tr><td>Publish QPS</td><td>Single digits to the low hundreds. Still far below business reads</td></tr>
+<tr><td>Watch connections</td><td>About 10k long-polls or long-lived connections</td></tr>
+<tr><td>One fan-out</td><td>A hot key may wake thousands to about 10k subscribers. Batch it</td></tr>
+<tr><td>Startup pull</td><td>A few KB per instance during a rolling deploy. Almost nothing in steady state</td></tr>
+<tr><td>Storage</td><td>Small keys plus history, on the order of gigabytes. Object storage is a different prompt</td></tr>
+</tbody></table>
+<p class="say">Whiteboard, 10k instances: publish QPS is noise. What you fear is the watch connections, and flipping a hot switch so every subscriber wakes at once. Notify carries the version. Content is pulled on demand.</p>
+  </div>
+</div>
+    <figure class="deck">
+<div class="slide">
+  <svg viewBox="0 0 960 420" class="board" role="img">
+  <g>
+    <rect x="195" y="156" width="260" height="96" rx="12" class="box"/>
+    <text x="325" y="190" text-anchor="middle" class="label">Reads</text>
+    <text x="325" y="214" text-anchor="middle" class="sub">local getConfig</text>
+  </g>
+  <g>
+    <rect x="505" y="156" width="260" height="96" rx="12" class="box alt"/>
+    <text x="635" y="190" text-anchor="middle" class="label">Writes</text>
+    <text x="635" y="214" text-anchor="middle" class="sub">humans and CI</text>
+  </g>
+  <line x1="461" y1="204" x2="494" y2="204" class="wire"/>
+  <polygon points="494,199 503,204 494,209" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">第一笔：读在进程里发生，写是人和流水线。这题读多写少。</span><span class="lang-en">First stroke: reads happen in-process. Writes are humans and CI. This prompt is read-heavy.</span></figcaption>
+</div>
+<div class="slide">
+  <svg viewBox="0 0 960 420" class="board" role="img">
+  <g>
+    <rect x="195" y="156" width="260" height="96" rx="12" class="box ok"/>
+    <text x="325" y="190" text-anchor="middle" class="label">Publish QPS</text>
+    <text x="325" y="214" text-anchor="middle" class="sub">tens, assumed</text>
+  </g>
+  <g>
+    <rect x="505" y="156" width="260" height="96" rx="12" class="box"/>
+    <text x="635" y="190" text-anchor="middle" class="label">Business QPS</text>
+    <text x="635" y="214" text-anchor="middle" class="sub">a different budget</text>
+  </g>
+  <line x1="461" y1="204" x2="494" y2="204" class="wire"/>
+  <polygon points="494,199 503,204 494,209" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">发布 QPS 标成教学假设：个位到百。业务 API 的万级 QPS 留在业务路径上。</span><span class="lang-en">Label publish QPS as a teaching assumption: single digits to the low hundreds. A business API's tens of thousands of QPS stays on the business path.</span></figcaption>
+</div>
+<div class="slide">
+  <svg viewBox="0 0 960 420" class="board" role="img">
+  <g>
+    <rect x="195" y="156" width="260" height="96" rx="12" class="box"/>
+    <text x="325" y="190" text-anchor="middle" class="label">~10k instances</text>
+    <text x="325" y="214" text-anchor="middle" class="sub">teaching assumption</text>
+  </g>
+  <g>
+    <rect x="505" y="156" width="260" height="96" rx="12" class="box alt"/>
+    <text x="635" y="190" text-anchor="middle" class="label">~10k watches</text>
+    <text x="635" y="214" text-anchor="middle" class="sub">one channel each</text>
+  </g>
+  <line x1="461" y1="204" x2="494" y2="204" class="wire"/>
+  <polygon points="494,199 503,204 494,209" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">贵的是挂起的连接：文件描述符和线程。磁盘上的 KV 很便宜。</span><span class="lang-en">What costs is the held connections: file descriptors and threads. The KV on disk is cheap.</span></figcaption>
+</div>
+<div class="slide">
+  <svg viewBox="0 0 960 420" class="board" role="img">
+  <g>
+    <rect x="195" y="156" width="260" height="96" rx="12" class="box bad"/>
+    <text x="325" y="190" text-anchor="middle" class="label">Hot key</text>
+    <text x="325" y="214" text-anchor="middle" class="sub">wake everyone</text>
+  </g>
+  <g>
+    <rect x="505" y="156" width="260" height="96" rx="12" class="box ok"/>
+    <text x="635" y="190" text-anchor="middle" class="label">Batch</text>
+    <text x="635" y="214" text-anchor="middle" class="sub">wake in groups</text>
+  </g>
+  <line x1="461" y1="204" x2="494" y2="204" class="wire"/>
+  <polygon points="494,199 503,204 494,209" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">一改热开关，订阅者会一起醒。通知分批发。同步 fan-out 留在请求线程外面。</span><span class="lang-en">Flip a hot switch and the subscribers wake together. Send notify in batches. Synchronous fan-out stays off the request thread.</span></figcaption>
+</div>
+</figure>
+    <p class="cite"><span class="lang-zh">估算口径在 <span class="chip soon">Ch03 · 粗略估算</span>。连接和分批叫醒后读 <span class="chip soon">Ch40 · 协议选型</span><span class="chip soon">Ch42 · 消息与弹性</span>。</span><span class="lang-en">The estimate habit is <span class="chip soon">Ch03 · back-of-the-envelope</span>. Connections and batched wake-ups come later: <span class="chip soon">Ch40 · protocol choices</span><span class="chip soon">Ch42 · messaging and resilience</span>.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">一条控制面</span><span class="lang-en">One control plane</span></h2>
+    <div class="bilingual">
+  <div class="lang-zh"><p class="col-kicker">中文</p>
+<p>从左到右只画一条线。发现、mesh、Git 先不出现。面试官点头之后再拆 watch、版本、gray release。</p>
+<p>键空间够用就停：<code>namespace / app / cluster / key</code>。值是文本或 JSON。每次发布一条 Release，带单调 version，或内容 MD5。Gray release 的规则挂在同一条 key 上。</p>
+<p><strong>读：</strong>启动 GET 进内存，并落一份本地快照。<code>getConfig</code> 读进程内缓存。变更靠 watch，再到 callback，业务刷新超时、开关、限流阈值。</p>
+<p><strong>写：</strong>鉴权，带上当前 version 做乐观并发，落 DB，更新缓存，再通知。方向 OK 的话，下一笔是 push/pull。</p>
+  </div>
+  <div class="lang-en"><p class="col-kicker">English</p>
+<p>Left to right, one line. Discovery, mesh, and Git stay off this picture. After they buy in, split watch, versions, and gray release.</p>
+<p>Stop the keyspace when it is enough: <code>namespace / app / cluster / key</code>. The value is text or JSON. Each publish is a Release with a monotonic version, or a content MD5. Gray-release rules hang on that same key.</p>
+<p><strong>Read:</strong> GET the set into memory at startup, and write a local snapshot. <code>getConfig</code> reads the in-process cache. Changes arrive on the watch, then a callback refreshes timeouts, switches, and rate-limit thresholds.</p>
+<p><strong>Write:</strong> auth, optimistic concurrency with the current version, persist to the DB, update the cache, then notify. If the direction is OK, the next stroke is push/pull.</p>
+  </div>
+</div>
+    <figure class="deck">
+<div class="slide">
+  <svg viewBox="0 0 960 420" class="board" role="img">
+  <g>
+    <rect x="350" y="156" width="260" height="96" rx="12" class="box"/>
+    <text x="480" y="190" text-anchor="middle" class="label">Client</text>
+    <text x="480" y="214" text-anchor="middle" class="sub">SDK</text>
+  </g>
+</svg>
+  <figcaption><span class="lang-zh">入口只有 Client。运行中的进程来要配置。</span><span class="lang-en">The entrance is only the client. A running process comes for config.</span></figcaption>
+</div>
+<div class="slide">
+  <svg viewBox="0 0 960 420" class="board" role="img">
+  <g>
+    <rect x="195" y="156" width="260" height="96" rx="12" class="box"/>
+    <text x="325" y="190" text-anchor="middle" class="label">Client</text>
+    <text x="325" y="214" text-anchor="middle" class="sub">SDK</text>
+  </g>
+  <g>
+    <rect x="505" y="156" width="260" height="96" rx="12" class="box"/>
+    <text x="635" y="190" text-anchor="middle" class="label">Config API</text>
+    <text x="635" y="214" text-anchor="middle" class="sub">watch and GET</text>
+  </g>
+  <line x1="461" y1="204" x2="494" y2="204" class="wire"/>
+  <polygon points="494,199 503,204 494,209" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">加上 Config API。启动拉和之后的 watch 都打到这一框。</span><span class="lang-en">Add Config API. The startup pull and the later watch both hit this box.</span></figcaption>
+</div>
+<div class="slide">
+  <svg viewBox="0 0 960 420" class="board" role="img">
+  <g>
+    <rect x="110" y="156" width="220" height="96" rx="12" class="box"/>
+    <text x="220" y="190" text-anchor="middle" class="label">Client</text>
+    <text x="220" y="214" text-anchor="middle" class="sub">SDK</text>
+  </g>
+  <g>
+    <rect x="370" y="156" width="220" height="96" rx="12" class="box"/>
+    <text x="480" y="190" text-anchor="middle" class="label">Config API</text>
+    <text x="480" y="214" text-anchor="middle" class="sub">watch and GET</text>
+  </g>
+  <line x1="336" y1="204" x2="358" y2="204" class="wire"/>
+  <polygon points="358,199 368,204 358,209" class="head"/>
+  <g>
+    <rect x="630" y="156" width="220" height="96" rx="12" class="box alt"/>
+    <text x="740" y="190" text-anchor="middle" class="label">Cache</text>
+    <text x="740" y="214" text-anchor="middle" class="sub">hot path</text>
+  </g>
+  <line x1="596" y1="204" x2="618" y2="204" class="wire"/>
+  <polygon points="618,199 628,204 618,209" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">服务端缓存走热路径。多节点之间可以有一小段延迟，权威版本在后面的 DB。</span><span class="lang-en">The server cache is the hot path. Nodes may lag each other for a moment. The authoritative version is the DB, next.</span></figcaption>
+</div>
+<div class="slide">
+  <svg viewBox="0 0 960 420" class="board" role="img">
+  <g>
+    <rect x="110" y="78" width="220" height="88" rx="12" class="box"/>
+    <text x="220" y="110" text-anchor="middle" class="label">Client</text>
+    <text x="220" y="134" text-anchor="middle" class="sub">SDK</text>
+  </g>
+  <g>
+    <rect x="370" y="78" width="220" height="88" rx="12" class="box"/>
+    <text x="480" y="110" text-anchor="middle" class="label">Config API</text>
+    <text x="480" y="134" text-anchor="middle" class="sub">watch and GET</text>
+  </g>
+  <line x1="336" y1="122" x2="358" y2="122" class="wire"/>
+  <polygon points="358,117 368,122 358,127" class="head"/>
+  <g>
+    <rect x="630" y="78" width="220" height="88" rx="12" class="box alt"/>
+    <text x="740" y="110" text-anchor="middle" class="label">Cache</text>
+    <text x="740" y="134" text-anchor="middle" class="sub">hot path</text>
+  </g>
+  <line x1="596" y1="122" x2="618" y2="122" class="wire"/>
+  <polygon points="618,117 628,122 618,127" class="head"/>
+  <g>
+    <rect x="370" y="250" width="220" height="88" rx="12" class="box"/>
+    <text x="480" y="282" text-anchor="middle" class="label">DB</text>
+    <text x="480" y="306" text-anchor="middle" class="sub">source of truth</text>
+  </g>
+  <line x1="480" y1="172" x2="480" y2="238" class="wire"/>
+  <polygon points="475,238 480,248 485,238" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">DB 是底稿。只放内存，进程一重启发布就没了。</span><span class="lang-en">The DB is the source of truth. Memory only means a process restart loses the publish.</span></figcaption>
+</div>
+<div class="slide">
+  <svg viewBox="0 0 960 420" class="board" role="img">
+  <g>
+    <rect x="370" y="28" width="220" height="80" rx="12" class="box alt"/>
+    <text x="480" y="58" text-anchor="middle" class="label">Admin</text>
+    <text x="480" y="82" text-anchor="middle" class="sub">publish</text>
+  </g>
+  <line x1="480" y1="114" x2="480" y2="146" class="wire"/>
+  <polygon points="475,146 480,156 485,146" class="head"/>
+  <g>
+    <rect x="110" y="164" width="220" height="84" rx="12" class="box"/>
+    <text x="220" y="196" text-anchor="middle" class="label">Client</text>
+    <text x="220" y="220" text-anchor="middle" class="sub">SDK</text>
+  </g>
+  <g>
+    <rect x="370" y="164" width="220" height="84" rx="12" class="box"/>
+    <text x="480" y="196" text-anchor="middle" class="label">Config API</text>
+    <text x="480" y="220" text-anchor="middle" class="sub">watch and GET</text>
+  </g>
+  <line x1="336" y1="206" x2="358" y2="206" class="wire"/>
+  <polygon points="358,201 368,206 358,211" class="head"/>
+  <g>
+    <rect x="630" y="164" width="220" height="84" rx="12" class="box alt"/>
+    <text x="740" y="196" text-anchor="middle" class="label">Cache</text>
+    <text x="740" y="220" text-anchor="middle" class="sub">hot path</text>
+  </g>
+  <line x1="596" y1="206" x2="618" y2="206" class="wire"/>
+  <polygon points="618,201 628,206 618,211" class="head"/>
+  <g>
+    <rect x="370" y="300" width="220" height="80" rx="12" class="box"/>
+    <text x="480" y="330" text-anchor="middle" class="label">DB</text>
+    <text x="480" y="354" text-anchor="middle" class="sub">source of truth</text>
+  </g>
+  <line x1="480" y1="254" x2="480" y2="288" class="wire"/>
+  <polygon points="475,288 480,298 485,288" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">最后加上 Admin。发布走同一条 API 的写路径。这张图到这里停。</span><span class="lang-en">Add Admin last. Publish uses the same API's write path. Stop the picture here.</span></figcaption>
+</div>
+</figure>
+    <p class="cite"><span class="lang-zh">协议和「别在请求线程里 fan-out」后读 <span class="chip soon">Ch40 · 协议选型</span><span class="chip soon">Ch42 · 消息与弹性</span>。</span><span class="lang-en">Protocols, and why fan-out stays off the request thread: <span class="chip soon">Ch40 · protocol choices</span><span class="chip soon">Ch42 · messaging and resilience</span>.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">Hard part · push/pull</span><span class="lang-en">Hard part · push/pull</span></h2>
+    <div class="bilingual">
+  <div class="lang-zh"><p class="col-kicker">中文</p>
+<p>2026 的默认答案是：启动拉，变更通知，再拉内容。通道可以是 HTTP long-poll，也可以是 gRPC 或 WebSocket 长连接。都叫 watch，差别在协议。</p>
+<p><strong>Long-poll：</strong>Client 带上当前 version 打通知接口。服务端把请求 hold 几十秒。没变就 304。变了就返回哪个 key、哪个版本。Client 再 GET。延迟上界大约一个 hold 窗口，LB 仍然当普通 HTTP。</p>
+<p><strong>长连接 push：</strong>双向流挂着，服务端推变更事件，常见仍只带 key。正文另拉。延迟更低。服务器要管空闲超时、断线重连、重新订阅。</p>
+<table><thead><tr><th></th><th>短轮询</th><th>Long-poll</th><th>长连接 push</th></tr></thead><tbody>
+<tr><td>空转</td><td>每隔几秒 GET，QPS 是假的</td><td>挂起，空转流量几乎没有</td><td>一条连接，事件驱动</td></tr>
+<tr><td>延迟</td><td>最长一个周期</td><td>最长一个 hold</td><td>变更就可以推</td></tr>
+<tr><td>服务端状态</td><td>无</td><td>挂起的请求</td><td>连接表，断线要重订</td></tr>
+<tr><td>面试</td><td>当唯一方案是 red flag</td><td>2026 可以当默认</td><td>2026 也可以当默认</td></tr>
+</tbody></table>
+<p>通知接口只回答「变了没有」。拉正文是另一条幂等 GET。通道薄，好重试，也方便 gray release：不同实例本来就该拿到不同的值。WebSocket 是同类通道，面试官问「必须上 WS 吗」，答案是两条都能 watch。</p>
+<p class="say">启动拉一次，然后 watch。Long-poll 或 gRPC 都行。通知只带 key，再拉内容。短轮询留到被追问。</p>
+<p>trade-off：long-poll 好实现，延迟有上界。长连接更及时，连接运维更重。把全文塞进通知，看起来少一次往返，重试和 gray release 都会变难。</p>
+  </div>
+  <div class="lang-en"><p class="col-kicker">English</p>
+<p>The 2026 default is pull at startup, notify on change, then pull the content. The channel is HTTP long-poll, or a gRPC or WebSocket connection that stays open. Both are watch. The difference is the protocol.</p>
+<p><strong>Long-poll:</strong> the client calls the notify API with its current version. The server holds the request for tens of seconds. No change, 304. A change returns which key and which version. The client then GETs. Latency is bounded by about one hold window, and the load balancer still sees ordinary HTTP.</p>
+<p><strong>Long-lived push:</strong> a bidi stream stays up. The server pushes a change event, usually still just the key. The body is a later pull. Latency is lower. The server owns idle timeout, reconnect, and re-subscribe.</p>
+<table><thead><tr><th></th><th>Short-poll</th><th>Long-poll</th><th>Long-lived push</th></tr></thead><tbody>
+<tr><td>Idle</td><td>GET every few seconds. The QPS is fake</td><td>Held. Almost no idle traffic</td><td>One connection, event-driven</td></tr>
+<tr><td>Latency</td><td>Up to one period</td><td>Up to one hold</td><td>Push when it changes</td></tr>
+<tr><td>Server state</td><td>None</td><td>Held requests</td><td>A connection table. Reconnect re-subscribes</td></tr>
+<tr><td>Interview</td><td>A red flag as the only design</td><td>A fine 2026 default</td><td>Also a fine 2026 default</td></tr>
+</tbody></table>
+<p>The notify API only answers “did it change?” Pulling the body is a separate idempotent GET. A thin channel retries cleanly, and gray release stays possible, because different instances are supposed to receive different values. WebSocket is the same class of channel. If they ask “must it be WebSocket?”, both channels are watch.</p>
+<p class="say">Pull once at startup, then watch. Long-poll or gRPC both work. Notify carries only the key, then pull the content. Short-poll waits until they ask.</p>
+<p>trade-off: long-poll is simple, and latency has a ceiling. A long-lived connection is quicker, and connection ops are heavier. Putting the body in the notify looks like one fewer round trip. Retry and gray release both get harder.</p>
+  </div>
+</div>
+    <figure class="deck">
+<div class="slide">
+  <svg viewBox="0 0 960 420" class="board" role="img">
+  <g>
+    <rect x="195" y="156" width="260" height="96" rx="12" class="box"/>
+    <text x="325" y="190" text-anchor="middle" class="label">Startup GET</text>
+    <text x="325" y="214" text-anchor="middle" class="sub">full set</text>
+  </g>
+  <g>
+    <rect x="505" y="156" width="260" height="96" rx="12" class="box ok"/>
+    <text x="635" y="190" text-anchor="middle" class="label">Memory</text>
+    <text x="635" y="214" text-anchor="middle" class="sub">and a snapshot</text>
+  </g>
+  <line x1="461" y1="204" x2="494" y2="204" class="wire"/>
+  <polygon points="494,199 503,204 494,209" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">先拉一次全量进内存，并写一份磁盘快照。后面的 getConfig 打到这份内存。</span><span class="lang-en">Pull the full set into memory once, and write a disk snapshot. Later getConfig hits that memory.</span></figcaption>
+</div>
+<div class="slide">
+  <svg viewBox="0 0 960 420" class="board" role="img">
+  <g>
+    <rect x="350" y="156" width="260" height="96" rx="12" class="box bad"/>
+    <text x="480" y="190" text-anchor="middle" class="label">Short-poll</text>
+    <text x="480" y="214" text-anchor="middle" class="sub">GET every few s</text>
+  </g>
+</svg>
+  <figcaption><span class="lang-zh">每几秒 GET 一次会把空转 QPS 乘上去。被追问时用它当反例。开场的图是启动拉，然后 watch。</span><span class="lang-en">A GET every few seconds multiplies idle QPS. Use it as the counter-example when they ask. The opening picture is a startup pull, then watch.</span></figcaption>
+</div>
+<div class="slide">
+  <svg viewBox="0 0 960 420" class="board" role="img">
+  <g>
+    <rect x="195" y="156" width="260" height="96" rx="12" class="box ok"/>
+    <text x="325" y="190" text-anchor="middle" class="label">Long-poll</text>
+    <text x="325" y="214" text-anchor="middle" class="sub">HTTP hold</text>
+  </g>
+  <g>
+    <rect x="505" y="156" width="260" height="96" rx="12" class="box"/>
+    <text x="635" y="190" text-anchor="middle" class="label">304 or key</text>
+    <text x="635" y="214" text-anchor="middle" class="sub">version only</text>
+  </g>
+  <line x1="461" y1="204" x2="494" y2="204" class="wire"/>
+  <polygon points="494,199 503,204 494,209" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">Long-poll 把请求挂起几十秒。没变返回 304，变了只告诉你 key 和版本。</span><span class="lang-en">Long-poll holds the request for tens of seconds. No change returns 304. A change names the key and the version.</span></figcaption>
+</div>
+<div class="slide">
+  <svg viewBox="0 0 960 420" class="board" role="img">
+  <g>
+    <rect x="195" y="156" width="260" height="96" rx="12" class="box ok"/>
+    <text x="325" y="190" text-anchor="middle" class="label">gRPC / WS</text>
+    <text x="325" y="214" text-anchor="middle" class="sub">stay connected</text>
+  </g>
+  <g>
+    <rect x="505" y="156" width="260" height="96" rx="12" class="box"/>
+    <text x="635" y="190" text-anchor="middle" class="label">Event</text>
+    <text x="635" y="214" text-anchor="middle" class="sub">key, then pull</text>
+  </g>
+  <line x1="461" y1="204" x2="494" y2="204" class="wire"/>
+  <polygon points="494,199 503,204 494,209" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">长连接是另一条合格的默认。服务端推事件。断线要退避重连，并重新订阅。</span><span class="lang-en">A long-lived connection is the other valid default. The server pushes an event. On drop, back off, reconnect, and re-subscribe.</span></figcaption>
+</div>
+<div class="slide">
+  <svg viewBox="0 0 960 420" class="board" role="img">
+  <g>
+    <rect x="195" y="156" width="260" height="96" rx="12" class="box ok"/>
+    <text x="325" y="190" text-anchor="middle" class="label">Notify</text>
+    <text x="325" y="214" text-anchor="middle" class="sub">key + version</text>
+  </g>
+  <g>
+    <rect x="505" y="156" width="260" height="96" rx="12" class="box"/>
+    <text x="635" y="190" text-anchor="middle" class="label">GET body</text>
+    <text x="635" y="214" text-anchor="middle" class="sub">separate pull</text>
+  </g>
+  <line x1="461" y1="204" x2="494" y2="204" class="wire"/>
+  <polygon points="494,199 503,204 494,209" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">两笔分开。通知薄，正文用另一次 GET。全文塞进每一条叫醒，重试会放大。</span><span class="lang-en">Two strokes. Notify stays thin. The body is another GET. A fat body on every wake-up amplifies retries.</span></figcaption>
+</div>
+</figure>
+    <p class="cite"><span class="lang-zh">Long-poll 和长连接怎么过 LB、怎么管空闲，去 <span class="chip soon">Ch40 · 协议选型</span>。</span><span class="lang-en">How long-poll and long-lived connections pass a load balancer, and how you treat idle time: <span class="chip soon">Ch40 · protocol choices</span>.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">Gray release</span><span class="lang-en">Gray release</span></h2>
+    <div class="bilingual">
+  <div class="lang-zh"><p class="col-kicker">中文</p>
+<p>配置的 gray release 是同一份代码，不同实例读到不同的值。网关 canary 是把请求送到不同的代码版本。都是先小后大、能回滚。对象不同，白板上用两张图。</p>
+<p>规则够用就停：按 IP 或 instance id，按 tag（机房、集群、canary 组），按百分比 <code>hash(instance id) mod 100</code>。命中读灰度 Release，未命中读正式版。这次变更只叫醒命中的订阅者。看错误率和业务指标，再全量合并，或停掉灰度。</p>
+<p>用户维度的 flag：规则仍在配置里，判定可以在应用里用 userId 算。那是客户端求值。它和服务端按实例下发两份值，是两件事。</p>
+<table><thead><tr><th></th><th>流量 canary</th><th>本章 gray release</th></tr></thead><tbody>
+<tr><td>切什么</td><td>请求到 v1 / v2 进程</td><td>实例到 v1 / v2 的 KV</td></tr>
+<tr><td>谁执行</td><td>网关权重或 header</td><td>Config API 按客户端身份选 Release</td></tr>
+<tr><td>代码</td><td>常常两套制品</td><td>同一套代码，读不同阈值</td></tr>
+<tr><td>回滚</td><td>权重回到一侧</td><td>停灰度，或再发布上一条 Release</td></tr>
+</tbody></table>
+<p>主动说危险项：协议不兼容的开关拿去灰，舰队会一半序列化 A、一半 B。那种跟着发版走。超时、限流阈值、能退回的 flag 才先灰。</p>
+<p>注册中心常被一起问。配置是 KV、要历史、要 CAS。发现是实例列表和心跳，更怕不可用。同一套产品可以做两个数据面，白板上仍是两张表。mesh 怎么取配置，点到就停。</p>
+<p class="say">Gray release 按实例或百分比下发另一份 Release。先灰再全量。注册中心管谁在，配置中心管开什么开关。</p>
+  </div>
+  <div class="lang-en"><p class="col-kicker">English</p>
+<p>Config gray release is the same code, with different instances reading different values. A gateway canary sends requests to different code versions. Same idea, small then large, and you can roll back. The object is different, so the board gets two pictures.</p>
+<p>Stop the rules when they are enough: by IP or instance id, by tag (zone, cluster, canary group), by percent with <code>hash(instance id) mod 100</code>. A hit reads the gray Release. A miss reads production. That change wakes only the matching subscribers. Watch error rate and the business metric, then merge to full, or stop the gray.</p>
+<p>A user-level flag still lives in config. The decision can run in the app on userId. That is client-side evaluation. Shipping two values by instance is a separate picture.</p>
+<table><thead><tr><th></th><th>Traffic canary</th><th>Gray release here</th></tr></thead><tbody>
+<tr><td>What you split</td><td>Request to a v1 / v2 process</td><td>Instance to v1 / v2 KV</td></tr>
+<tr><td>Who executes</td><td>Gateway weight or header</td><td>Config API picks a Release by client identity</td></tr>
+<tr><td>Code</td><td>Often two artifacts</td><td>The same code, different thresholds</td></tr>
+<tr><td>Rollback</td><td>Weights back to one side</td><td>Stop the gray, or publish the previous Release again</td></tr>
+</tbody></table>
+<p>Say the dangerous case out loud. Gray-releasing a switch for an incompatible protocol splits the fleet: half serialize A, half B. That follows a deploy. Timeouts, rate-limit thresholds, and flags you can turn back are what you gray first.</p>
+<p>The registry is often asked in the same breath. Config is KV, with history and CAS. Discovery is the instance list and heartbeats, and it fears being down more than being briefly dirty. One product can own both data planes. On the whiteboard they are still two tables. How mesh fetches config: point at it and stop.</p>
+<p class="say">Gray release ships another Release by instance or by percent. Gray first, then full. The registry owns who is up. The config center owns which switch is on.</p>
+  </div>
+</div>
+    <figure class="deck">
+<div class="slide">
+  <svg viewBox="0 0 960 420" class="board" role="img">
+  <g>
+    <rect x="350" y="156" width="260" height="96" rx="12" class="box"/>
+    <text x="480" y="190" text-anchor="middle" class="label">Prod Release</text>
+    <text x="480" y="214" text-anchor="middle" class="sub">every instance</text>
+  </g>
+</svg>
+  <figcaption><span class="lang-zh">先画正式版：所有实例读同一条 Release。下一笔再把命中规则的实例拆出去。</span><span class="lang-en">Draw production first: every instance reads one Release. The next stroke peels off the instances that match the rule.</span></figcaption>
+</div>
+<div class="slide">
+  <svg viewBox="0 0 960 420" class="board" role="img">
+  <g>
+    <rect x="195" y="156" width="260" height="96" rx="12" class="box ok"/>
+    <text x="325" y="190" text-anchor="middle" class="label">Gray hit</text>
+    <text x="325" y="214" text-anchor="middle" class="sub">IP or tag</text>
+  </g>
+  <g>
+    <rect x="505" y="156" width="260" height="96" rx="12" class="box alt"/>
+    <text x="635" y="190" text-anchor="middle" class="label">Miss</text>
+    <text x="635" y="214" text-anchor="middle" class="sub">stay on prod</text>
+  </g>
+  <line x1="461" y1="204" x2="494" y2="204" class="wire"/>
+  <polygon points="494,199 503,204 494,209" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">加上规则。命中的实例读灰度 Release，其余继续读正式版。只叫醒命中的订阅者。</span><span class="lang-en">Add the rule. Matching instances read the gray Release. The rest stay on production. Wake only the matches.</span></figcaption>
+</div>
+<div class="slide">
+  <svg viewBox="0 0 960 420" class="board" role="img">
+  <g>
+    <rect x="195" y="156" width="260" height="96" rx="12" class="box ok"/>
+    <text x="325" y="190" text-anchor="middle" class="label">Percent</text>
+    <text x="325" y="214" text-anchor="middle" class="sub">hash(id) mod 100</text>
+  </g>
+  <g>
+    <rect x="505" y="156" width="260" height="96" rx="12" class="box"/>
+    <text x="635" y="190" text-anchor="middle" class="label">Then merge</text>
+    <text x="635" y="214" text-anchor="middle" class="sub">or stop gray</text>
+  </g>
+  <line x1="461" y1="204" x2="494" y2="204" class="wire"/>
+  <polygon points="494,199 503,204 494,209" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">百分比是同一条规则的另一种命中。指标正常再合并成全量，异常就停灰度。</span><span class="lang-en">Percent is the same rule with a different match. If the metric holds, merge to full. If it does not, stop the gray.</span></figcaption>
+</div>
+<div class="slide">
+  <svg viewBox="0 0 960 420" class="board" role="img">
+  <g>
+    <rect x="195" y="156" width="260" height="96" rx="12" class="box alt"/>
+    <text x="325" y="190" text-anchor="middle" class="label">Gateway</text>
+    <text x="325" y="214" text-anchor="middle" class="sub">split requests</text>
+  </g>
+  <g>
+    <rect x="505" y="156" width="260" height="96" rx="12" class="box ok"/>
+    <text x="635" y="190" text-anchor="middle" class="label">Gray release</text>
+    <text x="635" y="214" text-anchor="middle" class="sub">same code, new KV</text>
+  </g>
+  <line x1="461" y1="204" x2="494" y2="204" class="wire"/>
+  <polygon points="494,199 503,204 494,209" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">旁边补一笔对照。网关切的是流量和代码版本。这里切的是同一套代码读到的 KV。</span><span class="lang-en">Add the contrast beside it. The gateway splits traffic and code versions. Here the same code reads a different KV.</span></figcaption>
+</div>
+</figure>
+    <p class="cite"><span class="lang-zh">流量 canary 在 <span class="chip soon">Ch17 · API 网关</span>。发现和 mesh 在 <span class="chip soon">Ch44 · 微服务与服务治理</span>。</span><span class="lang-en">Traffic canary is <span class="chip soon">Ch17 · API gateway</span>. Discovery and mesh are <span class="chip soon">Ch44 · microservices and governance</span>.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">版本与回滚</span><span class="lang-en">Versions and rollback</span></h2>
+    <div class="bilingual">
+  <div class="lang-zh"><p class="col-kicker">中文</p>
+<p>面试官问「改了谁能看见」，答案是一条 per-key 的版本时钟，加上每个 Client 自己追。中间必然新旧并存。</p>
+<p>每次成功发布生成一条 Release。Client 记住上次的 version。GET 带上本地号，一样就 304。灰度是同一条 key 上的另一条 Release。key 名保持不动，规则才挂得住。</p>
+<p>两人同时改同一份草稿：后写带着旧 version 或旧 MD5，冲突拒绝。静默的 last-write-wins 会丢一次发布。回滚是把上一条 Release 再发布一次。历史和当前行都留着，控制台从历史里再选一次。</p>
+<table><thead><tr><th>阶段</th><th>看见什么</th></tr></thead><tbody>
+<tr><td>DB 提交</td><td>权威版本在了。只内存，重启就丢</td></tr>
+<tr><td>服务端缓存</td><td>Config API 能读到新值。多节点可能短暂落后</td></tr>
+<tr><td>Notify</td><td>订阅者被叫醒。只带变了的 key，可以分批</td></tr>
+<tr><td>Client callback</td><td>这一台用上新值。舰队里一段时间两版都在</td></tr>
+</tbody></table>
+<p class="say">发布落库并 bump 版本，CAS 防覆盖。通知之后每个 Client 自己拉。窗口是秒到几十秒。回滚走历史 Release。</p>
+<p>trade-off：版本加历史，换来可审计、可回滚，多占存储，发布多一步。让所有实例事务提交之后才返回，会把发布的可用性和延迟一起拖垮。跨实例 2PC 就是这种拖垮。一条 key 上的版本时钟已经够用。</p>
+  </div>
+  <div class="lang-en"><p class="col-kicker">English</p>
+<p>When they ask who sees the change, the answer is a per-key version clock, and each client catching up on its own. Old and new sit together in the middle.</p>
+<p>Each successful publish creates a Release. The client remembers the last version. GET carries that number. The same number is a 304. Gray release is another Release on the same key. Keep the key name, so the rule still attaches.</p>
+<p>Two people edit one draft. The later write still carries the old version or the old MD5, and the server rejects the conflict. Silent last-write-wins drops a publish. Rollback publishes the previous Release again. History stays, and so does the current row. The console picks the older Release and publishes it once more.</p>
+<table><thead><tr><th>Stage</th><th>What you see</th></tr></thead><tbody>
+<tr><td>DB commit</td><td>The authoritative version is in. Memory only loses it on restart</td></tr>
+<tr><td>Server cache</td><td>Config API can read the new value. Nodes may lag briefly</td></tr>
+<tr><td>Notify</td><td>Subscribers wake. Only the changed key, and you can batch</td></tr>
+<tr><td>Client callback</td><td>That instance is on the new value. The fleet holds both for a while</td></tr>
+</tbody></table>
+<p class="say">Publish lands in the DB and bumps the version. CAS blocks the overwrite. After notify, each client pulls on its own. The window is seconds to tens of seconds. Rollback is a historical Release.</p>
+<p>trade-off: version plus history buys an audit trail and rollback, costs storage, and adds a step to publish. Returning only after every instance has committed a transaction drags publish availability and latency down together. Cross-instance 2PC is that drag. A per-key version clock is enough.</p>
+  </div>
+</div>
+    <figure class="deck">
+<div class="slide">
+  <svg viewBox="0 0 960 420" class="board" role="img">
+  <g>
+    <rect x="350" y="156" width="260" height="96" rx="12" class="box"/>
+    <text x="480" y="190" text-anchor="middle" class="label">Publish</text>
+    <text x="480" y="214" text-anchor="middle" class="sub">one key</text>
+  </g>
+</svg>
+  <figcaption><span class="lang-zh">版本从一次发布开始。一次只讲一条 key。</span><span class="lang-en">A version starts at one publish. Talk about one key.</span></figcaption>
+</div>
+<div class="slide">
+  <svg viewBox="0 0 960 420" class="board" role="img">
+  <g>
+    <rect x="195" y="156" width="260" height="96" rx="12" class="box"/>
+    <text x="325" y="190" text-anchor="middle" class="label">Publish</text>
+    <text x="325" y="214" text-anchor="middle" class="sub">one key</text>
+  </g>
+  <g>
+    <rect x="505" y="156" width="260" height="96" rx="12" class="box"/>
+    <text x="635" y="190" text-anchor="middle" class="label">DB</text>
+    <text x="635" y="214" text-anchor="middle" class="sub">source of truth</text>
+  </g>
+  <line x1="461" y1="204" x2="494" y2="204" class="wire"/>
+  <polygon points="494,199 503,204 494,209" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">先落库。这一笔之后，发布已经在，即使通知还没发出。</span><span class="lang-en">Persist first. After this stroke the publish exists, even if notify has not gone out.</span></figcaption>
+</div>
+<div class="slide">
+  <svg viewBox="0 0 960 420" class="board" role="img">
+  <g>
+    <rect x="110" y="156" width="220" height="96" rx="12" class="box"/>
+    <text x="220" y="190" text-anchor="middle" class="label">Publish</text>
+    <text x="220" y="214" text-anchor="middle" class="sub">one key</text>
+  </g>
+  <g>
+    <rect x="370" y="156" width="220" height="96" rx="12" class="box"/>
+    <text x="480" y="190" text-anchor="middle" class="label">DB</text>
+    <text x="480" y="214" text-anchor="middle" class="sub">source of truth</text>
+  </g>
+  <line x1="336" y1="204" x2="358" y2="204" class="wire"/>
+  <polygon points="358,199 368,204 358,209" class="head"/>
+  <g>
+    <rect x="630" y="156" width="220" height="96" rx="12" class="box ok"/>
+    <text x="740" y="190" text-anchor="middle" class="label">Version + 1</text>
+    <text x="740" y="214" text-anchor="middle" class="sub">new Release</text>
+  </g>
+  <line x1="596" y1="204" x2="618" y2="204" class="wire"/>
+  <polygon points="618,199 628,204 618,209" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">成功发布 bump 一个单调版本，留下一条 Release。Client 下次用这个号来对 304。</span><span class="lang-en">A successful publish bumps a monotonic version and leaves a Release. The client uses that number for the next 304.</span></figcaption>
+</div>
+<div class="slide">
+  <svg viewBox="0 0 960 420" class="board" role="img">
+  <g>
+    <rect x="195" y="156" width="260" height="96" rx="12" class="box ok"/>
+    <text x="325" y="190" text-anchor="middle" class="label">CAS</text>
+    <text x="325" y="214" text-anchor="middle" class="sub">version matches</text>
+  </g>
+  <g>
+    <rect x="505" y="156" width="260" height="96" rx="12" class="box bad"/>
+    <text x="635" y="190" text-anchor="middle" class="label">Stale write</text>
+    <text x="635" y="214" text-anchor="middle" class="sub">reject</text>
+  </g>
+  <line x1="461" y1="204" x2="494" y2="204" class="wire"/>
+  <polygon points="494,199 503,204 494,209" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">第二个人带着旧 MD5 来写，服务器拒绝这次冲突。</span><span class="lang-en">A second writer still holding the old MD5 gets a conflict rejection.</span></figcaption>
+</div>
+<div class="slide">
+  <svg viewBox="0 0 960 420" class="board" role="img">
+  <g>
+    <rect x="195" y="156" width="260" height="96" rx="12" class="box alt"/>
+    <text x="325" y="190" text-anchor="middle" class="label">Older Release</text>
+    <text x="325" y="214" text-anchor="middle" class="sub">kept in history</text>
+  </g>
+  <g>
+    <rect x="505" y="156" width="260" height="96" rx="12" class="box ok"/>
+    <text x="635" y="190" text-anchor="middle" class="label">Rollback</text>
+    <text x="635" y="214" text-anchor="middle" class="sub">publish it again</text>
+  </g>
+  <line x1="461" y1="204" x2="494" y2="204" class="wire"/>
+  <polygon points="494,199 503,204 494,209" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">回滚是再发布上一条 Release。历史留着，当前行也留着，控制台从历史里再选一次。</span><span class="lang-en">Rollback publishes the previous Release again. History stays, and so does the current row. The console picks the older one and publishes it once more.</span></figcaption>
+</div>
+</figure>
+    <p class="cite"><span class="lang-zh">「别丢、别分叉」的复制口味，后读 <span class="chip soon">Ch41 · 复制、分片、事务</span>。分批通知仍在 <span class="chip soon">Ch42 · 消息与弹性</span>。</span><span class="lang-en">Replication that prefers “don’t lose it, don’t fork” is <span class="chip soon">Ch41 · replication, sharding, transactions</span>. Batched notify stays in <span class="chip soon">Ch42 · messaging and resilience</span>.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">Hard part · 丢更新和本地缓存</span><span class="lang-en">Hard part · dropped updates and local cache</span></h2>
+    <div class="bilingual">
+  <div class="lang-zh"><p class="col-kicker">中文</p>
+<p>再短的 push 也会丢。本地缓存让 <code>getConfig</code> 快，也让这一台在追平之前继续用旧值。这是这题的一致性 trade-off。修法是每台自己追平，加上分钟级对账。</p>
+<p>你承诺的是：每个实例最终看见同一条已发布版本。窗口是秒到几十秒，取决于 watch 通道和 fan-out。所以才要 gray release，先让一部分实例看见 v2。</p>
+<p>兜底是分钟级对账：拉 MD5 或版本，没变就 304。callback 到了之后，业务刷新自己的阈值。重活留在监听线程外面。类结构、序列化协议这种不能热更的项，承认那是发版。</p>
+<p class="say">Notify 可能丢。getConfig 读本地缓存，所以会旧。分钟级对一下版本。舰队里 v1 和 v2 并存是正常的。同一毫秒全球生效，我不承诺。</p>
+  </div>
+  <div class="lang-en"><p class="col-kicker">English</p>
+<p>Even a short push can drop. A local cache makes <code>getConfig</code> fast, and it also keeps that instance on the old value until it catches up. That is the consistency trade-off. The fix is each instance catching up on its own, plus a minute-level reconcile.</p>
+<p>What you promise: every instance eventually sees the same published version. The window is seconds to tens of seconds, depending on the watch channel and the fan-out. That is why you gray-release, and let a subset see v2 first.</p>
+<p>The safety net is a minute-level reconcile: pull the MD5 or the version, and 304 when it matches. After the callback, the app refreshes its own thresholds. Heavy work stays off the listener thread. A class-shape change or a serialization change cannot hot-reload. Say so: that is a deploy.</p>
+<p class="say">Notify can drop. getConfig reads the local cache, so it can be stale. Reconcile the version about once a minute. v1 and v2 together in the fleet is normal. I will not promise a global cutover in the same millisecond.</p>
+  </div>
+</div>
+    <figure class="deck">
+<div class="slide">
+  <svg viewBox="0 0 960 420" class="board" role="img">
+  <g>
+    <rect x="195" y="156" width="260" height="96" rx="12" class="box ok"/>
+    <text x="325" y="190" text-anchor="middle" class="label">Server</text>
+    <text x="325" y="214" text-anchor="middle" class="sub">published v2</text>
+  </g>
+  <g>
+    <rect x="505" y="156" width="260" height="96" rx="12" class="box bad"/>
+    <text x="635" y="190" text-anchor="middle" class="label">Client</text>
+    <text x="635" y="214" text-anchor="middle" class="sub">missed notify</text>
+  </g>
+  <line x1="461" y1="204" x2="494" y2="204" class="wire"/>
+  <polygon points="494,199 503,204 494,209" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">推送会丢。服务端已经是 v2，这一台还停在上一次拉到的值。</span><span class="lang-en">A push can drop. The server is already on v2. This instance is still on the last value it pulled.</span></figcaption>
+</div>
+<div class="slide">
+  <svg viewBox="0 0 960 420" class="board" role="img">
+  <g>
+    <rect x="195" y="156" width="260" height="96" rx="12" class="box"/>
+    <text x="325" y="190" text-anchor="middle" class="label">getConfig</text>
+    <text x="325" y="214" text-anchor="middle" class="sub">in-process cache</text>
+  </g>
+  <g>
+    <rect x="505" y="156" width="260" height="96" rx="12" class="box alt"/>
+    <text x="635" y="190" text-anchor="middle" class="label">Config API</text>
+    <text x="635" y="214" text-anchor="middle" class="sub">off the read path</text>
+  </g>
+  <line x1="461" y1="204" x2="494" y2="204" class="wire"/>
+  <polygon points="494,199 503,204 494,209" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">业务读的是进程内缓存。快，也意味着服务器上的新版本要等 watch 或对账才进来。</span><span class="lang-en">The app reads an in-process cache. That is fast, and it means a new server version waits for watch or reconcile.</span></figcaption>
+</div>
+<div class="slide">
+  <svg viewBox="0 0 960 420" class="board" role="img">
+  <g>
+    <rect x="195" y="156" width="260" height="96" rx="12" class="box alt"/>
+    <text x="325" y="190" text-anchor="middle" class="label">Instance A</text>
+    <text x="325" y="214" text-anchor="middle" class="sub">still on v1</text>
+  </g>
+  <g>
+    <rect x="505" y="156" width="260" height="96" rx="12" class="box ok"/>
+    <text x="635" y="190" text-anchor="middle" class="label">Instance B</text>
+    <text x="635" y="214" text-anchor="middle" class="sub">already on v2</text>
+  </g>
+  <line x1="461" y1="204" x2="494" y2="204" class="wire"/>
+  <polygon points="494,199 503,204 494,209" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">新旧并存是一致性模型。窗口通常是秒到几十秒。Gray release 先把这个窗口收在一部分实例上。</span><span class="lang-en">Old and new together is the consistency model. The window is usually seconds to tens of seconds. Gray release keeps that window on a subset first.</span></figcaption>
+</div>
+<div class="slide">
+  <svg viewBox="0 0 960 420" class="board" role="img">
+  <g>
+    <rect x="195" y="156" width="260" height="96" rx="12" class="box ok"/>
+    <text x="325" y="190" text-anchor="middle" class="label">Reconcile</text>
+    <text x="325" y="214" text-anchor="middle" class="sub">about once a minute</text>
+  </g>
+  <g>
+    <rect x="505" y="156" width="260" height="96" rx="12" class="box"/>
+    <text x="635" y="190" text-anchor="middle" class="label">MD5 / version</text>
+    <text x="635" y="214" text-anchor="middle" class="sub">304 if same</text>
+  </g>
+  <line x1="461" y1="204" x2="494" y2="204" class="wire"/>
+  <polygon points="494,199 503,204 494,209" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">分钟级再拉一次版本。一样就 304。这一笔把丢掉的通知补上。</span><span class="lang-en">Pull the version again about once a minute. The same value is a 304. This stroke repairs a dropped notify.</span></figcaption>
+</div>
+<div class="slide">
+  <svg viewBox="0 0 960 420" class="board" role="img">
+  <g>
+    <rect x="195" y="156" width="260" height="96" rx="12" class="box bad"/>
+    <text x="325" y="190" text-anchor="middle" class="label">Fleet 2PC</text>
+    <text x="325" y="214" text-anchor="middle" class="sub">ack after everyone</text>
+  </g>
+  <g>
+    <rect x="505" y="156" width="260" height="96" rx="12" class="box ok"/>
+    <text x="635" y="190" text-anchor="middle" class="label">Catch up</text>
+    <text x="635" y="214" text-anchor="middle" class="sub">each client alone</text>
+  </g>
+  <line x1="461" y1="204" x2="494" y2="204" class="wire"/>
+  <polygon points="494,199 503,204 494,209" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">修一致性的办法是让每台自己追平。等全舰队提交再返回，发布会被可用性拖垮。</span><span class="lang-en">The consistency fix is each client catching up alone. Waiting for the whole fleet to commit before you return drags the publish down with availability.</span></figcaption>
+</div>
+</figure>
+    <p class="cite"><span class="lang-zh">对账、重连退避、别堵住监听线程，后读 <span class="chip soon">Ch42 · 消息与弹性</span>。</span><span class="lang-en">Reconcile, reconnect backoff, and keeping the listener thread light: <span class="chip soon">Ch42 · messaging and resilience</span>.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">失败路径</span><span class="lang-en">Failure path</span></h2>
+    <div class="bilingual">
+  <div class="lang-zh"><p class="col-kicker">中文</p>
+<p>失败路径单独画。配置中心宕了，进程仍然要起来。本地磁盘快照是上一次成功拉到的值。多数产品开关 fail-open，用旧阈值继续服务。鉴权和安全开关 fail-close，快照缺失或过期就拒绝。</p>
+<p>另一条失败是发布请求自己：在请求线程里同步叫醒上万 watch，发布接口会被惊群拖死。叫醒分批，和业务读路径解开。</p>
+<p>callback 只把新文本交出去。外部依赖和重算大表若放进监听线程，一次热更新会把实例打满。不能热更的变更走发版。Gray release 只装能退回的阈值和 flag。</p>
+  </div>
+  <div class="lang-en"><p class="col-kicker">English</p>
+<p>Draw the failure path on its own. If the config center is down, the process still has to boot. The local disk snapshot is the last value that pulled successfully. Most product switches fail-open and keep serving on the old threshold. Auth and security switches fail-close: a missing or expired snapshot refuses.</p>
+<p>The other failure is the publish request itself. Synchronously waking about 10k watches on that thread lets a thundering herd take the publish API down. Wake in batches, off the business read path.</p>
+<p>The callback only hands over the new text. An external call or a big recompute on the listener thread lets one hot reload saturate the instance. A change that cannot hot-reload ships as a deploy. Gray release carries thresholds and flags you can turn back.</p>
+  </div>
+</div>
+    <figure class="deck">
+<div class="slide">
+  <svg viewBox="0 0 960 420" class="board" role="img">
+  <g>
+    <rect x="195" y="156" width="260" height="96" rx="12" class="box bad"/>
+    <text x="325" y="190" text-anchor="middle" class="label">Config API</text>
+    <text x="325" y="214" text-anchor="middle" class="sub">unreachable</text>
+  </g>
+  <g>
+    <rect x="505" y="156" width="260" height="96" rx="12" class="box bad"/>
+    <text x="635" y="190" text-anchor="middle" class="label">Watch</text>
+    <text x="635" y="214" text-anchor="middle" class="sub">drops</text>
+  </g>
+  <line x1="461" y1="204" x2="494" y2="204" class="wire"/>
+  <polygon points="494,199 503,204 494,209" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">中心不可达，watch 断掉。启动和运行中的读都要有不依赖中心的那一笔。</span><span class="lang-en">The center is unreachable and the watch drops. Boot and the steady-state read both need a stroke that does not depend on the center.</span></figcaption>
+</div>
+<div class="slide">
+  <svg viewBox="0 0 960 420" class="board" role="img">
+  <g>
+    <rect x="195" y="156" width="260" height="96" rx="12" class="box ok"/>
+    <text x="325" y="190" text-anchor="middle" class="label">Disk snapshot</text>
+    <text x="325" y="214" text-anchor="middle" class="sub">last good pull</text>
+  </g>
+  <g>
+    <rect x="505" y="156" width="260" height="96" rx="12" class="box"/>
+    <text x="635" y="190" text-anchor="middle" class="label">Process</text>
+    <text x="635" y="214" text-anchor="middle" class="sub">boots on old</text>
+  </g>
+  <line x1="461" y1="204" x2="494" y2="204" class="wire"/>
+  <polygon points="494,199 503,204 494,209" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">用磁盘快照启动。值是旧的，进程是活的。恢复之后 watch 再追到新版本。</span><span class="lang-en">Boot from the disk snapshot. The value is old. The process is up. When the center returns, watch catches up.</span></figcaption>
+</div>
+<div class="slide">
+  <svg viewBox="0 0 960 420" class="board" role="img">
+  <g>
+    <rect x="195" y="156" width="260" height="96" rx="12" class="box ok"/>
+    <text x="325" y="190" text-anchor="middle" class="label">Product flag</text>
+    <text x="325" y="214" text-anchor="middle" class="sub">fail-open</text>
+  </g>
+  <g>
+    <rect x="505" y="156" width="260" height="96" rx="12" class="box ok"/>
+    <text x="635" y="190" text-anchor="middle" class="label">Auth flag</text>
+    <text x="635" y="214" text-anchor="middle" class="sub">fail-close</text>
+  </g>
+  <line x1="461" y1="204" x2="494" y2="204" class="wire"/>
+  <polygon points="494,199 503,204 494,209" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">两条策略都写在白板上。产品开关用旧值继续；安全开关在快照不可用时拒绝。</span><span class="lang-en">Write both policies on the board. A product switch keeps the old value. A security switch refuses when the snapshot is unusable.</span></figcaption>
+</div>
+<div class="slide">
+  <svg viewBox="0 0 960 420" class="board" role="img">
+  <g>
+    <rect x="195" y="156" width="260" height="96" rx="12" class="box bad"/>
+    <text x="325" y="190" text-anchor="middle" class="label">Request thread</text>
+    <text x="325" y="214" text-anchor="middle" class="sub">sync fan-out</text>
+  </g>
+  <g>
+    <rect x="505" y="156" width="260" height="96" rx="12" class="box ok"/>
+    <text x="635" y="190" text-anchor="middle" class="label">Batch wake</text>
+    <text x="635" y="214" text-anchor="middle" class="sub">off that thread</text>
+  </g>
+  <line x1="461" y1="204" x2="494" y2="204" class="wire"/>
+  <polygon points="494,199 503,204 494,209" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">发布线程里同步 fan-out 是失败路径。分批叫醒，发布接口才能在热 key 下活下来。</span><span class="lang-en">Synchronous fan-out on the publish thread is a failure path. Batch the wake-up so the publish API survives a hot key.</span></figcaption>
+</div>
+</figure>
+    <p class="cite"><span class="lang-zh">惊群、退避、监听线程上的重活，去 <span class="chip soon">Ch42 · 消息与弹性</span>。</span><span class="lang-en">Thundering herds, backoff, and heavy work on the listener thread: <span class="chip soon">Ch42 · messaging and resilience</span>.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">2026 怎么答</span><span class="lang-en">How you answer in 2026</span></h2>
+    <div class="bilingual">
+  <div class="lang-zh"><p class="col-kicker">中文</p>
+<details class="fold"><summary>没有专书章节。网上旧答换掉</summary>
+<p>两卷面试书都没有「设计配置中心」。这一章按 2026 公开面试题来答：long-poll 或长连接 watch、版本 CAS、按实例 gray release、配置和发现分开。产品手册留在文档里。</p>
+<table><thead><tr><th>旧惯性</th><th>现在开口</th></tr></thead><tbody>
+<tr><td>每 5–30 秒短轮询当唯一方案</td><td>启动拉加 watch。分钟级对账只是兜底</td></tr>
+<tr><td>通知里塞整份配置</td><td>先通知 key / 版本，再 GET</td></tr>
+<tr><td>只放内存</td><td>DB 加缓存。Client 再加磁盘快照</td></tr>
+<tr><td>Git 仓库当配置中心</td><td>Git 没有 watch，也没有按实例灰度</td></tr>
+<tr><td>改完就滚 Pod</td><td>那是部署配置。这里是运行时热更新</td></tr>
+<tr><td>UDP 推配置当默认</td><td>旧的辅助手段。现在是 long-poll 或长连接</td></tr>
+<tr><td>某厂 QPS 当事实</td><td>教学假设，只报数量级</td></tr>
+</tbody></table>
+<p>还成立的骨架：集中存储、能动态更新、有版本和回滚。</p>
+</details>
+  </div>
+  <div class="lang-en"><p class="col-kicker">English</p>
+<details class="fold"><summary>No dedicated book chapter. Retire the old internet answer</summary>
+<p>Neither interview volume has “design a configuration center.” Answer from 2026 public prompts: long-poll or a long-lived watch, version CAS, gray release by instance, config split from discovery. Leave the product manual in the docs.</p>
+<table><thead><tr><th>Old habit</th><th>What you say now</th></tr></thead><tbody>
+<tr><td>Short-poll every 5–30 seconds as the only design</td><td>Pull at startup plus watch. Minute-level reconcile is only the safety net</td></tr>
+<tr><td>The full config inside notify</td><td>Notify the key and version, then GET</td></tr>
+<tr><td>Memory only</td><td>DB plus cache. The client also keeps a disk snapshot</td></tr>
+<tr><td>A Git repo as the config center</td><td>Git has no watch, and no per-instance gray release</td></tr>
+<tr><td>Roll instances after every edit</td><td>That is deploy config. This chapter is runtime hot reload</td></tr>
+<tr><td>UDP push as the default</td><td>An old helper. Now long-poll or a long-lived connection</td></tr>
+<tr><td>Some company’s QPS as fact</td><td>A teaching assumption. Order of magnitude only</td></tr>
+</tbody></table>
+<p>The skeleton that still holds: a centralized store, dynamic updates, versions and rollback.</p>
+</details>
+  </div>
+</div>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">追问</span><span class="lang-en">Follow-ups</span></h2>
+    <div class="bilingual">
+  <div class="lang-zh"><p class="col-kicker">中文</p>
+<ol>
+<li><strong>Git 能不能当配置中心？</strong> 能存。它没有 watch，也不能按实例 gray release。运行时开关走配置中心。</li>
+<li><strong>为什么不短轮询？</strong> 空转 QPS，延迟等于周期。Long-poll 或长连接。</li>
+<li><strong>通知为什么不带正文？</strong> 接口分开，好重试，好灰度。Client 再 GET。</li>
+<li><strong>所有机器同时生效吗？</strong> 每台自己追。中间新旧并存。</li>
+<li><strong>中心挂了？</strong> 本地快照启动。产品 flag fail-open，安全项 fail-close。</li>
+<li><strong>终图还要再加框？</strong> mesh、GitOps、功能对照表都不是这题。三条 hard part 讲透，比二十个框分高。</li>
+</ol>
+  </div>
+  <div class="lang-en"><p class="col-kicker">English</p>
+<ol>
+<li><strong>Can Git be the config center?</strong> It can store. It has no watch, and it cannot gray-release by instance. Runtime switches go through the config center.</li>
+<li><strong>Why not short-poll?</strong> Idle QPS, and latency equals the period. Long-poll or a long-lived connection.</li>
+<li><strong>Why does notify omit the body?</strong> Split the APIs. Retry stays easy, and so does gray release. The client then GETs.</li>
+<li><strong>Does every machine see it at once?</strong> Each instance catches up alone. Old and new coexist in the middle.</li>
+<li><strong>The center is down?</strong> Boot from the local snapshot. Product flags fail-open. Security items fail-close.</li>
+<li><strong>They want more boxes on the final picture?</strong> Mesh, GitOps, and a feature matrix are a different prompt. The three hard parts, said to the bottom, score higher than twenty boxes.</li>
+</ol>
+  </div>
+</div>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">收尾，不要说完美</span><span class="lang-en">Close without saying perfect</span></h2>
+    <div class="bilingual">
+  <div class="lang-zh"><p class="col-kicker">中文</p>
+<table><thead><tr><th>bottleneck</th><th>你怎么接</th></tr></thead><tbody>
+<tr><td>短轮询空转，或通知塞全文</td><td>启动拉加 watch。通知只带版本，再 GET</td></tr>
+<tr><td>只内存，没有版本</td><td>DB 加缓存，CAS，历史可回滚，快照兜底</td></tr>
+<tr><td>全量一刀切，或和发现搅在一起</td><td>先按实例 gray release。KV 和实例列表分开，发现去后一章</td></tr>
+</tbody></table>
+<p>合上这一页，用 30 秒开场加上那条控制面，把 long-poll 或长连接、谁能看见版本、gray release、丢通知之后的本地缓存，讲给空气听。哪句卡，回哪一节。</p>
+<p>主线下一章是 <span class="chip soon">Ch29 · LLM 推理服务</span>。</p>
+  </div>
+  <div class="lang-en"><p class="col-kicker">English</p>
+<table><thead><tr><th>Bottleneck</th><th>What you say</th></tr></thead><tbody>
+<tr><td>Short-poll idle, or a fat notify</td><td>Pull at startup plus watch. Notify carries the version, then GET</td></tr>
+<tr><td>Memory only, no versions</td><td>DB plus cache, CAS, history you can roll back, snapshot as the safety net</td></tr>
+<tr><td>All-at-once cutover, or mixed with discovery</td><td>Gray-release by instance first. KV and the instance list stay apart</td></tr>
+</tbody></table>
+<p>Close the page. Give the 30-second open and the one control plane, then say long-poll or a long-lived watch, who sees a version, gray release, and what the local cache does after a dropped notify. Whichever sentence snags, go back to that section.</p>
+<p>Next on the main line is <span class="chip soon">Ch29 · LLM inference service</span>.</p>
+  </div>
+</div>
+  </section>
+
+<section>
+  <h2><span class="lang-zh">闪卡</span><span class="lang-en">Flashcards</span></h2>
+  <p class="cite"><span class="lang-zh">点一下翻面。能讲出来才算会。</span><span class="lang-en">Click to flip. If you can say it, you know it.</span></p>
+  <div class="cards-grid">
+<button type="button" class="flip">
+  <span class="q"><span class="lang-zh">配置中心三个 hard part 是什么？</span><span class="lang-en">What are the three hard parts?</span></span>
+  <span class="a"><span class="lang-zh">push/pull 怎么 watch；版本改了谁能看见；gray release。发现只点一句。</span><span class="lang-en">How you watch, push versus pull; who sees a version; gray release. Discovery is one sentence.</span></span>
+</button>
+<button type="button" class="flip">
+  <span class="q"><span class="lang-zh">默认范围是什么？</span><span class="lang-en">What is the default scope?</span></span>
+  <span class="a"><span class="lang-zh">应用配置：feature flag、开关、超时和限流阈值。Git、部署清单、微服务整章都先放下。</span><span class="lang-en">Application config: feature flags, switches, timeouts, rate-limit thresholds. Leave Git, deploy manifests, and a microservices chapter for later.</span></span>
+</button>
+<button type="button" class="flip">
+  <span class="q"><span class="lang-zh">2026 怎么 watch？</span><span class="lang-en">How do you watch in 2026?</span></span>
+  <span class="a"><span class="lang-zh">启动拉一次，变更通知，再拉内容。Long-poll 或 gRPC / WebSocket 长连接。短轮询留到被追问。</span><span class="lang-en">Pull once at startup, notify on change, then pull the content. Long-poll, or a long-lived gRPC / WebSocket connection. Short-poll waits until they ask.</span></span>
+</button>
+<button type="button" class="flip">
+  <span class="q"><span class="lang-zh">通知里带全文吗？</span><span class="lang-en">Does notify carry the body?</span></span>
+  <span class="a"><span class="lang-zh">默认不带。只带 key 和版本，Client 再 GET。薄，好重试，也方便 gray release。</span><span class="lang-en">Not by default. Key and version only, then the client GETs. Thin, easy to retry, and gray release stays possible.</span></span>
+</button>
+<button type="button" class="flip">
+  <span class="q"><span class="lang-zh">本地缓存和一致性的 trade-off 是什么？</span><span class="lang-en">What is the local-cache consistency trade-off?</span></span>
+  <span class="a"><span class="lang-zh">getConfig 读进程内缓存，所以快，也会旧。推送会丢。分钟级对版本。舰队里 v1 和 v2 并存是正常的。</span><span class="lang-en">getConfig reads an in-process cache, so it is fast and it can be stale. A push can drop. Reconcile the version about once a minute. v1 and v2 together in the fleet is normal.</span></span>
+</button>
+<button type="button" class="flip">
+  <span class="q"><span class="lang-zh">两人同时改，怎么回滚？</span><span class="lang-en">Two editors, and how do you roll back?</span></span>
+  <span class="a"><span class="lang-zh">乐观并发：旧 version 或旧 MD5 直接拒绝。回滚是把上一条 Release 再发布一次。</span><span class="lang-en">Optimistic concurrency: an old version or old MD5 is rejected. Rollback publishes the previous Release again.</span></span>
+</button>
+<button type="button" class="flip">
+  <span class="q"><span class="lang-zh">Gray release 和网关 canary 差在哪？</span><span class="lang-en">How is gray release different from a gateway canary?</span></span>
+  <span class="a"><span class="lang-zh">Gray release 是同一份代码读不同 KV，按 IP、标签或百分比。网关 canary 切的是流量和代码版本。</span><span class="lang-en">Gray release is the same code reading different KV, by IP, tag, or percent. A gateway canary splits traffic and code versions.</span></span>
+</button>
+<button type="button" class="flip">
+  <span class="q"><span class="lang-zh">配置中心挂了怎么办？</span><span class="lang-en">What if the config center is down?</span></span>
+  <span class="a"><span class="lang-zh">用本地快照启动。多数产品 flag fail-open。鉴权和安全开关 fail-close。</span><span class="lang-en">Boot from the local snapshot. Most product flags fail-open. Auth and security switches fail-close.</span></span>
+</button>
+  </div>
+</section>
+<p><button type="button" class="read-toggle">
+  <span class="when-off"><span class="lang-zh">我已学完本章</span><span class="lang-en">Mark this chapter done</span></span>
+  <span class="when-on"><span class="lang-zh">已学完本章</span><span class="lang-en">Completed</span></span>
+</button></p>
+<p class="cite"><span class="lang-zh">进度存在这台浏览器里。</span><span class="lang-en">Saved in this browser only.</span></p>
+</article>
+</main>
+<script src="../assets/js/nav.js"></script>
+<script src="../assets/js/lang.js"></script>
+<script src="../assets/js/slides.js"></script>
+<script src="../assets/js/progress.js"></script>
+</body>
+</html>

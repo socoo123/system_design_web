@@ -1,0 +1,837 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="parchment" data-locale="zh">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ch20 · 分布式消息队列</title>
+  <link rel="icon" href="../favicon.ico" sizes="48x48">
+  <link rel="stylesheet" href="../assets/css/style.css">
+  <script src="../assets/js/boot.js"></script>
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="../index.html"><span class="brand-logo">SD</span><span class="lang-zh">系统设计面试</span><span class="lang-en">System Design Interview</span></a>
+  <span class="spacer"></span>
+  <a class="map-link" href="../index.html"><span class="lang-zh">课程地图</span><span class="lang-en">Map</span></a>
+  <div class="seg" role="group" aria-label="language">
+    <button type="button" data-locale-set="zh">中文</button>
+    <button type="button" data-locale-set="both"><span class="lang-zh">对照</span><span class="lang-en">Both</span></button>
+    <button type="button" data-locale-set="en">EN</button>
+  </div>
+  <div class="seg" role="group" aria-label="theme">
+    <button type="button" data-theme-set="parchment"><span class="lang-zh">护眼</span><span class="lang-en">Paper</span></button>
+    <button type="button" data-theme-set="dracula"><span class="lang-zh">深色</span><span class="lang-en">Dark</span></button>
+  </div>
+</header>
+<main class="wrap">
+<article class="chapter" id="ch20" data-ch="ch20">
+  <header>
+    <div class="ch-kicker"><span class="lang-zh">CHAPTER 20 · 设计题</span><span class="lang-en">CHAPTER 20 · case</span></div>
+    <h1><span class="lang-zh">分布式消息队列</span><span class="lang-en">Distributed message queue</span></h1>
+    <p class="ch-meta-line"><span class="lang-zh">约 35 分钟 · 前置：Ch01。Outbox 和弹性可以后读</span><span class="lang-en">~35 min · after Ch01. Outbox and resilience can wait</span></p>
+  </header>
+
+  <section class="goal">
+    <h2><span class="lang-zh">这一章结束你能做什么</span><span class="lang-en">What you can do after this chapter</span></h2>
+    <div class="bilingual">
+  <div class="lang-zh"><p class="col-kicker">中文</p>
+<ul>
+<li>用 30 秒说出三个 hard part，并把范围收在可重放的分区日志上。</li>
+<li>当面讲完 at-least-once、at-most-once、exactly-once 的 trade-off。默认是 at-least-once 加 idempotency。</li>
+<li>白板从 producer 长到 broker 再到 consumer，再讲 partition、replica、offset、重放。失败路径单独画。</li>
+</ul>
+  </div>
+  <div class="lang-en"><p class="col-kicker">English</p>
+<ul>
+<li>Name the three hard parts in 30 seconds, and keep the scope on a replayable partitioned log.</li>
+<li>Say the at-least-once, at-most-once, and exactly-once trade-off out loud. Default to at-least-once plus idempotency.</li>
+<li>Grow the board from producer to broker to consumer, then partition, replica, offset, and replay. Draw the failure path on its own.</li>
+</ul>
+  </div>
+</div>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">先定交付语义</span><span class="lang-en">Delivery semantics first</span></h2>
+    <div class="bilingual">
+  <div class="lang-zh"><p class="col-kicker">中文</p>
+<p class="say">设计 Kafka 风格日志，不是 Rabbit 五种 exchange，也不是弹性全书。三个 hard part：partition 与顺序、consumer group 再均衡、ISR / exactly-once / KRaft。顺序只在 partition 内。exactly-once 贵，白板默认 at-least-once 加 idempotency。协调面 2026 默认 KRaft。</p>
+<p>上一章 <a class="chip" href="ch19.html">Ch19 · 邻近服务</a> 讲附近怎么查。这题换成事件怎么可靠传。第一问必须是范围：消费即删，还是留着可重放。接着只问保序到哪、留存多久、几个独立 consumer group、日消息的数量级。问过 10 分钟还在问，本身就是 red flag。五种 exchange、Flink 窗口、熔断重试，承认差别然后收口。积压在 <span class="chip soon">Ch42 · 消息与弹性</span>。和数据库同一事务走 Outbox，在 <span class="chip soon">Ch41 · 复制与事务</span>。</p>
+<p>三种语义的 trade-off 要在画架构之前说完。at-most-once：先提交 offset 再处理，进程崩溃就丢。at-least-once：处理完再提交，崩溃会重放，消费者必须按业务键做 idempotency。exactly-once：幂等 producer 加事务，延迟和运维都贵，而且只在 Kafka 闭环里成立。写出外部库，事务覆盖不到。</p>
+<p class="say">我假设：分区日志，可重放，不是 Rabbit 手册。顺序按 message key 保 partition 内 FIFO。留存约 7 天。默认 at-least-once，消费者按业务键幂等。RF=3，acks=all，ISR。协调面 KRaft。方向不对你打断我。</p>
+  </div>
+  <div class="lang-en"><p class="col-kicker">English</p>
+<p class="say">Design a Kafka-style log, not Rabbit's five exchanges, and not a resilience encyclopedia. Three hard parts: partitions and ordering, consumer group rebalance, ISR / exactly-once / KRaft. Order is partition-local only. exactly-once is expensive. The whiteboard default is at-least-once plus idempotency. The 2026 control plane is KRaft.</p>
+<p>The previous case, <a class="chip" href="ch19.html">Ch19 · nearby</a>, was how you query what is close. This prompt is how events travel reliably. The first question has to be scope: consume-and-delete, or a log you can replay. Then only ask how far order goes, how long you retain, how many independent consumer groups, and the daily order of magnitude. Still asking after 10 minutes is its own red flag. Five exchanges, Flink windows, circuit-breaker retries: name the difference and close it. Backlog is <span class="chip soon">Ch42 · messaging and resilience</span>. The same transaction as the database is Outbox, in <span class="chip soon">Ch41 · replication and transactions</span>.</p>
+<p>Say the trade-off before you draw the architecture. at-most-once commits the offset, then processes: a crash drops the record. at-least-once processes, then commits: a crash replays, so the consumer needs idempotency on a business key. exactly-once is an idempotent producer plus transactions. It costs latency and ops, and it only holds inside the Kafka loop. An external database is outside that transaction.</p>
+<p class="say">I'll assume a partitioned log you can replay, not a Rabbit handbook. Order is FIFO inside a partition by message key. Retention is about 7 days. Default at-least-once, consumers idempotent on a business key. RF=3, acks=all, ISR. Control plane is KRaft. Stop me if that direction is wrong.</p>
+  </div>
+</div>
+    <figure class="deck">
+<div class="slide">
+  <svg class="board" viewBox="0 0 960 420" role="img">
+  <g>
+    <rect x="350" y="150" width="260" height="96" rx="12" class="box ok"/>
+    <text x="480" y="184" text-anchor="middle" class="label">Replayable log</text>
+    <text x="480" y="208" text-anchor="middle" class="sub">consume does not delete</text>
+  </g>
+</svg>
+  <figcaption><span class="lang-zh">第一笔写范围：可重放的分区日志。消费不删。Rabbit 的 exchange 先不画。</span><span class="lang-en">First stroke is scope: a replayable partitioned log. Consume does not delete. Do not draw Rabbit exchanges yet.</span></figcaption>
+</div>
+<div class="slide">
+  <svg class="board" viewBox="0 0 960 420" role="img">
+  <g>
+    <rect x="350" y="150" width="260" height="96" rx="12" class="box bad"/>
+    <text x="480" y="184" text-anchor="middle" class="label">at-most-once</text>
+    <text x="480" y="208" text-anchor="middle" class="sub">commit, then process</text>
+  </g>
+</svg>
+  <figcaption><span class="lang-zh">先提交 offset 再处理。崩溃发生在处理前，这条就丢了。</span><span class="lang-en">Commit the offset, then process. A crash before processing drops the record.</span></figcaption>
+</div>
+<div class="slide">
+  <svg class="board" viewBox="0 0 960 420" role="img">
+  <g>
+    <rect x="185" y="150" width="260" height="96" rx="12" class="box bad"/>
+    <text x="315" y="184" text-anchor="middle" class="label">at-most-once</text>
+    <text x="315" y="208" text-anchor="middle" class="sub">can drop</text>
+  </g>
+  <g>
+    <rect x="515" y="150" width="260" height="96" rx="12" class="box ok"/>
+    <text x="645" y="184" text-anchor="middle" class="label">at-least-once</text>
+    <text x="645" y="208" text-anchor="middle" class="sub">process, then commit</text>
+  </g>
+</svg>
+  <figcaption><span class="lang-zh">旁边写上默认：处理完再提交 offset。崩溃会重放，所以会有重复。</span><span class="lang-en">Add the default beside it: process, then commit the offset. A crash replays, so you get duplicates.</span></figcaption>
+</div>
+<div class="slide">
+  <svg class="board" viewBox="0 0 960 420" role="img">
+  <g>
+    <rect x="62" y="150" width="260" height="96" rx="12" class="box bad"/>
+    <text x="192" y="184" text-anchor="middle" class="label">at-most-once</text>
+    <text x="192" y="208" text-anchor="middle" class="sub">can drop</text>
+  </g>
+  <g>
+    <rect x="350" y="150" width="260" height="96" rx="12" class="box ok"/>
+    <text x="480" y="184" text-anchor="middle" class="label">at-least-once</text>
+    <text x="480" y="208" text-anchor="middle" class="sub">duplicates</text>
+  </g>
+  <g>
+    <rect x="638" y="150" width="260" height="96" rx="12" class="box alt"/>
+    <text x="768" y="184" text-anchor="middle" class="label">exactly-once</text>
+    <text x="768" y="208" text-anchor="middle" class="sub">txn, expensive</text>
+  </g>
+</svg>
+  <figcaption><span class="lang-zh">exactly-once 是第三格，不是免费默认。幂等 producer 加事务，贵，而且出了 Kafka 就不成立。</span><span class="lang-en">exactly-once is the third box, not a free default. Idempotent producer plus transactions, and it is expensive. It stops holding outside Kafka.</span></figcaption>
+</div>
+<div class="slide">
+  <svg class="board" viewBox="0 0 960 420" role="img">
+  <g>
+    <rect x="62" y="150" width="260" height="96" rx="12" class="box ok"/>
+    <text x="192" y="184" text-anchor="middle" class="label">at-least-once</text>
+    <text x="192" y="208" text-anchor="middle" class="sub">whiteboard default</text>
+  </g>
+  <g>
+    <rect x="350" y="150" width="260" height="96" rx="12" class="box ok"/>
+    <text x="480" y="184" text-anchor="middle" class="label">idempotency</text>
+    <text x="480" y="208" text-anchor="middle" class="sub">business key</text>
+  </g>
+  <g>
+    <rect x="638" y="150" width="260" height="96" rx="12" class="box ok"/>
+    <text x="768" y="184" text-anchor="middle" class="label">KRaft</text>
+    <text x="768" y="208" text-anchor="middle" class="sub">control plane</text>
+  </g>
+</svg>
+  <figcaption><span class="lang-zh">假设写上白板再往下画：at-least-once、业务键 idempotency、协调面 KRaft。ZooKeeper 不进第一张图。</span><span class="lang-en">Write the assumptions, then keep drawing: at-least-once, idempotency on a business key, KRaft on the control plane. ZooKeeper stays off the first diagram.</span></figcaption>
+</div>
+</figure>
+    <p class="cite"><span class="lang-zh">时间盒在 <a class="chip" href="ch01.html">Ch01</a>。先把交付语义定下来，再估数量级。</span><span class="lang-en">The clock is in <a class="chip" href="ch01.html">Ch01</a>. Lock delivery semantics, then estimate.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">数量级</span><span class="lang-en">Orders of magnitude</span></h2>
+    <div class="bilingual">
+  <div class="lang-zh"><p class="col-kicker">中文</p>
+<p>公式在 <span class="chip soon">Ch03 · 粗略估算</span>。这里只证明一件事：bottleneck 是热 partition、再均衡和 replica 确认，不是编一个某厂峰值。下面全是教学假设，旁边标「假设」。</p>
+<p>内部事件总线大约 1e8 条/天，均条约 1 KB，峰值大约是日均的 5 到 10 倍，留存 7 天，RF=3。先按未压缩估。1e8 / 86400 大约 1e3 QPS，峰值大约 1e4。一天大约 100 GB，7 天乘 RF=3 是 2 TB 这个量级。组内并行不超过 partition 数，预分几十到几百。同一个 key 仍然挤在一个 partition 里。多出来的 consumer 是空转。</p>
+<p class="say">亿条/天的白板：日均千级 QPS，峰值万级。磁盘按留存和副本到 TB。真正怕的是热 partition 和 group 再均衡。我不会把某厂的日消息量当成自己的内部数字。</p>
+  </div>
+  <div class="lang-en"><p class="col-kicker">English</p>
+<p>The formulas live in <span class="chip soon">Ch03 · estimates</span>. Here you only prove one thing: the bottleneck is a hot partition, rebalance, and replica acks, not a peak you invented for some company. Everything below is a teaching assumption. Label it.</p>
+<p>An internal event bus of about 1e8 records a day, mean size about 1 KB, peak about 5 to 10 times the daily average, retention 7 days, RF=3. Estimate uncompressed first. 1e8 / 86400 is about 1e3 QPS, peak about 1e4. A day is about 100 GB. Seven days times RF=3 is on the order of 2 TB. In-group parallelism cannot pass the partition count. Pre-create tens to hundreds. The same key still piles into one partition. Extra consumers sit idle.</p>
+<p class="say">A hundred million a day on the board: thousands of QPS on average, tens of thousands at peak. Disk is terabytes once you keep retention and replicas. What I actually fear is a hot partition and group rebalance. I will not treat some company's daily volume as my internal number.</p>
+  </div>
+</div>
+    <figure class="deck">
+<div class="slide">
+  <svg class="board" viewBox="0 0 960 420" role="img">
+  <g>
+    <rect x="350" y="150" width="260" height="96" rx="12" class="box"/>
+    <text x="480" y="184" text-anchor="middle" class="label">1e8 / day</text>
+    <text x="480" y="208" text-anchor="middle" class="sub">teaching assumption</text>
+  </g>
+</svg>
+  <figcaption><span class="lang-zh">先写教学假设：大约一亿条一天。这不是某厂的内部数字。</span><span class="lang-en">Write the teaching assumption first: about a hundred million records a day. That is not some company's internal number.</span></figcaption>
+</div>
+<div class="slide">
+  <svg class="board" viewBox="0 0 960 420" role="img">
+  <g>
+    <rect x="185" y="150" width="260" height="96" rx="12" class="box"/>
+    <text x="315" y="184" text-anchor="middle" class="label">~1e3 QPS</text>
+    <text x="315" y="208" text-anchor="middle" class="sub">1e8 / 86400</text>
+  </g>
+  <g>
+    <rect x="515" y="150" width="260" height="96" rx="12" class="box alt"/>
+    <text x="645" y="184" text-anchor="middle" class="label">peak ~1e4</text>
+    <text x="645" y="208" text-anchor="middle" class="sub">about 5 to 10x</text>
+  </g>
+  <line x1="451" y1="198" x2="504" y2="198" class="wire"/>
+  <polygon points="504,193 513,198 504,203" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">日均千级 QPS，峰值万级。入口画成百万 QPS，却不讲 partition，那是在编数字。</span><span class="lang-en">Thousands of QPS on average, tens of thousands at peak. Drawing a million QPS at ingress without partitions is inventing a number.</span></figcaption>
+</div>
+<div class="slide">
+  <svg class="board" viewBox="0 0 960 420" role="img">
+  <g>
+    <rect x="185" y="150" width="260" height="96" rx="12" class="box"/>
+    <text x="315" y="184" text-anchor="middle" class="label">~100 GB / day</text>
+    <text x="315" y="208" text-anchor="middle" class="sub">1e8 times 1 KB</text>
+  </g>
+  <g>
+    <rect x="515" y="150" width="260" height="96" rx="12" class="box"/>
+    <text x="645" y="184" text-anchor="middle" class="label">~2 TB</text>
+    <text x="645" y="208" text-anchor="middle" class="sub">7d times RF=3</text>
+  </g>
+  <line x1="451" y1="198" x2="504" y2="198" class="wire"/>
+  <polygon points="504,193 513,198 504,203" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">未压缩一天大约 100 GB。留存 7 天再乘 3 副本，磁盘是 TB 量级。压缩和批会再降，粗估先不扣。</span><span class="lang-en">Uncompressed, a day is about 100 GB. Seven days times three replicas puts disk in the terabyte range. Compression and batching cut that later. Do not subtract them in the first pass.</span></figcaption>
+</div>
+<div class="slide">
+  <svg class="board" viewBox="0 0 960 420" role="img">
+  <g>
+    <rect x="350" y="150" width="260" height="96" rx="12" class="box bad"/>
+    <text x="480" y="184" text-anchor="middle" class="label">Hot partition</text>
+    <text x="480" y="208" text-anchor="middle" class="sub">one key, one log</text>
+  </g>
+</svg>
+  <figcaption><span class="lang-zh">平均 QPS 好看没用。同一个 key 会打满一个 partition。加实例也加不过 partition 数。</span><span class="lang-en">A pretty average QPS does not help. One key fills one partition. Adding instances cannot pass the partition count.</span></figcaption>
+</div>
+</figure>
+    <p class="cite"><span class="lang-zh">口径沿用 <span class="chip soon">Ch03 · 粗略估算</span>。数字旁边写「假设」。</span><span class="lang-en">The habit is <span class="chip soon">Ch03 · estimates</span>. Write "assumption" next to the numbers.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">高层：producer 到 consumer</span><span class="lang-en">High-level: producer to consumer</span></h2>
+    <div class="bilingual">
+  <div class="lang-zh"><p class="col-kicker">中文</p>
+<p>从左到右只画一条数据面：producer、broker 上的 append-only log、consumer。这张图不扇出 Schema Registry、Connect、Flink、五种 exchange，也不画多 Region。KRaft 管 topic、partition leader 和 ISR，不搬业务字节，所以先不画在数据面上。</p>
+<p>写路径：客户端按 key 选 partition，攒 batch，打到那个 partition 的 leader，leader 追加 WAL。follower 跟上、进入 ISR 之后，high watermark 往前走，acks=all 才回成功。和库必须同一事务的事件，先写 Outbox 再 produce。请求线程里先写库再裸 send，不要当成唯一方案。CDC 从 binlog 进 topic，点到即可。</p>
+<p>读路径：consumer 加入 consumer group，分到若干 partition，从 committed offset 做 pull，长轮询，处理完再提交 offset。消费不删日志，过期靠留存切 segment。另一组可以从头重放。吞吐靠顺序写、批、pagecache，不是「消息必须进内存库」。为什么日志落在磁盘上，回 <a class="chip" href="ch37.html">Ch37 · 存储选型</a> 看一眼。延迟用小批，日志聚合用大批。高层不展开零拷贝。</p>
+<p class="say">producer 打 broker 的分区日志，consumer 按 group pull。和库一致走 Outbox。协调面 KRaft，数据面不画 ZooKeeper。方向可以的话，下一笔是 partition 和顺序，然后是 replica，再是 offset、重放和 idempotency。</p>
+  </div>
+  <div class="lang-en"><p class="col-kicker">English</p>
+<p>Left to right, one data plane: producer, an append-only log on the broker, consumer. Do not fan out Schema Registry, Connect, Flink, five exchanges, or multi-region on this diagram. KRaft owns topics, partition leaders, and the ISR. It does not carry business bytes, so leave it off the data plane for now.</p>
+<p>Write path: the client picks a partition by key, batches, and hits that partition's leader. The leader appends the WAL. After followers catch up and sit in the ISR, the high watermark moves, and acks=all is the only success. An event that must share a transaction with the database: write the Outbox, then produce. Do not make "write the row, then a naked send on the request thread" the only plan. CDC from the binlog into a topic is one sentence, not this chapter.</p>
+<p>Read path: the consumer joins a consumer group, is assigned partitions, and pulls from the committed offset with a long poll. Process, then commit the offset. Consume does not delete the log. Retention drops old segments. Another group can replay from the start. Throughput is sequential write, batch, and pagecache, not "messages must live in memory." Why the log sits on disk is a glance at <a class="chip" href="ch37.html">Ch37 · storage</a>. Latency wants small batches. Log aggregation wants large ones. Do not teach zero-copy at this layer.</p>
+<p class="say">The producer hits the broker's partitioned log. The consumer pulls by group. Consistency with the database is Outbox. The control plane is KRaft. The data plane does not draw ZooKeeper. If this direction is fine, next is partition and order, then the replica, then offset, replay, and idempotency.</p>
+  </div>
+</div>
+    <figure class="deck">
+<div class="slide">
+  <svg class="board" viewBox="0 0 960 420" role="img">
+  <g>
+    <rect x="350" y="150" width="260" height="96" rx="12" class="box"/>
+    <text x="480" y="184" text-anchor="middle" class="label">Producer</text>
+    <text x="480" y="208" text-anchor="middle" class="sub">client library</text>
+  </g>
+</svg>
+  <figcaption><span class="lang-zh">第一笔只有入口。谁在发事件，先写上，broker 下一笔再加。</span><span class="lang-en">The first stroke is only the entrance. Who emits the event goes up first. The broker is the next stroke.</span></figcaption>
+</div>
+<div class="slide">
+  <svg class="board" viewBox="0 0 960 420" role="img">
+  <g>
+    <rect x="185" y="150" width="260" height="96" rx="12" class="box"/>
+    <text x="315" y="184" text-anchor="middle" class="label">Producer</text>
+    <text x="315" y="208" text-anchor="middle" class="sub">client library</text>
+  </g>
+  <g>
+    <rect x="515" y="150" width="260" height="96" rx="12" class="box alt"/>
+    <text x="645" y="184" text-anchor="middle" class="label">Broker</text>
+    <text x="645" y="208" text-anchor="middle" class="sub">append-only log</text>
+  </g>
+  <line x1="451" y1="198" x2="504" y2="198" class="wire"/>
+  <polygon points="504,193 513,198 504,203" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">broker 上是只追加的日志。还没有 consumer，先把写入落点定下来。</span><span class="lang-en">The broker holds an append-only log. No consumer yet. Lock where the write lands.</span></figcaption>
+</div>
+<div class="slide">
+  <svg class="board" viewBox="0 0 960 420" role="img">
+  <g>
+    <rect x="62" y="150" width="260" height="96" rx="12" class="box"/>
+    <text x="192" y="184" text-anchor="middle" class="label">Producer</text>
+    <text x="192" y="208" text-anchor="middle" class="sub">client library</text>
+  </g>
+  <g>
+    <rect x="350" y="150" width="260" height="96" rx="12" class="box alt"/>
+    <text x="480" y="184" text-anchor="middle" class="label">Broker</text>
+    <text x="480" y="208" text-anchor="middle" class="sub">append-only log</text>
+  </g>
+  <line x1="328" y1="198" x2="339" y2="198" class="wire"/>
+  <polygon points="339,193 348,198 339,203" class="head"/>
+  <g>
+    <rect x="638" y="150" width="260" height="96" rx="12" class="box"/>
+    <text x="768" y="184" text-anchor="middle" class="label">Consumer</text>
+    <text x="768" y="208" text-anchor="middle" class="sub">pull by group</text>
+  </g>
+  <line x1="616" y1="198" x2="627" y2="198" class="wire"/>
+  <polygon points="627,193 636,198 627,203" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">数据面到这里就齐了。consumer 按 group pull。默认不是 push，慢消费者不会被灌爆。</span><span class="lang-en">The data plane is complete here. The consumer pulls by group. The default is not push, so a slow consumer does not get flooded.</span></figcaption>
+</div>
+<div class="slide">
+  <svg class="board" viewBox="0 0 960 420" role="img">
+  <g>
+    <rect x="62" y="150" width="260" height="96" rx="12" class="box"/>
+    <text x="192" y="184" text-anchor="middle" class="label">Producer</text>
+    <text x="192" y="208" text-anchor="middle" class="sub">key, then batch</text>
+  </g>
+  <g>
+    <rect x="350" y="150" width="260" height="96" rx="12" class="box alt"/>
+    <text x="480" y="184" text-anchor="middle" class="label">Leader</text>
+    <text x="480" y="208" text-anchor="middle" class="sub">append the WAL</text>
+  </g>
+  <line x1="328" y1="198" x2="339" y2="198" class="wire"/>
+  <polygon points="339,193 348,198 339,203" class="head"/>
+  <g>
+    <rect x="638" y="150" width="260" height="96" rx="12" class="box"/>
+    <text x="768" y="184" text-anchor="middle" class="label">Consumer</text>
+    <text x="768" y="208" text-anchor="middle" class="sub">pull, then commit</text>
+  </g>
+  <line x1="616" y1="198" x2="627" y2="198" class="wire"/>
+  <polygon points="627,193 636,198 627,203" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">把三个框的动作写具体：按 key 攒批，leader 追加，consumer 处理完再提交 offset。副本确认下一套再拆。</span><span class="lang-en">Name the action in each box: batch by key, the leader appends, the consumer commits the offset after processing. Replica acks get their own deck next.</span></figcaption>
+</div>
+<div class="slide">
+  <svg class="board" viewBox="0 0 960 420" role="img">
+  <g>
+    <rect x="38" y="150" width="200" height="96" rx="12" class="box ok"/>
+    <text x="138" y="184" text-anchor="middle" class="label">Outbox</text>
+    <text x="138" y="208" text-anchor="middle" class="sub">same txn as DB</text>
+  </g>
+  <g>
+    <rect x="266" y="150" width="200" height="96" rx="12" class="box"/>
+    <text x="366" y="184" text-anchor="middle" class="label">Producer</text>
+    <text x="366" y="208" text-anchor="middle" class="sub">then produce</text>
+  </g>
+  <line x1="244" y1="198" x2="255" y2="198" class="wire"/>
+  <polygon points="255,193 264,198 255,203" class="head"/>
+  <g>
+    <rect x="494" y="150" width="200" height="96" rx="12" class="box alt"/>
+    <text x="594" y="184" text-anchor="middle" class="label">Broker</text>
+    <text x="594" y="208" text-anchor="middle" class="sub">partition log</text>
+  </g>
+  <line x1="472" y1="198" x2="483" y2="198" class="wire"/>
+  <polygon points="483,193 492,198 483,203" class="head"/>
+  <g>
+    <rect x="722" y="150" width="200" height="96" rx="12" class="box"/>
+    <text x="822" y="184" text-anchor="middle" class="label">Consumer</text>
+    <text x="822" y="208" text-anchor="middle" class="sub">group offset</text>
+  </g>
+  <line x1="700" y1="198" x2="711" y2="198" class="wire"/>
+  <polygon points="711,193 720,198 711,203" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">和库一起成功的事件，前面加 Outbox。Kafka 事务盖不住外部数据库。</span><span class="lang-en">Events that must succeed with the database get an Outbox in front. A Kafka transaction does not cover an external database.</span></figcaption>
+</div>
+</figure>
+    <p class="cite"><span class="lang-zh">和库同一事务点到 <span class="chip soon">Ch41 · 复制与事务</span>。日志落在磁盘上的理由，见 <a class="chip" href="ch37.html">Ch37 · 存储选型</a>。</span><span class="lang-en">The same transaction as the database points at <span class="chip soon">Ch41 · replication and transactions</span>. Why the log is on disk: <a class="chip" href="ch37.html">Ch37 · storage</a>.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">Hard part：partition 与顺序</span><span class="lang-en">Hard part: partition and order</span></h2>
+    <div class="bilingual">
+  <div class="lang-zh"><p class="col-kicker">中文</p>
+<p>第一个 hard part。并行单位是 partition，不是 topic，也不是整条总线一条 FIFO。2026 白板第一句：顺序只在 partition 内；同一个 key 哈希进同一个 partition。没有全局顺序。</p>
+<p>topic 是逻辑流。每个 partition 是一条只追加的文件，切成 segment。位置是单调的 offset。没有 key 时，客户端把一批粘在某个 partition 上换吞吐，不保跨消息顺序。有 key：hash(key) % N，Kafka 默认 murmur2，同 key 同 partition，这个 key 的事件 FIFO。分片键用 user_id 或 order_id。随机 UUID 还承诺「这个用户的事件有序」，这句话不成立。</p>
+<p>不要轻易改 N。N 一变，几乎所有 key 的路由都变，原来同区的顺序被拆开。Kafka 允许加 partition，不允许减。创建时预分够，多于近期 consumer 数。扩吞吐先加 consumer，不动 N。热 key，大用户或热 SKU，加多少 partition 也挤在一区。这是模型的 trade-off，不是再哈希一次就能消掉。全局 FIFO 等于单 partition，吞吐等于一台 leader，只有审计总账才考虑。组内两个 consumer 读同一个 partition，顺序必乱，所以一区同时只派给组里一个成员。这句话接到后面的 offset。</p>
+<p class="say">顺序跟着 key 进 partition。全局顺序就是单 partition，别随口答应。分区数预留够，别为了扩容改 N，把亲和打乱。</p>
+  </div>
+  <div class="lang-en"><p class="col-kicker">English</p>
+<p>First hard part. The unit of parallelism is the partition, not the topic, and not one FIFO for the whole bus. The 2026 first sentence: order is partition-local only. The same key hashes to the same partition. There is no global order.</p>
+<p>A topic is a logical stream. Each partition is one append-only file, cut into segments. The position is a monotonic offset. With no key, the client sticky-batches onto one partition for throughput, and order across messages is gone. With a key: hash(key) % N, murmur2 by default in Kafka. Same key, same partition, that key's events are FIFO. The key is a user_id or an order_id. A random UUID plus a promise that "this user's events are ordered" does not hold.</p>
+<p>Do not change N lightly. When N changes, almost every key moves, and events that used to share a partition split. Kafka lets you add partitions, not shrink them. Pre-create enough, more than the near-term consumer count. Scale throughput by adding consumers first. Leave N alone. A hot key, a whale user or a hot SKU, still sits in one partition no matter how many you add. That is the model's trade-off. Another hash round does not erase it. Global FIFO is one partition, throughput equals one leader, and you only consider it for an audit ledger. Two consumers in a group reading one partition destroy order, so a partition is assigned to one member at a time. That sentence feeds the offset section.</p>
+<p class="say">Order follows the key into a partition. Global order is one partition. Do not promise it casually. Pre-partition enough. Do not change N to scale and smash affinity.</p>
+  </div>
+</div>
+    <figure class="deck">
+<div class="slide">
+  <svg class="board" viewBox="0 0 960 420" role="img">
+  <g>
+    <rect x="350" y="150" width="260" height="96" rx="12" class="box"/>
+    <text x="480" y="184" text-anchor="middle" class="label">message key</text>
+    <text x="480" y="208" text-anchor="middle" class="sub">user or order</text>
+  </g>
+</svg>
+  <figcaption><span class="lang-zh">先写顺序键。user_id 或 order_id。随机 UUID 保不住这个用户的事件顺序。</span><span class="lang-en">Write the ordering key first. A user_id or an order_id. A random UUID does not keep one user's events in order.</span></figcaption>
+</div>
+<div class="slide">
+  <svg class="board" viewBox="0 0 960 420" role="img">
+  <g>
+    <rect x="185" y="150" width="260" height="96" rx="12" class="box"/>
+    <text x="315" y="184" text-anchor="middle" class="label">message key</text>
+    <text x="315" y="208" text-anchor="middle" class="sub">user or order</text>
+  </g>
+  <g>
+    <rect x="515" y="150" width="260" height="96" rx="12" class="box alt"/>
+    <text x="645" y="184" text-anchor="middle" class="label">hash % N</text>
+    <text x="645" y="208" text-anchor="middle" class="sub">same key, same slot</text>
+  </g>
+  <line x1="451" y1="198" x2="504" y2="198" class="wire"/>
+  <polygon points="504,193 513,198 504,203" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">哈希进固定槽。N 是创建时定的 partition 数。改 N，几乎所有 key 都会换槽。</span><span class="lang-en">Hash into a fixed slot. N is the partition count you chose at create time. Change N and almost every key moves.</span></figcaption>
+</div>
+<div class="slide">
+  <svg class="board" viewBox="0 0 960 420" role="img">
+  <g>
+    <rect x="62" y="150" width="260" height="96" rx="12" class="box"/>
+    <text x="192" y="184" text-anchor="middle" class="label">message key</text>
+    <text x="192" y="208" text-anchor="middle" class="sub">user or order</text>
+  </g>
+  <g>
+    <rect x="350" y="150" width="260" height="96" rx="12" class="box alt"/>
+    <text x="480" y="184" text-anchor="middle" class="label">hash % N</text>
+    <text x="480" y="208" text-anchor="middle" class="sub">murmur2</text>
+  </g>
+  <line x1="328" y1="198" x2="339" y2="198" class="wire"/>
+  <polygon points="339,193 348,198 339,203" class="head"/>
+  <g>
+    <rect x="638" y="150" width="260" height="96" rx="12" class="box ok"/>
+    <text x="768" y="184" text-anchor="middle" class="label">partition</text>
+    <text x="768" y="208" text-anchor="middle" class="sub">FIFO by offset</text>
+  </g>
+  <line x1="616" y1="198" x2="627" y2="198" class="wire"/>
+  <polygon points="627,193 636,198 627,203" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">落到 partition 之后，顺序只靠单调 offset。这个 key 的事件 FIFO。别的 partition 之间没有顺序。</span><span class="lang-en">Once it lands, order is the monotonic offset. That key's events are FIFO. There is no order across other partitions.</span></figcaption>
+</div>
+<div class="slide">
+  <svg class="board" viewBox="0 0 960 420" role="img">
+  <g>
+    <rect x="62" y="150" width="260" height="96" rx="12" class="box ok"/>
+    <text x="192" y="184" text-anchor="middle" class="label">partition FIFO</text>
+    <text x="192" y="208" text-anchor="middle" class="sub">the default promise</text>
+  </g>
+  <g>
+    <rect x="350" y="150" width="260" height="96" rx="12" class="box bad"/>
+    <text x="480" y="184" text-anchor="middle" class="label">global FIFO</text>
+    <text x="480" y="208" text-anchor="middle" class="sub">one partition</text>
+  </g>
+  <g>
+    <rect x="638" y="150" width="260" height="96" rx="12" class="box bad"/>
+    <text x="768" y="184" text-anchor="middle" class="label">hot key</text>
+    <text x="768" y="208" text-anchor="middle" class="sub">still one partition</text>
+  </g>
+</svg>
+  <figcaption><span class="lang-zh">三格放在一起比，不是一条流水线。默认只承诺 partition 内 FIFO。全局序把队列收成单机。热 key 加 partition 也散不开。</span><span class="lang-en">Three boxes side by side, not a pipeline. The default promise is FIFO inside a partition. Global order collapses the queue to one box. A hot key does not spread when you add partitions.</span></figcaption>
+</div>
+</figure>
+    <p class="cite"><span class="lang-zh">热 key 和改 N 是这题的 trade-off。复制的通用说法在 <span class="chip soon">Ch41 · 复制与事务</span>，下一套只开口 ISR。</span><span class="lang-en">The hot key and changing N are the trade-off. General replication is <span class="chip soon">Ch41 · replication and transactions</span>. The next deck only opens the ISR.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">Hard part：replica 与 ISR</span><span class="lang-en">Hard part: replica and ISR</span></h2>
+    <div class="bilingual">
+  <div class="lang-zh"><p class="col-kicker">中文</p>
+<p>第二个 hard part 先讲副本，exactly-once 的贵留在下一套。每 partition 的 RF 常见是 3。producer 只写 leader，follower 来 fetch。ISR 是在 replica.lag.time.max.ms 里跟上的副本。acks=all 从 Kafka 3.0 起是默认，要等当前 ISR 都追加。consumer 只读到 high watermark，避免读到可能被截掉的脏尾。</p>
+<p>min.insync.replicas=2：ISR 缩到 1 时，acks=all 拒写。用可用性换不丢。把它设成等于 RF，一台 follower 抖动，写入就停。leader 挂了只从 ISR 里选。unclean leader election 可能丢掉已经 ack 的数据，白板默认关掉。ELR 只说一句：ISR 里再筛一批可以安全当 leader 的副本，然后停。</p>
+<p class="say">acks=all 等 ISR。新 leader 只从 ISR 选。读停在 high watermark。为了绝对不丢把 min.insync 设成 RF，一台抖动就写不进去。</p>
+  </div>
+  <div class="lang-en"><p class="col-kicker">English</p>
+<p>Second hard part starts at the replica. Why exactly-once is expensive waits for the next deck. RF per partition is commonly 3. The producer writes the leader only. Followers fetch. The ISR is the replicas that have caught up within replica.lag.time.max.ms. acks=all is the default since Kafka 3.0, and it waits for the current ISR to append. Consumers read only up to the high watermark, so they never see a dirty tail that might get truncated.</p>
+<p>min.insync.replicas=2: when the ISR shrinks to 1, acks=all refuses the write. You trade availability for durability. Set it equal to RF and one jittery follower stops writes. If the leader dies, elect only from the ISR. Unclean leader election can lose data that was already acked, so the whiteboard default is off. ELR is one sentence: a safer-to-elect subset of the ISR, then stop.</p>
+<p class="say">acks=all waits for the ISR. A new leader comes only from the ISR. Reads stop at the high watermark. Setting min.insync equal to RF so you "never lose a byte" means one jittery follower refuses writes.</p>
+  </div>
+</div>
+    <figure class="deck">
+<div class="slide">
+  <svg class="board" viewBox="0 0 960 420" role="img">
+  <g>
+    <rect x="350" y="150" width="260" height="96" rx="12" class="box"/>
+    <text x="480" y="184" text-anchor="middle" class="label">Leader</text>
+    <text x="480" y="208" text-anchor="middle" class="sub">producer writes here</text>
+  </g>
+</svg>
+  <figcaption><span class="lang-zh">producer 只打 leader。副本还没画，先把写入点定成一个。</span><span class="lang-en">The producer hits the leader only. Replicas are not drawn yet. Lock a single place the write lands.</span></figcaption>
+</div>
+<div class="slide">
+  <svg class="board" viewBox="0 0 960 420" role="img">
+  <g>
+    <rect x="185" y="150" width="260" height="96" rx="12" class="box"/>
+    <text x="315" y="184" text-anchor="middle" class="label">Leader</text>
+    <text x="315" y="208" text-anchor="middle" class="sub">appends the WAL</text>
+  </g>
+  <g>
+    <rect x="515" y="150" width="260" height="96" rx="12" class="box alt"/>
+    <text x="645" y="184" text-anchor="middle" class="label">Follower</text>
+    <text x="645" y="208" text-anchor="middle" class="sub">fetches</text>
+  </g>
+  <line x1="451" y1="198" x2="504" y2="198" class="wire"/>
+  <polygon points="504,193 513,198 504,203" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">follower 自己来拉，不是 leader 推。RF 常见 3，这里先画一个 follower 把方向说清。</span><span class="lang-en">The follower fetches. The leader does not push. RF is commonly 3. One follower is enough to show the direction.</span></figcaption>
+</div>
+<div class="slide">
+  <svg class="board" viewBox="0 0 960 420" role="img">
+  <g>
+    <rect x="62" y="150" width="260" height="96" rx="12" class="box"/>
+    <text x="192" y="184" text-anchor="middle" class="label">Leader</text>
+    <text x="192" y="208" text-anchor="middle" class="sub">appends</text>
+  </g>
+  <g>
+    <rect x="350" y="150" width="260" height="96" rx="12" class="box alt"/>
+    <text x="480" y="184" text-anchor="middle" class="label">ISR ack</text>
+    <text x="480" y="208" text-anchor="middle" class="sub">caught-up replicas</text>
+  </g>
+  <line x1="328" y1="198" x2="339" y2="198" class="wire"/>
+  <polygon points="339,193 348,198 339,203" class="head"/>
+  <g>
+    <rect x="638" y="150" width="260" height="96" rx="12" class="box ok"/>
+    <text x="768" y="184" text-anchor="middle" class="label">HWM</text>
+    <text x="768" y="208" text-anchor="middle" class="sub">consumers stop here</text>
+  </g>
+  <line x1="616" y1="198" x2="627" y2="198" class="wire"/>
+  <polygon points="627,193 636,198 627,203" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">acks=all 等当前 ISR 都追加，然后 high watermark 往前。consumer 不读水位前面的脏尾。</span><span class="lang-en">acks=all waits until the current ISR has appended, then the high watermark moves. Consumers do not read the dirty tail past that watermark.</span></figcaption>
+</div>
+<div class="slide">
+  <svg class="board" viewBox="0 0 960 420" role="img">
+  <g>
+    <rect x="185" y="150" width="260" height="96" rx="12" class="box ok"/>
+    <text x="315" y="184" text-anchor="middle" class="label">acks=all</text>
+    <text x="315" y="208" text-anchor="middle" class="sub">ISR has the record</text>
+  </g>
+  <g>
+    <rect x="515" y="150" width="260" height="96" rx="12" class="box bad"/>
+    <text x="645" y="184" text-anchor="middle" class="label">ISR shrinks</text>
+    <text x="645" y="208" text-anchor="middle" class="sub">refuse the write</text>
+  </g>
+</svg>
+  <figcaption><span class="lang-zh">min.insync.replicas=2。ISR 缩到 1，acks=all 拒写。这是用可用换不丢，不是故障当没看见。</span><span class="lang-en">min.insync.replicas=2. When the ISR shrinks to 1, acks=all refuses the write. That is availability traded for durability, not a failure you ignore.</span></figcaption>
+</div>
+</figure>
+    <p class="cite"><span class="lang-zh">leader 挂了选谁，放在失败路径那一套。这里先把「怎样才算写成功」说清。</span><span class="lang-en">Who becomes leader after a death is the failure deck. Here you only say when a write counts.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">Hard part：offset、重放、幂等</span><span class="lang-en">Hard part: offset, replay, idempotency</span></h2>
+    <div class="bilingual">
+  <div class="lang-zh"><p class="col-kicker">中文</p>
+<p>第三个 hard part。consumer group 同时是点对点和发布订阅。同一组抢 partition，一条记录在组内只处理一次。不同组各有自己的 offset，同一条日志被独立重放。组内并行上限就是 partition 数。consumer 比 partition 多，多出来的空闲。</p>
+<p>默认 pull。消费者自己控速，空日志用长轮询，不要空转打满 broker。offset 在处理后提交，就是 at-least-once，崩溃会重放。先提交再处理，就是 at-most-once。自动提交适合演示，处理失败时容易丢或重。面试说选手动提交。</p>
+<p>幂等落在业务键上，用来接住 at-least-once 的重复。幂等 producer 用 PID 加分区序号，3.0 起默认打开，而且要求 acks=all。它只保证同一次会话、同一个 partition 不会因为重试双写。跨 partition、consume-process-produce、把 offset 和输出绑在一起，才要 transactional id 和 read_committed。这套端到端 exactly-once 只在 Kafka 里面。写出外部库，仍是业务 idempotency 或 <span class="chip soon">Ch41 · 复制与事务</span> 的 Outbox。</p>
+<p>成员加入、离开、心跳超时，group coordinator 按 group id 重分配 partition。经典协议是 stop-the-world，全组暂停 fetch。2026 可以开口 cooperative，只挪受影响的 partition。Kafka 4.0 的新协议要客户端 opt-in，别说老客户端已经全部默认增量。Share group 是队列式抢单条，不是这张白板的默认。积压看 lag。同步 RPC 加无限重试会打出 retry 风暴，熔断和死信去 <span class="chip soon">Ch42 · 消息与弹性</span>，点到即停。</p>
+<p class="say">一组里一个 partition 一个 consumer，顺序才在。多组各自记 offset，才能重放。exactly-once 贵。实践默认 at-least-once 加消费侧 idempotency。</p>
+  </div>
+  <div class="lang-en"><p class="col-kicker">English</p>
+<p>Third hard part. A consumer group is both point-to-point and pub-sub. Members of one group compete for partitions, so a record is processed once inside the group. Different groups each keep an offset, so the same log is replayed independently. In-group parallelism caps at the partition count. Consumers beyond that sit idle.</p>
+<p>The default is pull. The consumer controls the rate. An empty log uses a long poll so you do not spin the broker. Commit the offset after processing and you have at-least-once: a crash replays. Commit first and you have at-most-once. Auto-commit is fine for a demo and easy to drop or duplicate when processing fails. Say you prefer a manual commit.</p>
+<p>Idempotency sits on a business key, so the at-least-once duplicate is safe. An idempotent producer, PID plus a per-partition sequence, is on by default since 3.0 and it requires acks=all. It only stops a retry from double-writing in the same session and the same partition. Cross-partition work, consume-process-produce, tying the offset to the output: that needs a transactional id and read_committed. End-to-end exactly-once stays inside Kafka. An external database still needs business idempotency, or the Outbox in <span class="chip soon">Ch41 · replication and transactions</span>.</p>
+<p>A member joins, leaves, or misses heartbeats, and the group coordinator, a broker found by group id, reassigns partitions. The classic protocol is stop-the-world: the whole group pauses fetch. The 2026 opening is cooperative: only the affected partitions move. Kafka 4.0's newer protocol is a client opt-in. Do not pretend every old client already defaults to incremental. A share group steals single records like a queue. It is not this board's default. Backlog is lag. Sync RPC plus unbounded retries is a retry storm. Circuit breakers and a dead-letter queue are <span class="chip soon">Ch42 · messaging and resilience</span>. Mention them and stop.</p>
+<p class="say">One consumer per partition in the group is what keeps order. Multiple groups each store an offset, which is how you replay. exactly-once is expensive. The practice default is at-least-once plus idempotency on the consumer.</p>
+  </div>
+</div>
+    <figure class="deck">
+<div class="slide">
+  <svg class="board" viewBox="0 0 960 420" role="img">
+  <g>
+    <rect x="185" y="150" width="260" height="96" rx="12" class="box alt"/>
+    <text x="315" y="184" text-anchor="middle" class="label">partition</text>
+    <text x="315" y="208" text-anchor="middle" class="sub">one log</text>
+  </g>
+  <g>
+    <rect x="515" y="150" width="260" height="96" rx="12" class="box"/>
+    <text x="645" y="184" text-anchor="middle" class="label">consumer</text>
+    <text x="645" y="208" text-anchor="middle" class="sub">committed offset</text>
+  </g>
+  <line x1="451" y1="198" x2="504" y2="198" class="wire"/>
+  <polygon points="504,193 513,198 504,203" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">组内一个 partition 只交给一个 consumer。它记住的是 committed offset，不是把日志删掉。</span><span class="lang-en">Inside the group, one partition goes to one consumer. What it remembers is the committed offset. It does not delete the log.</span></figcaption>
+</div>
+<div class="slide">
+  <svg class="board" viewBox="0 0 960 420" role="img">
+  <g>
+    <rect x="185" y="150" width="260" height="96" rx="12" class="box ok"/>
+    <text x="315" y="184" text-anchor="middle" class="label">P0 to C1</text>
+    <text x="315" y="208" text-anchor="middle" class="sub">one group</text>
+  </g>
+  <g>
+    <rect x="515" y="150" width="260" height="96" rx="12" class="box ok"/>
+    <text x="645" y="184" text-anchor="middle" class="label">P1 to C2</text>
+    <text x="645" y="208" text-anchor="middle" class="sub">still one group</text>
+  </g>
+</svg>
+  <figcaption><span class="lang-zh">两个 partition 分给组里两个成员。并行到此为止。第三个 consumer 没有 partition 可领，它空着。</span><span class="lang-en">Two partitions, two members of the same group. Parallelism stops there. A third consumer has no partition to take, so it sits idle.</span></figcaption>
+</div>
+<div class="slide">
+  <svg class="board" viewBox="0 0 960 420" role="img">
+  <g>
+    <rect x="185" y="150" width="260" height="96" rx="12" class="box ok"/>
+    <text x="315" y="184" text-anchor="middle" class="label">billing offset</text>
+    <text x="315" y="208" text-anchor="middle" class="sub">group A</text>
+  </g>
+  <g>
+    <rect x="515" y="150" width="260" height="96" rx="12" class="box alt"/>
+    <text x="645" y="184" text-anchor="middle" class="label">audit offset</text>
+    <text x="645" y="208" text-anchor="middle" class="sub">replay the log</text>
+  </g>
+</svg>
+  <figcaption><span class="lang-zh">第二组自己记 offset，可以从头重放同一条日志。两组之间没有箭头，它们不互相消费。</span><span class="lang-en">The second group stores its own offset and can replay the same log from the start. No arrow between them. They do not consume each other.</span></figcaption>
+</div>
+<div class="slide">
+  <svg class="board" viewBox="0 0 960 420" role="img">
+  <g>
+    <rect x="62" y="150" width="260" height="96" rx="12" class="box"/>
+    <text x="192" y="184" text-anchor="middle" class="label">process</text>
+    <text x="192" y="208" text-anchor="middle" class="sub">business key</text>
+  </g>
+  <g>
+    <rect x="350" y="150" width="260" height="96" rx="12" class="box ok"/>
+    <text x="480" y="184" text-anchor="middle" class="label">commit offset</text>
+    <text x="480" y="208" text-anchor="middle" class="sub">after success</text>
+  </g>
+  <line x1="328" y1="198" x2="339" y2="198" class="wire"/>
+  <polygon points="339,193 348,198 339,203" class="head"/>
+  <g>
+    <rect x="638" y="150" width="260" height="96" rx="12" class="box ok"/>
+    <text x="768" y="184" text-anchor="middle" class="label">idempotency</text>
+    <text x="768" y="208" text-anchor="middle" class="sub">duplicate is safe</text>
+  </g>
+  <line x1="616" y1="198" x2="627" y2="198" class="wire"/>
+  <polygon points="627,193 636,198 627,203" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">先处理，成功后再提交 offset。重放来的重复靠业务键 idempotency 接住，而不是假装不会重放。</span><span class="lang-en">Process first. Commit the offset only after success. A replayed duplicate is caught by idempotency on the business key. Do not pretend replay will not happen.</span></figcaption>
+</div>
+<div class="slide">
+  <svg class="board" viewBox="0 0 960 420" role="img">
+  <g>
+    <rect x="185" y="150" width="260" height="96" rx="12" class="box ok"/>
+    <text x="315" y="184" text-anchor="middle" class="label">at-least-once</text>
+    <text x="315" y="208" text-anchor="middle" class="sub">plus idempotency</text>
+  </g>
+  <g>
+    <rect x="515" y="150" width="260" height="96" rx="12" class="box alt"/>
+    <text x="645" y="184" text-anchor="middle" class="label">exactly-once</text>
+    <text x="645" y="208" text-anchor="middle" class="sub">txn inside Kafka</text>
+  </g>
+</svg>
+  <figcaption><span class="lang-zh">左边是实践默认。右边的 exactly-once 要事务协调器，只在 Kafka 闭环里成立，写出数据库仍要 Outbox。</span><span class="lang-en">The left box is the practice default. exactly-once on the right needs the transaction coordinator and only holds inside Kafka. Writing to a database still needs an Outbox.</span></figcaption>
+</div>
+</figure>
+    <p class="cite"><span class="lang-zh">积压和 retry 风暴去 <span class="chip soon">Ch42 · 消息与弹性</span>。本场停在 offset 和 idempotency。</span><span class="lang-en">Backlog and retry storms go to <span class="chip soon">Ch42 · messaging and resilience</span>. This loop stops at offset and idempotency.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">失败路径</span><span class="lang-en">Failure path</span></h2>
+    <div class="bilingual">
+  <div class="lang-zh"><p class="col-kicker">中文</p>
+<p>失败不要画回成功路径上。四件事先分开说：leader 挂了、unclean 选举、再均衡把整组停住、协调面还画着 ZooKeeper。</p>
+<p>leader 挂了，只从 ISR 里选，已经越过 high watermark 的记录还在。打开 unclean，可能把没跟上的副本抬成 leader，已经 ack 的数据会没。ISR 缩到 min.insync 以下时拒写，这是上一套的 trade-off，失败时把它说成「现在写不进去」，不要改成静默丢。</p>
+<p>再均衡的经典协议会 stop-the-world。大组、滚动发布，fetch 暂停，lag 涨。2026 开口只挪受影响的 partition，而且客户端要 opt-in。消费者里同步调用加无限重试，会在恢复之后打出风暴，熔断和死信留在 <span class="chip soon">Ch42 · 消息与弹性</span>。</p>
+<p>协调面：控制器用 Raft 写集群元数据，broker 拉增量。生产常见 3 或 5 个专职 controller，不要和重磁盘的 broker 混部当第一答案。Kafka 4.0 起不再提供 ZooKeeper 模式。3.x 还在 ZK 上，必须先迁 KRaft 再上 4.x。原书全程 ZK，放在折叠里。</p>
+<p class="say">leader 挂了只从 ISR 选，unclean 默认关。再均衡经典会停消费。控制面是 KRaft，不画 ZooKeeper。</p>
+  </div>
+  <div class="lang-en"><p class="col-kicker">English</p>
+<p>Do not draw failures back onto the happy path. Four cases, separate: the leader dies, unclean election, rebalance pausing the whole group, and a control plane that still shows ZooKeeper.</p>
+<p>When the leader dies, elect only from the ISR. Records past the high watermark stay. Turn unclean election on and a replica that had not caught up can become leader. Data that was already acked can disappear. When the ISR falls below min.insync, the write is refused. That trade-off was the previous deck. On the failure path, say "writes stop now." Do not turn it into a silent drop.</p>
+<p>Classic rebalance is stop-the-world. A large group or a rolling deploy pauses fetch and lag grows. The 2026 opening moves only the affected partitions, and the client has to opt in. A sync call plus unbounded retries inside the consumer becomes a storm after recovery. Circuit breakers and a dead-letter queue stay in <span class="chip soon">Ch42 · messaging and resilience</span>.</p>
+<p>Control plane: the controller quorum writes cluster metadata with Raft, and brokers pull the delta. Production commonly runs 3 or 5 dedicated controllers. Do not colocate them with heavy-disk brokers as the first answer. Kafka 4.0 no longer ships ZooKeeper mode. A 3.x cluster still on ZK has to move to KRaft before 4.x. The book's all-ZK path goes in the fold.</p>
+<p class="say">If the leader dies, elect only from the ISR. Unclean stays off. Classic rebalance stops consume. The control plane is KRaft. Do not draw ZooKeeper.</p>
+  </div>
+</div>
+    <figure class="deck">
+<div class="slide">
+  <svg class="board" viewBox="0 0 960 420" role="img">
+  <g>
+    <rect x="350" y="150" width="260" height="96" rx="12" class="box bad"/>
+    <text x="480" y="184" text-anchor="middle" class="label">Leader down</text>
+    <text x="480" y="208" text-anchor="middle" class="sub">partition has no head</text>
+  </g>
+</svg>
+  <figcaption><span class="lang-zh">失败从 leader 消失开始。先别画新 leader，下一笔才说从哪选。</span><span class="lang-en">The failure starts when the leader is gone. Do not draw the new leader yet. The next stroke says where it is elected from.</span></figcaption>
+</div>
+<div class="slide">
+  <svg class="board" viewBox="0 0 960 420" role="img">
+  <g>
+    <rect x="185" y="150" width="260" height="96" rx="12" class="box bad"/>
+    <text x="315" y="184" text-anchor="middle" class="label">Leader down</text>
+    <text x="315" y="208" text-anchor="middle" class="sub">partition stalled</text>
+  </g>
+  <g>
+    <rect x="515" y="150" width="260" height="96" rx="12" class="box ok"/>
+    <text x="645" y="184" text-anchor="middle" class="label">Elect from ISR</text>
+    <text x="645" y="208" text-anchor="middle" class="sub">acked data stays</text>
+  </g>
+  <line x1="451" y1="198" x2="504" y2="198" class="wire"/>
+  <polygon points="504,193 513,198 504,203" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">新 leader 只从 ISR 里出。已经 ack、并且过了 high watermark 的记录还在。</span><span class="lang-en">The new leader comes only from the ISR. Records that were acked and are past the high watermark stay.</span></figcaption>
+</div>
+<div class="slide">
+  <svg class="board" viewBox="0 0 960 420" role="img">
+  <g>
+    <rect x="185" y="150" width="260" height="96" rx="12" class="box ok"/>
+    <text x="315" y="184" text-anchor="middle" class="label">From ISR</text>
+    <text x="315" y="208" text-anchor="middle" class="sub">committed stays</text>
+  </g>
+  <g>
+    <rect x="515" y="150" width="260" height="96" rx="12" class="box bad"/>
+    <text x="645" y="184" text-anchor="middle" class="label">Unclean elect</text>
+    <text x="645" y="208" text-anchor="middle" class="sub">acked data can vanish</text>
+  </g>
+</svg>
+  <figcaption><span class="lang-zh">旁边写上错误开关。unclean 会把没跟上的副本抬成 leader。白板默认关掉。</span><span class="lang-en">Write the wrong switch beside it. Unclean can promote a replica that had not caught up. The whiteboard default is off.</span></figcaption>
+</div>
+<div class="slide">
+  <svg class="board" viewBox="0 0 960 420" role="img">
+  <g>
+    <rect x="185" y="150" width="260" height="96" rx="12" class="box bad"/>
+    <text x="315" y="184" text-anchor="middle" class="label">Rebalance</text>
+    <text x="315" y="208" text-anchor="middle" class="sub">fetch paused</text>
+  </g>
+  <g>
+    <rect x="515" y="150" width="260" height="96" rx="12" class="box bad"/>
+    <text x="645" y="184" text-anchor="middle" class="label">lag grows</text>
+    <text x="645" y="208" text-anchor="middle" class="sub">whole group waits</text>
+  </g>
+  <line x1="451" y1="198" x2="504" y2="198" class="wire"/>
+  <polygon points="504,193 513,198 504,203" class="head"/>
+</svg>
+  <figcaption><span class="lang-zh">经典再均衡是整组停 fetch。2026 开口只挪受影响的 partition，客户端 opt-in，别说已经全员默认。</span><span class="lang-en">Classic rebalance pauses fetch for the whole group. The 2026 opening moves only affected partitions, client opt-in. Do not say every client already defaults to that.</span></figcaption>
+</div>
+<div class="slide">
+  <svg class="board" viewBox="0 0 960 420" role="img">
+  <g>
+    <rect x="185" y="150" width="260" height="96" rx="12" class="box bad"/>
+    <text x="315" y="184" text-anchor="middle" class="label">ZooKeeper</text>
+    <text x="315" y="208" text-anchor="middle" class="sub">gone in 4.0</text>
+  </g>
+  <g>
+    <rect x="515" y="150" width="260" height="96" rx="12" class="box ok"/>
+    <text x="645" y="184" text-anchor="middle" class="label">KRaft</text>
+    <text x="645" y="208" text-anchor="middle" class="sub">metadata quorum</text>
+  </g>
+</svg>
+  <figcaption><span class="lang-zh">2026 的协调面是 KRaft。ZooKeeper 不进主路径。Kafka 4.0 起没有 ZK 模式。</span><span class="lang-en">The 2026 control plane is KRaft. ZooKeeper is not on the main path. Kafka 4.0 no longer has ZK mode.</span></figcaption>
+</div>
+</figure>
+    <p class="cite"><span class="lang-zh">弹性全书在 <span class="chip soon">Ch42 · 消息与弹性</span>。和库一起提交仍是 <span class="chip soon">Ch41 · 复制与事务</span> 的 Outbox。</span><span class="lang-en">The resilience encyclopedia is <span class="chip soon">Ch42 · messaging and resilience</span>. Committing with the database is still the Outbox in <span class="chip soon">Ch41 · replication and transactions</span>.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">收尾，不要说完美</span><span class="lang-en">Close without saying perfect</span></h2>
+    <div class="bilingual">
+  <div class="lang-zh"><p class="col-kicker">中文</p>
+<table>
+<thead><tr><th>bottleneck</th><th>你怎么接</th></tr></thead>
+<tbody>
+<tr><td>热 key，或随口答应全局序</td><td>partition 内 FIFO。同 key 同 partition。预分 N，别乱加</td></tr>
+<tr><td>再均衡停消费，实例多于 partition</td><td>组内一区一个 consumer。开口增量协议。积压看 lag</td></tr>
+<tr><td>副本和语义讲不清</td><td>ISR 加 acks=all。exactly-once 贵。默认 at-least-once。控制面 KRaft</td></tr>
+</tbody>
+</table>
+<ol>
+<li>这是 Rabbit 还是 Kafka？默认可重放的分区日志。五种 exchange 不是本章。</li>
+<li>能保证全局顺序吗？只能 partition 内。全局等于单 partition。同 key 同区。</li>
+<li>partition 能随便加吗？hash % N 会变，亲和被拆开。扩容先加 consumer。</li>
+<li>consumer 比 partition 多？多出来的空闲。并行上限是 partition 数。</li>
+<li>exactly-once 怎么做？幂等 producer 加事务，贵。默认 at-least-once 加 idempotency。跨库仍要 Outbox。</li>
+<li>还要 ZooKeeper 吗？2026 不要。KRaft。4.0 起没有 ZK 模式。</li>
+<li>积压了怎么办？看 lag 和 partition 数。retry 风暴去 Ch42。</li>
+<li>终图已经很大还往上堆？Registry、Flink、五种 exchange 都不是本章。三条 hard part 说清，比二十个框分高。</li>
+</ol>
+<details class="fold"><summary>原书把 ZooKeeper 和「语义可配」放在第一张图</summary>
+<p>partition 是并行和顺序的单位，WAL 只追加，组内一个 partition 一个 consumer，pull 加长轮询，这些还在。过时的是全程 ZooKeeper、复制只说「3 副本加足够多」、把 exactly-once 说成零成本默认、再均衡只剩 stop-the-world、以及背某厂日消息量。现在协调面是 KRaft，Kafka 4.0 已去掉 ZK 模式。开口是 ISR、high watermark、min.insync.replicas。幂等 producer 从 3.0 起默认开，事务仍按需。增量再均衡是客户端 opt-in。Pulsar 的存算分离一句带过。长留存的 tiered storage 点到，不展开对象存储。数量级标成假设。</p>
+</details>
+<p>合上这一页，用开场 30 秒把 partition 顺序、consumer group、ISR、exactly-once 为什么贵、KRaft 讲一遍。ZooKeeper 只在折叠里。卡在哪句就回哪一节。下一章是 <span class="chip soon">Ch21 · 酒店预订与秒杀库存</span>：从 broker 日志回到库存预扣和尖峰。</p>
+  </div>
+  <div class="lang-en"><p class="col-kicker">English</p>
+<table>
+<thead><tr><th>bottleneck</th><th>What you say</th></tr></thead>
+<tbody>
+<tr><td>Hot key, or a casual global-order promise</td><td>FIFO inside a partition. Same key, same partition. Pre-create N. Do not add partitions casually</td></tr>
+<tr><td>Rebalance stops consume, more instances than partitions</td><td>One consumer per partition in the group. Open with the incremental protocol. Backlog is lag</td></tr>
+<tr><td>Replicas and semantics stay fuzzy</td><td>ISR plus acks=all. exactly-once is expensive. Default at-least-once. Control plane is KRaft</td></tr>
+</tbody>
+</table>
+<ol>
+<li>Rabbit or Kafka? Default is a replayable partitioned log. Five exchanges are not this chapter.</li>
+<li>Can you guarantee global order? Only inside a partition. Global means one partition. Same key, same partition.</li>
+<li>Can I add partitions whenever? hash % N changes and affinity splits. Scale by adding consumers first.</li>
+<li>More consumers than partitions? The extras sit idle. Parallelism caps at the partition count.</li>
+<li>How do you do exactly-once? Idempotent producer plus transactions, and it is expensive. Default is at-least-once plus idempotency. Across a database you still need an Outbox.</li>
+<li>Do we still need ZooKeeper? Not in 2026. KRaft. No ZK mode from 4.0 on.</li>
+<li>What if we are backlogged? Look at lag and the partition count. Retry storms go to Ch42.</li>
+<li>The diagram is already large and they keep stacking boxes? Registry, Flink, and five exchanges are not this chapter. Three hard parts, said clearly, score higher than twenty boxes.</li>
+</ol>
+<details class="fold"><summary>The book put ZooKeeper and "semantics are configurable" on the first diagram</summary>
+<p>The partition is still the unit of parallelism and order. The WAL still only appends. One consumer per partition in the group, pull plus long poll, those still hold. What aged is ZooKeeper the whole way, replication as only "3 replicas and enough of them," exactly-once as a zero-cost default, rebalance as only stop-the-world, and reciting some company's daily volume. The control plane now is KRaft. Kafka 4.0 dropped ZK mode. You open with the ISR, the high watermark, and min.insync.replicas. The idempotent producer is on by default since 3.0. Transactions stay on demand. Incremental rebalance is a client opt-in. Pulsar's split of storage and compute is one sentence. Tiered storage for long retention is a mention, not an object-storage chapter. Order of magnitude stays labeled as an assumption.</p>
+</details>
+<p>Close the page and give the 30-second open: partition order, the consumer group, the ISR, why exactly-once is expensive, and KRaft. ZooKeeper only in the fold. Wherever you stumble, go back to that section. Next is <span class="chip soon">Ch21 · hotel booking and flash-sale inventory</span>: from the broker log back to an inventory hold and a spike.</p>
+  </div>
+</div>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">闪卡</span><span class="lang-en">Flashcards</span></h2>
+    <p class="cite"><span class="lang-zh">点一下翻面。能讲出来才算会。</span><span class="lang-en">Click to flip. If you can say it, you know it.</span></p>
+    <div class="cards-grid">
+<button type="button" class="flip">
+  <span class="q"><span class="lang-zh">消息队列三个 hard part 是什么？</span><span class="lang-en">What are the three hard parts?</span></span>
+  <span class="a"><span class="lang-zh">partition 与顺序；consumer group 再均衡；ISR、exactly-once 和 KRaft。不是 Rabbit 手册，也不是 Ch42 全书。</span><span class="lang-en">Partitions and ordering; consumer group rebalance; ISR, exactly-once, and KRaft. Not a Rabbit handbook, and not all of Ch42.</span></span>
+</button>
+<button type="button" class="flip">
+  <span class="q"><span class="lang-zh">白板默认是哪种队列？</span><span class="lang-en">What is the whiteboard default?</span></span>
+  <span class="a"><span class="lang-zh">可重放的 Kafka 风格分区日志。不是五种 exchange，也不是 Flink。</span><span class="lang-en">A replayable Kafka-style partitioned log. Not five exchanges, and not Flink.</span></span>
+</button>
+<button type="button" class="flip">
+  <span class="q"><span class="lang-zh">三种交付语义怎么取舍？</span><span class="lang-en">How do you choose among the three delivery semantics?</span></span>
+  <span class="a"><span class="lang-zh">at-most-once 会丢。exactly-once 贵，且只在 Kafka 内。默认 at-least-once 加 idempotency。</span><span class="lang-en">at-most-once can drop. exactly-once is expensive and stays inside Kafka. Default to at-least-once plus idempotency.</span></span>
+</button>
+<button type="button" class="flip">
+  <span class="q"><span class="lang-zh">顺序保证到哪？</span><span class="lang-en">How far does order go?</span></span>
+  <span class="a"><span class="lang-zh">partition 内 FIFO。同 key 同 partition。没有全局顺序，除非收成单 partition。</span><span class="lang-en">FIFO inside a partition. Same key, same partition. No global order unless you collapse to one partition.</span></span>
+</button>
+<button type="button" class="flip">
+  <span class="q"><span class="lang-zh">为什么别随便加 partition？</span><span class="lang-en">Why not add partitions casually?</span></span>
+  <span class="a"><span class="lang-zh">hash(key) % N 变了，亲和顺序被拆开。预分够，扩容先加 consumer。</span><span class="lang-en">hash(key) % N changes and affinity splits. Pre-create enough. Scale by adding consumers first.</span></span>
+</button>
+<button type="button" class="flip">
+  <span class="q"><span class="lang-zh">consumer group 怎么保序，又怎么重放？</span><span class="lang-en">How does a consumer group keep order and still replay?</span></span>
+  <span class="a"><span class="lang-zh">组内一个 partition 一个 consumer。另一组自己的 offset 就是独立重放。</span><span class="lang-en">One consumer per partition in the group. Another group's own offset is an independent replay.</span></span>
+</button>
+<button type="button" class="flip">
+  <span class="q"><span class="lang-zh">acks 和 ISR 怎么开口？</span><span class="lang-en">What is the ISR and acks line?</span></span>
+  <span class="a"><span class="lang-zh">ISR 是跟上的副本。acks=all 等 ISR。新 leader 只从 ISR 选。读停在 high watermark。</span><span class="lang-en">The ISR is the caught-up replicas. acks=all waits for the ISR. Elect the leader only from the ISR. Reads stop at the high watermark.</span></span>
+</button>
+<button type="button" class="flip">
+  <span class="q"><span class="lang-zh">2026 还画 ZooKeeper 吗？</span><span class="lang-en">Do you still draw ZooKeeper in 2026?</span></span>
+  <span class="a"><span class="lang-zh">不画。默认 KRaft。Kafka 4.0 去掉了 ZK 模式。和库一起提交用 Outbox，点到 Ch41。</span><span class="lang-en">No. Default to KRaft. Kafka 4.0 dropped ZK mode. Committing with the database is an Outbox, and you point at Ch41.</span></span>
+</button>
+    </div>
+  </section>
+  <p><button type="button" class="read-toggle">
+    <span class="when-off"><span class="lang-zh">我已学完本章</span><span class="lang-en">Mark this chapter done</span></span>
+    <span class="when-on"><span class="lang-zh">已学完本章</span><span class="lang-en">Completed</span></span>
+  </button></p>
+  <p class="cite"><span class="lang-zh">进度存在这台浏览器里。</span><span class="lang-en">Saved in this browser only.</span></p>
+</article>
+</main>
+<script src="../assets/js/nav.js"></script>
+<script src="../assets/js/lang.js"></script>
+<script src="../assets/js/slides.js"></script>
+<script src="../assets/js/progress.js"></script>
+</body>
+</html>
