@@ -6,9 +6,52 @@
   <title>Ch01 · 世界地图与 4 步法</title>
   <link rel="icon" href="../favicon.ico" sizes="48x48">
   <link rel="stylesheet" href="../assets/css/style.css">
+  <style>
+    /* Ch01 keeps one visual grammar without changing the shared chapter theme. */
+    #ch01 .board .wire {
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      vector-effect: non-scaling-stroke;
+    }
+    #ch01 .board line.wire,
+    #ch01 .board path.wire { marker-end: url(#ch01-arrow-neutral); }
+    #ch01 .board .wire.reply,
+    #ch01 .board .wire.hit { marker-end: url(#ch01-arrow-ok); }
+    #ch01 .board .wire.async { marker-end: url(#ch01-arrow-async); }
+    #ch01 .board .wire.fail { marker-end: url(#ch01-arrow-fail); }
+    #ch01 .board path.wire[d*=" Q"] { marker-end: none; }
+    #ch01 .board .head { display: none; }
+    #ch01 .board .cache-detail {
+      fill: none;
+      stroke: rgb(var(--drac-cyan));
+      stroke-width: 1.25;
+      opacity: 0.7;
+    }
+    #ch01 .board .edge-label-bg {
+      fill: rgb(var(--bg-elev));
+      opacity: 0.94;
+    }
+    #ch01 .board .decision {
+      fill: rgb(var(--bg-card));
+      stroke: rgb(var(--drac-orange));
+      stroke-width: 1.5;
+    }
+    #ch01-arrow-neutral path { fill: rgb(var(--drac-comment)); }
+    #ch01-arrow-ok path { fill: rgb(var(--drac-green)); }
+    #ch01-arrow-async path { fill: rgb(var(--drac-orange)); }
+    #ch01-arrow-fail path { fill: rgb(var(--drac-red)); }
+  </style>
   <script src="../assets/js/boot.js"></script>
 </head>
 <body>
+<svg width="0" height="0" aria-hidden="true" focusable="false" style="position:absolute;overflow:hidden">
+  <defs>
+    <marker id="ch01-arrow-neutral" viewBox="0 0 12 12" refX="0" refY="6" markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto" overflow="visible"><path d="M0 0 L12 6 L0 12 Z"/></marker>
+    <marker id="ch01-arrow-ok" viewBox="0 0 12 12" refX="0" refY="6" markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto" overflow="visible"><path d="M0 0 L12 6 L0 12 Z"/></marker>
+    <marker id="ch01-arrow-async" viewBox="0 0 12 12" refX="0" refY="6" markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto" overflow="visible"><path d="M0 0 L12 6 L0 12 Z"/></marker>
+    <marker id="ch01-arrow-fail" viewBox="0 0 12 12" refX="0" refY="6" markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto" overflow="visible"><path d="M0 0 L12 6 L0 12 Z"/></marker>
+  </defs>
+</svg>
 <header class="topbar">
   <a class="brand" href="../index.html"><span class="brand-logo">SD</span><span class="lang-zh">系统设计面试</span><span class="lang-en">System Design Interview</span></a>
   <span class="spacer"></span>
@@ -24,720 +67,732 @@
   </div>
 </header>
 <main class="wrap">
-<!--
-样板骨架（计划 2 照抄结构，业务按各章重写）：
-- article.chapter#chNN + data-ch
-- 双语：.bilingual > .lang-zh / .lang-en。标题用 span.lang-zh + span.lang-en
-- 幻灯片：figure.deck 的直接子元素 .slide，里面 svg.board（viewBox 宽大于高）+ figcaption
-- 一组 3 到 6 张，顺序是白板上落笔的顺序。svg 里只写短英文，中文放在 figcaption。颜色只用 class：box / box.alt / box.ok / box.bad / wire / head / label / sub
-- 一组讲完用 p.cite 链到 M6。已有 html 的相关章用 a.chip，还没写的用 span.chip.soon
-- head 里加 <link rel="icon" href="../favicon.ico" sizes="48x48">
-- 章末 button.flip 闪卡，以及 button.read-toggle
--->
 <article class="chapter" id="ch01" data-ch="ch01">
   <header>
     <div class="ch-kicker"><span class="lang-zh">CHAPTER 01 · 面试方法</span><span class="lang-en">CHAPTER 01 · method</span></div>
     <h1><span class="lang-zh">世界地图与 4 步法</span><span class="lang-en">World map and the 4-step method</span></h1>
-    <p class="ch-meta-line"><span class="lang-zh">约 30 分钟 · 前置：无</span><span class="lang-en">~30 min · no prerequisite</span></p>
+    <p class="ch-meta-line"><span class="lang-zh">约 35 分钟 · 前置：无 · 一条商品详情读请求贯穿四步</span><span class="lang-en">~35 min · no prerequisite · one product-detail read through four steps</span></p>
   </header>
-  
+
   <section class="goal">
     <h2><span class="lang-zh">这一章结束你能做什么</span><span class="lang-en">What you can do after this chapter</span></h2>
     <div class="bilingual">
-  <div class="lang-zh"><p class="col-kicker">中文</p>
-<ul><li>用 3–10 / 10–15 / 10–25 / 3–5 分钟走完四步。</li><li>认出沉默、抢答、over-engineering。</li><li>卡住时出声，而不是在白板上发呆。</li></ul>
-  </div>
-  <div class="lang-en"><p class="col-kicker">English</p>
-<ul><li>Spend the hour as 3–10 / 10–15 / 10–25 / 3–5 minutes.</li><li>Spot silence, jumping ahead, and over-engineering.</li><li>Talk when you stall, instead of staring at the board.</li></ul>
-  </div>
-</div>
+      <div class="lang-zh"><p class="col-kicker">中文</p><ul>
+        <li>用同一条读请求走完四步：定范围、估算、高层、再深挖一条故障。每一步都在图上多一笔，而不是换一张名词卡。</li>
+        <li>说出哪个数迫使缓存出现，以及缓存整层挂掉时回源为什么必须有上限。</li>
+        <li>卡住时把卡点说出来，退回这张高层图，而不是沉默或再堆一个组件。</li>
+      </ul></div>
+      <div class="lang-en"><p class="col-kicker">English</p><ul>
+        <li>Walk one read through four steps — scope, estimate, high-level, then one failure — and add a stroke each time instead of swapping noun cards.</li>
+        <li>Say which number forces the cache, and why a dead cache tier cannot fall through to the store without a cap.</li>
+        <li>When you stall, name the stall and return to this high-level picture instead of going silent or adding another box.</li>
+      </ul></div>
+    </div>
   </section>
 
   <section>
-    <h2><span class="lang-zh">面试在评什么</span><span class="lang-en">What the interview scores</span></h2>
+    <h2><span class="lang-zh">30 秒开场、明确不做、以及写在白板上的假设</span><span class="lang-en">The 30-second open, explicit non-goals, and assumptions on the board</span></h2>
     <div class="bilingual">
-  <div class="lang-zh"><p class="col-kicker">中文</p>
-<p>它不是 45 分钟造出微信，也不是知识竞赛。两个工程师把一个模糊问题收成可落地的设计。<strong>过程比终图重要。</strong>终图漂亮但中途沉默，是低分。过程清楚、图有意做简，是高分。</p>
-  </div>
-  <div class="lang-en"><p class="col-kicker">English</p>
-<p>You are not building WeChat in 45 minutes, and it is not a quiz. Two engineers turn a fuzzy prompt into a design you could ship. <strong>The process outranks the final picture.</strong> A pretty diagram with a silent middle is a low score. A clear process and a deliberately small diagram is a high one.</p>
-  </div>
-</div>
+      <div class="lang-zh"><p class="col-kicker">中文</p>
+        <p class="say">我用一条读多的商品详情做贯穿例子：<code>GET /v1/products/{id}</code> 返回标题、价格、可售标记和图片 URL。四笔都画在同一张图上。先划信任边界，标出不做结账和搜索。再算峰值 QPS，把它和磁盘寻道预算比，比完才把缓存加进去。然后分开无状态服务和权威存储，画出同步请求和同步响应，并标明队列和第二机房这轮不连线。最后只深挖一条故障：缓存层不可用时，回源有人数上限，超出的请求 503，而不是把峰值全部压到存储上。</p>
+        <p>功能需求只有这一条读。调用方把商品 id 交给边缘，边缘转到商品服务，服务返回一份商品 JSON。未知 id 是 404。这是功能：系统正常时，这份 JSON 里有什么、没有什么。非功能是另一列，不要和功能混着说：单机房内服务侧 p99 按假设订在 80 毫秒以内，月可用性按假设订在 99.9%，详情页上的价格允许最多 30 秒陈旧。80 毫秒、99.9%、30 秒都是为了能继续设计而写下的目标，不是某家商店的内部 SLO，面试官可以改。</p>
+        <p>明确不做：结账、支付、库存预占、搜索排序、推荐、图片字节本身、多机房同时写。图片 URL 可以出现在 JSON 里，像素由对象存储或 CDN 承担，那不是这条 API 的带宽。推荐不在本站主线里，这轮也不要主动画。结账对价格的一致性要求和「浏览可以看 30 秒旧价」不是同一条策略，所以结账留在边界外面，避免用一条缓存策略假装覆盖两种操作。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">English</p>
+        <p class="say">The running example is a read-heavy product detail: <code>GET /v1/products/{id}</code> returns title, price, an availability flag, and image URLs. All four strokes land on that same picture. First the trust boundary, with checkout and search left outside. Then peak QPS compared with a disk-seek budget, and only then a cache. Then split the stateless service from the source of truth, draw the synchronous request and the synchronous reply, and leave the queue and the second region unwired. The deep dive is one failure: when the cache tier is down, origin reads have a cap and the rest return 503, rather than pouring the peak into the store.</p>
+        <p>The functional requirement is that one read. The caller sends a product id through the edge to Product Service and gets product JSON back. An unknown id is 404. That is function: what the JSON contains when the system is healthy. Non-function is a separate column: an assumed in-region service-side p99 under 80 ms, an assumed 99.9% monthly availability, and a price on this page that may be up to 30 seconds stale. Those three numbers are working targets so the design can continue, not a retailer’s internal SLO. The interviewer may replace them.</p>
+        <p>Explicitly out of scope: checkout, payment, inventory reservation, search ranking, recommendations, the image bytes, and multi-region writes. Image URLs may sit in the JSON; pixels belong to object storage or a CDN and are not this API’s bandwidth. Recommenders are not on this site’s spine and do not get a box in this round. Checkout’s price invariant is not the same policy as “a browse may show a 30-second-old price,” so checkout stays outside rather than letting one cache policy pretend to cover both operations.</p>
+      </div>
+    </div>
+    <table>
+      <thead><tr><th><span class="lang-zh">假设（不是测量）</span><span class="lang-en">Assumption, not a measurement</span></th><th><span class="lang-zh">数量</span><span class="lang-en">Quantity</span></th><th><span class="lang-zh">它会不会改图</span><span class="lang-en">Does it change the drawing?</span></th></tr></thead>
+      <tbody>
+        <tr><td><span class="lang-zh">日活 8,640,000，每人每天 10 次详情</span><span class="lang-en">8,640,000 DAU, 10 detail views each</span></td><td>86,400,000 reads/day → 1,000 avg QPS</td><td><span class="lang-zh">先得到平均负载</span><span class="lang-en">Produces the average load</span></td></tr>
+        <tr><td><span class="lang-zh">峰值是平均的 5 倍</span><span class="lang-en">Peak is 5× the average</span></td><td>5,000 peak read QPS</td><td><span class="lang-zh">和寻道预算比较之后，缓存才会出现</span><span class="lang-en">Compared with the seek budget, this is what adds the cache</span></td></tr>
+        <tr><td><span class="lang-zh">一次随机寻道 10 ms，单盘串行</span><span class="lang-en">One random seek is 10 ms, serial on one disk</span></td><td>100 seeks/s</td><td><span class="lang-zh">回源上限先用这个数，直到有实测替换它</span><span class="lang-en">Origin cap until a measurement replaces it</span></td></tr>
+        <tr><td><span class="lang-zh">200 万 SKU，每行约 1.5 KB；每天 5 万次目录更新</span><span class="lang-en">2,000,000 SKUs at ~1.5 KB; 50,000 catalog updates/day</span></td><td>~3 GB raw · ~0.6 write QPS</td><td><span class="lang-zh">容量和写 QPS 都不够格添分片或队列</span><span class="lang-en">Neither size nor write QPS earns a shard or a queue</span></td></tr>
+      </tbody>
+    </table>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">这些数从哪一步乘出来</p>
+        <p>日活取 8,640,000 是为了让除法落在整数上，方便口述，不是行业基准。8,640,000 × 10 = 86,400,000 次详情阅读。一天 86,400 秒，而 86,400 × 1,000 = 86,400,000，所以平均读 QPS 正好是 1,000。峰值系数取 5 也是假设：晚间流量高于白天，但还不到后面追问里的十倍增长。1,000 × 5 = 5,000，这才是图上要面对的读压力。</p>
+        <p>写侧分开算。目录更新按假设每天 50,000 次，50,000 ÷ 86,400 ≈ 0.58，口述约 0.6 次写 QPS。86,400,000 ÷ 50,000 = 1,728，大约 1,700 次读对 1 次写。夜间改价放到 30 倍也只有约 18 次写 QPS，所以这条读路径不加队列。</p>
+        <p>存储单独算，是为了说明它不改图。200 万 SKU × 1.5 KB ≈ 3 GB 原始行，三副本约 9 GB，加上索引仍是几十 GB。这轮溢出的是寻道速率，不是磁盘装不下。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">Where the multiplications come from</p>
+        <p>8,640,000 DAU is chosen so the division lands on an integer you can say aloud. It is not an industry benchmark. 8,640,000 × 10 = 86,400,000 detail reads. A day has 86,400 seconds, and 86,400 × 1,000 = 86,400,000, so average read QPS is exactly 1,000. The peak factor of 5 is also an assumption: evening traffic is higher than the day, and it is not yet the 10× growth in the follow-up. 1,000 × 5 = 5,000, and that is the read pressure the drawing has to face.</p>
+        <p>Keep writes in their own line so a read-heavy prompt does not turn into write fan-out. Catalog updates are an assumed 50,000 per day. 50,000 ÷ 86,400 ≈ 0.58, about 0.6 write QPS said aloud. Reads over writes: 86,400,000 ÷ 50,000 = 1,728, roughly 1,700 reads per write. A nightly price job at 30× for a short window is still only 0.6 × 30 ≈ 18 write QPS. That does not earn a queue on this read. The queue appears when someone asks for an asynchronous search-index update.</p>
+        <p>Storage gets one multiplication so you can see that it does not change this picture. 2,000,000 SKUs × 1.5 KB = 3,000,000 KB, about 3 GB of raw rows. Three replicas are about 9 GB; indexes and backups still leave a tens-of-GB planning range, not a day-one sharding problem. Capacity and QPS are different resources. What overflows here is seek rate, not free disk space.</p>
+      </div>
+    </div>
+    <p class="cite"><span class="lang-zh">更完整的估算操练在 <a href="ch03.html">Ch03</a>。本章只把一次除法算到它改变架构为止。架构会怎么继续长大，在 <a href="ch02.html">Ch02</a>。</span><span class="lang-en">The fuller estimate drill is <a href="ch03.html">Ch03</a>. This chapter follows one division until it changes the architecture. How the picture keeps growing is <a href="ch02.html">Ch02</a>.</span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">世界地图：积木是依赖，不是章节名单</span><span class="lang-en">World map: blocks are dependencies, not a list of chapter titles</span></h2>
+    <p class="cite"><span class="lang-zh">全章只有这一组是地图。它回答「不同题为什么长得像」。后面四组都回到同一条商品详情请求，一步只改变一个决定。</span><span class="lang-en">This is the only map deck. It answers why different prompts look alike. The next four decks return to one product-detail request and change one decision at a time.</span></p>
+    <p class="cite"><span class="lang-zh">读图约定：灰色实线是同步请求，绿色是同步返回，橙色虚线是异步发送，红色虚线是降级或拒绝；箭头尖端永远指向动作的接收方。</span><span class="lang-en">Visual grammar: solid gray is a synchronous request, green is its reply, dashed orange is asynchronous delivery, and dashed red is degradation or rejection. The arrowhead always points at the receiver of the action.</span></p>
     <figure class="deck">
-<div class="slide">
-  <svg viewBox="0 0 960 420" class="board" role="img">
-  <g>
-    <rect x="185" y="150" width="260" height="96" rx="12" class="box"/>
-    <text x="315" y="184" text-anchor="middle" class="label">You</text>
-    <text x="315" y="208" text-anchor="middle" class="sub">think out loud</text>
-  </g>
-  <g>
-    <rect x="515" y="150" width="260" height="96" rx="12" class="box alt"/>
-    <text x="645" y="184" text-anchor="middle" class="label">Interviewer</text>
-    <text x="645" y="208" text-anchor="middle" class="sub">asks and hints</text>
-  </g>
-  <line x1="451" y1="198" x2="504" y2="198" class="wire"/>
-  <polygon points="504,193 513,198 504,203" class="head"/>
-</svg>
-  <figcaption><span class="lang-zh">这是一场协作，不是闭卷考试。你卡住时出声，面试官才会把你往下带。</span><span class="lang-en">It is a working session. Say what you are thinking, or they cannot help you.</span></figcaption>
-</div>
-<div class="slide">
-  <svg viewBox="0 0 960 420" class="board" role="img">
-  <g>
-    <rect x="185" y="150" width="260" height="96" rx="12" class="box ok"/>
-    <text x="315" y="184" text-anchor="middle" class="label">Process</text>
-    <text x="315" y="208" text-anchor="middle" class="sub">clarify, estimate</text>
-  </g>
-  <g>
-    <rect x="515" y="150" width="260" height="96" rx="12" class="box"/>
-    <text x="645" y="184" text-anchor="middle" class="label">Final diagram</text>
-    <text x="645" y="208" text-anchor="middle" class="sub">clear is enough</text>
-  </g>
-  <line x1="451" y1="198" x2="504" y2="198" class="wire"/>
-  <polygon points="504,193 513,198 504,203" class="head"/>
-</svg>
-  <figcaption><span class="lang-zh">分在过程上。终图清楚、有意做简，比一张很满但没人跟得上的图分高。</span><span class="lang-en">They score the process. A clear, deliberately small diagram beats a dense one nobody can follow.</span></figcaption>
-</div>
-<div class="slide">
-  <svg viewBox="0 0 960 420" class="board" role="img">
-  <g>
-    <rect x="62" y="150" width="260" height="96" rx="12" class="box bad"/>
-    <text x="192" y="184" text-anchor="middle" class="label">Silence</text>
-    <text x="192" y="208" text-anchor="middle" class="sub">worst</text>
-  </g>
-  <g>
-    <rect x="350" y="150" width="260" height="96" rx="12" class="box bad"/>
-    <text x="480" y="184" text-anchor="middle" class="label">Jump in</text>
-    <text x="480" y="208" text-anchor="middle" class="sub">draw first</text>
-  </g>
-  <line x1="328" y1="198" x2="339" y2="198" class="wire"/>
-  <polygon points="339,193 348,198 339,203" class="head"/>
-  <g>
-    <rect x="638" y="150" width="260" height="96" rx="12" class="box bad"/>
-    <text x="768" y="184" text-anchor="middle" class="label">Over-engineer</text>
-    <text x="768" y="208" text-anchor="middle" class="sub">too much</text>
-  </g>
-  <line x1="616" y1="198" x2="627" y2="198" class="wire"/>
-  <polygon points="627,193 636,198 627,203" class="head"/>
-</svg>
-  <figcaption><span class="lang-zh">三个 red flag：沉默、抢答、over-engineering。后两个常常一起出现。</span><span class="lang-en">Three red flags: going quiet, jumping to a design, and over-engineering. The last two travel together.</span></figcaption>
-</div>
-</figure>
-    <p class="cite"><span class="lang-zh">原书那句仍然成立：最终设计和你在过程里做的工作相比，没那么重要。</span><span class="lang-en">The line from the book still holds: the final design matters less than the work you do in the process.</span></p>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="wm1t wm1d">
+          <title id="wm1t">Read and write families share one source of truth</title>
+          <desc id="wm1d">A caller reaches a read-heavy API. Read and write families both reach one durable store. The node positions are reserved for later cache, queue, and coordination decisions.</desc>
+          <circle cx="58" cy="92" r="22" class="box"/><circle cx="58" cy="84" r="7" class="box"/><path d="M44 106 Q58 94 72 106" class="wire"/><text x="58" y="136" text-anchor="middle" class="sub">Caller</text>
+          <rect x="120" y="54" width="190" height="74" rx="12" class="box"/><text x="215" y="85" text-anchor="middle" class="label">Read-heavy API</text><text x="215" y="108" text-anchor="middle" class="sub">product · profile</text>
+          <rect x="120" y="184" width="190" height="74" rx="12" class="box ok"/><text x="215" y="215" text-anchor="middle" class="label">Write pipeline</text><text x="215" y="238" text-anchor="middle" class="sub">order · catalog edit</text>
+          <line x1="82" y1="92" x2="108" y2="92" class="wire"/>
+          <g class="is-new">
+            <path d="M750 82 V166 A80 16 0 0 0 910 166 V82 Z" class="store"/><ellipse cx="830" cy="82" rx="80" ry="16" class="store"/>
+            <text x="830" y="124" text-anchor="middle" class="label">Durable store</text><text x="830" y="147" text-anchor="middle" class="sub">source of truth</text>
+            <path d="M310 118 C480 152 620 164 738 150" class="wire"/><text x="470" y="154" class="tiny">origin read</text>
+            <path d="M310 221 C500 221 620 188 738 164" class="wire"/><text x="492" y="213" class="tiny">commit</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">先画权威存储：读和写都能说明状态从哪来，但缓存、队列、协调器还没有理由出现。后续帧保留这些节点的位置，不再让旧元素跳动。</span><span class="lang-en">Start with the source of truth. Reads and writes can name where state comes from, while cache, queue, and coordination still have no reason to exist. Later frames keep these node positions fixed.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="wm2t wm2d">
+          <title id="wm2t">Cache accelerates only the read family</title>
+          <desc id="wm2d">The API sends a lookup to cache. A hit returns from cache to the API. A miss reaches the store, whose result fills the cache. The write pipeline still commits directly to the store.</desc>
+          <circle cx="58" cy="92" r="22" class="box"/><circle cx="58" cy="84" r="7" class="box"/><path d="M44 106 Q58 94 72 106" class="wire"/><text x="58" y="136" text-anchor="middle" class="sub">Caller</text>
+          <rect x="120" y="54" width="190" height="74" rx="12" class="box"/><text x="215" y="85" text-anchor="middle" class="label">Read-heavy API</text><text x="215" y="108" text-anchor="middle" class="sub">product · profile</text>
+          <rect x="120" y="184" width="190" height="74" rx="12" class="box ok"/><text x="215" y="215" text-anchor="middle" class="label">Write pipeline</text><text x="215" y="238" text-anchor="middle" class="sub">order · catalog edit</text>
+          <line x1="82" y1="92" x2="108" y2="92" class="wire"/>
+          <path d="M750 82 V166 A80 16 0 0 0 910 166 V82 Z" class="store"/><ellipse cx="830" cy="82" rx="80" ry="16" class="store"/>
+          <text x="830" y="124" text-anchor="middle" class="label">Durable store</text><text x="830" y="147" text-anchor="middle" class="sub">source of truth</text>
+          <path d="M310 118 C480 152 620 164 738 150" class="wire"/><text x="630" y="166" class="tiny">miss → origin</text>
+          <path d="M310 221 C500 221 620 188 738 164" class="wire"/><text x="492" y="213" class="tiny">commit</text>
+          <g class="is-new">
+            <rect x="452" y="58" width="150" height="68" rx="10" class="cache"/><rect x="460" y="66" width="134" height="52" rx="7" class="cache-detail"/><text x="527" y="98" text-anchor="middle" class="label">Cache</text>
+            <line x1="310" y1="78" x2="440" y2="78" class="wire"/><text x="352" y="69" class="tiny">lookup</text>
+            <line x1="452" y1="108" x2="322" y2="108" class="wire hit"/><text x="365" y="123" class="tiny">hit</text>
+            <line x1="750" y1="106" x2="614" y2="106" class="wire reply"/><text x="660" y="98" class="tiny">fill</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">现在方向明确：灰线把 lookup 送进缓存，绿色 hit 返回服务；miss 才回源，存储结果再向左回填。写提交仍然绕过缓存直达权威存储。</span><span class="lang-en">Direction is now explicit: gray sends the lookup into cache, green returns a hit, only a miss reaches origin, and the store result fills back toward cache. Writes still bypass cache and commit to the authority.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="wm3t wm3d">
+          <title id="wm3t">Queue detaches fan-out from the write commit</title>
+          <desc id="wm3d">The fixed read and write paths remain. After commit, the write pipeline emits asynchronously to a queue, and the queue delivers to fan-out. Reads do not cross the queue.</desc>
+          <circle cx="58" cy="92" r="22" class="box"/><circle cx="58" cy="84" r="7" class="box"/><path d="M44 106 Q58 94 72 106" class="wire"/><text x="58" y="136" text-anchor="middle" class="sub">Caller</text>
+          <rect x="120" y="54" width="190" height="74" rx="12" class="box"/><text x="215" y="85" text-anchor="middle" class="label">Read-heavy API</text><text x="215" y="108" text-anchor="middle" class="sub">product · profile</text>
+          <rect x="120" y="184" width="190" height="74" rx="12" class="box ok"/><text x="215" y="215" text-anchor="middle" class="label">Write pipeline</text><text x="215" y="238" text-anchor="middle" class="sub">commit, then emit</text>
+          <rect x="120" y="316" width="190" height="64" rx="12" class="box alt"/><text x="215" y="343" text-anchor="middle" class="label">Fan-out</text><text x="215" y="365" text-anchor="middle" class="sub">feed · notify</text>
+          <rect x="452" y="58" width="150" height="68" rx="10" class="cache"/><rect x="460" y="66" width="134" height="52" rx="7" class="cache-detail"/><text x="527" y="98" text-anchor="middle" class="label">Cache</text>
+          <path d="M750 82 V166 A80 16 0 0 0 910 166 V82 Z" class="store"/><ellipse cx="830" cy="82" rx="80" ry="16" class="store"/><text x="830" y="124" text-anchor="middle" class="label">Durable store</text><text x="830" y="147" text-anchor="middle" class="sub">source of truth</text>
+          <line x1="82" y1="92" x2="108" y2="92" class="wire"/><line x1="310" y1="78" x2="440" y2="78" class="wire"/><line x1="452" y1="108" x2="322" y2="108" class="wire hit"/>
+          <path d="M310 118 C480 152 620 164 738 150" class="wire"/><line x1="750" y1="106" x2="614" y2="106" class="wire reply"/><path d="M310 221 C500 221 620 188 738 164" class="wire"/>
+          <g class="is-new">
+            <path d="M430 202 h170 a19 19 0 0 1 0 38 h-170 a19 19 0 0 1 0-38" class="queue"/><text x="515" y="226" text-anchor="middle" class="label">Queue</text>
+            <path d="M310 235 C350 235 382 221 418 221" class="wire async"/><text x="345" y="226" class="tiny">emit</text>
+            <path d="M430 240 C386 278 350 326 322 344" class="wire async"/><text x="337" y="294" class="tiny">deliver</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">提交成功后才沿橙色虚线进入队列，队列再投递给扇出；方向不再用“depends on”含糊带过。读路径的位置和上一帧完全不变。</span><span class="lang-en">Only after commit does dashed orange enter the queue, which then delivers to fan-out. Direction is no longer hidden behind “depends on,” and the read path stays in exactly the same place.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="wm4t wm4d">
+          <title id="wm4t">Only once-only work depends on coordination</title>
+          <desc id="wm4d">The completed map keeps the read, write, queue, and fan-out paths fixed. Once-only work has its own synchronous dependency on coordination, while the read API has none.</desc>
+          <circle cx="58" cy="92" r="22" class="box"/><circle cx="58" cy="84" r="7" class="box"/><path d="M44 106 Q58 94 72 106" class="wire"/><text x="58" y="136" text-anchor="middle" class="sub">Caller</text>
+          <rect x="120" y="54" width="190" height="74" rx="12" class="box"/><text x="215" y="85" text-anchor="middle" class="label">Read-heavy API</text><text x="215" y="108" text-anchor="middle" class="sub">product · profile</text>
+          <rect x="120" y="184" width="190" height="74" rx="12" class="box ok"/><text x="215" y="215" text-anchor="middle" class="label">Write pipeline</text><text x="215" y="238" text-anchor="middle" class="sub">commit, then emit</text>
+          <rect x="120" y="316" width="190" height="64" rx="12" class="box alt"/><text x="215" y="343" text-anchor="middle" class="label">Fan-out</text><text x="215" y="365" text-anchor="middle" class="sub">feed · notify</text>
+          <rect x="452" y="58" width="150" height="68" rx="10" class="cache"/><rect x="460" y="66" width="134" height="52" rx="7" class="cache-detail"/><text x="527" y="98" text-anchor="middle" class="label">Cache</text>
+          <path d="M750 82 V166 A80 16 0 0 0 910 166 V82 Z" class="store"/><ellipse cx="830" cy="82" rx="80" ry="16" class="store"/><text x="830" y="124" text-anchor="middle" class="label">Durable store</text><text x="830" y="147" text-anchor="middle" class="sub">source of truth</text>
+          <path d="M430 202 h170 a19 19 0 0 1 0 38 h-170 a19 19 0 0 1 0-38" class="queue"/><text x="515" y="226" text-anchor="middle" class="label">Queue</text>
+          <line x1="82" y1="92" x2="108" y2="92" class="wire"/><line x1="310" y1="78" x2="440" y2="78" class="wire"/><line x1="452" y1="108" x2="322" y2="108" class="wire hit"/>
+          <path d="M310 118 C480 152 620 164 738 150" class="wire"/><line x1="750" y1="106" x2="614" y2="106" class="wire reply"/><path d="M310 221 C500 221 620 188 738 164" class="wire"/>
+          <path d="M310 235 C350 235 382 221 418 221" class="wire async"/><path d="M430 240 C386 278 350 326 322 344" class="wire async"/>
+          <g class="is-new">
+            <rect x="430" y="318" width="190" height="64" rx="12" class="box"/><text x="525" y="345" text-anchor="middle" class="label">Once-only work</text><text x="525" y="367" text-anchor="middle" class="sub">id · lock · rate limit</text>
+            <rect x="710" y="312" width="200" height="70" rx="12" class="box alt"/><text x="810" y="341" text-anchor="middle" class="label">Coordination</text><text x="810" y="364" text-anchor="middle" class="sub">lease · sequence · lock</text>
+            <line x1="620" y1="350" x2="698" y2="350" class="wire"/><text x="640" y="339" class="tiny">acquire</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">只能做一次的工作单独依赖协调器，箭头不再穿过队列，也不从写路径额外拉一条含义重复的线。读路径没有指向协调器的箭头。</span><span class="lang-en">Once-only work gets its own coordination dependency. No connector crosses the queue, and the write path no longer carries a redundant line. The read path has no arrow to coordination.</span></figcaption>
+      </div>
+    </figure>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">按依赖把这张图走一遍</p>
+        <p>读多的 API 先打缓存，命中就不再碰存储；未命中才读存储并回填。写路径先把权威状态提交到存储，成功之后才异步进队列。扇出消费队列，不占用这次 GET 的回程。发号、加锁、扣限流先依赖协调器。商品详情是读家族，所以后面四步只加缓存和存储之间的笔画，不把协调器放进 GET。</p>
+        <p>这样画，是因为约束不同，依赖就不同。读多而且单次要快，才会在存储前加一层可丢的内存。扇出可以晚几秒，所以用队列把发送从提交里解开。重复扣款或重复发号不能靠「大概不会撞」来赌，所以那些题依赖协调，而不是依赖缓存。面试里先说自己落在哪一个家族，再决定哪条箭头是同步的。本章后面用商品详情把读家族走完；短链那种读写都重的题在 <a href="ch09.html">Ch09</a>，那是另一条请求，不要把短链的盒子抄到这张地图上充数。</p>
+        <p>有的读不该走缓存：峰值远低于存储能稳定服务的速率，而且不允许陈旧。那时箭头只指存储。命中率接近零时，缓存只多一个故障域。写路径若必须和扇出同成败，才改用同步调用；否则队列是对的。</p>
+        <p>把协调器放进读路径，锁一抖动，本来不用加锁的 GET 会一起失败，所以终图没有那根箭头。队列若画成同步，扇出堆积会拖进读的预算；异步边表示这条边失败时，存储里的提交仍然算数。</p>
+        <p>常见的错法是把地图画成章节名，或把 cache、queue、CDN 当开场词表。没有箭头，就没有依赖。阅读顺序不要画进这张图：本章之后看 <a href="ch02.html">Ch02</a>、<a href="ch03.html">Ch03</a>，再用小题把四步跑顺，然后做 <a href="ch09.html">Ch09</a> 这种完整题。M5 只做推理、RAG 和 Agent 基建，不做推荐。机制后读 <a class="chip" href="ch37.html">Ch37</a> 和 <a class="chip" href="ch38.html">Ch38</a>。这门课不在浏览器里写代码。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">Walk the map by dependency</p>
+        <p>A read-heavy API hits the cache first. A hit is done and does not touch the store. A miss, or a fill, reads the store and puts the result back. The write pipeline commits authoritative state to the store first; only after that commit does it emit on the async edge into the queue. Fan-out consumes the queue and does not put “the notification must leave” on the synchronous return of a user read. Once-only work — issuing a unique id, taking a lock, spending rate-limit budget — depends on coordination, takes a lease or a sequence, then writes the store. Product detail is the read family in the upper left, so the next four steps only add strokes between its cache and its store. They do not put a coordinator on the GET path.</p>
+        <p>The drawing is shaped that way because different constraints create different dependencies. A read that is both frequent and latency-sensitive earns a droppable memory layer in front of the store. Fan-out that can be a few seconds late earns a queue that detaches delivery from the commit. A double charge or a double id cannot be waved off as “probably unique,” so those prompts depend on coordination rather than on a cache. In the interview, name the family first, then say which arrow is synchronous. The rest of this chapter walks the read family on product detail. A prompt where both reads and writes are hard, such as <a href="ch09.html">Ch09</a>, is a different request. Do not paste short-link boxes onto this map to look complete.</p>
+        <p>Some reads should not go through a cache: the peak sits far under what the store can serve steadily, and the product forbids staleness. That read arrow should point only at the store. A cache is a liability when the hit rate would be near zero or a 30-second-old price would be an incident: you add a failure domain and do not buy the freshness this prompt needs. In the other direction, a write that must succeed or fail together with fan-out should not use a queue. A synchronous fan-out call ties notification availability to checkout, and that is worth drawing only when the product says an order without a notification is a failed order.</p>
+        <p>The failure window on the map is specific. Put coordination on the read path and a lock-service blip fails GETs that never needed a lock. That is why the finished map has no arrow from the read API to coordination. If the queue edge is drawn as synchronous, fan-out backlog drags commit latency into the read budget. The async edge is the statement that a failure on that edge does not undo the commit already in the store. The cache-versus-store window is calculated on the product example below: the authoritative row can already be new while the cache still returns the old price inside the allowed stale time.</p>
+        <p>The common mistake is a row of chapter titles, or an opening vocabulary list of cache, queue, CDN, and Redis. A word list does not tell the interviewer who depends on whom, or which edge is synchronous. The correction is to keep only dependencies that have an arrow, and to say why that edge is synchronous. Reading order on this site is a different fact and does not belong on the drawing: this chapter, then <a href="ch02.html">Ch02</a> for how an architecture grows out of pain, then <a href="ch03.html">Ch03</a> until estimates are fluent, then small problems — rate limit, hashing, KV, unique ids, locks — until the four steps are automatic, then a full case such as <a href="ch09.html">Ch09</a>. M5 is LLM inference, RAG, and Agent infrastructure, not recommenders. Storage and cache mechanisms in M6 come later; open <a class="chip" href="ch37.html">Ch37 · storage</a> and <a class="chip" href="ch38.html">Ch38 · cache</a> when a design needs them. There is no in-browser coding assignment. A system-design interview is explaining dependencies so they still fit on the board.</p>
+      </div>
+    </div>
   </section>
 
   <section>
-    <h2><span class="lang-zh">这个站按什么顺序读</span><span class="lang-en">How to read this site</span></h2>
-    <div class="bilingual">
-  <div class="lang-zh"><p class="col-kicker">中文</p>
-<p>六块模块。主线是 <strong>M1–M5</strong>。M6 后置，当词典。M5 只做大模型推理、RAG、Agent 基建，<strong>不做推荐系统</strong>。</p><p>推荐路径：本章 → Ch02 从零扩到百万 → Ch03 粗略估算 → M2 把 4 步法跑熟 → M3、M4 设计题 → M5。第一道完整设计题样板是 <a href="ch09.html">Ch09 短链</a>。</p>
-  </div>
-  <div class="lang-en"><p class="col-kicker">English</p>
-<p>Six modules. The main line is <strong>M1–M5</strong>. M6 comes later, as a dictionary. M5 is LLM inference, RAG, and Agent infrastructure. <strong>No recommender system.</strong></p><p>Path: this chapter, then Ch02 (zero to a million users), Ch03 (estimates), M2 until the four steps feel automatic, then M3–M4 cases, then M5. The first full case sample is <a href="ch09.html">Ch09, a URL shortener</a>.</p>
-  </div>
-</div>
+    <h2><span class="lang-zh">第一步 · 定范围：信任边界、范围内的路径、明确不做</span><span class="lang-en">Step 1 · Scope: trust boundary, the in-scope path, and what is explicitly out</span></h2>
+    <p class="cite"><span class="lang-zh">时间盒大约 3 到 8 分钟。问到能写假设就停，不要问满 10 分钟。</span><span class="lang-en">About 3 to 8 minutes. Stop once the assumptions are written down. Do not interview them for 10 minutes.</span></p>
     <figure class="deck">
-<div class="slide">
-  <svg viewBox="0 0 960 420" class="board" role="img">
-  <g>
-    <rect x="350" y="156" width="260" height="90" rx="12" class="box"/>
-    <text x="480" y="190" text-anchor="middle" class="label">M1</text>
-    <text x="480" y="214" text-anchor="middle" class="sub">method, estimates</text>
-  </g>
-</svg>
-  <figcaption><span class="lang-zh">先把 4 步法和时间盒装进脑子。后面每道题都是同一具骨架。</span><span class="lang-en">Learn the four steps and the clock first. Every later question uses the same skeleton.</span></figcaption>
-</div>
-<div class="slide">
-  <svg viewBox="0 0 960 420" class="board" role="img">
-  <g>
-    <rect x="208" y="156" width="260" height="90" rx="12" class="box"/>
-    <text x="338" y="190" text-anchor="middle" class="label">M1</text>
-    <text x="338" y="214" text-anchor="middle" class="sub">method, estimates</text>
-  </g>
-  <g>
-    <rect x="492" y="156" width="260" height="90" rx="12" class="box"/>
-    <text x="622" y="190" text-anchor="middle" class="label">M2</text>
-    <text x="622" y="214" text-anchor="middle" class="sub">limit, KV, lock</text>
-  </g>
-  <line x1="472" y1="201" x2="481" y2="201" class="wire"/>
-  <polygon points="481,196 490,201 481,206" class="head"/>
-</svg>
-  <figcaption><span class="lang-zh">M2 用小题把骨架跑熟：限流、一致性哈希、KV、唯一 ID、锁。</span><span class="lang-en">M2 runs the skeleton on small problems: rate limit, consistent hashing, KV, IDs, locks.</span></figcaption>
-</div>
-<div class="slide">
-  <svg viewBox="0 0 960 420" class="board" role="img">
-  <g>
-    <rect x="66" y="156" width="260" height="90" rx="12" class="box"/>
-    <text x="196" y="190" text-anchor="middle" class="label">M1</text>
-    <text x="196" y="214" text-anchor="middle" class="sub">method, estimates</text>
-  </g>
-  <g>
-    <rect x="350" y="156" width="260" height="90" rx="12" class="box"/>
-    <text x="480" y="190" text-anchor="middle" class="label">M2</text>
-    <text x="480" y="214" text-anchor="middle" class="sub">limit, KV, lock</text>
-  </g>
-  <line x1="330" y1="201" x2="339" y2="201" class="wire"/>
-  <polygon points="339,196 348,201 339,206" class="head"/>
-  <g>
-    <rect x="634" y="156" width="260" height="90" rx="12" class="box"/>
-    <text x="764" y="190" text-anchor="middle" class="label">M3–M5</text>
-    <text x="764" y="214" text-anchor="middle" class="sub">cases, agents</text>
-  </g>
-  <line x1="614" y1="201" x2="623" y2="201" class="wire"/>
-  <polygon points="623,196 632,201 623,206" class="head"/>
-</svg>
-  <figcaption><span class="lang-zh">然后才是短链、Feed、订单、支付，以及 LLM / Agent 基建。不做推荐系统。</span><span class="lang-en">Then the cases: short URL, feed, orders, payments, and LLM / Agent infrastructure. No recommender system.</span></figcaption>
-</div>
-<div class="slide">
-  <svg viewBox="0 0 960 420" class="board" role="img">
-  <g>
-    <rect x="36" y="156" width="204" height="90" rx="12" class="box"/>
-    <text x="138" y="190" text-anchor="middle" class="label">M1</text>
-    <text x="138" y="214" text-anchor="middle" class="sub">method, estimates</text>
-  </g>
-  <g>
-    <rect x="264" y="156" width="204" height="90" rx="12" class="box"/>
-    <text x="366" y="190" text-anchor="middle" class="label">M2</text>
-    <text x="366" y="214" text-anchor="middle" class="sub">limit, KV, lock</text>
-  </g>
-  <line x1="244" y1="201" x2="253" y2="201" class="wire"/>
-  <polygon points="253,196 262,201 253,206" class="head"/>
-  <g>
-    <rect x="492" y="156" width="204" height="90" rx="12" class="box"/>
-    <text x="594" y="190" text-anchor="middle" class="label">M3–M5</text>
-    <text x="594" y="214" text-anchor="middle" class="sub">cases, agents</text>
-  </g>
-  <line x1="472" y1="201" x2="481" y2="201" class="wire"/>
-  <polygon points="481,196 490,201 481,206" class="head"/>
-  <g>
-    <rect x="720" y="156" width="204" height="90" rx="12" class="box alt"/>
-    <text x="822" y="190" text-anchor="middle" class="label">M6</text>
-    <text x="822" y="214" text-anchor="middle" class="sub">dictionary</text>
-  </g>
-  <line x1="700" y1="201" x2="709" y2="201" class="wire"/>
-  <polygon points="709,196 718,201 709,206" class="head"/>
-</svg>
-  <figcaption><span class="lang-zh">M6 不是预习。做到缓存、复制、CAP 时再点芯片。假期不要求读完。</span><span class="lang-en">M6 is not homework you finish first. Open it when a design names cache, replication, or CAP.</span></figcaption>
-</div>
-</figure>
-    <p class="cite"><span class="lang-zh">图里的 M6 现在还是占位。计划 2 会写成 <span class="chip soon">Ch36–Ch45</span>。</span><span class="lang-en">M6 on the slide is still a placeholder. Plan 2 writes <span class="chip soon">Ch36–Ch45</span>.</span></p>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="sc1t sc1d">
+          <title id="sc1t">Draw the trust boundary around edge, service, and store</title>
+          <desc id="sc1d">The product read still runs from client to edge to Product Service to Product Store. A trust boundary now encloses the edge, the service, and the store. The client stays outside and is marked untrusted.</desc>
+          <circle cx="62" cy="156" r="26" class="box"/><circle cx="62" cy="146" r="8" class="box"/><path d="M46 174 Q62 160 78 174" class="wire"/>
+          <text x="62" y="210" text-anchor="middle" class="label">Client</text>
+          <rect x="140" y="118" width="120" height="76" rx="38" class="box alt"/><text x="200" y="152" text-anchor="middle" class="label">Edge</text><text x="200" y="172" text-anchor="middle" class="sub">TLS · route</text>
+          <rect x="330" y="110" width="172" height="92" rx="12" class="box"/><text x="416" y="152" text-anchor="middle" class="label">Product Service</text><text x="416" y="174" text-anchor="middle" class="sub">GET /products/{id}</text>
+          <ellipse cx="868" cy="118" rx="68" ry="15" class="store"/><rect x="800" y="118" width="136" height="84" class="store"/><ellipse cx="868" cy="202" rx="68" ry="15" class="store"/>
+          <text x="868" y="158" text-anchor="middle" class="label">Product Store</text><text x="868" y="178" text-anchor="middle" class="sub">rows live here</text>
+          <line x1="90" y1="156" x2="128" y2="156" class="wire"/><polygon points="128,150 140,156 128,162" class="head"/>
+          <line x1="260" y1="156" x2="318" y2="156" class="wire"/><polygon points="318,150 330,156 318,162" class="head"/>
+          <path d="M502 188 C620 248 700 248 786 180" class="wire"/><polygon points="786,174 800,180 786,186" class="head"/>
+          <text x="560" y="268" class="tiny">GET /v1/products/42</text>
+          <g class="is-new">
+            <rect x="118" y="36" width="822" height="252" rx="20" class="boundary"/>
+            <text x="136" y="58" class="tiny">TRUST BOUNDARY</text>
+            <text x="62" y="232" text-anchor="middle" class="tiny">untrusted</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">这一笔把信任边界划在客户端外面：id 是不可信输入，边缘、服务和存储在边界内。边界还没有告诉你结账在不在范围内。</span><span class="lang-en">This stroke puts the trust boundary outside the client: the id is untrusted input, and the edge, service, and store sit inside. The boundary does not yet say whether checkout is in scope.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="sc2t sc2d">
+          <title id="sc2t">Mark the in-scope functional path</title>
+          <desc id="sc2d">Inside the trust boundary, the functional path is a single product read that returns JSON. Product Service is marked as the in-scope handler.</desc>
+          <circle cx="62" cy="156" r="26" class="box"/><circle cx="62" cy="146" r="8" class="box"/><path d="M46 174 Q62 160 78 174" class="wire"/>
+          <text x="62" y="210" text-anchor="middle" class="label">Client</text><text x="62" y="232" text-anchor="middle" class="tiny">untrusted</text>
+          <rect x="118" y="36" width="822" height="252" rx="20" class="boundary"/><text x="136" y="58" class="tiny">TRUST BOUNDARY</text>
+          <rect x="140" y="118" width="120" height="76" rx="38" class="box alt"/><text x="200" y="152" text-anchor="middle" class="label">Edge</text><text x="200" y="172" text-anchor="middle" class="sub">TLS · route</text>
+          <ellipse cx="868" cy="118" rx="68" ry="15" class="store"/><rect x="800" y="118" width="136" height="84" class="store"/><ellipse cx="868" cy="202" rx="68" ry="15" class="store"/>
+          <text x="868" y="158" text-anchor="middle" class="label">Product Store</text><text x="868" y="178" text-anchor="middle" class="sub">rows live here</text>
+          <line x1="90" y1="156" x2="128" y2="156" class="wire"/><polygon points="128,150 140,156 128,162" class="head"/>
+          <line x1="260" y1="156" x2="318" y2="156" class="wire"/><polygon points="318,150 330,156 318,162" class="head"/>
+          <path d="M502 188 C620 248 700 248 786 180" class="wire"/><polygon points="786,174 800,180 786,186" class="head"/>
+          <text x="560" y="268" class="tiny">GET /v1/products/42</text>
+          <g class="is-new">
+            <rect x="330" y="110" width="172" height="92" rx="12" class="box ok"/><text x="416" y="146" text-anchor="middle" class="label">Product Service</text><text x="416" y="168" text-anchor="middle" class="sub">in scope</text><text x="416" y="188" text-anchor="middle" class="tiny">functional · one JSON</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">这一笔标出功能：范围内只有「按 id 返回一份商品 JSON」。功能说的是正常响应里有什么，不是延迟，也不是可用性。</span><span class="lang-en">This stroke marks function: the only in-scope behavior is “return one product JSON for an id.” Function is what a healthy response contains, not latency and not availability.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="sc3t sc3d">
+          <title id="sc3t">Place checkout and search outside the boundary with no wire</title>
+          <desc id="sc3d">Checkout, search, and recommendations sit in a box below the trust boundary. No arrow connects them to Product Service or the store.</desc>
+          <circle cx="62" cy="156" r="26" class="box"/><circle cx="62" cy="146" r="8" class="box"/><path d="M46 174 Q62 160 78 174" class="wire"/>
+          <text x="62" y="210" text-anchor="middle" class="label">Client</text>
+          <rect x="118" y="36" width="822" height="252" rx="20" class="boundary"/><text x="136" y="58" class="tiny">TRUST BOUNDARY</text>
+          <rect x="140" y="118" width="120" height="76" rx="38" class="box alt"/><text x="200" y="152" text-anchor="middle" class="label">Edge</text><text x="200" y="172" text-anchor="middle" class="sub">TLS · route</text>
+          <rect x="330" y="110" width="172" height="92" rx="12" class="box ok"/><text x="416" y="146" text-anchor="middle" class="label">Product Service</text><text x="416" y="168" text-anchor="middle" class="sub">in scope</text><text x="416" y="188" text-anchor="middle" class="tiny">functional · one JSON</text>
+          <ellipse cx="868" cy="118" rx="68" ry="15" class="store"/><rect x="800" y="118" width="136" height="84" class="store"/><ellipse cx="868" cy="202" rx="68" ry="15" class="store"/>
+          <text x="868" y="158" text-anchor="middle" class="label">Product Store</text><text x="868" y="178" text-anchor="middle" class="sub">rows live here</text>
+          <line x1="90" y1="156" x2="128" y2="156" class="wire"/><polygon points="128,150 140,156 128,162" class="head"/>
+          <line x1="260" y1="156" x2="318" y2="156" class="wire"/><polygon points="318,150 330,156 318,162" class="head"/>
+          <path d="M502 188 C620 248 700 248 786 180" class="wire"/><polygon points="786,174 800,180 786,186" class="head"/>
+          <text x="560" y="268" class="tiny">GET /v1/products/42</text>
+          <g class="is-new">
+            <rect x="118" y="340" width="250" height="64" rx="12" class="box"/><text x="243" y="366" text-anchor="middle" class="label">Out of scope</text><text x="243" y="388" text-anchor="middle" class="sub">checkout · search · recs</text>
+            <text x="390" y="376" class="tiny">no wire in</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">这一笔把结账、搜索和推荐放到边界外，并且不连线。不做，是图上的决定，不是口头说完就忘。</span><span class="lang-en">This stroke parks checkout, search, and recommendations outside the boundary and does not wire them. Out of scope is a decision on the drawing, not a sentence you forget.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="sc4t sc4d">
+          <title id="sc4t">Call out non-functional budgets inside the boundary</title>
+          <desc id="sc4d">The in-scope path remains one product read. Inside the trust boundary the non-functional budgets are p99 80 ms, 99.9 percent availability, and staleness of at most 30 seconds. Checkout stays outside with no wire.</desc>
+          <circle cx="62" cy="156" r="26" class="box"/><circle cx="62" cy="146" r="8" class="box"/><path d="M46 174 Q62 160 78 174" class="wire"/>
+          <text x="62" y="210" text-anchor="middle" class="label">Client</text>
+          <rect x="118" y="36" width="822" height="252" rx="20" class="boundary"/><text x="136" y="58" class="tiny">TRUST BOUNDARY</text>
+          <rect x="140" y="118" width="120" height="76" rx="38" class="box alt"/><text x="200" y="152" text-anchor="middle" class="label">Edge</text><text x="200" y="172" text-anchor="middle" class="sub">TLS · route</text>
+          <rect x="330" y="110" width="172" height="92" rx="12" class="box ok"/><text x="416" y="146" text-anchor="middle" class="label">Product Service</text><text x="416" y="168" text-anchor="middle" class="sub">in scope</text><text x="416" y="188" text-anchor="middle" class="tiny">functional · one JSON</text>
+          <ellipse cx="868" cy="118" rx="68" ry="15" class="store"/><rect x="800" y="118" width="136" height="84" class="store"/><ellipse cx="868" cy="202" rx="68" ry="15" class="store"/>
+          <text x="868" y="158" text-anchor="middle" class="label">Product Store</text><text x="868" y="178" text-anchor="middle" class="sub">rows live here</text>
+          <line x1="90" y1="156" x2="128" y2="156" class="wire"/><polygon points="128,150 140,156 128,162" class="head"/>
+          <line x1="260" y1="156" x2="318" y2="156" class="wire"/><polygon points="318,150 330,156 318,162" class="head"/>
+          <path d="M502 188 C620 248 700 248 786 180" class="wire"/><polygon points="786,174 800,180 786,186" class="head"/>
+          <text x="560" y="250" class="tiny">GET /v1/products/42</text>
+          <rect x="118" y="340" width="250" height="64" rx="12" class="box"/><text x="243" y="366" text-anchor="middle" class="label">Out of scope</text><text x="243" y="388" text-anchor="middle" class="sub">checkout · search · recs</text>
+          <text x="390" y="376" class="tiny">no wire in</text>
+          <g class="is-new">
+            <text x="140" y="276" class="tiny">non-functional · p99 80ms · 99.9% · stale ≤ 30s</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">这一笔把非功能写进边界内部：p99、可用性和陈旧上限。它们还不是缓存。缓存要等下一步用寻道预算证明 5,000 QPS 不能每条都去寻道。</span><span class="lang-en">This stroke writes the non-functional budgets inside the boundary: p99, availability, and the staleness cap. They are not a cache yet. The cache waits until the next step shows that 5,000 QPS cannot each pay a disk seek.</span></figcaption>
+      </div>
+    </figure>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">问完就写假设，不要追问到烦</p>
+        <p>范围内的路径是：不可信的客户端把商品 id 送到边缘，边缘只做 TLS 和路由，商品服务读存储里的一行，正常时返回 JSON。未知 id 返回 404。这是功能契约。非功能写在同一张图的边界里，但是另一句话：p99 80 毫秒、99.9%、价格最多陈旧 30 秒。把「要返回价格」和「价格可以旧 30 秒」说成同一件事，后面缓存的 TTL 就没有依据。30 秒是产品假设。如果面试官说价格必须实时，TTL 策略会整个换掉，结账却仍然在边界外，因为实时价格也不等于要在这轮设计支付。</p>
+        <p>大约问 5 到 7 个就停：同一 GET 覆盖移动端和网页；不做结账；不是个性化价格；浏览可以旧 30 秒；规模用上面的日活；这轮单机房；p99 按 80 毫秒。对方把问题抛回来，就把假设写在白板左侧再进入估算。问太少会加错组件，问太久会吃掉深挖。</p>
+        <p>最小记录先写在旁边，不单独开一组图：<code>Product(id PK, title, price_cents, currency, availability, image_urls, version, updated_at)</code>。version 是为了后面比较缓存里的价格和权威行，不是为了在第一步引入协调器。id 是主键，按 id 读一行，所以这条路径不是搜索。搜索盒已经放在边界外，就是为了挡住「那我们顺手做个查询」。</p>
+        <p>这一步最常见的错是把非功能当成组件名。听到 80 毫秒就画缓存，听到 99.9% 就画三机房，听到陈旧就画队列。80 毫秒只说明同步路径不能做三次串行寻道；99.9% 还没证明需要第二机房；30 秒陈旧只说明浏览读可以接受一个有界的旧值。组件要等估算证明某个预算装不下再加。另一个错是把结账口头排除，图上却从商品服务拉一根线到支付。没有那根线，才算排除。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">Write the assumption and stop interviewing them</p>
+        <p>The in-scope path is: an untrusted client sends a product id to the edge, the edge does TLS and routing only, Product Service reads one row, and a healthy call returns JSON. An unknown id returns 404. That is the functional contract. Non-function is on the same picture, inside the boundary, and it is a different sentence: p99 80 ms, 99.9%, and a price that may be 30 seconds stale. If “return a price” and “the price may be 30 seconds old” collapse into one remark, the later TTL has nothing to hang on. Thirty seconds is a product assumption. If they require a live price, the TTL policy changes, and checkout is still outside, because a live price is not a decision to design payments in this round.</p>
+        <p>Ask about five to seven questions, then stop. Same GET for mobile and web: assume yes. Checkout in this round: assume no. Personalized price: assume no, one catalog price. May the browse be 30 seconds stale: assume yes. Scale: use the DAU above, do not invent “very large” live. Multi-region: assume one region this round. Latency: 80 ms. When they bounce a question back, write the assumption on the left of the board, say you will proceed and change it if they disagree, and move to the estimate. Too few questions add the wrong box because you never established that reads dominate. Too many questions spend the ten minutes on clarification and the deep dive disappears.</p>
+        <p>Write the minimum record beside the picture. It does not need its own deck: <code>Product(id PK, title, price_cents, currency, availability, image_urls, version, updated_at)</code>. Version exists so a later step can compare a cached price with the authoritative row. It is not a reason to introduce coordination in step 1. The id is the primary key and the read is one row, so this path is not search. The search box is already outside the boundary to stop “let’s add query while we are here.”</p>
+        <p>The usual miss at this step turns a non-functional phrase into a component name. Hearing 80 ms and drawing a cache, hearing 99.9% and drawing three regions, hearing staleness and drawing a queue. Eighty milliseconds only says the synchronous path cannot pay three serial seeks. 99.9% has not yet shown that a second region is required. Thirty seconds of staleness only says a browse may return a bounded old value. A component waits until the estimate shows a budget that does not fit. The other miss excludes checkout out loud and then draws a wire from Product Service to payments. The missing wire is the exclusion.</p>
+      </div>
+    </div>
   </section>
 
   <section>
-    <h2><span class="lang-zh">四步和时间盒</span><span class="lang-en">The four steps and the clock</span></h2>
-    <div class="bilingual">
-  <div class="lang-zh"><p class="col-kicker">中文</p>
-<p>45 分钟怎么切，就是这四步。估算公式在 Ch03，这一章只要求你在 Step 2 之前留出 back-of-envelope 的位置。</p>
-  </div>
-  <div class="lang-en"><p class="col-kicker">English</p>
-<p>How you slice 45 minutes is these four steps. The estimate formulas live in Ch03. Here you only have to leave a slot for a back-of-the-envelope check before step 2 ends.</p>
-  </div>
-</div>
+    <h2><span class="lang-zh">第二步 · 估算：一个数把缓存画上去</span><span class="lang-en">Step 2 · Estimate: one number adds the cache</span></h2>
+    <p class="cite"><span class="lang-zh">大约 4 分钟。平均 QPS 不够，要把它和寻道预算比完。Dean 的 10 ms 寻道来自他的大规模系统讲座幻灯片，不是博客转述。[2]</span><span class="lang-en">About four minutes. Average QPS is not enough until you compare it with the seek budget. Dean’s 10 ms seek is from his large-systems talk slides, not a blog recap. [2]</span></p>
     <figure class="deck">
-<div class="slide">
-  <svg viewBox="0 0 960 420" class="board" role="img">
-  <g>
-    <rect x="350" y="150" width="260" height="96" rx="12" class="box"/>
-    <text x="480" y="184" text-anchor="middle" class="label">1 · Scope</text>
-    <text x="480" y="208" text-anchor="middle" class="sub">3–10 min</text>
-  </g>
-</svg>
-  <figcaption><span class="lang-zh">先定范围。没问清楚就画图，后面全是返工。</span><span class="lang-en">Set scope first. A diagram before the questions is rework.</span></figcaption>
-</div>
-<div class="slide">
-  <svg viewBox="0 0 960 420" class="board" role="img">
-  <g>
-    <rect x="210" y="150" width="260" height="96" rx="12" class="box"/>
-    <text x="340" y="184" text-anchor="middle" class="label">1 · Scope</text>
-    <text x="340" y="208" text-anchor="middle" class="sub">3–10 min</text>
-  </g>
-  <g>
-    <rect x="490" y="150" width="260" height="96" rx="12" class="box"/>
-    <text x="620" y="184" text-anchor="middle" class="label">2 · High-level</text>
-    <text x="620" y="208" text-anchor="middle" class="sub">10–15 min</text>
-  </g>
-  <line x1="470" y1="198" x2="479" y2="198" class="wire"/>
-  <polygon points="479,193 488,198 479,203" class="head"/>
-</svg>
-  <figcaption><span class="lang-zh">高层图只要买到 buy-in：方向对了再往下挖。</span><span class="lang-en">The high-level picture only has to earn buy-in. Go deep after they nod.</span></figcaption>
-</div>
-<div class="slide">
-  <svg viewBox="0 0 960 420" class="board" role="img">
-  <g>
-    <rect x="70" y="150" width="260" height="96" rx="12" class="box"/>
-    <text x="200" y="184" text-anchor="middle" class="label">1 · Scope</text>
-    <text x="200" y="208" text-anchor="middle" class="sub">3–10 min</text>
-  </g>
-  <g>
-    <rect x="350" y="150" width="260" height="96" rx="12" class="box"/>
-    <text x="480" y="184" text-anchor="middle" class="label">2 · High-level</text>
-    <text x="480" y="208" text-anchor="middle" class="sub">10–15 min</text>
-  </g>
-  <line x1="330" y1="198" x2="339" y2="198" class="wire"/>
-  <polygon points="339,193 348,198 339,203" class="head"/>
-  <g>
-    <rect x="630" y="150" width="260" height="96" rx="12" class="box ok"/>
-    <text x="760" y="184" text-anchor="middle" class="label">3 · Deep dive</text>
-    <text x="760" y="208" text-anchor="middle" class="sub">10–25 min</text>
-  </g>
-  <line x1="610" y1="198" x2="619" y2="198" class="wire"/>
-  <polygon points="619,193 628,198 619,203" class="head"/>
-</svg>
-  <figcaption><span class="lang-zh">时间大头在 deep dive。挖 hard part，不要把每个框都点名一遍。</span><span class="lang-en">Spend the block on the deep dive. Dig the hard part, not a tour of every box.</span></figcaption>
-</div>
-<div class="slide">
-  <svg viewBox="0 0 960 420" class="board" role="img">
-  <g>
-    <rect x="28" y="150" width="211" height="96" rx="12" class="box"/>
-    <text x="134" y="184" text-anchor="middle" class="label">1 · Scope</text>
-    <text x="134" y="208" text-anchor="middle" class="sub">3–10 min</text>
-  </g>
-  <g>
-    <rect x="259" y="150" width="211" height="96" rx="12" class="box"/>
-    <text x="364" y="184" text-anchor="middle" class="label">2 · High-level</text>
-    <text x="364" y="208" text-anchor="middle" class="sub">10–15 min</text>
-  </g>
-  <line x1="239" y1="198" x2="248" y2="198" class="wire"/>
-  <polygon points="248,193 257,198 248,203" class="head"/>
-  <g>
-    <rect x="490" y="150" width="211" height="96" rx="12" class="box ok"/>
-    <text x="596" y="184" text-anchor="middle" class="label">3 · Deep dive</text>
-    <text x="596" y="208" text-anchor="middle" class="sub">10–25 min</text>
-  </g>
-  <line x1="470" y1="198" x2="479" y2="198" class="wire"/>
-  <polygon points="479,193 488,198 479,203" class="head"/>
-  <g>
-    <rect x="721" y="150" width="211" height="96" rx="12" class="box"/>
-    <text x="826" y="184" text-anchor="middle" class="label">4 · Wrap-up</text>
-    <text x="826" y="208" text-anchor="middle" class="sub">3–5 min</text>
-  </g>
-  <line x1="701" y1="198" x2="710" y2="198" class="wire"/>
-  <polygon points="710,193 719,198 710,203" class="head"/>
-</svg>
-  <figcaption><span class="lang-zh">最后 3 到 5 分钟收尾。挑 bottleneck，不要说设计完美。</span><span class="lang-en">Leave 3–5 minutes to close. Name bottlenecks. Do not call the design perfect.</span></figcaption>
-</div>
-</figure>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="es1t es1d">
+          <title id="es1t">Average QPS is already ten times one disk seek budget</title>
+          <desc id="es1d">The scoped product read remains client, edge, Product Service, and Product Store, with checkout outside. The new marks are 1,000 average QPS and a 100 seeks per second budget on the store. No cache yet.</desc>
+          <text x="480" y="24" text-anchor="middle" class="clock">1,000 avg QPS</text>
+          <circle cx="62" cy="156" r="26" class="box"/><circle cx="62" cy="146" r="8" class="box"/><path d="M46 174 Q62 160 78 174" class="wire"/>
+          <text x="62" y="210" text-anchor="middle" class="label">Client</text>
+          <rect x="118" y="36" width="822" height="252" rx="20" class="boundary"/><text x="136" y="58" class="tiny">TRUST BOUNDARY</text>
+          <rect x="140" y="118" width="120" height="76" rx="38" class="box alt"/><text x="200" y="152" text-anchor="middle" class="label">Edge</text><text x="200" y="172" text-anchor="middle" class="sub">TLS · route</text>
+          <rect x="330" y="110" width="172" height="92" rx="12" class="box ok"/><text x="416" y="146" text-anchor="middle" class="label">Product Service</text><text x="416" y="168" text-anchor="middle" class="sub">in scope</text><text x="416" y="188" text-anchor="middle" class="tiny">functional · one JSON</text>
+          <ellipse cx="868" cy="118" rx="68" ry="15" class="store"/><rect x="800" y="118" width="136" height="84" class="store"/><ellipse cx="868" cy="202" rx="68" ry="15" class="store"/>
+          <text x="868" y="156" text-anchor="middle" class="label">Product Store</text><text x="868" y="176" text-anchor="middle" class="sub">rows live here</text>
+          <line x1="90" y1="156" x2="128" y2="156" class="wire"/><polygon points="128,150 140,156 128,162" class="head"/>
+          <line x1="260" y1="156" x2="318" y2="156" class="wire"/><polygon points="318,150 330,156 318,162" class="head"/>
+          <path d="M502 188 C620 248 700 248 786 180" class="wire"/><polygon points="786,174 800,180 786,186" class="head"/>
+          <rect x="118" y="340" width="250" height="64" rx="12" class="box"/><text x="243" y="366" text-anchor="middle" class="label">Out of scope</text><text x="243" y="388" text-anchor="middle" class="sub">checkout · search · recs</text>
+          <g class="is-new">
+            <text x="800" y="228" text-anchor="middle" class="clock">seek budget 100/s</text>
+            <text x="140" y="276" class="tiny">1,000 / 100 = 10× one disk</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">这一笔还没加盒子。它把 1,000 平均 QPS 和每秒 100 次寻道放在一起：平均已经是单盘串行寻道的 10 倍，所以「每条请求都寻道」不成立。</span><span class="lang-en">This stroke adds no box. It places 1,000 average QPS next to 100 seeks per second: the average is already 10× one disk’s serial seeks, so “every request seeks” is already false.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="es2t es2d">
+          <title id="es2t">Peak QPS widens the gap to fifty times the seek budget</title>
+          <desc id="es2d">The same architecture now shows 5,000 peak QPS. Five thousand divided by the 100 seeks per second budget is 50. The store is still the only data box.</desc>
+          <circle cx="62" cy="156" r="26" class="box"/><circle cx="62" cy="146" r="8" class="box"/><path d="M46 174 Q62 160 78 174" class="wire"/>
+          <text x="62" y="210" text-anchor="middle" class="label">Client</text>
+          <rect x="118" y="36" width="822" height="252" rx="20" class="boundary"/><text x="136" y="58" class="tiny">TRUST BOUNDARY</text>
+          <rect x="140" y="118" width="120" height="76" rx="38" class="box alt"/><text x="200" y="152" text-anchor="middle" class="label">Edge</text><text x="200" y="172" text-anchor="middle" class="sub">TLS · route</text>
+          <rect x="330" y="110" width="172" height="92" rx="12" class="box ok"/><text x="416" y="146" text-anchor="middle" class="label">Product Service</text><text x="416" y="168" text-anchor="middle" class="sub">in scope</text><text x="416" y="188" text-anchor="middle" class="tiny">functional · one JSON</text>
+          <ellipse cx="868" cy="118" rx="68" ry="15" class="store"/><rect x="800" y="118" width="136" height="84" class="store"/><ellipse cx="868" cy="202" rx="68" ry="15" class="store"/>
+          <text x="868" y="156" text-anchor="middle" class="label">Product Store</text><text x="868" y="176" text-anchor="middle" class="sub">cannot seek 5,000/s</text>
+          <line x1="90" y1="156" x2="128" y2="156" class="wire"/><polygon points="128,150 140,156 128,162" class="head"/>
+          <line x1="260" y1="156" x2="318" y2="156" class="wire"/><polygon points="318,150 330,156 318,162" class="head"/>
+          <path d="M502 188 C620 248 700 248 786 180" class="wire"/><polygon points="786,174 800,180 786,186" class="head"/>
+          <rect x="118" y="340" width="250" height="64" rx="12" class="box"/><text x="243" y="366" text-anchor="middle" class="label">Out of scope</text><text x="243" y="388" text-anchor="middle" class="sub">checkout · search · recs</text>
+          <text x="800" y="228" text-anchor="middle" class="tiny">seek budget 100/s</text>
+          <g class="is-new">
+            <text x="480" y="24" text-anchor="middle" class="clock">5,000 peak QPS</text>
+            <text x="140" y="276" class="tiny">5,000 / 100 = 50× one disk</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">这一笔把图上的数从 1,000 改成 5,000。5,000 ÷ 100 = 50，峰值是单盘寻道预算的 50 倍。数变了，路径还没变，所以下一笔必须改路径。</span><span class="lang-en">This stroke changes the number on the drawing from 1,000 to 5,000. 5,000 ÷ 100 = 50, so the peak is 50× one disk’s seek budget. The number changed and the path did not, so the next stroke has to change the path.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="es3t es3d">
+          <title id="es3t">Insert a cache so the common path does not seek</title>
+          <desc id="es3d">A cache now sits between Product Service and Product Store. The common path is a cache hit. The lower wire remains the miss path into the store. Peak load is still 5,000 QPS.</desc>
+          <text x="480" y="24" text-anchor="middle" class="clock">5,000 peak QPS</text>
+          <circle cx="62" cy="156" r="26" class="box"/><circle cx="62" cy="146" r="8" class="box"/><path d="M46 174 Q62 160 78 174" class="wire"/>
+          <text x="62" y="210" text-anchor="middle" class="label">Client</text>
+          <rect x="118" y="36" width="822" height="252" rx="20" class="boundary"/><text x="136" y="58" class="tiny">TRUST BOUNDARY</text>
+          <rect x="140" y="118" width="120" height="76" rx="38" class="box alt"/><text x="200" y="152" text-anchor="middle" class="label">Edge</text><text x="200" y="172" text-anchor="middle" class="sub">TLS · route</text>
+          <rect x="330" y="110" width="172" height="92" rx="12" class="box ok"/><text x="416" y="146" text-anchor="middle" class="label">Product Service</text><text x="416" y="170" text-anchor="middle" class="sub">in scope</text>
+          <ellipse cx="868" cy="118" rx="68" ry="15" class="store"/><rect x="800" y="118" width="136" height="84" class="store"/><ellipse cx="868" cy="202" rx="68" ry="15" class="store"/>
+          <text x="868" y="156" text-anchor="middle" class="label">Product Store</text><text x="868" y="176" text-anchor="middle" class="sub">misses only</text>
+          <line x1="90" y1="156" x2="128" y2="156" class="wire"/><polygon points="128,150 140,156 128,162" class="head"/>
+          <line x1="260" y1="156" x2="318" y2="156" class="wire"/><polygon points="318,150 330,156 318,162" class="head"/>
+          <path d="M502 200 C640 268 720 250 786 190" class="wire"/><polygon points="786,184 800,188 788,198" class="head"/><text x="640" y="262" class="tiny">miss</text>
+          <rect x="118" y="340" width="250" height="64" rx="12" class="box"/><text x="243" y="366" text-anchor="middle" class="label">Out of scope</text><text x="243" y="388" text-anchor="middle" class="sub">checkout · search · recs</text>
+          <g class="is-new">
+            <rect x="564" y="120" width="136" height="72" rx="10" class="cache"/><rect x="572" y="128" width="120" height="56" rx="7" class="cache-detail"/>
+            <text x="632" y="151" text-anchor="middle" class="label">Cache</text><text x="632" y="173" text-anchor="middle" class="sub">not the truth</text>
+            <line x1="502" y1="140" x2="552" y2="140" class="wire"/><text x="512" y="130" class="tiny">lookup</text>
+            <line x1="564" y1="174" x2="514" y2="174" class="wire hit"/><text x="526" y="190" class="tiny">hit</text>
+            <line x1="800" y1="146" x2="712" y2="146" class="wire reply"/><text x="736" y="136" class="tiny">fill</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">这一笔才加缓存：常见路径打到内存，存储只接未命中。缓存不是权威。5,000 对 100 的差距是它出现的理由，不是「读多所以大家都加 Redis」。</span><span class="lang-en">This stroke is the cache: the common path hits memory, and the store takes misses only. The cache is not authority. The gap between 5,000 and 100 is why it appears, not the slogan that read-heavy systems always add Redis.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="es4t es4d">
+          <title id="es4t">Require about a 98 percent hit rate to fit the seek budget</title>
+          <desc id="es4d">At 5,000 peak QPS the cache must absorb about 98 percent of reads so the store sees about 100 misses per second, matching the one-disk seek budget. Hits return from cache. Misses and fills still reach Product Store.</desc>
+          <text x="480" y="24" text-anchor="middle" class="clock">5,000 peak · need ~98% hit</text>
+          <circle cx="62" cy="156" r="26" class="box"/><circle cx="62" cy="146" r="8" class="box"/><path d="M46 174 Q62 160 78 174" class="wire"/>
+          <text x="62" y="210" text-anchor="middle" class="label">Client</text>
+          <rect x="118" y="36" width="822" height="252" rx="20" class="boundary"/><text x="136" y="58" class="tiny">TRUST BOUNDARY</text>
+          <rect x="140" y="118" width="120" height="76" rx="38" class="box alt"/><text x="200" y="152" text-anchor="middle" class="label">Edge</text><text x="200" y="172" text-anchor="middle" class="sub">TLS · route</text>
+          <rect x="330" y="110" width="172" height="92" rx="12" class="box ok"/><text x="416" y="146" text-anchor="middle" class="label">Product Service</text><text x="416" y="170" text-anchor="middle" class="sub">in scope</text>
+          <rect x="564" y="120" width="136" height="72" rx="10" class="cache"/><rect x="572" y="128" width="120" height="56" rx="7" class="cache-detail"/>
+          <text x="632" y="151" text-anchor="middle" class="label">Cache</text><text x="632" y="173" text-anchor="middle" class="sub">not the truth</text>
+          <ellipse cx="868" cy="118" rx="68" ry="15" class="store"/><rect x="800" y="118" width="136" height="84" class="store"/><ellipse cx="868" cy="202" rx="68" ry="15" class="store"/>
+          <text x="868" y="156" text-anchor="middle" class="label">Product Store</text><text x="868" y="176" text-anchor="middle" class="sub">~100 miss QPS</text>
+          <line x1="90" y1="156" x2="128" y2="156" class="wire"/><polygon points="128,150 140,156 128,162" class="head"/>
+          <line x1="260" y1="156" x2="318" y2="156" class="wire"/><polygon points="318,150 330,156 318,162" class="head"/>
+          <line x1="502" y1="140" x2="552" y2="140" class="wire"/><text x="512" y="130" class="tiny">lookup</text>
+          <line x1="564" y1="174" x2="514" y2="174" class="wire hit"/><text x="526" y="190" class="tiny">hit</text>
+          <line x1="800" y1="146" x2="712" y2="146" class="wire reply"/><text x="736" y="136" class="tiny">fill</text>
+          <path d="M502 200 C640 268 720 250 786 190" class="wire"/><polygon points="786,184 800,188 788,198" class="head"/>
+          <rect x="118" y="340" width="250" height="64" rx="12" class="box"/><text x="243" y="366" text-anchor="middle" class="label">Out of scope</text><text x="243" y="388" text-anchor="middle" class="sub">checkout · search · recs</text>
+          <g class="is-new">
+            <text x="600" y="276" class="clock">5,000 × 0.02 = 100</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">终图把命中率写成存储负担：要让未命中落在每秒 100 次附近，5,000 的峰值需要大约 98% 命中，因为 5,000 × 0.02 = 100。这是设计要求，不是测出来的命中率。</span><span class="lang-en">The finished frame turns hit rate into store load: to land near 100 misses per second, a 5,000 peak needs about a 98% hit rate, because 5,000 × 0.02 = 100. That is a design requirement, not a measured hit rate.</span></figcaption>
+      </div>
+    </figure>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">把除法展开到它改变路径</p>
+        <p>Jeff Dean 的讲座幻灯片里，同机房往返是 500,000 纳秒，也就是 0.5 毫秒；一次磁盘寻道是 10,000,000 纳秒，也就是 10 毫秒；主存访问是 100 纳秒。[2] 单盘如果串行做随机寻道，一秒钟有 1,000 毫秒，1,000 ÷ 10 = 100，所以寻道预算大约是每秒 100 次。这不是某台机器的基准测试，而是用他公开的数量级挡住「存储什么都扛得住」。</p>
+        <p>平均 1,000 QPS 已经是 100 的 10 倍：1,000 ÷ 100 = 10。峰值 5,000 ÷ 100 = 50。所以即使用平均而不是峰值，也不能让每次详情阅读都去寻道。缓存这一笔是被这个倍数逼出来的。命中走内存：缓存若在另一台机器上，还要加上约 0.5 毫秒的机房往返，仍远小于 80 毫秒的假设预算。未命中才有资格去存储。</p>
+        <p>98% 不是拍脑袋的命中率。存储每秒只能按预算吃下约 100 次寻道，峰值是 5,000，未命中比例最多约 100 ÷ 5,000 = 0.02，所以命中率要到约 98%。验算：5,000 × 0.02 = 100。若你随口说 90%，未命中是 5,000 × 0.1 = 500，仍是单盘预算的 5 倍，缓存并没有把寻道问题解决完。90% 只有在你同时把寻道预算提高到 500（大约五块盘，或明确改口说热行已经在数据库缓冲池里、未命中不再寻道）时才站得住。面试里要把这句话说出来，否则 98% 看起来像魔术。</p>
+        <p>Dean 的缩略图例子里，30 次串行寻道 × 10 毫秒 = 300 毫秒，再加传输大约 560 毫秒；改成并行就落到一次寻道的量级。[2] 所以这轮把价格和可售标记放进同一行，同步路径只有一次存储读。他也写过：要能承受大约 10 到 20 倍的规模变化，但适合眼下的方案常常不适合 100 倍。[2] 十倍增长留到追问。</p>
+        <p>若热行已经在数据库内存里，寻道预算就不再是 100，缓存的理由改成尾延迟。Dean 和 Barroso 写过，大约 100 毫秒内的响应才显得顺，规模变大后尾部会主导体验。[3] SRE 监控章里，平均 100 毫秒、每秒 1,000 请求时，仍可能有 1% 的请求要 5 秒；页面若等多个后端，一个后端的 99 分位会变成用户看到的典型延迟。[4] 一次同步存储读，就是不让三条尾巴叠进同一次 GET。80 毫秒仍是假设。</p>
+        <p>替代方案是不加缓存，加盘直到寻道容量盖住 5,000。五块串行盘大约 500 次每秒，仍差一个数量级；大约 50 块盘才对齐。访问若非常均匀、缓存几乎不命中，加盘更好，因为 98% 依赖请求集中在少数 SKU，而那是假设，不是这里引用的测量。面试官若说每个 SKU 一样热，就删掉缓存，只谈盘或副本。</p>
+        <p>热门 id 同时过期时，未命中会从平稳的 100 变成接近 5,000 的尖峰。同进程合并同一个 id 只能削掉这一台机器上的重复回源，换一台仍会各打一次，所以它代替不了后面的回源上限。另一个窗口是价格：权威行已是新价，缓存仍可能在 30 秒内返回旧值。浏览接受；商家自己的下一次 GET 不接受，要绕过缓存或读主库。</p>
+        <p>常见错法是算出 QPS 却不改图，或只说「缓存抗住高并发」却不说命中率。3 GB 也不会迫使分片，溢出的是寻道而不是容量。SRE 的过载章还提醒：用 QPS 代表容量经常失真，不同请求耗的资源不一样。[5] 白板上的每秒 100 次寻道是数量级替身，有实测就替换，不要说成生产限流配置。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">Expand the division until it changes the path</p>
+        <p>In Jeff Dean’s talk slides, a round trip in the same datacenter is 500,000 nanoseconds, or 0.5 ms; a disk seek is 10,000,000 nanoseconds, or 10 ms; a main-memory reference is 100 nanoseconds. [2] If one disk serves random seeks serially, a second has 1,000 milliseconds, and 1,000 ÷ 10 = 100, so the seek budget is about 100 per second. That is not a benchmark of a particular machine. It uses his published order of magnitude to block “the store can take anything.”</p>
+        <p>Average 1,000 QPS is already 10× that budget: 1,000 ÷ 100 = 10. The peak is 5,000 ÷ 100 = 50. So even the average, not only the peak, forbids a seek on every detail view. The cache stroke is forced by that multiple. A hit is memory. If the cache is another machine, add about 0.5 ms of datacenter round trip, which is still far under the assumed 80 ms budget. Only a miss is allowed to touch the store.</p>
+        <p>Ninety-eight percent is not a decorative hit rate. The store can take about 100 seeks per second on this budget, the peak is 5,000, and the miss fraction can be at most about 100 ÷ 5,000 = 0.02, so the hit rate has to be about 98%. Check: 5,000 × 0.02 = 100. If you casually say 90%, misses are 5,000 × 0.1 = 500, still 5× one disk, and the cache has not finished the seek problem. Ninety percent stands only if you also raise the seek budget to 500 — about five disks — or you explicitly switch assumptions and say hot rows already live in the database buffer pool so a miss does not seek. Say that sentence. Otherwise 98% looks like a magic trick.</p>
+        <p>In Dean’s thumbnail example, 30 serial seeks × 10 ms = 300 ms, and with transfer the total is about 560 ms; in parallel the work falls to one seek. [2] This round keeps price and availability on the same row, one store read on the synchronous path. He also writes that a design should survive about a 10× to 20× change in scale, while the fit for today is often wrong at 100×. [2] A further 10× waits for the follow-up.</p>
+        <p>If hot rows already live in database memory, the seek budget is no longer 100 and the cache is about tail latency. Dean and Barroso write that responses on the order of 100 ms feel fluid, and that at larger scale the tail dominates. [3] The SRE monitoring chapter notes that at a mean of 100 ms and 1,000 requests per second, 1% of requests may still take 5 seconds, and a page that waits on several backends feels one backend’s 99th percentile. [4] One synchronous store read keeps three tails from stacking on this GET. The 80 ms target is still an assumption.</p>
+        <p>The alternative is no cache, and enough disks to cover 5,000 seeks. Five serial disks are about 500 per second, still an order of magnitude short; about 50 disks line up. When access is uniform and a cache would almost never hit, disks are the better stroke, because 98% assumes concentration on a few SKUs and that concentration is not a measurement cited here. If every SKU is equally hot, delete the cache and talk about disks or replicas.</p>
+        <p>When a hot id expires all at once, misses jump from a smooth 100 toward 5,000. Coalescing one id inside a process only removes duplicate origin reads on that machine; the next machine still sends its own, so coalescing does not replace the origin cap. The other window is price: the row is already new, and the cache may still return the old value for 30 seconds. A browse accepts that. The merchant’s next GET does not, and bypasses the cache or reads the primary.</p>
+        <p>The usual misses are computing QPS without changing the picture, or saying “the cache handles scale” without a hit rate. 3 GB does not force sharding; the overflow is seeks, not capacity. The SRE overload chapter also notes that QPS often misrepresents capacity because requests cost different resources. [5] One hundred seeks per second on the board is an order-of-magnitude stand-in. Replace it when a measurement exists. Do not call it a production throttle.</p>
+      </div>
+    </div>
+  </section>
+  <section>
+    <h2><span class="lang-zh">第三步 · 高层：无状态服务、权威存储、同步来回，以及故意不画的东西</span><span class="lang-en">Step 3 · High-level: stateless service, source of truth, synchronous round trip, and what stays unwired</span></h2>
+    <p class="cite"><span class="lang-zh">大约 10 到 15 分钟。结束的标志是面试官认可这张图，不是你自己画完。</span><span class="lang-en">About 10 to 15 minutes. This step ends when they buy the picture, not when you finish drawing.</span></p>
+    <figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="hl1t hl1d">
+          <title id="hl1t">Separate stateless compute from authoritative state</title>
+          <desc id="hl1d">Product Service owns no rows. Cache is droppable. Product Store is the source of truth. Request, hit reply, miss, and fill arrows point at the receiver of each action.</desc>
+          <text x="480" y="24" text-anchor="middle" class="clock">5,000 peak · ~98% hit</text>
+          <circle cx="62" cy="156" r="26" class="box"/><circle cx="62" cy="146" r="8" class="box"/><path d="M46 174 Q62 160 78 174" class="wire"/><text x="62" y="210" text-anchor="middle" class="label">Client</text>
+          <rect x="118" y="36" width="822" height="252" rx="20" class="boundary"/><text x="136" y="58" class="tiny">TRUST BOUNDARY</text>
+          <rect x="140" y="118" width="120" height="76" rx="38" class="box alt"/><text x="200" y="152" text-anchor="middle" class="label">Edge</text><text x="200" y="172" text-anchor="middle" class="sub">TLS · route</text>
+          <rect x="330" y="110" width="172" height="92" rx="12" class="box ok"/><text x="416" y="146" text-anchor="middle" class="label">Product Service</text><text x="416" y="168" text-anchor="middle" class="sub">stateless</text><text x="416" y="188" text-anchor="middle" class="tiny">owns no rows</text>
+          <rect x="564" y="120" width="136" height="72" rx="10" class="cache"/><rect x="572" y="128" width="120" height="56" rx="7" class="cache-detail"/><text x="632" y="151" text-anchor="middle" class="label">Cache</text><text x="632" y="173" text-anchor="middle" class="sub">droppable</text>
+          <path d="M800 118 V202 A68 15 0 0 0 936 202 V118 Z" class="store"/><ellipse cx="868" cy="118" rx="68" ry="15" class="store"/><text x="868" y="157" text-anchor="middle" class="label">Product Store</text><text x="868" y="179" text-anchor="middle" class="sub">source of truth</text>
+          <line x1="90" y1="156" x2="128" y2="156" class="wire"/><line x1="260" y1="156" x2="318" y2="156" class="wire"/>
+          <line x1="502" y1="140" x2="552" y2="140" class="wire"/><text x="511" y="130" class="tiny">lookup</text>
+          <line x1="564" y1="176" x2="514" y2="176" class="wire hit"/><text x="526" y="192" class="tiny">hit</text>
+          <path d="M502 200 C640 268 720 250 788 190" class="wire"/><text x="642" y="260" class="tiny">miss</text>
+          <line x1="800" y1="146" x2="712" y2="146" class="wire reply"/><text x="736" y="136" class="tiny">fill</text>
+          <rect x="118" y="340" width="220" height="60" rx="12" class="box"/><text x="228" y="366" text-anchor="middle" class="label">Out of scope</text><text x="228" y="386" text-anchor="middle" class="sub">checkout · search</text>
+        </svg>
+        <figcaption><span class="lang-zh">状态边界一次说清：服务无状态，缓存可丢，存储权威；灰线是 lookup 和 miss，绿色箭头才是 hit 与 fill 的返回方向。</span><span class="lang-en">State boundaries are explicit: the service is stateless, cache is droppable, and the store is authoritative. Gray carries lookup and miss; green carries hit and fill back.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="hl2t hl2d">
+          <title id="hl2t">Label the forward path as one synchronous GET</title>
+          <desc id="hl2d">The same fixed nodes and arrows are labeled as one synchronous GET. No client reply has been drawn yet.</desc>
+          <text x="480" y="24" text-anchor="middle" class="clock">5,000 peak · ~98% hit</text>
+          <circle cx="62" cy="156" r="26" class="box"/><circle cx="62" cy="146" r="8" class="box"/><path d="M46 174 Q62 160 78 174" class="wire"/><text x="62" y="210" text-anchor="middle" class="label">Client</text>
+          <rect x="118" y="36" width="822" height="252" rx="20" class="boundary"/><text x="136" y="58" class="tiny">TRUST BOUNDARY</text>
+          <rect x="140" y="118" width="120" height="76" rx="38" class="box alt"/><text x="200" y="152" text-anchor="middle" class="label">Edge</text><text x="200" y="172" text-anchor="middle" class="sub">TLS · route</text>
+          <rect x="330" y="110" width="172" height="92" rx="12" class="box ok"/><text x="416" y="146" text-anchor="middle" class="label">Product Service</text><text x="416" y="168" text-anchor="middle" class="sub">stateless</text><text x="416" y="188" text-anchor="middle" class="tiny">owns no rows</text>
+          <rect x="564" y="120" width="136" height="72" rx="10" class="cache"/><rect x="572" y="128" width="120" height="56" rx="7" class="cache-detail"/><text x="632" y="151" text-anchor="middle" class="label">Cache</text><text x="632" y="173" text-anchor="middle" class="sub">droppable</text>
+          <path d="M800 118 V202 A68 15 0 0 0 936 202 V118 Z" class="store"/><ellipse cx="868" cy="118" rx="68" ry="15" class="store"/><text x="868" y="157" text-anchor="middle" class="label">Product Store</text><text x="868" y="179" text-anchor="middle" class="sub">source of truth</text>
+          <line x1="90" y1="156" x2="128" y2="156" class="wire"/><line x1="260" y1="156" x2="318" y2="156" class="wire"/><line x1="502" y1="140" x2="552" y2="140" class="wire"/><line x1="564" y1="176" x2="514" y2="176" class="wire hit"/><path d="M502 200 C640 268 720 250 788 190" class="wire"/><line x1="800" y1="146" x2="712" y2="146" class="wire reply"/>
+          <rect x="118" y="340" width="220" height="60" rx="12" class="box"/><text x="228" y="366" text-anchor="middle" class="label">Out of scope</text><text x="228" y="386" text-anchor="middle" class="sub">checkout · search</text>
+          <g class="is-new"><text x="200" y="104" text-anchor="middle" class="clock">sync GET</text><text x="528" y="98" class="tiny">lookup</text><text x="636" y="260" class="tiny">miss only</text></g>
+        </svg>
+        <figcaption><span class="lang-zh">向前路径是同步 GET：调用方在等。命中停在缓存，未命中才落到存储；客户端回程还没出现。</span><span class="lang-en">The forward path is a synchronous GET: the caller waits. A hit stops at cache and only a miss reaches the store. The client reply is still absent.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="hl3t hl3d">
+          <title id="hl3t">Return product JSON through the edge</title>
+          <desc id="hl3d">Product Service returns 200 JSON through Edge to the client. Separate green arrows make both reply hops visible. The response does not bypass Edge or wait on a queue.</desc>
+          <text x="480" y="24" text-anchor="middle" class="clock">5,000 peak · ~98% hit</text>
+          <circle cx="62" cy="156" r="26" class="box"/><circle cx="62" cy="146" r="8" class="box"/><path d="M46 174 Q62 160 78 174" class="wire"/><text x="62" y="210" text-anchor="middle" class="label">Client</text>
+          <rect x="118" y="36" width="822" height="252" rx="20" class="boundary"/><text x="136" y="58" class="tiny">TRUST BOUNDARY</text>
+          <rect x="140" y="118" width="120" height="76" rx="38" class="box alt"/><text x="200" y="152" text-anchor="middle" class="label">Edge</text><text x="200" y="172" text-anchor="middle" class="sub">TLS · route</text>
+          <rect x="330" y="110" width="172" height="92" rx="12" class="box ok"/><text x="416" y="146" text-anchor="middle" class="label">Product Service</text><text x="416" y="168" text-anchor="middle" class="sub">stateless</text><text x="416" y="188" text-anchor="middle" class="tiny">owns no rows</text>
+          <rect x="564" y="120" width="136" height="72" rx="10" class="cache"/><rect x="572" y="128" width="120" height="56" rx="7" class="cache-detail"/><text x="632" y="151" text-anchor="middle" class="label">Cache</text><text x="632" y="173" text-anchor="middle" class="sub">droppable</text>
+          <path d="M800 118 V202 A68 15 0 0 0 936 202 V118 Z" class="store"/><ellipse cx="868" cy="118" rx="68" ry="15" class="store"/><text x="868" y="157" text-anchor="middle" class="label">Product Store</text><text x="868" y="179" text-anchor="middle" class="sub">source of truth</text>
+          <line x1="90" y1="146" x2="128" y2="146" class="wire"/><line x1="260" y1="146" x2="318" y2="146" class="wire"/><line x1="502" y1="140" x2="552" y2="140" class="wire"/><line x1="564" y1="176" x2="514" y2="176" class="wire hit"/><path d="M502 200 C640 268 720 250 788 190" class="wire"/><line x1="800" y1="146" x2="712" y2="146" class="wire reply"/>
+          <text x="200" y="104" text-anchor="middle" class="tiny">sync GET</text>
+          <rect x="118" y="340" width="220" height="60" rx="12" class="box"/><text x="228" y="366" text-anchor="middle" class="label">Out of scope</text><text x="228" y="386" text-anchor="middle" class="sub">checkout · search</text>
+          <g class="is-new"><line x1="330" y1="184" x2="272" y2="184" class="wire reply"/><path d="M140 182 C118 182 104 174 90 164" class="wire reply"/><text x="190" y="222" class="tiny">sync 200 JSON</text></g>
+        </svg>
+        <figcaption><span class="lang-zh">200 沿绿色箭头先回 Edge，再回 Client；不再用一条大弧线跳过入口。每一跳都能对应超时、状态码和观测点。</span><span class="lang-en">The 200 follows green from service to Edge, then to Client. It no longer uses one large arc that visually skips the entry layer, so each hop can own a timeout, status, and observation point.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="hl4t hl4d">
+          <title id="hl4t">Complete one-region high-level read and leave extras unwired</title>
+          <desc id="hl4d">The completed high-level diagram keeps the synchronous request and two-hop reply. Queue and Region B are muted and explicitly unwired because no current constraint earns them.</desc>
+          <text x="480" y="24" text-anchor="middle" class="clock">5,000 peak · ~98% hit</text>
+          <circle cx="62" cy="156" r="26" class="box"/><circle cx="62" cy="146" r="8" class="box"/><path d="M46 174 Q62 160 78 174" class="wire"/><text x="62" y="210" text-anchor="middle" class="label">Client</text>
+          <rect x="118" y="36" width="822" height="252" rx="20" class="boundary"/><text x="136" y="58" class="tiny">TRUST BOUNDARY</text>
+          <rect x="140" y="118" width="120" height="76" rx="38" class="box alt"/><text x="200" y="152" text-anchor="middle" class="label">Edge</text><text x="200" y="172" text-anchor="middle" class="sub">TLS · route</text>
+          <rect x="330" y="110" width="172" height="92" rx="12" class="box ok"/><text x="416" y="146" text-anchor="middle" class="label">Product Service</text><text x="416" y="168" text-anchor="middle" class="sub">stateless</text><text x="416" y="188" text-anchor="middle" class="tiny">owns no rows</text>
+          <rect x="564" y="120" width="136" height="72" rx="10" class="cache"/><rect x="572" y="128" width="120" height="56" rx="7" class="cache-detail"/><text x="632" y="151" text-anchor="middle" class="label">Cache</text><text x="632" y="173" text-anchor="middle" class="sub">droppable</text>
+          <path d="M800 118 V202 A68 15 0 0 0 936 202 V118 Z" class="store"/><ellipse cx="868" cy="118" rx="68" ry="15" class="store"/><text x="868" y="157" text-anchor="middle" class="label">Product Store</text><text x="868" y="179" text-anchor="middle" class="sub">source of truth</text>
+          <line x1="90" y1="146" x2="128" y2="146" class="wire"/><line x1="260" y1="146" x2="318" y2="146" class="wire"/><line x1="502" y1="140" x2="552" y2="140" class="wire"/><line x1="564" y1="176" x2="514" y2="176" class="wire hit"/><path d="M502 200 C640 268 720 250 788 190" class="wire"/><line x1="800" y1="146" x2="712" y2="146" class="wire reply"/>
+          <line x1="330" y1="184" x2="272" y2="184" class="wire reply"/><path d="M140 182 C118 182 104 174 90 164" class="wire reply"/><text x="190" y="222" class="tiny">sync 200 JSON</text>
+          <rect x="118" y="340" width="200" height="60" rx="12" class="box"/><text x="218" y="366" text-anchor="middle" class="label">Out of scope</text><text x="218" y="386" text-anchor="middle" class="sub">checkout · search</text>
+          <g class="is-new muted"><path d="M400 352 h130 a16 16 0 0 1 0 32 h-130 a16 16 0 0 1 0-32" class="queue"/><text x="465" y="374" text-anchor="middle" class="label">Queue</text><rect x="620" y="340" width="150" height="60" rx="12" class="box alt"/><text x="695" y="366" text-anchor="middle" class="label">Region B</text><text x="695" y="386" text-anchor="middle" class="sub">not wired</text><text x="560" y="332" class="tiny">deliberately no arrow</text></g>
+        </svg>
+        <figcaption><span class="lang-zh">终图只有一条完整读路径。队列和第二机房以弱化状态保留为“被拒绝的方案”，没有箭头就表示它们不参与当前请求。</span><span class="lang-en">The final frame has one complete read path. Queue and Region B remain muted as rejected options; no arrow means they do not participate in this request.</span></figcaption>
+      </div>
+    </figure>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">按一次成功的读把高层说完</p>
+        <p>客户端发出同步 GET。边缘校验路径和 id 形状，转发到任意一个商品服务实例。实例自己不存行：命中则从缓存取出带 version 的商品 JSON，沿绿色回程返回 200；未命中则读存储，把同一份字段填进缓存，再返回 200。未知 id 返回 404，并且不要把「存储超时」写成 404，否则一次故障会被缓存成「商品不存在」。到这里，调用方已经拿到响应。队列没有参加这次往返。</p>
+        <p>服务保持无状态，是因为 5,000 QPS 要靠加实例，而不是靠会话粘在某一台机器上。实例挂了，边缘把下一跳送到别的实例，缓存和存储都还在。若把商品行放进服务进程，扩容和发布都会变成数据迁移。小规模时服务和缓存客户端可以在同一个进程里，逻辑上仍然是「计算不拥有行」。存储拥有行，所以商家改价必须写存储成功，才算改完；只改缓存不算。</p>
+        <p>队列这轮不连线，因为写大约 0.6 QPS，没有扇出要从提交里解开。搜索索引以后要异步更新时，再把那条边接上。第二机房也不连线。Dean 的幻灯片里，加州到荷兰再回来大约 150 毫秒。[2] 同步跨大陆读会吃掉 80 毫秒预算。用户真的跨两大洲、而且 150 毫秒不可接受时，才加区域读缓存，并接受新写入的传播窗口。Brewer 写过，「二选三」是误导：没有分区时不必放弃一致性或可用性；分区期间才按操作选择，不是给整张图贴一张 AP。[1]</p>
+        <p>这一步要停下来要反馈。话术是：「同步 GET 进来，200 从无状态服务回去，行只在存储里，缓存可丢。队列和第二机房我故意没连。这个方向可以吗？」没有这句，你是在自说自话。若面试官说必须全球低延迟读，再把 Region B 连上，并改口陈旧窗口。若他们说改价必须立刻被所有人看见，就把 30 秒假设划掉，缓存要么去掉，要么改成写后主动失效，那是下一笔的材料，不是现在把多机房画满。</p>
+        <p>常见错法是高层图上每个盒子都点一次名，却说不出哪条边同步、谁拥有行。深度会在下一步只挖缓存挂掉。广度到此为止。另一个错法是响应只停在服务框里，不画回客户端，然后口头说「返回 JSON」。图上没有回程，面试官无法核对超时发生在哪一跳。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">Say the high-level picture as one successful read</p>
+        <p>The client sends a synchronous GET. The edge checks the path and the shape of the id and forwards to any Product Service instance. The instance stores no row: on a hit it takes the versioned product JSON from cache and returns 200 on the green path; on a miss it reads the store, fills the cache with the same fields, and returns 200. An unknown id is 404. A store timeout must not be recorded as 404, or one outage gets cached as “the product does not exist.” At this point the caller has the response. The queue did not join the round trip.</p>
+        <p>The service stays stateless because 5,000 QPS is absorbed by adding instances, not by sticking a session to one machine. When an instance dies, the edge sends the next hop elsewhere. Cache and store remain. Put the product row inside the service process and every scale-out or rollout becomes a data move. At small size the service and the cache client may share a process; logically, computation still does not own the row. The store owns the row, so a merchant price change counts only after the store write succeeds. Writing the cache alone does not.</p>
+        <p>The queue stays unwired because writes are about 0.6 QPS and nothing about fan-out has to detach from the commit. An asynchronous search index later is the write-family queue from the map. It turns from “not connected” into an async edge when they ask. Drawing it now pays for a failure domain with no constraint. Region B stays unwired for the same reason. In Dean’s slides a packet from California to the Netherlands and back is about 150 ms. [2] One synchronous cross-continent read spends the entire 80 ms budget and more. One region meets the assumed latency first. Add a regional read cache only when users actually span continents and 150 ms is unacceptable, and then admit a propagation window for new writes. Brewer writes that the “two out of three” poster is misleading: with no partition there is no reason to forfeit consistency or availability, and during a partition the choice is per operation, fine-grained enough to differ by call. It is not an AP sticker on the whole drawing. [1]</p>
+        <p>Stop and ask. The line is: “Synchronous GET in, 200 back from a stateless service, rows only in the store, cache droppable. I deliberately did not wire the queue or the second region. Is that direction right?” Without that sentence you are talking to yourself. If they require low-latency global reads, connect Region B and restate the staleness window. If they require every reader to see a price change immediately, cross out the 30-second assumption and either remove the cache or switch to invalidation on write. That is material for the next stroke, not a reason to fill the board with regions now.</p>
+        <p>The common miss names every box and never says which edge is synchronous or who owns the row. Depth in the next step digs only into a dead cache. Breadth stops here. The other miss ends the response at the service box and says “return JSON” out loud. With no return path on the drawing, they cannot see which hop a timeout belongs to.</p>
+      </div>
+    </div>
   </section>
 
   <section>
-    <h2><span class="lang-zh">Step 1 · 定范围</span><span class="lang-en">Step 1 · Set scope</span></h2>
+    <h2><span class="lang-zh">第四步 · 深挖一条故障：缓存层挂了，回源有边界</span><span class="lang-en">Step 4 · One deep dive: the cache tier is down, and origin has a boundary</span></h2>
+    <p class="cite"><span class="lang-zh">大约 10 到 25 分钟挖这一条，最后 3 到 5 分钟收口。不要换成第二套架构。</span><span class="lang-en">Spend about 10 to 25 minutes on this one failure, then 3 to 5 minutes to close. Do not switch to a second architecture.</span></p>
+    <figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="fl1t fl1d">
+          <title id="fl1t">Healthy read hits cache and returns through the edge</title>
+          <desc id="fl1d">A synchronous request reaches Product Service and cache. The cache hit returns to Product Service, then a two-hop green 200 response passes through Edge to the client. Product Store is not on the hit path.</desc>
+          <text x="480" y="24" text-anchor="middle" class="clock">healthy · cache hit</text>
+          <circle cx="62" cy="156" r="26" class="box"/><circle cx="62" cy="146" r="8" class="box"/><path d="M46 174 Q62 160 78 174" class="wire"/><text x="62" y="210" text-anchor="middle" class="label">Client</text>
+          <rect x="118" y="36" width="822" height="252" rx="20" class="boundary"/><text x="136" y="58" class="tiny">TRUST BOUNDARY</text>
+          <rect x="140" y="118" width="120" height="76" rx="38" class="box alt"/><text x="200" y="152" text-anchor="middle" class="label">Edge</text><text x="200" y="172" text-anchor="middle" class="sub">TLS · route</text>
+          <rect x="330" y="100" width="172" height="112" rx="12" class="box ok"/><text x="416" y="136" text-anchor="middle" class="label">Product Service</text><text x="416" y="160" text-anchor="middle" class="sub">stateless</text><text x="416" y="184" text-anchor="middle" class="tiny">normal path</text>
+          <rect x="564" y="120" width="136" height="72" rx="10" class="cache"/><rect x="572" y="128" width="120" height="56" rx="7" class="cache-detail"/><text x="632" y="151" text-anchor="middle" class="label">Cache</text><text x="632" y="173" text-anchor="middle" class="sub">hit</text>
+          <path d="M800 118 V202 A68 15 0 0 0 936 202 V118 Z" class="store"/><ellipse cx="868" cy="118" rx="68" ry="15" class="store"/><text x="868" y="157" text-anchor="middle" class="label">Product Store</text><text x="868" y="179" text-anchor="middle" class="sub">not touched</text>
+          <line x1="90" y1="146" x2="128" y2="146" class="wire"/><line x1="260" y1="146" x2="318" y2="146" class="wire"/><line x1="502" y1="140" x2="552" y2="140" class="wire"/><line x1="564" y1="176" x2="514" y2="176" class="wire hit"/>
+          <line x1="330" y1="184" x2="272" y2="184" class="wire reply"/><path d="M140 182 C118 182 104 174 90 164" class="wire reply"/><text x="190" y="222" class="tiny">200 JSON</text>
+        </svg>
+        <figcaption><span class="lang-zh">健康基线只有缓存命中：lookup 向右，hit 向左，200 再经过 Edge 回到 Client。存储明确不在这一跳上。</span><span class="lang-en">The healthy baseline is only a cache hit: lookup goes right, hit goes left, and 200 returns through Edge to Client. The store is explicitly off this hop.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="fl2t fl2d">
+          <title id="fl2t">A dead cache opens an uncapped origin fallback</title>
+          <desc id="fl2d">The cache circuit is open. Product Service bypasses it on a dashed red fallback toward Product Store. The path is still uncapped and therefore unsafe.</desc>
+          <text x="480" y="24" text-anchor="middle" class="clock">cache tier down · unsafe fallback</text>
+          <circle cx="62" cy="156" r="26" class="box"/><circle cx="62" cy="146" r="8" class="box"/><path d="M46 174 Q62 160 78 174" class="wire"/><text x="62" y="210" text-anchor="middle" class="label">Client</text>
+          <rect x="118" y="36" width="822" height="252" rx="20" class="boundary"/><text x="136" y="58" class="tiny">TRUST BOUNDARY</text>
+          <rect x="140" y="118" width="120" height="76" rx="38" class="box alt"/><text x="200" y="152" text-anchor="middle" class="label">Edge</text><text x="200" y="172" text-anchor="middle" class="sub">TLS · route</text>
+          <rect x="330" y="100" width="172" height="112" rx="12" class="box ok"/><text x="416" y="136" text-anchor="middle" class="label">Product Service</text><text x="416" y="160" text-anchor="middle" class="sub">stateless</text><text x="416" y="184" text-anchor="middle" class="tiny">no origin cap yet</text>
+          <rect x="564" y="120" width="136" height="72" rx="10" class="cache bad"/><rect x="572" y="128" width="120" height="56" rx="7" class="cache-detail"/><text x="632" y="151" text-anchor="middle" class="label">Cache down</text><text x="632" y="173" text-anchor="middle" class="sub">circuit open</text>
+          <path d="M800 118 V202 A68 15 0 0 0 936 202 V118 Z" class="store"/><ellipse cx="868" cy="118" rx="68" ry="15" class="store"/><text x="868" y="157" text-anchor="middle" class="label">Product Store</text><text x="868" y="179" text-anchor="middle" class="sub">source of truth</text>
+          <line x1="90" y1="146" x2="128" y2="146" class="wire"/><line x1="260" y1="146" x2="318" y2="146" class="wire"/>
+          <line x1="330" y1="184" x2="272" y2="184" class="wire reply"/><path d="M140 182 C118 182 104 174 90 164" class="wire reply"/><text x="176" y="222" class="tiny">200 if origin survives</text>
+          <g class="is-new"><path d="M502 198 C638 270 720 248 788 190" class="wire fail"/><text x="620" y="268" class="tiny">uncapped fallback</text></g>
+        </svg>
+        <figcaption><span class="lang-zh">缓存熔断后服务直接回源，但红线尚未限流。它把 5,000 QPS 暴露给只能承受约 100 次寻道的存储，所以仍是危险状态。</span><span class="lang-en">After the cache circuit opens, the service goes straight to origin, but the red path is still uncapped. It exposes 5,000 QPS to a store budgeted for about 100 seeks, so this frame remains unsafe.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="fl3t fl3d">
+          <title id="fl3t">Enforce the origin budget at Product Service</title>
+          <desc id="fl3d">Product Service enforces an origin gate of about 100 reads per second, derived from store capacity. Admitted fallback reaches Product Store. Over-budget calls leave Product Service as a dashed red 503 response through Edge to the client.</desc>
+          <text x="480" y="24" text-anchor="middle" class="clock">admit 100/s · reject before the store</text>
+          <circle cx="62" cy="156" r="26" class="box"/><circle cx="62" cy="146" r="8" class="box"/><path d="M46 174 Q62 160 78 174" class="wire"/><text x="62" y="210" text-anchor="middle" class="label">Client</text>
+          <rect x="118" y="36" width="822" height="252" rx="20" class="boundary"/><text x="136" y="58" class="tiny">TRUST BOUNDARY</text>
+          <rect x="140" y="118" width="120" height="76" rx="38" class="box alt"/><text x="200" y="152" text-anchor="middle" class="label">Edge</text><text x="200" y="172" text-anchor="middle" class="sub">TLS · route</text>
+          <rect x="330" y="100" width="172" height="112" rx="12" class="box ok"/><text x="416" y="136" text-anchor="middle" class="label">Product Service</text><text x="416" y="160" text-anchor="middle" class="sub">origin gate · 100/s</text><text x="416" y="184" text-anchor="middle" class="tiny">shed locally</text>
+          <rect x="564" y="120" width="136" height="72" rx="10" class="cache bad"/><rect x="572" y="128" width="120" height="56" rx="7" class="cache-detail"/><text x="632" y="151" text-anchor="middle" class="label">Cache down</text><text x="632" y="173" text-anchor="middle" class="sub">circuit open</text>
+          <rect x="772" y="76" width="172" height="170" rx="16" class="boundary"/><text x="788" y="98" class="tiny">STORE BUDGET · ~100/s</text>
+          <path d="M800 118 V202 A68 15 0 0 0 936 202 V118 Z" class="store"/><ellipse cx="868" cy="118" rx="68" ry="15" class="store"/><text x="868" y="157" text-anchor="middle" class="label">Product Store</text><text x="868" y="179" text-anchor="middle" class="sub">source of truth</text>
+          <line x1="90" y1="136" x2="128" y2="136" class="wire"/><line x1="260" y1="136" x2="318" y2="136" class="wire"/>
+          <path d="M502 198 C638 270 720 248 788 190" class="wire fail"/><text x="620" y="268" class="tiny">admit ≤ 100/s</text>
+          <line x1="330" y1="174" x2="272" y2="174" class="wire reply"/><path d="M140 172 C118 172 104 166 90 160" class="wire reply"/><text x="164" y="216" class="tiny">200 if admitted</text>
+          <g class="is-new"><line x1="330" y1="202" x2="272" y2="202" class="wire fail"/><path d="M140 192 C116 192 102 178 90 168" class="wire fail"/><text x="250" y="244" text-anchor="middle" class="tiny">503 · over budget</text></g>
+        </svg>
+        <figcaption><span class="lang-zh">上限由存储能力推导，但在 Product Service 执行：约 100 QPS 才能沿红色回源线进入存储；超出的请求直接沿 503 回程经过 Edge，存储根本看不到它们。</span><span class="lang-en">Store capacity derives the cap, but Product Service enforces it. Only about 100 QPS may follow the fallback into the store; overflow returns 503 through Edge and never reaches the store.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="fl4t fl4d">
+          <title id="fl4t">Complete failure arithmetic with two explicit outcomes</title>
+          <desc id="fl4d">At a 5,000 QPS peak and an origin cap of about 100, Product Service admits about 100 requests to Product Store and returns 200 for successful reads. It rejects about 4,900 before the store and returns 503 through Edge.</desc>
+          <text x="480" y="24" text-anchor="middle" class="clock">5,000 − 100 = ~4,900 shed</text>
+          <circle cx="62" cy="156" r="26" class="box"/><circle cx="62" cy="146" r="8" class="box"/><path d="M46 174 Q62 160 78 174" class="wire"/><text x="62" y="210" text-anchor="middle" class="label">Client</text>
+          <rect x="118" y="36" width="822" height="252" rx="20" class="boundary"/><text x="136" y="58" class="tiny">TRUST BOUNDARY</text>
+          <rect x="140" y="118" width="120" height="76" rx="38" class="box alt"/><text x="200" y="152" text-anchor="middle" class="label">Edge</text><text x="200" y="172" text-anchor="middle" class="sub">TLS · route</text>
+          <rect x="330" y="100" width="172" height="112" rx="12" class="box ok"/><text x="416" y="136" text-anchor="middle" class="label">Product Service</text><text x="416" y="160" text-anchor="middle" class="sub">origin gate · 100/s</text><text x="416" y="184" text-anchor="middle" class="tiny">shed locally</text>
+          <rect x="564" y="120" width="136" height="72" rx="10" class="cache bad"/><rect x="572" y="128" width="120" height="56" rx="7" class="cache-detail"/><text x="632" y="151" text-anchor="middle" class="label">Cache down</text><text x="632" y="173" text-anchor="middle" class="sub">circuit open</text>
+          <rect x="772" y="76" width="172" height="170" rx="16" class="boundary"/><text x="788" y="98" class="tiny">STORE BUDGET · ~100/s</text>
+          <path d="M800 118 V202 A68 15 0 0 0 936 202 V118 Z" class="store"/><ellipse cx="868" cy="118" rx="68" ry="15" class="store"/><text x="868" y="157" text-anchor="middle" class="label">Product Store</text><text x="868" y="179" text-anchor="middle" class="sub">source of truth</text>
+          <line x1="90" y1="136" x2="128" y2="136" class="wire"/><line x1="260" y1="136" x2="318" y2="136" class="wire"/>
+          <path d="M502 198 C638 270 720 248 788 190" class="wire fail"/><text x="620" y="268" class="tiny">~100/s admitted</text>
+          <line x1="330" y1="174" x2="272" y2="174" class="wire reply"/><path d="M140 172 C118 172 104 166 90 160" class="wire reply"/><text x="164" y="216" class="tiny">200 if found</text>
+          <line x1="330" y1="202" x2="272" y2="202" class="wire fail"/><path d="M140 192 C116 192 102 178 90 168" class="wire fail"/>
+          <g class="is-new"><rect x="330" y="322" width="220" height="62" rx="12" class="box bad"/><text x="440" y="348" text-anchor="middle" class="label">503 before origin</text><text x="440" y="370" text-anchor="middle" class="sub">~4,900/s at peak</text><path d="M416 224 V310" class="wire fail"/></g>
+        </svg>
+        <figcaption><span class="lang-zh">终图只有两个结果：约 100 QPS 被放行，读到行后返回 200；峰值剩余约 4,900 QPS 在服务侧就变成 503。拒绝箭头不再从 Store 发出。</span><span class="lang-en">The final frame has two outcomes: about 100 QPS are admitted and may return 200; the remaining roughly 4,900 QPS become 503 at the service. The rejection arrow no longer originates at the store.</span></figcaption>
+      </div>
+    </figure>
     <div class="bilingual">
-  <div class="lang-zh"><p class="col-kicker">中文</p>
-<p>别当 Jimmy：题面一出就抢答，零加分，而且是 red flag。短链、Feed 这种题，5 到 7 个问题就停，其余写成你自己的假设。</p>
-        <table><thead><tr><th>你问</th><th>Feed 上的典型回答</th></tr></thead><tbody>
-        <tr><td>App、Web，还是都要？</td><td>都要</td></tr>
-        <tr><td>最重要的功能？</td><td>发帖，看 feed</td></tr>
-        <tr><td>按时间还是有权重？</td><td>这一轮按时间</td></tr>
-        <tr><td>规模和读:写？</td><td>读远多于写</td></tr>
+      <div class="lang-zh"><p class="col-kicker">故障时请求实际怎么走</p>
+        <p>缓存层熔断后，商品服务不再等缓存，但恢复边界只放行大约每秒 100 次，仍是单盘寻道预算，直到有实测替换。放行且读到行返回 200，没有行返回 404，没放行的在服务侧 503，并带 Retry-After，不要无界重试。5,000 − 100 ≈ 4,900。5,000 ÷ 100 = 50，和估算是同一个倍数，所以缓存层是故障域，不是可有可无的加速器。</p>
+        <p>选 503 而不是无限排队，是因为超时本身就是决定。Brewer 把分区在操作上看成通信的时间上限：一直重试等于选择一致性并放弃这一次调用的可用性。[1] 停下来的是超出预算的 GET。放行的约 100 次仍读权威行，没有用旧值换可用。SRE 的过载章写过：极端过载下应返回错误，尽快拒绝，免得依赖把资源花在完不成的工作上；本地旧副本只在你还握着那份副本时才算降级。[5] 缓存整层都没了，冷实例也没有副本，所以这张图拒绝超出的请求，不发明命中。</p>
+        <p>进程内存里还有这份商品、而且没超过 30 秒时，直接返回那份旧 JSON，不去打已经过载的存储。窗口过了或本地没有这个 id，就 503，不要偷偷把 TTL 拉长。存储自己挂了是另一条故障：缓存还热时才讨论旧值；未知 id 和超时不能变成 404。等面试官指向存储再加那条红线。</p>
+        <p>熔断刚打开时，各实例会一起回源。总上限由存储能力算出，但必须由共享限流器或集中配额执行，不能每台服务都以为自己有 100。放行的读看到存储里的当前行；被 503 的请求什么都看不到。</p>
+        <p>「缓存挂了就查数据库」会把 5,000 打进预算只有 100 的存储，浏览和改价一起死。先说放行数从哪道除法来，再说其余请求的状态码。深挖时不要把队列、第二机房和推荐补上；那些盒子是故意不连的。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">What the request does during the failure</p>
+        <p>After the cache tier is broken, Product Service stops waiting on it. It tries to read the store, but the recovery boundary admits only about 100 per second. That number is still the one-disk serial seek budget, still an assumption until someone gives you a measurement. An admitted request returns 200 when the row exists and 404 when it does not. A request that is not admitted returns 503 inside the service process, preferably with Retry-After, and it does not retry without a bound. Subtract 100 from the peak of 5,000 and about 4,900 QPS fail. The ratio is ugly on purpose: the cache tier is a failure domain, not an optional accelerator. 5,000 ÷ 100 = 50, the same multiple as in the estimate.</p>
+        <p>Choosing 503 over an unbounded queue is a timeout decision. Brewer treats a partition, operationally, as a time bound on communication: retrying forever chooses consistency and gives up availability for that call; stopping does the reverse. [1] What stops here are the GETs over budget. The 100 that are admitted still read the authoritative row, so they did not trade a stale value for availability. The overload chapter of the SRE book says that under extreme overload a service may not even have time to build a degraded response and should serve an error, and that rejecting quickly is better than spending the dependency’s CPU on work it cannot finish. It also lists a local copy that may not be fully up to date as one form of degradation, which applies when you still have that copy. [5] If the whole cache tier is gone, the copy is not in that tier. A cold service instance does not have it either. The first failure picture therefore rejects the overflow instead of inventing a hit that is not there.</p>
+        <p>The alternative is better when a copy is still in process memory. If 30 seconds of staleness is allowed and this instance’s local cache still holds the id inside that age, return that JSON and do not touch a store that is already over budget. You buy availability and you pay the staleness already written down as an assumption. Past the window, or with no local key, return 503. Do not quietly stretch the TTL to “save” availability. The store itself being down is a different failure and does not belong on this same stroke. When the store is down and the cache is still warm, that is the moment to discuss serving an old value inside the stale window. An unknown id and a timeout still must not become 404. Add that red line when they point at the store. Two failure stories on one picture and the close falls apart.</p>
+        <p>Two concurrency windows remain. First, the instant the circuit opens, every instance falls through together. Store capacity derives one global cap, but a shared limiter or centrally allocated quota must enforce it; 100 per service process would still overload origin. Second, there is no extra magic between a merchant’s just-committed price and an admitted read: the admitted read sees the current row, and a shed read sees nothing. Do not say “the 503 users will be consistent when they refresh” as if that covers the page they cannot load now.</p>
+        <p>The common wrong line is “if the cache dies, read the database.” At 5,000 against 100, that read punches through the seek budget and the failure spreads from cache to source of truth, taking browse and price updates down together. The correction is to say which division produced the admit count, then which status code the rest receive. The other miss uses the deep dive to bolt on the queue, the second region, and recommendations. Those boxes were left unwired on purpose. A deep dive finishes one red line: who is rejected, who still reads the authoritative row, and how traffic is let back in during recovery. It does not complete a noun list.</p>
+      </div>
+    </div>
+    <h3><span class="lang-zh">收口时准备好的三句瓶颈</span><span class="lang-en">Three bottleneck lines to keep for the close</span></h3>
+    <div class="bilingual">
+      <div class="lang-zh"><p>不要说设计完美。收口只留三个瓶颈：缓存整层挂掉时只有约 100 QPS 能活，恢复时要慢慢放流量；热 key 会先打满一个缓存分片，饱和常常先看 p99；[4] 权威行和缓存之间最多 30 秒旧价，商家自己的读要绕过缓存。观测收在四个黄金信号：延迟分开成功和失败，流量是这条 GET 的 QPS，错误包括 5xx 和超过 80 毫秒的请求，饱和看回源是否靠近 100。[4]</p></div>
+      <div class="lang-en"><p>Do not call the design perfect. Close on three bottlenecks: when the whole cache tier is down only about 100 QPS survive, and recovery must let traffic back slowly; a hot key fills one cache shard first, and saturation often shows up as p99; [4] the row and the cache can disagree for up to 30 seconds, so the merchant’s own read bypasses the cache. Observation closes on the four golden signals: split success latency from failure latency, traffic is this GET’s QPS, errors include 5xx and requests over 80 ms, and saturation is origin QPS nearing 100. [4]</p></div>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">35 分钟主线怎么说，卡住怎么接</span><span class="lang-en">How to spend the 35-minute core and recover a stall</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">中文</p>
+        <p>本章主线按 35 分钟排；真实面试若给 45 分钟，把多出的 10 分钟加到第四步追问，不要再铺一套架构。白板左侧写假设和除法，中间画请求与回程，右侧只留一条故障和 trade-off。级别改的是深度：初级说清 GET、404 和「行在存储里」；资深说清 5,000 对 100、共享回源上限和 503；再往上说明哪个操作允许陈旧、为什么第二机房还没连。</p>
+        <p>卡住时第一句把卡点说出来：「我卡在回源上限该用寻道还是用缓冲池。」然后退回高层那张同步 GET 的图，问面试官要不要换预算，或者换一条故障。要提示不丢人。沉默几十秒等于没有信号。算法题可以安静想；这道题不行。也不要在一个 TTL 公式上花 15 分钟。每 5 分钟看一次时间，深挖只保留缓存这一条红线。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">English</p>
+        <p>This chapter budgets a 35-minute core. If the interview gives 45 minutes, spend the extra ten on follow-ups inside step 4 instead of spreading a second architecture. Left side of the board: assumptions and the division. Center: request and reply. Right: one failure and the trade-off. A junior walk-through names the GET, the 404, and “the row lives in the store.” A senior one names 5,000 against 100, the shared origin cap, and the 503. Above that, say which operation may be stale and why Region B is still unwired.</p>
+        <p>When you stall, the first sentence names it: “I’m stuck on whether the origin cap should be the seek budget or the buffer pool.” Then return to the high-level synchronous GET and ask whether to change the budget or to switch failures. Asking for a hint is part of the collaboration. Tens of seconds of silence are no signal. An algorithms problem can sit quiet. This one cannot. Do not spend 15 minutes on a TTL formula. Glance at the clock every five minutes, and keep the deep dive on the one red cache line.</p>
+      </div>
+    </div>
+    <table>
+      <thead><tr><th><span class="lang-zh">时间</span><span class="lang-en">Time</span></th><th><span class="lang-zh">动作</span><span class="lang-en">Move</span></th><th><span class="lang-zh">口播</span><span class="lang-en">Line</span></th></tr></thead>
+      <tbody>
+        <tr><td>0–1</td><td><span class="lang-zh">复述</span><span class="lang-en">Restate</span></td><td><span class="lang-zh">你要的是商品详情读，不是结账。</span><span class="lang-en">You want the product-detail read, not checkout.</span></td></tr>
+        <tr><td>1–6</td><td><span class="lang-zh">定范围</span><span class="lang-en">Scope</span></td><td><span class="lang-zh">功能是一份 JSON；非功能是 80 毫秒、99.9%、30 秒。</span><span class="lang-en">Function is one JSON; non-function is 80 ms, 99.9%, 30 seconds.</span></td></tr>
+        <tr><td>6–10</td><td><span class="lang-zh">估算</span><span class="lang-en">Estimate</span></td><td><span class="lang-zh">1,000 平均，5,000 峰值，除以 100 次寻道，所以加缓存。</span><span class="lang-en">1,000 average, 5,000 peak, divided by 100 seeks, so the cache appears.</span></td></tr>
+        <tr><td>10–18</td><td><span class="lang-zh">高层并要反馈</span><span class="lang-en">High-level and buy-in</span></td><td><span class="lang-zh">同步 GET，同步 200，行在存储，队列没连。</span><span class="lang-en">Sync GET, sync 200, rows in the store, queue unwired.</span></td></tr>
+        <tr><td>18–31</td><td><span class="lang-zh">一条故障</span><span class="lang-en">One failure</span></td><td><span class="lang-zh">缓存挂了，共享上限放行 100，其余 503。</span><span class="lang-en">Cache down, shared cap admits 100, 503 for the rest.</span></td></tr>
+        <tr><td>31–35</td><td><span class="lang-zh">收口</span><span class="lang-en">Close</span></td><td><span class="lang-zh">三个瓶颈：缓存故障域、热 key、30 秒旧价。不说完美。</span><span class="lang-en">Three bottlenecks: cache failure domain, hot key, 30-second price. Not perfect.</span></td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">追问：从新约束改图，不从零再画</span><span class="lang-en">Follow-ups: change the picture from a new constraint</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">流量再翻 10 倍</p>
+        <p>现在的峰值是 5,000。再翻 10 倍是 50,000 QPS。寻道预算若仍是 100，需要的命中率是 1 − 100 ÷ 50,000 = 0.998，也就是 99.8%。这已经不是一句「缓存还在」能兜住的。要么把寻道容量加到大约 10 块盘的 1,000 次每秒，命中率需求回到 98%（50,000 × 0.02 = 1,000），要么把缓存按 key 拆开，避免一个热 SKU 打满单分片。仍然先说哪个数溢出，再加盒子。Dean 提醒过，适合当前规模的方案到 100 倍常常不对；50,000 相对最初的 1,000 平均已经是 50 倍，应该主动说这张图的边界到了。[2]</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">Traffic times ten</p>
+        <p>The peak is 5,000. Times ten is 50,000 QPS. If the seek budget is still 100, the required hit rate is 1 − 100 ÷ 50,000 = 0.998, or 99.8%. “The cache is still there” does not cover that. Either raise seek capacity to about 1,000 per second, on the order of ten disks, which brings the required hit rate back to 98% because 50,000 × 0.02 = 1,000, or split the cache by key so one hot SKU cannot fill a shard. Name the overflow before adding a box. Dean notes that the design that fits the current size is often wrong at 100×. 50,000 against the original 1,000 average is already 50×, so say that this picture has reached its edge. [2]</p>
+      </div>
+    </div>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">一个机房挂了</p>
+        <p>不要说「我们是 AP」。Brewer 的更正是：没有分区时，一致性和可用性可以同时有；分区期间才按操作选择。[1] 分区在操作上就是超时。浏览可以在 30 秒窗口内读副本或尚热的缓存；改价若不能分叉，就在分区期间拒绝写。跨大陆同步读大约 150 毫秒，[2] 所以只有延迟目标改了才连上 Region B，并写明哪种调用继续、哪种失败。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">One datacenter dies</p>
+        <p>Do not say “we are AP.” Brewer’s correction is that consistency and availability can both hold when there is no partition; during a partition you must choose, and different operations may choose differently. [1] Operationally a partition is a timeout. A product browse may read another replica or a still-warm cache inside the assumed 30-second window: bounded staleness bought with availability. A price update that must not fork refuses the write during the partition: availability given up for a single copy. Waiting forever for the other side spends the 80 ms budget and may still get no answer. That is why Region B is not decoration on the first picture. A synchronous cross-continent read is about 150 ms. [2] Connect Region B only after the latency goal changes, and say which call continues during a partition and which call fails.</p>
+      </div>
+    </div>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">怎么监控</p>
+        <p>四个黄金信号就够：延迟、流量、错误、饱和。[4] 延迟把 200 和 503 分开，否则拒绝越快平均越好看。流量是这条 GET 的 QPS。错误包括 5xx，也包括超过 80 毫秒、被你自己的目标定义成失败的请求。饱和看回源离 100 还有多远，以及命中率是否还在约 98% 附近。p99 常常比 CPU 打满更早。[4]</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">How do you monitor?</p>
+        <p>The four golden signals are enough to close: latency, traffic, errors, and saturation. [4] Split latency of 200s from latency of 503s, or faster rejects make the average look healthier. Traffic is QPS of <code>GET /v1/products/{id}</code>, broken out by hit and miss when that matters. Errors include 5xx and the requests you defined as failures by missing 80 ms. Saturation is how close origin QPS is to 100, and whether hit rate is still near the 98% this budget needs. Rising p99 is often earlier than a full CPU. [4] Add one way to follow a single request, so a slow store is distinct from a slow network on the way to the store. Do not close by listing vendor product names.</p>
+      </div>
+    </div>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">商家刚改完价，自己刷新却看到旧的</p>
+        <p>这是读自己的写，不是把所有人的 TTL 改成零。PUT 先提交存储，提交成功才算改完。商家随后对同一 id 的 GET 短时间绕过缓存或读主库。其他浏览者仍可能在 30 秒内看到旧价。缓存值要带 version 和 price_cents。若任何人都不许看到旧价，就改成写后删除，并重算命中率，因为失效会制造回源。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">The merchant refreshes and still sees the old price</p>
+        <p>This is read-your-write, not “set everyone’s TTL to zero.” The merchant’s PUT commits to the store first. The change counts only after that commit. Their following GET for the same id bypasses the cache or reads the primary for a short window, so they see the new price. Other browsers may still see the old price inside the assumed 30 seconds. The cached value has to carry version and price_cents, or you cannot tell an expired row from the current one. If the product changes and says nobody may see an old price, the cache stroke becomes delete-on-write or a version check, and the hit-rate assumption has to be recomputed because invalidation creates origin reads. “The cache will eventually be consistent” does not answer this. That sentence has no deadline and does not say who is reading.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">常见错误答案</span><span class="lang-en">Common wrong answers</span></h2>
+    <table>
+      <thead><tr><th><span class="lang-zh">说法</span><span class="lang-en">Claim</span></th><th><span class="lang-zh">为什么不完整</span><span class="lang-en">Why it is incomplete</span></th><th><span class="lang-zh">改成</span><span class="lang-en">Replace it with</span></th></tr></thead>
+      <tbody>
+        <tr><td><span class="lang-zh">先把最终架构画满</span><span class="lang-en">Draw the final architecture first</span></td><td><span class="lang-zh">没有哪一笔对应哪个约束，过程无法评分</span><span class="lang-en">No stroke matches a constraint, so the process cannot be scored</span></td><td><span class="lang-zh">同一条 GET 上，范围、估算、回程、一条红线各加一笔</span><span class="lang-en">On one GET, add scope, the estimate, the reply, then one red line</span></td></tr>
+        <tr><td><span class="lang-zh">缓存挂了就查数据库</span><span class="lang-en">Cache down, just read the database</span></td><td><span class="lang-zh">5,000 是寻道预算 100 的 50 倍，故障会打穿权威存储</span><span class="lang-en">5,000 is 50× the seek budget of 100, so the failure punches through the source of truth</span></td><td><span class="lang-zh">按存储能力算出约 100，并在服务侧执行；其余直接 503</span><span class="lang-en">Derive about 100 from store capacity, enforce it at the service, and return 503 for the rest</span></td></tr>
+        <tr><td><span class="lang-zh">这个系统是 AP</span><span class="lang-en">This system is AP</span></td><td><span class="lang-zh">「二选三」是误导；选择发生在分区期间，而且按操作不同</span><span class="lang-en">“Two out of three” misleads; the choice is during a partition and can differ by operation</span></td><td><span class="lang-zh">浏览可以有界陈旧，改价在分区时可以拒绝</span><span class="lang-en">Browse may be bounded-stale; a price write may refuse during a partition</span></td></tr>
+        <tr><td><span class="lang-zh">算出 QPS 图就不用改</span><span class="lang-en">Once you have QPS the picture can stay</span></td><td><span class="lang-zh">1,000 已经是 100 次寻道的 10 倍</span><span class="lang-en">1,000 is already 10× a 100-seek budget</span></td><td><span class="lang-zh">倍数本身就是加缓存的那一笔</span><span class="lang-en">The multiple is the stroke that adds the cache</span></td></tr>
+        <tr><td><span class="lang-zh">3 GB 所以要分片</span><span class="lang-en">3 GB, therefore shard</span></td><td><span class="lang-zh">溢出的是寻道速率，不是磁盘容量</span><span class="lang-en">The overflow is seek rate, not disk capacity</span></td><td><span class="lang-zh">容量留在备注里；图上改的是缓存和回源上限</span><span class="lang-en">Leave capacity in a note; the picture changes at the cache and the origin cap</span></td></tr>
+      </tbody>
+    </table>
+    <div class="bilingual">
+      <div class="lang-zh"><p>表外还有三个过程错误。抢答是范围没写完就把缓存画上；缓存要等 5,000 和 100 比完。沉默是想回源上限时不出声，对方就没法把预算改成他的数。过度设计是队列、第二机房、推荐一起出现，却没有一条边说明为什么连、为什么不连。</p></div>
+      <div class="lang-en"><p>Two process failures are not in the table and are just as costly. One is jumping ahead: drawing the cache before scope is written down. The cache earns its place only after 5,000 has been compared with 100. The other is silence while you think about the origin cap. Say “I am comparing seeks with the buffer pool,” and they can replace the budget with the number they care about. Over-engineering is the third: queue, second region, and recommendations appear together, and no edge says why they are synchronous or why they are unwired. Every box you add has to point back at a number on the left or at a sentence that excluded something.</p></div>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">收尾：三个 trade-off，不说完美</span><span class="lang-en">Close on three trade-offs, not on perfect</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">中文</p>
+        <table><thead><tr><th>trade-off</th><th><span class="lang-zh">口述</span><span class="lang-en">Line</span></th></tr></thead><tbody>
+          <tr><td><span class="lang-zh">命中率 vs 寻道预算</span><span class="lang-en">Hit rate vs seek budget</span></td><td><span class="lang-zh">98% 命中才把 5,000 收成约 100 次未命中。做不到这个命中率，就要加盘或承认预算不是寻道。</span><span class="lang-en">A 98% hit rate turns 5,000 into about 100 misses. If you cannot hit that, add disks or admit the budget is not seeks.</span></td></tr>
+          <tr><td><span class="lang-zh">503 vs 无上限回源</span><span class="lang-en">503 vs uncapped origin</span></td><td><span class="lang-zh">缓存层挂掉时拒绝大约 4,900 QPS，换存储还活着。全部打到存储，浏览和改价一起死。</span><span class="lang-en">When the cache tier dies, rejecting about 4,900 QPS keeps the store alive. Sending all of them kills browse and price updates together.</span></td></tr>
+          <tr><td><span class="lang-zh">单机房 80 毫秒 vs 跨大陆 150 毫秒</span><span class="lang-en">80 ms in one region vs 150 ms cross-continent</span></td><td><span class="lang-zh">第二机房不连，是因为同步跨大陆读会吃掉延迟预算。连上之后，分区期间要按操作选择继续还是拒绝。</span><span class="lang-en">Region B stays unwired because a synchronous cross-continent read spends the latency budget. Once it is connected, each operation chooses to continue or refuse during a partition.</span></td></tr>
         </tbody></table>
-  </div>
-  <div class="lang-en"><p class="col-kicker">English</p>
-<p>Do not be Jimmy, the student who answers before the question is finished. That scores nothing, and it is a red flag. On a short-URL or feed prompt, stop after five to seven questions and write the rest as your assumptions.</p>
-        <table><thead><tr><th>You ask</th><th>A typical feed answer</th></tr></thead><tbody>
-        <tr><td>App, web, or both?</td><td>Both</td></tr>
-        <tr><td>The features that matter?</td><td>Post, and read the feed</td></tr>
-        <tr><td>Time order or ranked?</td><td>Time order for this round</td></tr>
-        <tr><td>Scale and read:write?</td><td>Reads dwarf writes</td></tr>
+        <p class="say">最后 20 秒：商品详情是同步 GET，行在存储，服务无状态，缓存是因为 5,000 比 100 次寻道大了 50 倍，所以需要大约 98% 命中。缓存层挂了只放行约 100，其余 503。队列和第二机房这轮不连。三个瓶颈是缓存故障域、热 key、30 秒旧价。若有时间，我会先把回源上限换成实测，而不是再加一个组件。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">English</p>
+        <table><thead><tr><th>Trade-off</th><th>Line</th></tr></thead><tbody>
+          <tr><td>Hit rate vs seek budget</td><td>A 98% hit rate turns 5,000 into about 100 misses. If you cannot hit that, add disks or admit the budget is not seeks.</td></tr>
+          <tr><td>503 vs uncapped origin</td><td>When the cache tier dies, rejecting about 4,900 QPS keeps the store alive. Sending all of them kills browse and price updates together.</td></tr>
+          <tr><td>80 ms in one region vs 150 ms cross-continent</td><td>Region B stays unwired because a synchronous cross-continent read spends the latency budget. Once connected, each operation chooses to continue or refuse during a partition.</td></tr>
         </tbody></table>
-  </div>
-</div>
-    <figure class="deck">
-<div class="slide">
-  <svg viewBox="0 0 960 420" class="board" role="img">
-  <g>
-    <rect x="350" y="150" width="260" height="96" rx="12" class="box"/>
-    <text x="480" y="184" text-anchor="middle" class="label">Users</text>
-    <text x="480" y="208" text-anchor="middle" class="sub">who, which client</text>
-  </g>
-</svg>
-  <figcaption><span class="lang-zh">先问谁在用、是 App 还是 Web。Feed 这种题，端不同，fan-out 完全不一样。</span><span class="lang-en">Ask who uses it, and whether it is app, web, or both. For a feed, the client changes the fan-out.</span></figcaption>
-</div>
-<div class="slide">
-  <svg viewBox="0 0 960 420" class="board" role="img">
-  <g>
-    <rect x="210" y="150" width="260" height="96" rx="12" class="box"/>
-    <text x="340" y="184" text-anchor="middle" class="label">Users</text>
-    <text x="340" y="208" text-anchor="middle" class="sub">who, which client</text>
-  </g>
-  <g>
-    <rect x="490" y="150" width="260" height="96" rx="12" class="box"/>
-    <text x="620" y="184" text-anchor="middle" class="label">Features</text>
-    <text x="620" y="208" text-anchor="middle" class="sub">this round only</text>
-  </g>
-  <line x1="470" y1="198" x2="479" y2="198" class="wire"/>
-  <polygon points="479,193 488,198 479,203" class="head"/>
-</svg>
-  <figcaption><span class="lang-zh">把功能收成这一轮能画完的几件。News Feed 可以先只做发帖和按时间看。</span><span class="lang-en">Cut features to what you can draw this round. A feed can be post plus a time-ordered read.</span></figcaption>
-</div>
-<div class="slide">
-  <svg viewBox="0 0 960 420" class="board" role="img">
-  <g>
-    <rect x="70" y="150" width="260" height="96" rx="12" class="box"/>
-    <text x="200" y="184" text-anchor="middle" class="label">Users</text>
-    <text x="200" y="208" text-anchor="middle" class="sub">who, which client</text>
-  </g>
-  <g>
-    <rect x="350" y="150" width="260" height="96" rx="12" class="box"/>
-    <text x="480" y="184" text-anchor="middle" class="label">Features</text>
-    <text x="480" y="208" text-anchor="middle" class="sub">this round only</text>
-  </g>
-  <line x1="330" y1="198" x2="339" y2="198" class="wire"/>
-  <polygon points="339,193 348,198 339,203" class="head"/>
-  <g>
-    <rect x="630" y="150" width="260" height="96" rx="12" class="box"/>
-    <text x="760" y="184" text-anchor="middle" class="label">Scale</text>
-    <text x="760" y="208" text-anchor="middle" class="sub">QPS, read:write</text>
-  </g>
-  <line x1="610" y1="198" x2="619" y2="198" class="wire"/>
-  <polygon points="619,193 628,198 619,203" class="head"/>
-</svg>
-  <figcaption><span class="lang-zh">规模问数量级：DAU、读和写谁多、延迟能不能到秒。精确字节留给 Ch03。</span><span class="lang-en">Scale is an order of magnitude: DAU, read versus write, and whether latency can be seconds. Exact bytes wait for Ch03.</span></figcaption>
-</div>
-<div class="slide">
-  <svg viewBox="0 0 960 420" class="board" role="img">
-  <g>
-    <rect x="28" y="150" width="211" height="96" rx="12" class="box"/>
-    <text x="134" y="184" text-anchor="middle" class="label">Users</text>
-    <text x="134" y="208" text-anchor="middle" class="sub">who, which client</text>
-  </g>
-  <g>
-    <rect x="259" y="150" width="211" height="96" rx="12" class="box"/>
-    <text x="364" y="184" text-anchor="middle" class="label">Features</text>
-    <text x="364" y="208" text-anchor="middle" class="sub">this round only</text>
-  </g>
-  <line x1="239" y1="198" x2="248" y2="198" class="wire"/>
-  <polygon points="248,193 257,198 248,203" class="head"/>
-  <g>
-    <rect x="490" y="150" width="211" height="96" rx="12" class="box"/>
-    <text x="596" y="184" text-anchor="middle" class="label">Scale</text>
-    <text x="596" y="208" text-anchor="middle" class="sub">QPS, read:write</text>
-  </g>
-  <line x1="470" y1="198" x2="479" y2="198" class="wire"/>
-  <polygon points="479,193 488,198 479,203" class="head"/>
-  <g>
-    <rect x="721" y="150" width="211" height="96" rx="12" class="box alt"/>
-    <text x="826" y="184" text-anchor="middle" class="label">Non-goals</text>
-    <text x="826" y="208" text-anchor="middle" class="sub">out of scope</text>
-  </g>
-  <line x1="701" y1="198" x2="710" y2="198" class="wire"/>
-  <polygon points="710,193 719,198 710,203" class="head"/>
-</svg>
-  <figcaption><span class="lang-zh">把不做的写在白板边上。自定义排序、推荐、多区域，往往是 non-goal，除非他们追问。</span><span class="lang-en">Write non-goals on the side of the board. Ranking, recommendations, and multi-region stay out unless they ask.</span></figcaption>
-</div>
-</figure>
-    <p class="cite"><span class="lang-zh">估算怎么开口，去 <span class="chip soon">Ch03 · 粗略估算</span>。</span><span class="lang-en">How to say the numbers out loud: <span class="chip soon">Ch03 · estimates</span>.</span></p>
+        <p class="say">Last twenty seconds: product detail is a synchronous GET, the row lives in the store, the service is stateless, and the cache exists because 5,000 is 50× a 100-seek budget, which needs about a 98% hit rate. If the cache tier dies, admit about 100 and 503 the rest. The queue and Region B stay unwired this round. Three bottlenecks: the cache failure domain, the hot key, and a 30-second-old price. With more time I would replace the origin cap with a measurement before I added another component.</p>
+      </div>
+    </div>
   </section>
 
   <section>
-    <h2><span class="lang-zh">Step 2 · 高层，换 buy-in</span><span class="lang-en">Step 2 · High-level, then buy-in</span></h2>
-    <div class="bilingual">
-  <div class="lang-zh"><p class="col-kicker">中文</p>
-<p>四个动作：画初始蓝图，边画边问，用数量级看它撑不撑得住，再走通 1 到 2 个用例。</p>
-        <p class="say">我先用 5 分钟画高层，确认方向。Client 进来，LB 后面是无状态 Web，读多的话前面放 Cache，权威数据在 DB。这一步方向可以吗？</p>
-        <p>大题（设计搜索）可以先不写 API。中小题在这一步列出 endpoint。拿不准就问一句要不要写。</p>
-  </div>
-  <div class="lang-en"><p class="col-kicker">English</p>
-<p>Four moves: sketch the blueprint, ask as you draw, check that the orders of magnitude fit, then walk one or two use cases.</p>
-        <p class="say">I will spend five minutes on a high-level picture and check the direction. Clients hit a load balancer and a stateless web tier. Reads go through a cache. The database is the source of truth. Is that direction all right?</p>
-        <p>On a huge prompt such as search, you can skip the API. On a medium one, list the endpoints here. If you are unsure, ask whether they want them.</p>
-  </div>
-</div>
-    <figure class="deck">
-<div class="slide">
-  <svg viewBox="0 0 960 420" class="board" role="img">
-  <g>
-    <rect x="350" y="148" width="260" height="92" rx="12" class="box"/>
-    <text x="480" y="182" text-anchor="middle" class="label">Client</text>
-    <text x="480" y="206" text-anchor="middle" class="sub">App / Web</text>
-  </g>
-</svg>
-  <figcaption><span class="lang-zh">第一笔只画用户从哪进来。</span><span class="lang-en">The first stroke is only where the user comes in.</span></figcaption>
-</div>
-<div class="slide">
-  <svg viewBox="0 0 960 420" class="board" role="img">
-  <g>
-    <rect x="211" y="148" width="260" height="92" rx="12" class="box"/>
-    <text x="341" y="182" text-anchor="middle" class="label">Client</text>
-    <text x="341" y="206" text-anchor="middle" class="sub">App / Web</text>
-  </g>
-  <g>
-    <rect x="489" y="148" width="260" height="92" rx="12" class="box"/>
-    <text x="619" y="182" text-anchor="middle" class="label">LB</text>
-    <text x="619" y="206" text-anchor="middle" class="sub">entry</text>
-  </g>
-  <line x1="469" y1="194" x2="478" y2="194" class="wire"/>
-  <polygon points="478,189 487,194 478,199" class="head"/>
-</svg>
-  <figcaption><span class="lang-zh">加上 LB，入口和业务分开。</span><span class="lang-en">Add a load balancer so the entry is not the web process itself.</span></figcaption>
-</div>
-<div class="slide">
-  <svg viewBox="0 0 960 420" class="board" role="img">
-  <g>
-    <rect x="72" y="148" width="260" height="92" rx="12" class="box"/>
-    <text x="202" y="182" text-anchor="middle" class="label">Client</text>
-    <text x="202" y="206" text-anchor="middle" class="sub">App / Web</text>
-  </g>
-  <g>
-    <rect x="350" y="148" width="260" height="92" rx="12" class="box"/>
-    <text x="480" y="182" text-anchor="middle" class="label">LB</text>
-    <text x="480" y="206" text-anchor="middle" class="sub">entry</text>
-  </g>
-  <line x1="330" y1="194" x2="339" y2="194" class="wire"/>
-  <polygon points="339,189 348,194 339,199" class="head"/>
-  <g>
-    <rect x="628" y="148" width="260" height="92" rx="12" class="box"/>
-    <text x="758" y="182" text-anchor="middle" class="label">Web</text>
-    <text x="758" y="206" text-anchor="middle" class="sub">stateless API</text>
-  </g>
-  <line x1="608" y1="194" x2="617" y2="194" class="wire"/>
-  <polygon points="617,189 626,194 617,199" class="head"/>
-</svg>
-  <figcaption><span class="lang-zh">Web 无状态，确认可以水平加机器。</span><span class="lang-en">The web tier is stateless, so you can add machines.</span></figcaption>
-</div>
-<div class="slide">
-  <svg viewBox="0 0 960 420" class="board" role="img">
-  <g>
-    <rect x="21" y="148" width="216" height="92" rx="12" class="box"/>
-    <text x="129" y="182" text-anchor="middle" class="label">Client</text>
-    <text x="129" y="206" text-anchor="middle" class="sub">App / Web</text>
-  </g>
-  <g>
-    <rect x="255" y="148" width="216" height="92" rx="12" class="box"/>
-    <text x="363" y="182" text-anchor="middle" class="label">LB</text>
-    <text x="363" y="206" text-anchor="middle" class="sub">entry</text>
-  </g>
-  <line x1="235" y1="194" x2="244" y2="194" class="wire"/>
-  <polygon points="244,189 253,194 244,199" class="head"/>
-  <g>
-    <rect x="489" y="148" width="216" height="92" rx="12" class="box"/>
-    <text x="597" y="182" text-anchor="middle" class="label">Web</text>
-    <text x="597" y="206" text-anchor="middle" class="sub">stateless API</text>
-  </g>
-  <line x1="469" y1="194" x2="478" y2="194" class="wire"/>
-  <polygon points="478,189 487,194 478,199" class="head"/>
-  <g>
-    <rect x="723" y="148" width="216" height="92" rx="12" class="box alt"/>
-    <text x="831" y="182" text-anchor="middle" class="label">Cache</text>
-    <text x="831" y="206" text-anchor="middle" class="sub">hot keys</text>
-  </g>
-  <line x1="703" y1="194" x2="712" y2="194" class="wire"/>
-  <polygon points="712,189 721,194 712,199" class="head"/>
-</svg>
-  <figcaption><span class="lang-zh">读多就补 Cache，热点不要直接打到 DB。</span><span class="lang-en">If reads dominate, add a cache. Hot keys should not hit the database every time.</span></figcaption>
-</div>
-<div class="slide">
-  <svg viewBox="0 0 960 420" class="board" role="img">
-  <g>
-    <rect x="22" y="148" width="169" height="92" rx="12" class="box"/>
-    <text x="106" y="182" text-anchor="middle" class="label">Client</text>
-    <text x="106" y="206" text-anchor="middle" class="sub">App / Web</text>
-  </g>
-  <g>
-    <rect x="208" y="148" width="169" height="92" rx="12" class="box"/>
-    <text x="293" y="182" text-anchor="middle" class="label">LB</text>
-    <text x="293" y="206" text-anchor="middle" class="sub">entry</text>
-  </g>
-  <line x1="188" y1="194" x2="198" y2="194" class="wire"/>
-  <polygon points="198,189 206,194 198,199" class="head"/>
-  <g>
-    <rect x="396" y="148" width="169" height="92" rx="12" class="box"/>
-    <text x="480" y="182" text-anchor="middle" class="label">Web</text>
-    <text x="480" y="206" text-anchor="middle" class="sub">stateless API</text>
-  </g>
-  <line x1="376" y1="194" x2="384" y2="194" class="wire"/>
-  <polygon points="384,189 394,194 384,199" class="head"/>
-  <g>
-    <rect x="582" y="148" width="169" height="92" rx="12" class="box alt"/>
-    <text x="667" y="182" text-anchor="middle" class="label">Cache</text>
-    <text x="667" y="206" text-anchor="middle" class="sub">hot keys</text>
-  </g>
-  <line x1="562" y1="194" x2="572" y2="194" class="wire"/>
-  <polygon points="572,189 580,194 572,199" class="head"/>
-  <g>
-    <rect x="770" y="148" width="169" height="92" rx="12" class="box"/>
-    <text x="854" y="182" text-anchor="middle" class="label">DB</text>
-    <text x="854" y="206" text-anchor="middle" class="sub">source of truth</text>
-  </g>
-  <line x1="750" y1="194" x2="758" y2="194" class="wire"/>
-  <polygon points="758,189 768,194 758,199" class="head"/>
-  <text x="480" y="78" text-anchor="middle" class="clock">Buy-in?</text>
-</svg>
-  <figcaption><span class="lang-zh">DB 只放权威数据。停下来问：这个方向可以吗？</span><span class="lang-en">The database is the source of truth. Stop and ask whether this direction is right.</span></figcaption>
-</div>
-</figure>
-    <p class="cite"><span class="lang-zh">这一层后面会拆开讲：<span class="chip soon">Ch39 · 负载均衡</span><span class="chip soon">Ch38 · 缓存</span><span class="chip soon">Ch37 · 存储</span>。</span><span class="lang-en">Later chapters split this tier: <span class="chip soon">Ch39 · load balancing</span><span class="chip soon">Ch38 · cache</span><span class="chip soon">Ch37 · storage</span>.</span></p>
+    <h2><span class="lang-zh">引用与延伸阅读</span><span class="lang-en">References and further reading</span></h2>
+    <ol class="references">
+      <li>[1] Eric Brewer, <a href="https://www.infoq.com/articles/cap-twelve-years-later-how-the-rules-have-changed/"><em>CAP Twelve Years Later: How the “Rules” Have Changed</em></a>, IEEE Computer, 2012. The “2 of 3” formulation is misleading; during a partition the choice is per operation, and operationally a partition is a timeout.</li>
+      <li>[2] Jeff Dean, <a href="https://static.googleusercontent.com/media/research.google.com/en//people/jeff/stanford-295-talk.pdf"><em>Software Engineering Advice from Building Large-Scale Distributed Systems</em></a>, talk slides. Numbers used here: datacenter round trip 0.5 ms, disk seek 10 ms, California–Netherlands–California about 150 ms; serial thumbnail seeks; design for 10×–20×, not blindly for 100×.</li>
+      <li>[3] Jeffrey Dean and Luiz André Barroso, <a href="https://research.google/pubs/the-tail-at-scale/"><em>The Tail at Scale</em></a>, Communications of the ACM, 56 (2013), pp. 74–80. Interactive responses on the order of 100 ms; at large scale the tail dominates.</li>
+      <li>[4] Rob Ewaschuk, edited by Betsy Beyer, <a href="https://sre.google/sre-book/monitoring-distributed-systems/"><em>Monitoring Distributed Systems</em></a>, Google SRE book. The four golden signals are latency, traffic, errors, and saturation; mean latency hides a tail that a fan-in page will feel.</li>
+      <li>[5] Alejandro Forero Cuervo, edited by Sarah Chavis, <a href="https://sre.google/sre-book/handling-overload/"><em>Handling Overload</em></a>, Google SRE book. Under extreme overload, serve errors; a stale local copy is a degradation only when the copy exists; QPS is a weak capacity model.</li>
+    </ol>
+    <p class="cite"><span class="lang-zh">站内延伸：</span><span class="lang-en">Course follow-ups:</span> <a class="chip" href="ch02.html">Ch02</a> <a class="chip" href="ch03.html">Ch03</a> <a class="chip" href="ch09.html">Ch09</a> <a class="chip" href="ch37.html">Ch37 · 存储</a> <a class="chip" href="ch38.html">Ch38 · 缓存</a></p>
   </section>
 
   <section>
-    <h2><span class="lang-zh">Step 3 和收尾</span><span class="lang-en">Step 3 and the close</span></h2>
-    <div class="bilingual">
-  <div class="lang-zh"><p class="col-kicker">中文</p>
-<p>Deep dive 只挖一块：这题的 <strong>hard part</strong>（短链是跳转和短码，聊天是连接和 fan-out），或者面试官刚指的那块。深度大于广度。最隐蔽的失败是每个组件点名一遍，哪块都不深。</p>
-        <p>初级岗把组件、API、schema 讲清。Senior 讲 bottleneck、扩展和失败。Staff 再加 trade-off、多区域和成本。别用资深岗的词堆给初级岗。</p>
-        <p>2026 的白板多半是共享文档，不是教室里的黑板。中小题主动列 endpoint。收尾时补一句可观测性：延迟、流量、错误、饱和。</p>
-  </div>
-  <div class="lang-en"><p class="col-kicker">English</p>
-<p>The deep dive covers one slice: the <strong>hard part</strong> (redirect and short code for a URL shortener, connection and fan-out for chat), or whatever they just pointed at. Depth beats breadth. The quiet failure is naming every box and going deep on none.</p>
-        <p>A junior answer makes the components, API, and schema clear. A senior answer adds bottlenecks, scale-out, and failure. Staff adds trade-offs, multi-region, and cost. Do not dump staff vocabulary on a junior loop.</p>
-        <p>In 2026 the board is usually a shared doc, not a classroom whiteboard. On a medium problem, offer the endpoints. In the wrap-up, add observability: latency, traffic, errors, saturation.</p>
-  </div>
-</div>
-    <figure class="deck">
-<div class="slide">
-  <svg viewBox="0 0 960 420" class="board" role="img">
-  <g>
-    <rect x="350" y="156" width="260" height="90" rx="12" class="box bad"/>
-    <text x="480" y="190" text-anchor="middle" class="label">Silence</text>
-    <text x="480" y="214" text-anchor="middle" class="sub">long pause</text>
-  </g>
-</svg>
-  <figcaption><span class="lang-zh">卡住时最忌讳沉默。安静几十秒，过程分就没了。</span><span class="lang-en">The costly move when you stall is silence. A long pause spends the process score.</span></figcaption>
-</div>
-<div class="slide">
-  <svg viewBox="0 0 960 420" class="board" role="img">
-  <g>
-    <rect x="350" y="156" width="260" height="90" rx="12" class="box ok"/>
-    <text x="480" y="190" text-anchor="middle" class="label">Name it</text>
-    <text x="480" y="214" text-anchor="middle" class="sub">say where</text>
-  </g>
-</svg>
-  <figcaption><span class="lang-zh">先说你卡在哪。例如：我理一下，目前卡在消息 fan-out。</span><span class="lang-en">Name the stuck point. For example: I am stuck on message fan-out, let me place it.</span></figcaption>
-</div>
-<div class="slide">
-  <svg viewBox="0 0 960 420" class="board" role="img">
-  <g>
-    <rect x="62" y="150" width="260" height="96" rx="12" class="box"/>
-    <text x="192" y="184" text-anchor="middle" class="label">Step back</text>
-    <text x="192" y="208" text-anchor="middle" class="sub">go up a level</text>
-  </g>
-  <g>
-    <rect x="350" y="150" width="260" height="96" rx="12" class="box alt"/>
-    <text x="480" y="184" text-anchor="middle" class="label">Ask</text>
-    <text x="480" y="208" text-anchor="middle" class="sub">request a hint</text>
-  </g>
-  <line x1="328" y1="198" x2="339" y2="198" class="wire"/>
-  <polygon points="339,193 348,198 339,203" class="head"/>
-  <g>
-    <rect x="638" y="150" width="260" height="96" rx="12" class="box"/>
-    <text x="768" y="184" text-anchor="middle" class="label">Switch</text>
-    <text x="768" y="208" text-anchor="middle" class="sub">another design</text>
-  </g>
-  <line x1="616" y1="198" x2="627" y2="198" class="wire"/>
-  <polygon points="627,193 636,198 627,203" class="head"/>
-</svg>
-  <figcaption><span class="lang-zh">三条出路：退回高层、向面试官要提示、换一个你能讲完的方案。要提示不扣分。</span><span class="lang-en">Three ways out: step back up, ask for a hint, or switch to a design you can finish. Asking is fine.</span></figcaption>
-</div>
-<div class="slide">
-  <svg viewBox="0 0 960 420" class="board" role="img">
-  <g>
-    <rect x="62" y="150" width="260" height="96" rx="12" class="box"/>
-    <text x="192" y="184" text-anchor="middle" class="label">SPOF</text>
-    <text x="192" y="208" text-anchor="middle" class="sub">replica</text>
-  </g>
-  <g>
-    <rect x="350" y="150" width="260" height="96" rx="12" class="box"/>
-    <text x="480" y="184" text-anchor="middle" class="label">Hot key</text>
-    <text x="480" y="208" text-anchor="middle" class="sub">shard, cache</text>
-  </g>
-  <line x1="328" y1="198" x2="339" y2="198" class="wire"/>
-  <polygon points="339,193 348,198 339,203" class="head"/>
-  <g>
-    <rect x="638" y="150" width="260" height="96" rx="12" class="box"/>
-    <text x="768" y="184" text-anchor="middle" class="label">Stale cache</text>
-    <text x="768" y="208" text-anchor="middle" class="sub">TTL</text>
-  </g>
-  <line x1="616" y1="198" x2="627" y2="198" class="wire"/>
-  <polygon points="627,193 636,198 627,203" class="head"/>
-</svg>
-  <figcaption><span class="lang-zh">Wrap-up 准备三个 bottleneck 口播。流量翻 10 倍、机房挂了、怎么监控，都从这里接。</span><span class="lang-en">Keep three bottleneck lines for the wrap-up. 10× traffic, a dead datacenter, and monitoring all hang off these.</span></figcaption>
-</div>
-</figure>
-    <p class="cite"><span class="lang-zh">失败和多区域的机制在 <span class="chip soon">Ch36 · CAP / SLO</span><span class="chip soon">Ch42 · 弹性</span>。面试先用上面三个 bottleneck 开口。</span><span class="lang-en">Failure and multi-region mechanisms are in <span class="chip soon">Ch36 · CAP / SLO</span><span class="chip soon">Ch42 · resilience</span>. In the interview, start from the three bottlenecks above.</span></p>
+    <h2><span class="lang-zh">闪卡</span><span class="lang-en">Flashcards</span></h2>
+    <p class="cite"><span class="lang-zh">点一下翻面。能把那次 GET 讲出来才算会。</span><span class="lang-en">Click to flip. Knowing means you can walk that GET.</span></p>
+    <div class="cards-grid">
+      <button type="button" class="flip"><span class="q"><span class="lang-zh">四步各在图上加什么？</span><span class="lang-en">What does each step add on the drawing?</span></span><span class="a"><span class="lang-zh">范围划边界并排除结账；估算用 5,000 对 100 加上缓存；高层补同步 200 并故意不连队列；故障用红线放行 100、其余 503。</span><span class="lang-en">Scope draws the boundary and leaves checkout out. The estimate adds a cache from 5,000 versus 100. High-level adds the sync 200 and leaves the queue unwired. Failure admits 100 on a red line and 503s the rest.</span></span></button>
+      <button type="button" class="flip"><span class="q"><span class="lang-zh">1,000 QPS 是怎么除出来的？</span><span class="lang-en">Where does 1,000 QPS come from?</span></span><span class="a"><span class="lang-zh">8,640,000 × 10 = 86,400,000 次读。86,400 × 1,000 = 86,400,000，所以平均正好 1,000。峰值再 ×5 = 5,000。</span><span class="lang-en">8,640,000 × 10 = 86,400,000 reads. 86,400 × 1,000 = 86,400,000, so the average is exactly 1,000. Peak ×5 = 5,000.</span></span></button>
+      <button type="button" class="flip"><span class="q"><span class="lang-zh">为什么是大约 98% 命中？</span><span class="lang-en">Why about a 98% hit rate?</span></span><span class="a"><span class="lang-zh">10 ms 寻道串行约每秒 100 次。100 ÷ 5,000 = 0.02，所以未命中只能约 2%。这是要求，不是测量。</span><span class="lang-en">A 10 ms serial seek is about 100 per second. 100 ÷ 5,000 = 0.02, so misses can be only about 2%. That is a requirement, not a measurement.</span></span></button>
+      <button type="button" class="flip"><span class="q"><span class="lang-zh">谁拥有商品行？</span><span class="lang-en">Who owns the product row?</span></span><span class="a"><span class="lang-zh">Product Store。服务无状态，缓存可丢。只改缓存不算改价成功。</span><span class="lang-en">Product Store. The service is stateless and the cache is droppable. Writing the cache alone is not a successful price change.</span></span></button>
+      <button type="button" class="flip"><span class="q"><span class="lang-zh">为什么队列和第二机房不连线？</span><span class="lang-en">Why are the queue and Region B unwired?</span></span><span class="a"><span class="lang-zh">写大约 0.6 QPS，没有扇出要解开。跨大陆往返约 150 ms，会吃掉 80 ms 预算。</span><span class="lang-en">Writes are about 0.6 QPS, so no fan-out needs detaching. A cross-continent round trip is about 150 ms and spends the 80 ms budget.</span></span></button>
+      <button type="button" class="flip"><span class="q"><span class="lang-zh">缓存层挂了，用户看到什么？</span><span class="lang-en">What do users see when the cache tier is down?</span></span><span class="a"><span class="lang-zh">大约 100 QPS 回源，读到行就是 200。峰值下其余约 4,900 是 503，不是无上限打到存储。</span><span class="lang-en">About 100 QPS reach the store and return 200 when the row exists. At the peak the other ~4,900 are 503, not an uncapped store flood.</span></span></button>
+      <button type="button" class="flip"><span class="q"><span class="lang-zh">「这个系统是 AP」错在哪？</span><span class="lang-en">What is wrong with “this system is AP”?</span></span><span class="a"><span class="lang-zh">分区期间才选，而且按操作选。浏览可以有界陈旧，改价可以拒绝。无分区时不必放弃 C 或 A。</span><span class="lang-en">The choice is during a partition and per operation. Browse may be bounded-stale; a price write may refuse. With no partition you need not give up C or A.</span></span></button>
+      <button type="button" class="flip"><span class="q"><span class="lang-zh">收口哪三句，不能说什么？</span><span class="lang-en">Which three lines close, and what can you not say?</span></span><span class="a"><span class="lang-zh">缓存故障域、热 key、30 秒旧价。不能说设计完美。监控收在延迟、流量、错误、饱和。</span><span class="lang-en">Cache failure domain, hot key, 30-second price. Do not say the design is perfect. Monitoring closes on latency, traffic, errors, and saturation.</span></span></button>
+    </div>
   </section>
 
-  <section>
-    <h2><span class="lang-zh">追问时怎么接</span><span class="lang-en">How to take the follow-ups</span></h2>
-    <div class="bilingual">
-  <div class="lang-zh"><p class="col-kicker">中文</p>
-<ol>
-        <li>还有什么问题？挑两个 bottleneck 和改进，不要说完美。</li>
-        <li>流量翻 10 倍？分片、读写分离、缓存。故事在 Ch02。</li>
-        <li>一个机房挂了？先说多副本和你愿意牺牲哪一种一致性，再提多区域。</li>
-        <li>怎么监控？四个黄金信号，外加一条请求能追下去。</li>
-        <li>为什么选 A 不选 B？必须有一句 trade-off，不能只说业界都这么做。</li>
-        </ol>
-        <details class="fold"><summary>2026 和原书差在哪</summary>
-        <p>原书默认物理白板，现在虚拟白板是常态，提前练共享文档。原书不太推 API，中小题你应该在 Step 2 自己列出来。原书几乎不提模型，现在可能追问向量检索，那是 M5，不是这一章的第一答案。</p>
-        </details>
-  </div>
-  <div class="lang-en"><p class="col-kicker">English</p>
-<ol>
-        <li>Anything else? Name two bottlenecks and a fix. Do not say perfect.</li>
-        <li>10× traffic? Shard, split reads and writes, add cache. That story is Ch02.</li>
-        <li>One datacenter dies? Start with replicas and which consistency you will give up, then multi-region.</li>
-        <li>How do you monitor? The four golden signals, plus a way to follow one request.</li>
-        <li>Why A and not B? You need a trade-off, not "the industry does this".</li>
-        </ol>
-        <details class="fold"><summary>2026 versus the book</summary>
-        <p>The book assumes a physical whiteboard. A shared doc is the normal board now, so practice that. The book is light on APIs; on a medium problem you should list endpoints in step 2. The book barely mentions models. A vector-search follow-up belongs to M5, not to your first answer here.</p>
-        </details>
-  </div>
-</div>
-  </section>
-
-  <section>
-    <h2><span class="lang-zh">下一步</span><span class="lang-en">Next</span></h2>
-    <div class="bilingual">
-  <div class="lang-zh"><p class="col-kicker">中文</p>
-<p>合上这一页，把 45 分钟剧本对着空气走一遍：复述、问需求、估一个数量级、画高层并问 buy-in、挖一块 hard part、用两个 bottleneck 收尾。哪一步说不利索，就回哪一节。</p><p>下一章是从零扩到百万用户（计划 2）。想直接看一道完整题，打开 <a href="ch09.html">Ch09 短链</a>。</p>
-  </div>
-  <div class="lang-en"><p class="col-kicker">English</p>
-<p>Close the page and walk the 45 minutes out loud: restate, ask, one order-of-magnitude estimate, a high-level picture plus buy-in, one hard part, two bottlenecks to close. Whichever step snags, go back to that section.</p><p>Next is scaling from zero to a million users (plan 2). To see a full case now, open <a href="ch09.html">Ch09, the URL shortener</a>.</p>
-  </div>
-</div>
-  </section>
-<section>
-  <h2><span class="lang-zh">闪卡</span><span class="lang-en">Flashcards</span></h2>
-  <p class="cite"><span class="lang-zh">点一下翻面。能讲出来才算会。</span><span class="lang-en">Click to flip. If you can say it, you know it.</span></p>
-  <div class="cards-grid">
-<button type="button" class="flip">
-  <span class="q"><span class="lang-zh">系统设计面试主要考终图吗？</span><span class="lang-en">Do they mainly grade the final diagram?</span></span>
-  <span class="a"><span class="lang-zh">不考。考澄清、估算、trade-off，以及你卡定时还说不说话。</span><span class="lang-en">No. They grade clarifying, estimates, trade-offs, and whether you still talk when you stall.</span></span>
-</button>
-<button type="button" class="flip">
-  <span class="q"><span class="lang-zh">四步各给几分钟？</span><span class="lang-en">How many minutes for each step?</span></span>
-  <span class="a"><span class="lang-zh">定范围 3–10，高层 10–15，deep dive 10–25，wrap-up 3–5。</span><span class="lang-en">Scope 3–10, high-level 10–15, deep dive 10–25, wrap-up 3–5.</span></span>
-</button>
-<button type="button" class="flip">
-  <span class="q"><span class="lang-zh">最大的 red flag 是什么？</span><span class="lang-en">What is the biggest red flag?</span></span>
-  <span class="a"><span class="lang-zh">沉默，以及没问需求就画图。over-engineering 紧跟在后面。</span><span class="lang-en">Silence, and drawing before you ask. Over-engineering is right behind those.</span></span>
-</button>
-<button type="button" class="flip">
-  <span class="q"><span class="lang-zh">Step 2 结束的标志是什么？</span><span class="lang-en">What marks the end of step 2?</span></span>
-  <span class="a"><span class="lang-zh">面试官对方向点头。没有 buy-in 不要往下挖。</span><span class="lang-en">They agree with the direction. No buy-in, no deep dive.</span></span>
-</button>
-<button type="button" class="flip">
-  <span class="q"><span class="lang-zh">Deep dive 挖哪里？</span><span class="lang-en">Where does the deep dive go?</span></span>
-  <span class="a"><span class="lang-zh">这题的 hard part，或他们刚问的那块。深度大于广度。</span><span class="lang-en">The hard part of this question, or whatever they just asked. Depth over breadth.</span></span>
-</button>
-<button type="button" class="flip">
-  <span class="q"><span class="lang-zh">Wrap-up 第一句不要说什么？</span><span class="lang-en">What do you not say first in the wrap-up?</span></span>
-  <span class="a"><span class="lang-zh">不要说设计完美。准备单点、热点、缓存不一致这三类 bottleneck。</span><span class="lang-en">Do not say the design is perfect. Keep single point of failure, hot key, and stale cache ready.</span></span>
-</button>
-<button type="button" class="flip">
-  <span class="q"><span class="lang-zh">M6 什么时候读？</span><span class="lang-en">When do you read M6?</span></span>
-  <span class="a"><span class="lang-zh">当词典。设计题点到缓存、CAP、复制时再跳，不必先读完。</span><span class="lang-en">As a dictionary. Jump in when a design names cache, CAP, or replication. Do not read it all first.</span></span>
-</button>
-<button type="button" class="flip">
-  <span class="q"><span class="lang-zh">M5 做什么，不做什么？</span><span class="lang-en">What is M5, and what is it not?</span></span>
-  <span class="a"><span class="lang-zh">LLM 推理、RAG、Agent 基建。不做推荐系统。</span><span class="lang-en">LLM inference, RAG, and Agent infrastructure. Not a recommender system.</span></span>
-</button>
-  </div>
-</section><p><button type="button" class="read-toggle">
-  <span class="when-off"><span class="lang-zh">我已学完本章</span><span class="lang-en">Mark this chapter done</span></span>
-  <span class="when-on"><span class="lang-zh">已学完本章</span><span class="lang-en">Completed</span></span>
-</button></p>
-<p class="cite"><span class="lang-zh">进度存在这台浏览器里。</span><span class="lang-en">Saved in this browser only.</span></p>
+  <p><button type="button" class="read-toggle"><span class="when-off"><span class="lang-zh">我已学完本章</span><span class="lang-en">Mark this chapter done</span></span><span class="when-on"><span class="lang-zh">已学完本章</span><span class="lang-en">Completed</span></span></button></p>
+  <p class="cite"><span class="lang-zh">进度存在这台浏览器里。</span><span class="lang-en">Saved in this browser only.</span></p>
 </article>
 </main>
 <script src="../assets/js/nav.js"></script>
