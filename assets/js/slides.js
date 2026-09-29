@@ -3,16 +3,40 @@
   "use strict";
 
   var activeDeck = null;
+  var controllers = [];
   var reduced = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)");
+  var speedSteps = [0.5, 1, 1.5, 2];
+  var speedIndex = speedSteps.indexOf(Number(readSetting("sd-deck-speed", "1")));
+  var loopEnabled = readSetting("sd-deck-loop", "on") !== "off";
+  if (speedIndex < 0) speedIndex = 1;
+
+  function readSetting(key, fallback) {
+    try {
+      var value = window.localStorage.getItem(key);
+      return value === null ? fallback : value;
+    } catch (_) {
+      return fallback;
+    }
+  }
+
+  function saveSetting(key, value) {
+    try { window.localStorage.setItem(key, value); } catch (_) { /* file:// may deny storage */ }
+  }
+
+  function refreshAll() {
+    controllers.forEach(function (controller) { controller.applyPrefs(); });
+  }
 
   function words() {
     var en = document.documentElement.getAttribute("data-locale") === "en";
     return en ? {
-      prev: "Prev stroke", next: "Next stroke", play: "Play", pause: "Pause",
-      replay: "Replay", step: "Go to stroke "
+      prev: "Prev", next: "Next", play: "Play", pause: "Pause", replay: "Replay",
+      speed: "Speed", speedTitle: "Speed: click to change", loopOn: "Loop on",
+      loopOff: "Loop off", loopTitle: "Toggle automatic repeat", step: "Go to stroke "
     } : {
-      prev: "上一笔", next: "下一笔", play: "播放", pause: "暂停",
-      replay: "重播", step: "跳到第 "
+      prev: "上一步", next: "下一步", play: "播放", pause: "暂停", replay: "重播",
+      speed: "速度", speedTitle: "速度：点击切换", loopOn: "循环开",
+      loopOff: "循环关", loopTitle: "切换自动重复播放", step: "跳到第 "
     };
   }
 
@@ -28,7 +52,7 @@
     var finished = false;
     var takenOver = false;
     var visible = false;
-    var interval = Math.max(1800, Number(fig.getAttribute("data-interval")) || 3500);
+    var interval = Math.max(900, Number(fig.getAttribute("data-interval")) || 1800);
     var autoplay = fig.getAttribute("data-autoplay") !== "off";
 
     fig.tabIndex = 0;
@@ -43,6 +67,12 @@
     toggle.type = "button";
     toggle.className = "deck-toggle";
     toggle.setAttribute("aria-pressed", "false");
+    var speed = document.createElement("button");
+    speed.type = "button";
+    speed.className = "deck-speed";
+    var loop = document.createElement("button");
+    loop.type = "button";
+    loop.className = "deck-loop";
     var count = document.createElement("span");
     count.className = "deck-count";
     var dots = document.createElement("div");
@@ -61,11 +91,13 @@
       });
       dots.appendChild(dot);
     });
-    bar.appendChild(prev);
     bar.appendChild(toggle);
+    bar.appendChild(prev);
+    bar.appendChild(next);
+    bar.appendChild(speed);
+    bar.appendChild(loop);
     bar.appendChild(count);
     bar.appendChild(dots);
-    bar.appendChild(next);
     fig.appendChild(bar);
 
     function clearTimer() {
@@ -81,6 +113,15 @@
       toggle.hidden = Boolean(reduced && reduced.matches);
       toggle.setAttribute("aria-label", toggle.textContent);
       toggle.setAttribute("aria-pressed", running ? "true" : "false");
+      speed.textContent = word.speed + " " + speedSteps[speedIndex] + "×";
+      speed.title = word.speedTitle;
+      speed.setAttribute("aria-label", speed.textContent);
+      speed.hidden = Boolean(reduced && reduced.matches);
+      loop.textContent = loopEnabled ? word.loopOn : word.loopOff;
+      loop.title = word.loopTitle;
+      loop.setAttribute("aria-label", loop.textContent);
+      loop.setAttribute("aria-pressed", loopEnabled ? "true" : "false");
+      loop.hidden = Boolean(reduced && reduced.matches);
       count.textContent = (i + 1) + " / " + slides.length;
       Array.prototype.forEach.call(dots.children, function (dot, n) {
         dot.classList.toggle("is-on", n === i);
@@ -114,12 +155,17 @@
       if (!running) return;
       timer = window.setTimeout(function () {
         if (i >= slides.length - 1) {
-          stop(true);
+          if (loopEnabled) {
+            show(0);
+            schedule();
+          } else {
+            stop(true);
+          }
           return;
         }
         show(i + 1);
         schedule();
-      }, interval);
+      }, interval / speedSteps[speedIndex]);
     }
 
     function play(fromUser) {
@@ -140,6 +186,16 @@
 
     prev.addEventListener("click", function () { takeOver(); show(i - 1); });
     next.addEventListener("click", function () { takeOver(); show(i + 1); });
+    speed.addEventListener("click", function () {
+      speedIndex = (speedIndex + 1) % speedSteps.length;
+      saveSetting("sd-deck-speed", String(speedSteps[speedIndex]));
+      refreshAll();
+    });
+    loop.addEventListener("click", function () {
+      loopEnabled = !loopEnabled;
+      saveSetting("sd-deck-loop", loopEnabled ? "on" : "off");
+      refreshAll();
+    });
     toggle.addEventListener("click", function () {
       if (running) { takeOver(); return; }
       if (finished || i === slides.length - 1) show(0);
@@ -150,9 +206,11 @@
       if (event.key === "ArrowRight") { takeOver(); show(i + 1); event.preventDefault(); }
       if (event.key === "ArrowLeft") { takeOver(); show(i - 1); event.preventDefault(); }
       if (event.key === " ") { toggle.click(); event.preventDefault(); }
+      if (event.key === "s" || event.key === "S") { speed.click(); event.preventDefault(); }
+      if (event.key === "l" || event.key === "L") { loop.click(); event.preventDefault(); }
     });
     fig.addEventListener("focusin", function (event) {
-      if (event.target !== toggle) takeOver();
+      if (event.target === fig) takeOver();
     });
     document.addEventListener("visibilitychange", function () {
       if (document.hidden && running) stop(false);
@@ -167,6 +225,10 @@
         visible = value;
         if (visible) play(false);
         else if (running) stop(false);
+      },
+      applyPrefs: function () {
+        updateControls();
+        if (running) schedule();
       }
     };
 
@@ -185,7 +247,10 @@
     var entries = [];
     document.querySelectorAll("figure.deck").forEach(function (fig) {
       var api = boot(fig);
-      if (api) entries.push({ fig: fig, api: api });
+      if (api) {
+        controllers.push(api);
+        entries.push({ fig: fig, api: api });
+      }
     });
 
     if (!("IntersectionObserver" in window)) {

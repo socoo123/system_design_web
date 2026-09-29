@@ -28,7 +28,7 @@
   <header>
     <div class="ch-kicker"><span class="lang-zh">CHAPTER 09 · 设计题</span><span class="lang-en">CHAPTER 09 · case</span></div>
     <h1><span class="lang-zh">设计短链服务</span><span class="lang-en">Design a URL shortener</span></h1>
-    <p class="ch-meta-line"><span class="lang-zh">约 35–40 分钟 · 前置：Ch01 · 7 组自动播放架构图</span><span class="lang-en">~35–40 min · after Ch01 · 7 autoplay architecture decks</span></p>
+    <p class="ch-meta-line"><span class="lang-zh">主线约 40 分钟 + 深挖约 15 分钟 · 前置：Ch01 · 7 组自动播放架构图</span><span class="lang-en">~40 min core + ~15 min deep dives · after Ch01 · 7 autoplay architecture decks</span></p>
   </header>
 
   <section class="goal">
@@ -67,6 +67,30 @@
         <tr><td>6-char base62</td><td>62<sup>6</sup> = 56,800,235,584</td><td><span class="lang-zh">理论约 155 年空间，但仍预留增长与不复用 ID</span><span class="lang-en">About 155 theoretical years, with room reserved for growth and non-reuse</span></td></tr>
       </tbody>
     </table>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">为什么先算这些数</p>
+        <p>粗估不是面试仪式，它应该删掉不必要的复杂度。每天创建 100 万条，平均写 QPS 只有 11.6；即使给 10 倍峰值，单个正常数据库集群也不会因为这点写入量被压垮。因此第一张图不需要分库分表、Kafka 写扩散或全球协调器。写侧真正困难的是：多个实例同时创建时如何不发重复码，客户端超时重试时如何不重复创建，以及 custom alias 如何原子抢占。</p>
+        <p>读侧完全不同。每天约 1 亿次跳转，平均约 1,157 QPS，10 倍峰值约 11.6K QPS；而且流量通常不是均匀分布，一个活动链接可能在几分钟里吃掉大部分请求。这才解释了为什么 Redirect Service 要无状态扩容、为什么前面放 Local LRU 和 Redis、为什么同一个 cache miss 要合并回源。</p>
+        <p>容量也要落到存储。若每条记录连 URL、owner、状态、时间戳和索引开销按 0.5 KB 粗估，一年新增 3.65 亿条就是约 183 GB 原始数据；算三副本、索引、空间放大和备份，规划到 0.6–1 TB/年更诚实。它不算小到可以忽略，但也远没大到第一天就必须自研全球 KV。</p>
+        <p>最后别把目标网页流量算到短链系统。短链服务只返回一个很小的 302 响应和 <code>Location</code> header。真正的 HTML、图片和视频由目标站点承担。若 302 响应按 0.5 KB 粗估，11.6K peak QPS 约 5.8 MB/s，网络不是首要矛盾，尾延迟和热点才是。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">Why these numbers come first</p>
+        <p>Estimation is not ceremony; it should remove unnecessary machinery. One million creates per day is only 11.6 average write QPS, or roughly 116 at a 10× peak. That does not justify sharding, a write fan-out pipeline, or global coordination in the first diagram. The write-side problems are uniqueness across concurrent instances, safe client retries, and atomic reservation of custom aliases.</p>
+        <p>Reads are different. One hundred million redirects per day average about 1,157 QPS and reach roughly 11.6K at a 10× peak. Demand is also skewed: one campaign code can dominate a short interval. That is why Redirect Service scales statelessly, why Local LRU and Redis exist, and why concurrent misses for the same key must be coalesced.</p>
+        <p>Capacity needs a storage consequence. At an assumed 0.5 KB per mapping including URL, owner, status, timestamps, and index overhead, 365 million annual rows are about 183 GB raw. Three replicas, indexes, amplification, and backups make 0.6–1 TB per year a more honest planning range. It matters, but it does not demand a custom global KV on day one.</p>
+        <p>Do not charge the destination page to this service. The shortener returns a small 302 response and a <code>Location</code> header; the destination serves its own HTML, images, and video. At an assumed 0.5 KB per redirect response, 11.6K peak QPS is about 5.8 MB/s. Tail latency and hot keys dominate bandwidth.</p>
+      </div>
+    </div>
+    <h3><span class="lang-zh">把目标写成可讨论的 SLO</span><span class="lang-en">Turn goals into discussable SLOs</span></h3>
+    <table>
+      <thead><tr><th>Path</th><th><span class="lang-zh">示例目标，不是事实</span><span class="lang-en">Example target, not a fact</span></th><th><span class="lang-zh">设计影响</span><span class="lang-en">Design impact</span></th></tr></thead>
+      <tbody>
+        <tr><td>Redirect</td><td>99.99% availability; service-side p99 &lt; 50 ms</td><td><span class="lang-zh">短关键路径、缓存、统计异步、读侧独立故障域</span><span class="lang-en">Short path, caching, async analytics, isolated read failures</span></td></tr>
+        <tr><td>Create</td><td>99.9% availability; p99 &lt; 300 ms</td><td><span class="lang-zh">允许更重的校验；allocator 故障可短暂消耗本地号段</span><span class="lang-en">More validation is acceptable; local leases mask allocator outages</span></td></tr>
+        <tr><td>Revoke</td><td><span class="lang-zh">例如 10 秒内全局生效</span><span class="lang-en">For example, globally effective within 10 seconds</span></td><td><span class="lang-zh">决定缓存 TTL、主动失效和故障时能否读 stale</span><span class="lang-en">Determines TTL, invalidation, and stale-read policy</span></td></tr>
+      </tbody>
+    </table>
+    <p class="cite"><span class="lang-zh">面试时要明确说“这是我为了继续设计给出的目标，请面试官纠正”，不要把假设伪装成 Bitly 或 TinyURL 的内部数据。</span><span class="lang-en">Say these are working targets chosen to continue the design, not private production numbers from Bitly or TinyURL.</span></p>
   </section>
 
   <section>
@@ -153,6 +177,25 @@
       </div>
     </figure>
     <p class="cite"><span class="lang-zh">这张图的原则：先画最小闭环，再让每个新组件回答一个已出现的问题。</span><span class="lang-en">Rule: close the smallest loop first; every new component must answer an observed problem.</span></p>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">怎么读这张终图</p>
+        <p><strong>Edge + LB</strong> 负责 TLS、域名路由、基础限流和把两类请求送到正确服务。它不拥有短链映射。把状态放在 Edge 里会让发布、扩缩容和多节点一致性变得困难；这里只让它做便宜、可复制的工作。</p>
+        <p><strong>Shorten Service</strong> 是写侧。它做 URL 语法与 scheme 校验、tenant quota、幂等处理、自定义 alias 抢占，以及普通短码生成。它可以容忍几百毫秒延迟，却必须把“到底创建了哪一个 code”回答得确定。<strong>Redirect Service</strong> 是读侧，只做 code 校验、缓存 / 存储查询、状态判断和返回 302。两者逻辑拆开，是为了让延迟目标、扩缩容比例和故障影响互不绑架；小规模时它们仍可以部署在同一个代码库或进程里。</p>
+        <p><strong>Mapping Store</strong> 保存 <code>code → Link record</code>，是唯一权威来源。Redis 和 Local LRU 都是可丢的派生状态：丢了会变慢，不能变错。面试中说“Redis 挂了还有数据库”不够，还要补一句：回源必须限流并合并同 key 请求，否则缓存故障会瞬间把数据库拖死。</p>
+        <p><strong>ID Allocator</strong> 只服务普通创建，不参与跳转。这个依赖方向很重要：即使发号器故障，已有链接仍应正常跳转。<strong>Click Stream</strong> 同样不在同步回程上；它把点击统计、去重、聚合与主路径隔开。架构图上用虚线不是装饰，而是在声明“这条支路失败时 302 仍成功”。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">How to read the final diagram</p>
+        <p><strong>Edge + LB</strong> terminates TLS, routes domains, applies basic rate limits, and sends each request type to the right service. It owns no link mapping. Putting mappings at the edge would complicate rollout, scaling, and consistency; keep this layer cheap and reproducible.</p>
+        <p><strong>Shorten Service</strong> is the write side: syntax and scheme validation, tenant quotas, idempotency, custom-alias reservation, and ordinary code generation. It may tolerate hundreds of milliseconds but must answer deterministically which code was created. <strong>Redirect Service</strong> is the read side: validate the code, query cache or storage, evaluate status, and return the redirect. The logical split isolates latency goals, scaling ratios, and failures; at small scale both may still ship in one codebase or process.</p>
+        <p><strong>Mapping Store</strong> owns <code>code → Link record</code>. Redis and Local LRU are disposable derived state: losing them may slow the system but must not make it wrong. “Fall back to the database” is incomplete unless requests are rate-limited and same-key misses are coalesced.</p>
+        <p><strong>ID Allocator</strong> serves normal creates only and never appears on redirect. That dependency direction preserves existing links during allocator failure. <strong>Click Stream</strong> is also outside the response path; its dashed line is a failure contract stating that a broken analytics branch does not break the 302.</p>
+      </div>
+    </div>
+    <h3><span class="lang-zh">为什么现在不画 CDN 和 multi-region</span><span class="lang-en">Why CDN and multi-region are absent—for now</span></h3>
+    <div class="bilingual">
+      <div class="lang-zh"><p>CDN 可以缓存 302，但这样点击可能不再经过 Redirect Service，统计、撤销和 retarget 的语义都会变化。只有当面试官把全球延迟或源站容量提为目标时，才把“边缘短 TTL + edge log / event”作为下一层 trade-off。multi-region 也一样：它会立即引入 code 唯一性、跨区复制、撤销传播和冲突解决问题。先证明单 Region 方案达不到目标，再付这笔复杂度。</p></div>
+      <div class="lang-en"><p>A CDN can cache a 302, but clicks may then bypass Redirect Service, changing analytics, revocation, and retarget semantics. Add short edge TTL plus edge logs/events only when global latency or origin capacity becomes a requirement. Multi-region likewise introduces code uniqueness, replication, revocation propagation, and conflict resolution. Pay that complexity only after showing the single-region design misses a stated goal.</p></div>
+    </div>
   </section>
 
   <section>
@@ -169,6 +212,31 @@
     </div>
     <pre><code>Link(code PK, target_url, owner_id, status, created_at, expires_at, version)
 Idempotency(owner_id, key, code, expires_at, PRIMARY KEY(owner_id, key))</code></pre>
+    <h3><span class="lang-zh">接口契约要解决重试与竞争</span><span class="lang-en">The API contract must settle retries and races</span></h3>
+    <pre><code>POST /v1/links
+Idempotency-Key: 6fc1…
+{
+  "target_url": "https://example.com/campaign",
+  "custom_alias": "sale-2026",
+  "expires_at": "2026-12-31T16:00:00Z"
+}
+
+201 Created
+{ "code": "sale-2026", "short_url": "https://sho.rt/sale-2026" }</code></pre>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">四个容易漏掉的语义</p>
+        <p><strong>第一，Idempotency-Key 代表一次创建意图，不代表 target URL。</strong>客户端发出请求后超时，它不知道服务端是否已经成功写入；重试必须得到第一次的 code。若把 target URL 当幂等键，同一用户为两个 campaign 创建不同统计链接的需求就被错误合并。建议键空间至少包含 owner / tenant，并给幂等记录设置比客户端最大重试窗口更长的 TTL。</p>
+        <p><strong>第二，自定义 alias 的唯一性要靠存储条件写。</strong>“先 SELECT 看是否存在，再 INSERT”在并发下会让两个请求都看到空位。正确做法是唯一索引、<code>INSERT ... ON CONFLICT</code> 或 KV 的 compare-and-set / put-if-absent；谁写成功谁拥有 alias，失败者收到 409。</p>
+        <p><strong>第三，状态码要让调用者知道能否重试。</strong>格式不合法是 400，未认证是 401，自定义码冲突是 409，quota / rate limit 是 429，临时存储故障是 503。对 429 / 503 返回 <code>Retry-After</code>，再配合相同 Idempotency-Key 重试；不要把所有失败都包成 200 加业务字符串。</p>
+        <p><strong>第四，Link record 需要状态和版本。</strong><code>status</code> 区分 active、revoked、blocked；<code>expires_at</code> 表示时间到期；<code>version</code> 帮助缓存失效和并发 retarget。删除通常做 tombstone 或状态转换而不是立刻复用 code，否则旧缓存、搜索引擎和历史消息可能把旧短链导向完全无关的新用户目标。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">Four semantics people often miss</p>
+        <p><strong>First, Idempotency-Key identifies one create intent, not a target URL.</strong> After a timeout the client cannot know whether the server committed, so a retry must recover the first code. Using the target as the key incorrectly merges two campaigns that intentionally share a landing page. Scope the key by owner or tenant and retain it longer than the maximum client retry window.</p>
+        <p><strong>Second, custom-alias uniqueness belongs in a conditional storage operation.</strong> A SELECT followed by INSERT races because two writers can both observe absence. Use a unique index, <code>INSERT ... ON CONFLICT</code>, compare-and-set, or put-if-absent. The winner owns the alias; the loser receives 409.</p>
+        <p><strong>Third, status codes tell clients whether to retry.</strong> Malformed input is 400, missing authentication 401, alias collision 409, rate or quota pressure 429, and transient storage failure 503. Pair 429/503 with <code>Retry-After</code> and reuse the Idempotency-Key; do not flatten every failure into HTTP 200 plus a string.</p>
+        <p><strong>Fourth, a Link record needs status and version.</strong> <code>status</code> distinguishes active, revoked, and blocked; <code>expires_at</code> handles time expiry; <code>version</code> supports cache invalidation and concurrent retargeting. Deletion normally becomes a tombstone or state change rather than immediate code reuse, because stale caches and old messages could otherwise redirect an old code to an unrelated new owner.</p>
+      </div>
+    </div>
   </section>
 
   <section>
@@ -233,6 +301,37 @@ Idempotency(owner_id, key, code, expires_at, PRIMARY KEY(owner_id, key))</code><
         <figcaption><span class="lang-zh">先让 mapping 的唯一约束定胜负，再记录幂等结果并返回。跨两份状态的原子性要靠同库事务或可重试补偿明确说明。</span><span class="lang-en">Let the mapping constraint decide uniqueness, then record the idempotent result. State whether the two writes share a transaction or use retryable repair.</span></figcaption>
       </div>
     </figure>
+    <h3><span class="lang-zh">把一次普通创建完整推演</span><span class="lang-en">Walk one normal create all the way through</span></h3>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">正常路径</p>
+        <ol>
+          <li>Shorten Service 解析 URL，只接受明确允许的 scheme，做认证、quota 和便宜的滥用检查。URL normalization 要保守：host 大小写、默认端口等可以规范化，但不要随意重排 query，因为参数顺序和重复参数可能有业务语义。</li>
+          <li>用 <code>(owner_id, idempotency_key)</code> 查幂等记录。命中就返回保存的 code；未命中才继续。这个读取不是全局“同 URL 去重”，它只回答“这是不是同一次调用的重试”。</li>
+          <li>没有 custom alias 时，实例从本地号段拿下一个整数。正常请求不必每次访问发号数据库；只有当前号段接近耗尽时，后台预取下一段。双 buffer 可以让切段不暴露到 p99 延迟。</li>
+          <li>整数做 base62，并按产品契约 padding 成固定宽度。然后对 Mapping Store 执行条件插入。号段理论上已保证不冲突，但存储唯一约束仍是最后防线，也能挡住部署错误或重复消费。</li>
+          <li>写入幂等结果并返回 201。若 mapping 与 idempotency 在同一事务库，可以原子提交；若分开存储，就需要 outbox / repair job 或“先查 mapping 再修复幂等记录”的可重试流程。不能用一句“同时写两张表”跳过故障窗口。</li>
+        </ol>
+      </div>
+      <div class="lang-en"><p class="col-kicker">Happy path</p>
+        <ol>
+          <li>Shorten Service parses the URL, accepts only explicit schemes, authenticates, enforces quota, and runs bounded abuse checks. Normalize conservatively: host case and default ports are safe candidates, but arbitrary query reordering can change repeated-parameter semantics.</li>
+          <li>Look up <code>(owner_id, idempotency_key)</code>. A hit returns the stored code; only a miss continues. This is not global target deduplication—it answers whether this request is a retry of the same intent.</li>
+          <li>Without a custom alias, take the next integer from an in-memory segment. Ordinary requests do not hit the allocation database. Prefetch the next range before exhaustion; double buffering keeps segment rollover out of p99 latency.</li>
+          <li>Encode the integer in base62 and pad if the product promises fixed width. Insert the mapping conditionally. Segments should already avoid collisions, but a storage uniqueness constraint remains the final defense against deployment mistakes or duplicate processing.</li>
+          <li>Record the idempotency result and return 201. A shared transactional database can commit mapping and idempotency together. Separate stores need an outbox, repair job, or retry path that discovers the mapping and repairs the idempotency record. “Write both” is not a failure strategy.</li>
+        </ol>
+      </div>
+    </div>
+    <h3><span class="lang-zh">三个写入故障窗口</span><span class="lang-en">Three write failure windows</span></h3>
+    <table>
+      <thead><tr><th><span class="lang-zh">失败时刻</span><span class="lang-en">Failure point</span></th><th><span class="lang-zh">风险</span><span class="lang-en">Risk</span></th><th><span class="lang-zh">处理</span><span class="lang-en">Handling</span></th></tr></thead>
+      <tbody>
+        <tr><td><span class="lang-zh">拿到 ID、尚未写 mapping</span><span class="lang-en">ID allocated, mapping not written</span></td><td><span class="lang-zh">ID 有洞</span><span class="lang-en">Gap in sequence</span></td><td><span class="lang-zh">接受；唯一 ID 不要求连续，回收反而容易重复</span><span class="lang-en">Accept it; uniqueness does not require continuity, and recycling risks reuse</span></td></tr>
+        <tr><td><span class="lang-zh">mapping 成功、幂等记录失败</span><span class="lang-en">Mapping committed, idempotency failed</span></td><td><span class="lang-zh">客户端重试可能再分配</span><span class="lang-en">Retry may allocate again</span></td><td><span class="lang-zh">同库事务，或可根据 request ID 查回并修复</span><span class="lang-en">Transaction, or recover by request ID and repair</span></td></tr>
+        <tr><td><span class="lang-zh">服务返回前连接断开</span><span class="lang-en">Connection drops before response</span></td><td><span class="lang-zh">客户端不知道结果</span><span class="lang-en">Client cannot know outcome</span></td><td><span class="lang-zh">同一 Idempotency-Key 重试并返回原 code</span><span class="lang-en">Retry with the same key and recover the original code</span></td></tr>
+      </tbody>
+    </table>
+    <p class="cite"><span class="lang-zh"><strong>常见错误：</strong>为了追求“没有洞的连续 ID”引入全局锁。短码只要求唯一和长度可控；号段有洞完全可接受，强行连续会把低 QPS 写路径变成单点协调瓶颈。</span><span class="lang-en"><strong>Common mistake:</strong> adding a global lock to eliminate sequence gaps. Codes need uniqueness and bounded length, not continuity. Gaps are harmless; global serialization is not.</span></p>
   </section>
 
   <section>
@@ -294,6 +393,29 @@ Idempotency(owner_id, key, code, expires_at, PRIMARY KEY(owner_id, key))</code><
         <figcaption><span class="lang-zh">先把 302 交给浏览器，再发布 click event。MQ / analytics 故障不应拖慢跳转；统计允许明确的降级与去重策略。</span><span class="lang-en">Return the 302 first, then publish the click event. Analytics failure must not stretch redirect latency.</span></figcaption>
       </div>
     </figure>
+    <h3><span class="lang-zh">一次 redirect 到底做了什么</span><span class="lang-en">What one redirect actually does</span></h3>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">从 GET 到 Location</p>
+        <p>Edge 先拒绝明显非法的 code 形状，例如长度超限或含不在 alphabet 中的字符，避免垃圾请求进入应用层。Redirect Service 随后按 Local LRU → Redis → Mapping Store 查找。Local LRU 延迟最低，却是每个实例各自的一份；Redis 让实例共享热集；Mapping Store 才能回答权威状态。每一级 miss 都要区分“没有这个 key”和“这一层暂时不可用”，前者可以进入 negative cache，后者不能误判为 404。</p>
+        <p>读到记录后仍不能立刻 302。服务要检查 <code>status</code>、<code>expires_at</code>，必要时验证版本。active 才返回目标；unknown 用 404，明确 expired / revoked 可用 410 或安全说明页。把三者全部缓存成同一个 null 会让临时存储故障、真实不存在和已封禁无法区分，也会让恢复行为不可控。</p>
+        <p>成功响应包含 <code>Location</code>，以及与产品语义一致的 Cache-Control。若产品要求每次点击都计数、能迅速撤销与 retarget，就用 <code>Cache-Control: no-store</code>。如果允许统计近似、撤销有几十秒传播窗口，可以在浏览器或 CDN 给很短 TTL，降低源站延迟；但这是一笔明确交换，不是“302 自然不会缓存”。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">From GET to Location</p>
+        <p>The edge rejects malformed code shapes—excessive length or characters outside the alphabet—before they consume application work. Redirect Service then checks Local LRU, Redis, and finally Mapping Store. Local cache is fastest but per-instance; Redis shares the hot set; Mapping Store alone answers authoritative state. At every layer distinguish “key absent” from “layer unavailable.” The first may be negative-cached; the second must not become a false 404.</p>
+        <p>A found record is not immediately redirectable. Check <code>status</code>, <code>expires_at</code>, and when needed its version. Only active records return the target. Unknown may be 404; explicit expiry or revocation may be 410 or a safety page. Caching all three as the same null erases the difference between absence, a temporary store failure, and a blocked link.</p>
+        <p>A successful response carries <code>Location</code> and cache controls matching product semantics. If every click must be counted and revocation or retargeting must be immediate, use <code>Cache-Control: no-store</code>. If approximate analytics and a tens-of-seconds propagation window are acceptable, a short browser or CDN TTL can lower origin latency. That is an explicit exchange, not a property automatically granted by 302.</p>
+      </div>
+    </div>
+    <h3><span class="lang-zh">301、302、307 怎么选</span><span class="lang-en">Choosing among 301, 302, and 307</span></h3>
+    <div class="bilingual">
+      <div class="lang-zh"><p><strong>301</strong> 表达永久搬迁，RFC 允许启发式缓存；浏览器、代理或搜索引擎可能长期记住目标，所以不适合默认的可撤销短链。<strong>302</strong> 表达临时目标，是传统短链最常见答案；对本题的 GET 请求，历史上的 method rewrite 差异通常不构成问题。<strong>307</strong> 也是临时重定向，但明确保持原 method 和 body；如果系统允许非 GET 短链或要严格保留方法，可选 307。真正决定统计是否回源的仍是缓存策略与统计位置，而不是背诵一个状态码。</p></div>
+      <div class="lang-en"><p><strong>301</strong> declares a permanent move and is heuristically cacheable; browsers, intermediaries, and search engines may retain the target, making it a poor default for revocable links. <strong>302</strong> is temporary and remains the conventional shortener answer; historical method rewriting is normally irrelevant because this path starts with GET. <strong>307</strong> is also temporary but explicitly preserves method and body, useful if non-GET short links are supported. Whether analytics reaches origin still depends on cache policy and event placement—not a memorized status code.</p></div>
+    </div>
+    <h3><span class="lang-zh">统计事件不是“丢进 MQ”就结束</span><span class="lang-en">Analytics is more than “send it to a queue”</span></h3>
+    <div class="bilingual">
+      <div class="lang-zh"><p>一个 click event 至少带 <code>event_id</code>、code、occurred_at、粗粒度 client / referrer 信息和隐私策略允许的维度。生产者重试可能制造重复事件，因此消费者要按 event_id 去重或接受 at-least-once 后用幂等聚合。事件时间与处理时间要分开，否则 MQ 延迟会把昨天的点击算到今天。Analytics 不是 source of truth for redirect；它晚到、重复或短时不可用，都不应改变用户能否跳转。</p><p>如果业务声称“绝不丢一个点击”，就必须讨论本地持久化、同步日志或 edge event 的成本；它会增加跳转延迟与故障耦合。更常见的选择是 redirect SLO 优先，统计允许极小、可观测的损失，并通过 producer failure metric、queue lag 和对账任务量化，而不是嘴上说“异步所以可靠”。</p></div>
+      <div class="lang-en"><p>A click event should include an <code>event_id</code>, code, occurred-at time, coarse client/referrer context, and only privacy-approved dimensions. Producer retries create duplicates, so consumers deduplicate by event ID or use idempotent aggregation under at-least-once delivery. Separate event time from processing time so queue lag does not move yesterday’s clicks into today. Analytics is not redirect authority; late, duplicate, or temporarily unavailable events must not decide whether the user can redirect.</p><p>If the product claims zero click loss, discuss the latency and coupling cost of local durability, synchronous logs, or edge events. A more common choice prioritizes redirect SLO and accepts a tiny, measurable loss budget, observed through producer failures, queue lag, and reconciliation—not the slogan “it is async, therefore reliable.”</p></div>
+    </div>
   </section>
 
   <section>
@@ -343,6 +465,29 @@ Idempotency(owner_id, key, code, expires_at, PRIMARY KEY(owner_id, key))</code><
         <figcaption><span class="lang-zh">Snowflake 解决“分布式高吞吐唯一 ID”，不是“紧凑 6 位 token”。上界需要 11 个 base62 字符；截断任意位都会破坏原唯一性保证。[3][4]</span><span class="lang-en">Snowflake solves distributed high-throughput uniqueness, not compact six-character tokens. Its upper range needs 11 base62 characters; truncation voids the guarantee. [3][4]</span></figcaption>
       </div>
     </figure>
+    <h3><span class="lang-zh">四种方案不是谁更“高级”，而是谁匹配约束</span><span class="lang-en">Four choices: fit the constraint, not the fanciest algorithm</span></h3>
+    <table>
+      <thead><tr><th><span class="lang-zh">方案</span><span class="lang-en">Choice</span></th><th><span class="lang-zh">优点</span><span class="lang-en">Strength</span></th><th><span class="lang-zh">代价</span><span class="lang-en">Cost</span></th><th><span class="lang-zh">适合本题吗</span><span class="lang-en">Fit here?</span></th></tr></thead>
+      <tbody>
+        <tr><td>DB auto-increment</td><td><span class="lang-zh">最简单、ID 小、天然唯一</span><span class="lang-en">Simple, compact, unique</span></td><td><span class="lang-zh">中心写点；直接暴露递增规模</span><span class="lang-en">Central write point; reveals sequence</span></td><td><span class="lang-zh">当前写 QPS 下完全可以作为第一版</span><span class="lang-en">Entirely reasonable at this write rate</span></td></tr>
+        <tr><td>Segment / range</td><td><span class="lang-zh">小 ID；实例本地发号；DB 短时故障可继续</span><span class="lang-en">Compact IDs, local allocation, tolerates brief DB loss</span></td><td><span class="lang-zh">号段预取、浪费与运维复杂度</span><span class="lang-en">Prefetch, gaps, operational complexity</span></td><td><strong><span class="lang-zh">扩展后的默认答案</span><span class="lang-en">Scaled default</span></strong></td></tr>
+        <tr><td>Random token</td><td><span class="lang-zh">不暴露顺序，天然适合不可预测需求</span><span class="lang-en">Hides order; suits unpredictability</span></td><td><span class="lang-zh">要足够熵、唯一约束、碰撞重试</span><span class="lang-en">Needs entropy, uniqueness check, collision retry</span></td><td><span class="lang-zh">安全 / 产品要求优先时选</span><span class="lang-en">Use when product/security requires it</span></td></tr>
+        <tr><td>Snowflake</td><td><span class="lang-zh">分布式、高吞吐、时间大致有序</span><span class="lang-en">Distributed, high throughput, roughly ordered</span></td><td><span class="lang-zh">ID 大、依赖时钟与 worker 分配</span><span class="lang-en">Large ID, clock and worker management</span></td><td><span class="lang-zh">不适合“固定 6 位”约束</span><span class="lang-en">Poor fit for fixed six characters</span></td></tr>
+      </tbody>
+    </table>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">hash 截断为什么不是免费方案</p>
+        <p>把 <code>hash(long_url)</code> 截成 6 个 base62 字符，确实可以让同一个输入稳定得到同一个候选码，但候选空间仍只有 <code>N = 62^6</code>。生日悖论下，碰撞概率达到约 50% 的请求规模不是 N，而是 <code>sqrt(2N ln 2)</code>，这里约 28 万个独立候选。它不表示第 28 万条一定冲突，而是表示“到这个规模至少发生一次碰撞”的概率已经不可忽略。</p>
+        <p>因此 hash 方案仍要做条件插入：若 code 已对应同一个规范化 URL，可以复用；若对应不同 URL，就加盐、扩大长度或重试另一个候选。此时它并不真正无状态，还引入 normalization 语义和热点长 URL 的并发竞争。若需求只是幂等，用 Idempotency-Key 更精确；若需求是不可预测，用足够熵的随机 token 更直接。</p>
+        <p>顺序 ID 可枚举也不意味着“换 Snowflake 就安全”。Snowflake 高位包含时间，仍泄露结构，而且编码太长。要在保持 6 位空间的同时隐藏顺序，只能做空间内的可逆置换；它改变外观，不增加 56.8B 的总熵，也不能把短码变成授权凭证。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">Why a truncated hash is not free</p>
+        <p>Truncating <code>hash(long_url)</code> to six base62 characters gives the same input a stable candidate, but the space remains <code>N = 62^6</code>. Under the birthday bound, about <code>sqrt(2N ln 2)</code>—roughly 280 thousand independent candidates here—already yields about a 50% chance that at least one collision has occurred. It does not mean the 280-thousandth row must collide; it means collision handling is already a real requirement.</p>
+        <p>The hash path still needs a conditional insert. If the code maps to the same normalized URL it may be reused; if it maps elsewhere, salt, lengthen, or generate another candidate. The design is therefore not stateless, and it adds URL-normalization semantics plus concurrent contention for popular targets. Use Idempotency-Key when the requirement is retry safety; use sufficiently random tokens when the requirement is unpredictability.</p>
+        <p>Enumerability of sequential IDs does not make Snowflake a security fix. Snowflake still exposes structure through time bits and is too large. A keyed permutation can hide order inside the six-character space, but it does not increase the 56.8-billion total entropy and never turns a locator into authorization.</p>
+      </div>
+    </div>
+    <p class="cite"><span class="lang-zh"><strong>面试判断：</strong>在给定的百级 peak create QPS 下，先答 DB 自增也不丢分；当面试官追问多实例、数据库压力或短时不可用，再演进到 segment。复杂方案必须由需求推出。</span><span class="lang-en"><strong>Interview judgment:</strong> at roughly one hundred peak creates per second, DB auto-increment is a defensible first answer. Evolve to segments when multi-instance allocation, database pressure, or brief allocator outages enter the requirements.</span></p>
   </section>
 
   <section>
@@ -387,6 +532,30 @@ Idempotency(owner_id, key, code, expires_at, PRIMARY KEY(owner_id, key))</code><
         <figcaption><span class="lang-zh">retarget / revoke 先提交权威版本，再广播失效；TTL 是最后保险，不是唯一一致性方案。</span><span class="lang-en">Commit the authoritative version before broadcasting invalidation. TTL is the final safety net, not the only consistency plan.</span></figcaption>
       </div>
     </figure>
+    <h3><span class="lang-zh">缓存里放什么、放多久</span><span class="lang-en">What to cache, and for how long</span></h3>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">不要只说“上 Redis”</p>
+        <p>缓存 key 通常是 domain + code；若产品只有一个域名，domain 可以隐含。value 至少包含 target URL、status、expires_at 和 version，而不只是裸 URL。这样读侧能在不回源时执行过期 / 撤销判断，并在 invalidation 事件到来时比较版本。不要缓存 owner 的敏感资料或写侧不需要的元数据，它们只会放大内存和泄露面。</p>
+        <p>TTL 由产品语义反推。若承诺撤销 10 秒内生效，正常 cache TTL 就不能是 1 小时；可以用 5–10 秒 TTL 配合主动失效。对稳定、不允许 retarget 的公共链接可更长。给 TTL 加少量随机 jitter，避免一批同时写入的热门 key 在同一秒集中失效。Local LRU 的 TTL 应不长于 Redis，否则 Redis 已更新，本地仍持续返回旧目标。</p>
+        <p>unknown code 可以 negative-cache 几秒，挡住扫描器和重复拼写错误，但 revoked / blocked 要有单独状态，不能和 unknown 混成一个 null。negative TTL 太长会让刚创建的 custom alias 暂时不可见；解决方法是创建成功后主动删除该 code 的 negative entry，而不是无限缩短所有 TTL。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">“Add Redis” is not a policy</p>
+        <p>The cache key is usually domain plus code; domain may be implicit for a single-domain product. The value should include target URL, status, expiry, and version—not only the URL—so reads can evaluate state without origin and invalidation can compare versions. Do not cache owner-sensitive or write-only metadata that only increases memory and exposure.</p>
+        <p>Derive TTL from product semantics. A promise that revocation becomes effective within ten seconds is incompatible with a one-hour normal TTL; use perhaps five to ten seconds plus active invalidation. Stable public links that cannot retarget may live longer. Add small random jitter so a batch of popular keys does not expire in one second. Local LRU must not outlive Redis or it can keep serving an older target after the shared cache changes.</p>
+        <p>Unknown codes can be negative-cached for a few seconds to absorb scanners and repeated typos, but revoked or blocked needs a distinct state rather than the same null. A long negative TTL can hide a newly created custom alias; creation should actively evict that negative entry instead of shortening every cache entry.</p>
+      </div>
+    </div>
+    <h3><span class="lang-zh">命中率怎样改变后端压力</span><span class="lang-en">How hit rate changes origin pressure</span></h3>
+    <div class="bilingual">
+      <div class="lang-zh"><p>在 11.6K peak redirect QPS 假设下，Redis + Local 合计 95% 命中，Mapping Store 只承担约 580 read QPS；90% 命中则是约 1,160 QPS。这个简单乘法比一句“缓存能抗高并发”更有用，因为它让你能反推数据库余量和降级风险。Redis 故障时，后端压力会从几百瞬间跳回 11.6K，所以绕过缓存必须配限流、熔断和 singleflight。</p><p>Local LRU 不应追求缓存所有 code。假设一个完整缓存对象连运行时开销约 1 KB，10 万个最热 code 约占 100 MB/实例，通常已能覆盖高度偏斜的头部。实际大小要用线上对象测量，淘汰可从 LRU / TinyLFU 一类策略中选；面试重点不是背算法，而是说明本地缓存提高速度、同时带来每实例副本和失效传播成本。</p></div>
+      <div class="lang-en"><p>At the assumed 11.6K peak redirect QPS, a combined 95% local-plus-Redis hit rate leaves about 580 read QPS for Mapping Store; 90% leaves about 1,160. This multiplication is more useful than saying “cache handles scale” because it sizes origin headroom and degradation risk. If Redis fails, origin pressure can jump from hundreds back to 11.6K, so bypass needs rate limits, a breaker, and singleflight.</p><p>Local LRU should not hold every code. If a full runtime cache object costs roughly 1 KB, the hottest 100 thousand codes cost about 100 MB per instance and may cover a strongly skewed head. Measure actual object size and choose an eviction policy such as LRU or TinyLFU as needed. The interview point is that local cache buys latency at the cost of per-instance duplication and harder invalidation.</p></div>
+    </div>
+    <h3><span class="lang-zh">cache stampede 的三个层次</span><span class="lang-en">Three layers of stampede control</span></h3>
+    <ol>
+      <li><span class="lang-zh"><strong>同进程合并：</strong>按 code 建一个 in-flight promise，一个 leader 回源，waiter 共享结果。</span><span class="lang-en"><strong>In-process coalescing:</strong> one in-flight promise per code; one leader loads and waiters share.</span></li>
+      <li><span class="lang-zh"><strong>跨进程保护：</strong>Redis 仍可能收到多个实例的 leader；让 Mapping Store 有并发限额，必要时用短租约锁，但不要把全局锁放进每个正常 hit。</span><span class="lang-en"><strong>Cross-process protection:</strong> Redis may still see one leader from every instance; cap origin concurrency and use a short lease only when justified, never a global lock on normal hits.</span></li>
+      <li><span class="lang-zh"><strong>时间打散：</strong>TTL jitter、后台 refresh-ahead 和短 stale-while-revalidate 窗口，减少热门 key 在过期瞬间同步回源。</span><span class="lang-en"><strong>Time spreading:</strong> TTL jitter, refresh-ahead, and a bounded stale-while-revalidate window reduce synchronized reloads.</span></li>
+    </ol>
   </section>
 
   <section>
@@ -434,6 +603,33 @@ Idempotency(owner_id, key, code, expires_at, PRIMARY KEY(owner_id, key))</code><
       </div>
     </figure>
     <p class="cite"><span class="lang-zh">KV 的可用性与一致性 trade-off 可延伸阅读 Dynamo，但具体行为必须由本题语义决定。[8]</span><span class="lang-en">Dynamo is useful background for availability/consistency trade-offs, but this service still needs explicit product semantics. [8]</span></p>
+    <h3><span class="lang-zh">降级不是“还能返回”，而是写清边界</span><span class="lang-en">Degradation means explicit boundaries, not merely returning something</span></h3>
+    <table>
+      <thead><tr><th>Component</th><th><span class="lang-zh">用户可见行为</span><span class="lang-en">User-visible behavior</span></th><th><span class="lang-zh">保护动作</span><span class="lang-en">Protection</span></th><th><span class="lang-zh">恢复后</span><span class="lang-en">Recovery</span></th></tr></thead>
+      <tbody>
+        <tr><td>Redis</td><td><span class="lang-zh">大部分链接仍可跳转，延迟升高</span><span class="lang-en">Most links still redirect, at higher latency</span></td><td><span class="lang-zh">熔断、回源限流、singleflight</span><span class="lang-en">Breaker, origin rate limit, singleflight</span></td><td><span class="lang-zh">自然回填，避免瞬间全量 warm-up</span><span class="lang-en">Lazy refill; avoid instant full warm-up</span></td></tr>
+        <tr><td>Mapping Store</td><td><span class="lang-zh">允许窗口内的 active cache 可暂时服务；miss / 撤销不确定则 fail closed</span><span class="lang-en">Active cached records may serve inside a stated window; uncertain misses/revocations fail closed</span></td><td><span class="lang-zh">限制 stale 年龄、停止写入、告警</span><span class="lang-en">Bound stale age, stop writes, alert</span></td><td><span class="lang-zh">校验版本、逐步恢复回源</span><span class="lang-en">Validate versions and ramp origin traffic</span></td></tr>
+        <tr><td>ID Allocator</td><td><span class="lang-zh">已有链接正常；create 用完本地号段后 503</span><span class="lang-en">Existing links work; creates return 503 after leases exhaust</span></td><td><span class="lang-zh">双 buffer 号段、禁止复用旧范围</span><span class="lang-en">Double-buffer leases; never reuse old ranges</span></td><td><span class="lang-zh">重新领新号段，不回填“洞”</span><span class="lang-en">Lease a new range; do not fill gaps</span></td></tr>
+        <tr><td>Click Stream</td><td><span class="lang-zh">跳转正常，统计可能延迟或有损</span><span class="lang-en">Redirect works; analytics may lag or lose a bounded amount</span></td><td><span class="lang-zh">有限 buffer、重试预算、采样降级</span><span class="lang-en">Bounded buffer, retry budget, sampled degradation</span></td><td><span class="lang-zh">按 event_id 去重回放并监控 lag</span><span class="lang-en">Replay with event-ID dedupe and monitor lag</span></td></tr>
+      </tbody>
+    </table>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">一致性要按操作区分</p>
+        <p>创建成功后立即 GET 自己的 code，用户通常期待 read-your-write。最简单做法是 mapping 写入成功后让读取访问同一个权威区域，并主动填充 / 删除缓存。retarget 与 revoke 更敏感：旧 cache 在 TTL 内继续跳到旧目标，可能只是统计误差，也可能是安全事故。两者不能用同一默认值。</p>
+        <p>如果业务要求撤销近乎立即生效，应使用主动 invalidation、较短 TTL、版本检查，甚至让 revoked code 走一个更强一致的 deny path。若业务优先全球可用与低延迟，就承认几秒传播窗口并在 SLA 里写清。所谓 CAP 不替你做产品决定；它只提醒网络分区时不可能同时假装所有目标都满足。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">Consistency differs by operation</p>
+        <p>After a successful create, users normally expect an immediate GET of their own code to work. Keep the authoritative read in the same region and populate or invalidate caches after commit. Retarget and revoke are more sensitive: an old cached target may be a minor analytics discrepancy or a security incident. They cannot blindly share one default.</p>
+        <p>If revocation must become nearly immediate, combine active invalidation, short TTL, version checks, and perhaps a stronger deny path for revoked codes. If global availability and low latency dominate, admit a propagation window and state it in the SLA. CAP does not choose the product semantics; it prevents pretending every goal survives a partition.</p>
+      </div>
+    </div>
+    <h3><span class="lang-zh">最少要看的指标</span><span class="lang-en">Minimum operational signals</span></h3>
+    <ul>
+      <li><span class="lang-zh">Redirect：总 QPS、p50/p95/p99、按状态码分布、Local / Redis hit rate、Mapping Store QPS 与 error rate。</span><span class="lang-en">Redirect: QPS, p50/p95/p99, status distribution, local/Redis hit rate, Mapping Store QPS and errors.</span></li>
+      <li><span class="lang-zh">Create：成功率、409 / 429 / 503、幂等命中、条件写冲突、剩余号段和领段延迟。</span><span class="lang-en">Create: success, 409/429/503, idempotency hits, conditional-write conflicts, segment runway and lease latency.</span></li>
+      <li><span class="lang-zh">Analytics：publish failure、queue lag、consumer retry / dedupe、事件时间与处理时间差。</span><span class="lang-en">Analytics: publish failures, queue lag, consumer retries/deduplication, event-time versus processing-time lag.</span></li>
+      <li><span class="lang-zh">安全：创建限流命中、扫描型 404、blocked redirect、举报处理时间和误杀 appeal。</span><span class="lang-en">Safety: create throttles, scanning-shaped 404s, blocked redirects, report handling time, and false-positive appeals.</span></li>
+    </ul>
   </section>
 
   <section>
@@ -467,6 +663,78 @@ Idempotency(owner_id, key, code, expires_at, PRIMARY KEY(owner_id, key))</code><
         <figcaption><span class="lang-zh">安全不是只在创建时扫一次：举报、检测、封禁状态和 appeal 要形成闭环；blocked 链接在读侧停止 302。</span><span class="lang-en">Safety is not a one-time create scan. Reports, detection, block state, and appeals form a loop; blocked links stop redirecting.</span></figcaption>
       </div>
     </figure>
+    <h3><span class="lang-zh">威胁模型：系统会被怎样使用</span><span class="lang-en">Threat model: how the system will be used</span></h3>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">不只是一句“加限流”</p>
+        <p><strong>枚举：</strong>顺序码让攻击者容易猜相邻 code，随机 6 位码也只有有限空间。研究已经展示过短 token 扫描可以发现本不希望公开的云文件和地图分享。[5] 所以真正私密的资源必须由目标服务做登录、ACL 或带权限的 capability 校验；短链域名只负责定位。</p>
+        <p><strong>钓鱼与恶意跳转：</strong>短链隐藏真实域名，攻击者会批量创建指向仿冒登录页或恶意下载的链接。创建侧需要认证、IP / tenant quota、scheme allowlist、域名信誉或恶意内容检测；跳转侧需要快速封禁、举报入口与安全提示页。只在创建时扫描一次不够，因为目标内容和 DNS 之后都可能变化。</p>
+        <p><strong>扫描与成本攻击：</strong>攻击者可以随机 GET code 制造大量 cache miss，逼 Mapping Store 承担成本。对不存在的 code 做极短 negative cache、在 Edge 识别高比例 404 的来源、按 IP / ASN / token bucket 限流，并为 Mapping Store 设置硬并发预算。不能因为 redirect 是公共接口就让每个 miss 无限回源。</p>
+        <p><strong>自动预览带来的 SSRF：</strong>如果风控或预览服务会主动抓取 target URL，它就可能访问内网 IP、云 metadata endpoint 或重定向链中的受限地址。抓取器要运行在隔离网络，解析后与每次 redirect 后都检查目标 IP，限制 scheme、端口、响应大小、跳转次数和超时。Redirect Service 本身不必同步抓目标页面。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">More than “add rate limiting”</p>
+        <p><strong>Enumeration:</strong> sequential codes expose neighbors, and random six-character codes still occupy a finite space. Research has demonstrated scanning short tokens to discover cloud files and map shares that users did not expect to be public. [5] Truly private resources need authentication, ACLs, or capability checks at the destination; the short-link domain only locates them.</p>
+        <p><strong>Phishing and malicious redirects:</strong> a short link hides the real domain, so attackers will create links to credential theft and malware. Creation needs authentication, IP and tenant quotas, a scheme allowlist, and reputation or content checks. Redirect needs fast blocking, reporting, and a safety page. A one-time create scan is insufficient because content and DNS can change later.</p>
+        <p><strong>Scanning and cost attacks:</strong> random GETs can force cache misses and make Mapping Store pay. Use a very short negative cache, detect sources with abnormal 404 ratios at the edge, rate-limit by appropriate identities, and enforce a hard origin concurrency budget. A public redirect endpoint is not permission for unbounded origin work.</p>
+        <p><strong>SSRF from automated preview:</strong> if safety or preview workers fetch targets, they can be tricked toward private IPs, cloud metadata endpoints, or restricted addresses later in a redirect chain. Isolate fetchers; validate resolved IPs initially and after every redirect; bound schemes, ports, response size, redirect count, and timeout. Redirect Service itself need not synchronously fetch destination content.</p>
+      </div>
+    </div>
+    <h3><span class="lang-zh">安全策略与产品体验的冲突</span><span class="lang-en">Where safety and product experience conflict</span></h3>
+    <div class="bilingual"><div class="lang-zh"><p>更严格的检测会增加创建延迟和误杀，预览页会增加一次点击，封禁可能伤及已经传播的正常 campaign。正确答案不是“全部同步检查”，而是分层：便宜规则同步拒绝，昂贵扫描异步完成；高风险链接先进入 preview / pending 状态；封禁带 reason、审计和 appeal；安全状态通过高优先级 invalidation 快速进入读侧。</p></div><div class="lang-en"><p>Stricter detection raises create latency and false positives; preview adds a click; blocking can damage a legitimate campaign already in circulation. Do not run every expensive check synchronously. Reject cheap rules inline, complete expensive scans asynchronously, place high-risk links into preview or pending state, attach reason/audit/appeal to blocks, and propagate safety state through a high-priority invalidation path.</p></div></div>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">追问怎么接：从约束继续演进</span><span class="lang-en">Follow-ups: evolve from a new constraint</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">1 · “为什么一定要 KV，PostgreSQL 不行吗？”</p>
+        <p>当然可以。这个数据模型以主键点查为主，但当前只有百级 peak 写入和万级 peak 读取，PostgreSQL 的唯一索引、事务和成熟运维非常适合第一版；前面加缓存即可。选择分布式 KV 的理由应该是数据量、读吞吐、可用性或跨分区扩展真的超出单集群目标，而不是“系统设计题必须 NoSQL”。即使换 KV，自定义 alias 的条件写、幂等记录和撤销语义仍要保留。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">1 · “Why not PostgreSQL—must it be a KV?”</p>
+        <p>PostgreSQL is entirely viable. The model is primary-key lookup heavy, but the assumed load is only hundreds of peak writes and tens of thousands of peak reads; unique indexes, transactions, and mature operations make it a strong first version behind a cache. Move to a distributed KV when data volume, read throughput, availability, or partition scale actually exceeds the cluster target—not because system-design interviews supposedly require NoSQL. Conditional aliases, idempotency, and revocation semantics survive either choice.</p>
+      </div>
+    </div>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">2 · “过期数据怎么清理？”</p>
+        <p>读路径永远先检查 <code>expires_at</code>，所以后台清理延迟不能让过期链接继续跳转。物理删除是容量回收，不是正确性机制：可以按 expires_at 建索引分批扫描、用数据库 TTL，或按时间分区后整段回收。删除前后都发送 invalidation；code 默认不复用，以免历史缓存和旧消息串到新目标。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">2 · “How is expired data removed?”</p>
+        <p>The read path always checks <code>expires_at</code>, so delayed background cleanup cannot keep an expired link alive. Physical deletion is capacity reclamation, not the correctness mechanism. Scan an expiry index in batches, use store TTL, or time-partition data for bulk reclamation. Invalidate caches around cleanup and do not normally reuse codes, avoiding stale caches and old messages pointing to a new owner.</p>
+      </div>
+    </div>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">3 · “一个爆款 code 把 Redis 单分片打热怎么办？”</p>
+        <p>先靠每个 Redirect 实例的 Local LRU，把同一个 key 的绝大多数请求挡在进程内；这比复制 Redis key 更简单。再做 request coalescing、Redis replica read 或按热点自动延长本地 TTL。若业务允许边缘短 TTL，可以把极热的稳定链接下沉 CDN，但要同步接受统计与撤销语义变化。盲目给同一个 key 加随机后缀会降低缓存命中，并把一致性问题复制多份。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">3 · “What if one viral code overheats one Redis shard?”</p>
+        <p>Let every Redirect instance absorb the key in Local LRU first; this is simpler than replicating one Redis key. Then use request coalescing, replica reads, or a longer local TTL for detected hot stable links. If edge TTL is acceptable, extremely hot links can move to a CDN while explicitly changing analytics and revocation semantics. Randomly suffixing the same cache key reduces hit rate and multiplies consistency problems.</p>
+      </div>
+    </div>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">4 · “全球部署怎么做？”</p>
+        <p>先问目标：只是全球低延迟读，还是每个 Region 都能创建和 retarget？前者可以单写 Region + 异步复制映射 + 各区读缓存，接受新链接和撤销的传播窗口。后者需要给 code 空间分区、为 allocator 分配 Region 前缀 / 不重叠号段，或改用随机 token；同时定义冲突和 owner home region。multi-region 最大难点通常不是画三个数据库，而是明确分区时哪些操作还能成功、用户会看到多旧的数据。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">4 · “How would this go global?”</p>
+        <p>First ask whether the goal is low-latency global reads or create and retarget in every region. The first can use one write region plus asynchronous mapping replication and regional read caches, accepting propagation windows for new links and revocations. The second needs partitioned code space, region-specific allocator ranges, or random tokens, plus conflict semantics and perhaps an owner home region. The real multi-region problem is not drawing three databases; it is stating what succeeds during partition and how stale a user may observe.</p>
+      </div>
+    </div>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">5 · “点击统计需要 exactly-once 吗？”</p>
+        <p>通常不值得。网络和消费者重试让 at-least-once 更自然，event_id + 幂等聚合可以把重复控制在可接受范围。先问统计用途：趋势看板允许近似，计费或分成才可能需要更强对账。即使需要财务级准确，也更常用可重放日志、去重表和周期 reconciliation，而不是把 exactly-once 事务放到 redirect 同步路径。</p>
+      </div>
+      <div class="lang-en"><p class="col-kicker">5 · “Do click counts need exactly-once?”</p>
+        <p>Usually not. Network and consumer retries make at-least-once natural; event IDs plus idempotent aggregation control duplicates. Ask what the count is for: a trend dashboard tolerates approximation, while billing or revenue share needs reconciliation. Even financial accuracy more often uses a replayable log, dedupe state, and periodic reconciliation than an exactly-once transaction in the redirect path.</p>
+      </div>
+    </div>
+    <h3><span class="lang-zh">五个常见翻车点</span><span class="lang-en">Five common failure modes in the interview</span></h3>
+    <table>
+      <thead><tr><th><span class="lang-zh">翻车说法</span><span class="lang-en">Weak answer</span></th><th><span class="lang-zh">为什么不够</span><span class="lang-en">Why it fails</span></th><th><span class="lang-zh">改成什么</span><span class="lang-en">Better answer</span></th></tr></thead>
+      <tbody>
+        <tr><td>“用 Snowflake 再 base62”</td><td><span class="lang-zh">没算长度，无法满足 6 位约束</span><span class="lang-en">Length was never derived</span></td><td><span class="lang-zh">小 ID 用自增 / 号段；Snowflake 接受最长 11 位</span><span class="lang-en">Use compact counters/segments, or accept up to 11 chars</span></td></tr>
+        <tr><td>“302 不缓存”</td><td><span class="lang-zh">忽略显式缓存控制和 CDN 行为</span><span class="lang-en">Ignores explicit caching and intermediaries</span></td><td><span class="lang-zh">302 + 明确 Cache-Control，并解释 trade-off</span><span class="lang-en">302 plus explicit Cache-Control and its trade-off</span></td></tr>
+        <tr><td>“同 URL 永远同码”</td><td><span class="lang-zh">破坏 campaign、owner、expiry 语义</span><span class="lang-en">Breaks campaigns, owners, and expiry semantics</span></td><td><span class="lang-zh">用 owner-scoped Idempotency-Key；去重作为产品选项</span><span class="lang-en">Owner-scoped idempotency; dedupe is a product option</span></td></tr>
+        <tr><td>“Redis 挂了查 DB”</td><td><span class="lang-zh">没解释流量骤增和级联故障</span><span class="lang-en">Ignores the sudden origin surge</span></td><td><span class="lang-zh">熔断、限流、singleflight、逐步恢复</span><span class="lang-en">Breaker, limits, coalescing, controlled recovery</span></td></tr>
+        <tr><td>“短码随机所以安全”</td><td><span class="lang-zh">把定位符当成授权</span><span class="lang-en">Treats a locator as authorization</span></td><td><span class="lang-zh">目标资源仍做认证 / ACL；随机只提高扫描成本</span><span class="lang-en">Destination enforces auth/ACL; randomness only raises scan cost</span></td></tr>
+      </tbody>
+    </table>
   </section>
 
   <section>

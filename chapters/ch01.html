@@ -6,52 +6,9 @@
   <title>Ch01 · 世界地图与 4 步法</title>
   <link rel="icon" href="../favicon.ico" sizes="48x48">
   <link rel="stylesheet" href="../assets/css/style.css">
-  <style>
-    /* Ch01 keeps one visual grammar without changing the shared chapter theme. */
-    #ch01 .board .wire {
-      stroke-linecap: round;
-      stroke-linejoin: round;
-      vector-effect: non-scaling-stroke;
-    }
-    #ch01 .board line.wire,
-    #ch01 .board path.wire { marker-end: url(#ch01-arrow-neutral); }
-    #ch01 .board .wire.reply,
-    #ch01 .board .wire.hit { marker-end: url(#ch01-arrow-ok); }
-    #ch01 .board .wire.async { marker-end: url(#ch01-arrow-async); }
-    #ch01 .board .wire.fail { marker-end: url(#ch01-arrow-fail); }
-    #ch01 .board path.wire[d*=" Q"] { marker-end: none; }
-    #ch01 .board .head { display: none; }
-    #ch01 .board .cache-detail {
-      fill: none;
-      stroke: rgb(var(--drac-cyan));
-      stroke-width: 1.25;
-      opacity: 0.7;
-    }
-    #ch01 .board .edge-label-bg {
-      fill: rgb(var(--bg-elev));
-      opacity: 0.94;
-    }
-    #ch01 .board .decision {
-      fill: rgb(var(--bg-card));
-      stroke: rgb(var(--drac-orange));
-      stroke-width: 1.5;
-    }
-    #ch01-arrow-neutral path { fill: rgb(var(--drac-comment)); }
-    #ch01-arrow-ok path { fill: rgb(var(--drac-green)); }
-    #ch01-arrow-async path { fill: rgb(var(--drac-orange)); }
-    #ch01-arrow-fail path { fill: rgb(var(--drac-red)); }
-  </style>
   <script src="../assets/js/boot.js"></script>
 </head>
 <body>
-<svg width="0" height="0" aria-hidden="true" focusable="false" style="position:absolute;overflow:hidden">
-  <defs>
-    <marker id="ch01-arrow-neutral" viewBox="0 0 12 12" refX="0" refY="6" markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto" overflow="visible"><path d="M0 0 L12 6 L0 12 Z"/></marker>
-    <marker id="ch01-arrow-ok" viewBox="0 0 12 12" refX="0" refY="6" markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto" overflow="visible"><path d="M0 0 L12 6 L0 12 Z"/></marker>
-    <marker id="ch01-arrow-async" viewBox="0 0 12 12" refX="0" refY="6" markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto" overflow="visible"><path d="M0 0 L12 6 L0 12 Z"/></marker>
-    <marker id="ch01-arrow-fail" viewBox="0 0 12 12" refX="0" refY="6" markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto" overflow="visible"><path d="M0 0 L12 6 L0 12 Z"/></marker>
-  </defs>
-</svg>
 <header class="topbar">
   <a class="brand" href="../index.html"><span class="brand-logo">SD</span><span class="lang-zh">系统设计面试</span><span class="lang-en">System Design Interview</span></a>
   <span class="spacer"></span>
@@ -94,22 +51,22 @@
     <h2><span class="lang-zh">30 秒开场、明确不做、以及写在白板上的假设</span><span class="lang-en">The 30-second open, explicit non-goals, and assumptions on the board</span></h2>
     <div class="bilingual">
       <div class="lang-zh"><p class="col-kicker">中文</p>
-        <p class="say">我用一条读多的商品详情做贯穿例子：<code>GET /v1/products/{id}</code> 返回标题、价格、可售标记和图片 URL。四笔都画在同一张图上。先划信任边界，标出不做结账和搜索。再算峰值 QPS，把它和磁盘寻道预算比，比完才把缓存加进去。然后分开无状态服务和权威存储，画出同步请求和同步响应，并标明队列和第二机房这轮不连线。最后只深挖一条故障：缓存层不可用时，回源有人数上限，超出的请求 503，而不是把峰值全部压到存储上。</p>
+        <p class="say">我用一条读多的商品详情做贯穿例子：<code>GET /v1/products/{id}</code> 返回标题、价格、可售标记和图片 URL。四笔都画在同一张图上。先划信任边界，再用无连线的 scope note 标出本轮不做结账和搜索，两种边界不混。再算峰值 QPS，把它和「10 ms 串行寻道」推出的数学上限比，比完才把缓存加进去。然后分开无状态服务和权威存储，画出同步请求和同步响应，并标明队列和第二机房这轮不连线。最后只深挖一条故障：缓存层不可用时，回源有放行上限，超出的请求 503，而不是把峰值全部压到存储上。</p>
         <p>功能需求只有这一条读。调用方把商品 id 交给边缘，边缘转到商品服务，服务返回一份商品 JSON。未知 id 是 404。这是功能：系统正常时，这份 JSON 里有什么、没有什么。非功能是另一列，不要和功能混着说：单机房内服务侧 p99 按假设订在 80 毫秒以内，月可用性按假设订在 99.9%，详情页上的价格允许最多 30 秒陈旧。80 毫秒、99.9%、30 秒都是为了能继续设计而写下的目标，不是某家商店的内部 SLO，面试官可以改。</p>
-        <p>明确不做：结账、支付、库存预占、搜索排序、推荐、图片字节本身、多机房同时写。图片 URL 可以出现在 JSON 里，像素由对象存储或 CDN 承担，那不是这条 API 的带宽。推荐不在本站主线里，这轮也不要主动画。结账对价格的一致性要求和「浏览可以看 30 秒旧价」不是同一条策略，所以结账留在边界外面，避免用一条缓存策略假装覆盖两种操作。</p>
+        <p>明确不做：结账、支付、库存预占、搜索排序、推荐、图片字节本身、多机房同时写。图片 URL 可以出现在 JSON 里，像素由对象存储或 CDN 承担，那不是这条 API 的带宽。推荐不在本站主线里，这轮也不要主动画。结账对价格的一致性要求和「浏览可以看 30 秒旧价」不是同一条策略，所以结账留在本轮范围外；它仍可能在同一系统信任边界内。这样才不会用一条缓存策略假装覆盖两种操作。</p>
       </div>
       <div class="lang-en"><p class="col-kicker">English</p>
-        <p class="say">The running example is a read-heavy product detail: <code>GET /v1/products/{id}</code> returns title, price, an availability flag, and image URLs. All four strokes land on that same picture. First the trust boundary, with checkout and search left outside. Then peak QPS compared with a disk-seek budget, and only then a cache. Then split the stateless service from the source of truth, draw the synchronous request and the synchronous reply, and leave the queue and the second region unwired. The deep dive is one failure: when the cache tier is down, origin reads have a cap and the rest return 503, rather than pouring the peak into the store.</p>
+        <p class="say">The running example is a read-heavy product detail: <code>GET /v1/products/{id}</code> returns title, price, an availability flag, and image URLs. All four strokes land on that same picture. First draw the trust boundary, then put checkout and search in a separate no-wire scope note; the two boundaries are not the same. Compare peak QPS with the mathematical ceiling implied by an assumed serial 10 ms seek, and only then add a cache. Next split the stateless service from the source of truth, draw the synchronous request and reply, and leave Queue and Region B unwired. The deep dive is one failure: when the cache tier is down, origin admission has a cap and the rest return 503 rather than pouring the peak into the store.</p>
         <p>The functional requirement is that one read. The caller sends a product id through the edge to Product Service and gets product JSON back. An unknown id is 404. That is function: what the JSON contains when the system is healthy. Non-function is a separate column: an assumed in-region service-side p99 under 80 ms, an assumed 99.9% monthly availability, and a price on this page that may be up to 30 seconds stale. Those three numbers are working targets so the design can continue, not a retailer’s internal SLO. The interviewer may replace them.</p>
-        <p>Explicitly out of scope: checkout, payment, inventory reservation, search ranking, recommendations, the image bytes, and multi-region writes. Image URLs may sit in the JSON; pixels belong to object storage or a CDN and are not this API’s bandwidth. Recommenders are not on this site’s spine and do not get a box in this round. Checkout’s price invariant is not the same policy as “a browse may show a 30-second-old price,” so checkout stays outside rather than letting one cache policy pretend to cover both operations.</p>
+        <p>Explicitly out of scope: checkout, payment, inventory reservation, search ranking, recommendations, the image bytes, and multi-region writes. Image URLs may sit in the JSON; pixels belong to object storage or a CDN and are not this API’s bandwidth. Recommenders are not on this site’s spine and do not get a box in this round. Checkout’s price invariant is not the same policy as “a browse may show a 30-second-old price,” so checkout stays out of this round—not necessarily outside the system trust boundary—rather than letting one cache policy pretend to cover both operations.</p>
       </div>
     </div>
     <table>
       <thead><tr><th><span class="lang-zh">假设（不是测量）</span><span class="lang-en">Assumption, not a measurement</span></th><th><span class="lang-zh">数量</span><span class="lang-en">Quantity</span></th><th><span class="lang-zh">它会不会改图</span><span class="lang-en">Does it change the drawing?</span></th></tr></thead>
       <tbody>
         <tr><td><span class="lang-zh">日活 8,640,000，每人每天 10 次详情</span><span class="lang-en">8,640,000 DAU, 10 detail views each</span></td><td>86,400,000 reads/day → 1,000 avg QPS</td><td><span class="lang-zh">先得到平均负载</span><span class="lang-en">Produces the average load</span></td></tr>
-        <tr><td><span class="lang-zh">峰值是平均的 5 倍</span><span class="lang-en">Peak is 5× the average</span></td><td>5,000 peak read QPS</td><td><span class="lang-zh">和寻道预算比较之后，缓存才会出现</span><span class="lang-en">Compared with the seek budget, this is what adds the cache</span></td></tr>
-        <tr><td><span class="lang-zh">一次随机寻道 10 ms，单盘串行</span><span class="lang-en">One random seek is 10 ms, serial on one disk</span></td><td>100 seeks/s</td><td><span class="lang-zh">回源上限先用这个数，直到有实测替换它</span><span class="lang-en">Origin cap until a measurement replaces it</span></td></tr>
+        <tr><td><span class="lang-zh">峰值是平均的 5 倍</span><span class="lang-en">Peak is 5× the average</span></td><td>5,000 peak read QPS</td><td><span class="lang-zh">和示意性寻道上限比较之后，缓存才会出现</span><span class="lang-en">Compared with the illustrative seek ceiling, this is what adds the cache</span></td></tr>
+        <tr><td><span class="lang-zh">一次随机寻道 10 ms，单盘串行</span><span class="lang-en">One random seek is 10 ms, serial on one disk</span></td><td>≤100 seeks/s at 100% busy</td><td><span class="lang-zh">只作白板数学上限；生产回源 gate 要用压测与余量重算</span><span class="lang-en">Whiteboard ceiling only; production admission needs load tests and headroom</span></td></tr>
         <tr><td><span class="lang-zh">200 万 SKU，每行约 1.5 KB；每天 5 万次目录更新</span><span class="lang-en">2,000,000 SKUs at ~1.5 KB; 50,000 catalog updates/day</span></td><td>~3 GB raw · ~0.6 write QPS</td><td><span class="lang-zh">容量和写 QPS 都不够格添分片或队列</span><span class="lang-en">Neither size nor write QPS earns a shard or a queue</span></td></tr>
       </tbody>
     </table>
@@ -134,97 +91,113 @@
     <p class="cite"><span class="lang-zh">读图约定：灰色实线是同步请求，绿色是同步返回，橙色虚线是异步发送，红色虚线是降级或拒绝；箭头尖端永远指向动作的接收方。</span><span class="lang-en">Visual grammar: solid gray is a synchronous request, green is its reply, dashed orange is asynchronous delivery, and dashed red is degradation or rejection. The arrowhead always points at the receiver of the action.</span></p>
     <figure class="deck">
       <div class="slide">
-        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="wm1t wm1d">
-          <title id="wm1t">Read and write families share one source of truth</title>
-          <desc id="wm1d">A caller reaches a read-heavy API. Read and write families both reach one durable store. The node positions are reserved for later cache, queue, and coordination decisions.</desc>
-          <circle cx="58" cy="92" r="22" class="box"/><circle cx="58" cy="84" r="7" class="box"/><path d="M44 106 Q58 94 72 106" class="wire"/><text x="58" y="136" text-anchor="middle" class="sub">Caller</text>
-          <rect x="120" y="54" width="190" height="74" rx="12" class="box"/><text x="215" y="85" text-anchor="middle" class="label">Read-heavy API</text><text x="215" y="108" text-anchor="middle" class="sub">product · profile</text>
-          <rect x="120" y="184" width="190" height="74" rx="12" class="box ok"/><text x="215" y="215" text-anchor="middle" class="label">Write pipeline</text><text x="215" y="238" text-anchor="middle" class="sub">order · catalog edit</text>
-          <line x1="82" y1="92" x2="108" y2="92" class="wire"/>
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d1s1t d1s1d">
+          <title id="d1s1t">One service loop reaches one authoritative store</title>
+          <desc id="d1s1d">Caller sends a read or write to Service. Service reads or commits to Source of truth, the row or acknowledgement returns to Service, and JSON or acknowledgement returns to Caller.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
           <g class="is-new">
-            <path d="M750 82 V166 A80 16 0 0 0 910 166 V82 Z" class="store"/><ellipse cx="830" cy="82" rx="80" ry="16" class="store"/>
-            <text x="830" y="124" text-anchor="middle" class="label">Durable store</text><text x="830" y="147" text-anchor="middle" class="sub">source of truth</text>
-            <path d="M310 118 C480 152 620 164 738 150" class="wire"/><text x="470" y="154" class="tiny">origin read</text>
-            <path d="M310 221 C500 221 620 188 738 164" class="wire"/><text x="492" y="213" class="tiny">commit</text>
+            <circle cx="45" cy="176" r="12" class="box"/><path d="M25 222 Q45 190 65 222" class="wire"/><text x="45" y="244" text-anchor="middle" class="label">Caller</text>
+            <rect x="135" y="158" width="180" height="84" rx="12" class="box"/><text x="225" y="197" text-anchor="middle" class="label">Service</text><text x="225" y="216" text-anchor="middle" class="sub">read · write</text>
+            <path d="M485 150 V232 A75 12 0 0 0 635 232 V150" class="store"/><ellipse cx="560" cy="150" rx="75" ry="12" class="store"/><text x="560" y="201" text-anchor="middle" class="label">Source of truth</text><text x="560" y="219" text-anchor="middle" class="sub">rows + outbox</text>
+            <path d="M71 191 L125 191" class="wire"/><polygon points="135,191 125,196 125,186" class="head"/><text x="103" y="182" text-anchor="middle" class="tiny">GET / PUT</text>
+            <path d="M135 209 L81 209" class="wire reply"/><polygon points="71,209 81,204 81,214" class="head reply"/><text x="103" y="226" text-anchor="middle" class="tiny">JSON / ack</text>
+            <path d="M315 191 L475 191" class="wire"/><polygon points="485,191 475,196 475,186" class="head"/><text x="400" y="182" text-anchor="middle" class="tiny">read / commit</text>
+            <path d="M485 209 L325 209" class="wire reply"/><polygon points="315,209 325,204 325,214" class="head reply"/><text x="400" y="226" text-anchor="middle" class="tiny">row / ack</text>
           </g>
         </svg>
-        <figcaption><span class="lang-zh">先画权威存储：读和写都能说明状态从哪来，但缓存、队列、协调器还没有理由出现。后续帧保留这些节点的位置，不再让旧元素跳动。</span><span class="lang-en">Start with the source of truth. Reads and writes can name where state comes from, while cache, queue, and coordination still have no reason to exist. Later frames keep these node positions fixed.</span></figcaption>
+        <figcaption><span class="lang-zh">先把最小闭环画完整：Caller → Service → Source of truth，再原路逐跳返回。此时只有权威存储保存状态。</span><span class="lang-en">Start with one complete loop: Caller to Service to Source of truth, then return hop by hop on the same spine. Only the authoritative store owns state.</span></figcaption>
       </div>
       <div class="slide">
-        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="wm2t wm2d">
-          <title id="wm2t">Cache accelerates only the read family</title>
-          <desc id="wm2d">The API sends a lookup to cache. A hit returns from cache to the API. A miss reaches the store, whose result fills the cache. The write pipeline still commits directly to the store.</desc>
-          <circle cx="58" cy="92" r="22" class="box"/><circle cx="58" cy="84" r="7" class="box"/><path d="M44 106 Q58 94 72 106" class="wire"/><text x="58" y="136" text-anchor="middle" class="sub">Caller</text>
-          <rect x="120" y="54" width="190" height="74" rx="12" class="box"/><text x="215" y="85" text-anchor="middle" class="label">Read-heavy API</text><text x="215" y="108" text-anchor="middle" class="sub">product · profile</text>
-          <rect x="120" y="184" width="190" height="74" rx="12" class="box ok"/><text x="215" y="215" text-anchor="middle" class="label">Write pipeline</text><text x="215" y="238" text-anchor="middle" class="sub">order · catalog edit</text>
-          <line x1="82" y1="92" x2="108" y2="92" class="wire"/>
-          <path d="M750 82 V166 A80 16 0 0 0 910 166 V82 Z" class="store"/><ellipse cx="830" cy="82" rx="80" ry="16" class="store"/>
-          <text x="830" y="124" text-anchor="middle" class="label">Durable store</text><text x="830" y="147" text-anchor="middle" class="sub">source of truth</text>
-          <path d="M310 118 C480 152 620 164 738 150" class="wire"/><text x="630" y="166" class="tiny">miss → origin</text>
-          <path d="M310 221 C500 221 620 188 738 164" class="wire"/><text x="492" y="213" class="tiny">commit</text>
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d1s2t d1s2d">
+          <title id="d1s2t">A look-aside cache is beside the read API, not between API and store</title>
+          <desc id="d1s2d">The main service-store loop stays fixed. Service looks up Cache; Cache returns hit or miss. On a miss Service reads Source of truth, receives the row, and fills Cache.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <circle cx="45" cy="176" r="12" class="box"/><path d="M25 222 Q45 190 65 222" class="wire"/><text x="45" y="244" text-anchor="middle" class="label">Caller</text>
+          <rect x="135" y="158" width="180" height="84" rx="12" class="box"/><text x="225" y="197" text-anchor="middle" class="label">Service</text><text x="225" y="216" text-anchor="middle" class="sub">read · write</text>
+          <path d="M485 150 V232 A75 12 0 0 0 635 232 V150" class="store"/><ellipse cx="560" cy="150" rx="75" ry="12" class="store"/><text x="560" y="201" text-anchor="middle" class="label">Source of truth</text><text x="560" y="219" text-anchor="middle" class="sub">rows + outbox</text>
+          <path d="M71 191 L125 191" class="wire"/><polygon points="135,191 125,196 125,186" class="head"/><text x="103" y="182" text-anchor="middle" class="tiny">GET / PUT</text>
+          <path d="M135 209 L81 209" class="wire reply"/><polygon points="71,209 81,204 81,214" class="head reply"/><text x="103" y="226" text-anchor="middle" class="tiny">JSON / ack</text>
+          <path d="M315 191 L475 191" class="wire"/><polygon points="485,191 475,196 475,186" class="head"/><text x="400" y="182" text-anchor="middle" class="tiny">read / commit</text>
+          <path d="M485 209 L325 209" class="wire reply"/><polygon points="315,209 325,204 325,214" class="head reply"/><text x="400" y="226" text-anchor="middle" class="tiny">row / ack</text>
           <g class="is-new">
-            <rect x="452" y="58" width="150" height="68" rx="10" class="cache"/><rect x="460" y="66" width="134" height="52" rx="7" class="cache-detail"/><text x="527" y="98" text-anchor="middle" class="label">Cache</text>
-            <line x1="310" y1="78" x2="440" y2="78" class="wire"/><text x="352" y="69" class="tiny">lookup</text>
-            <line x1="452" y1="108" x2="322" y2="108" class="wire hit"/><text x="365" y="123" class="tiny">hit</text>
-            <line x1="750" y1="106" x2="614" y2="106" class="wire reply"/><text x="660" y="98" class="tiny">fill</text>
+            <rect x="437" y="55" width="150" height="70" rx="8" class="cache"/><rect x="430" y="48" width="150" height="70" rx="8" class="cache"/><text x="505" y="80" text-anchor="middle" class="label">Cache</text><text x="505" y="99" text-anchor="middle" class="sub">droppable</text>
+            <path d="M210 158 L210 93 Q210 85 218 85 L420 85" class="wire"/><polygon points="430,85 420,90 420,80" class="head"/><text x="320" y="76" text-anchor="middle" class="tiny">lookup</text>
+            <path d="M430 105 L358 105 Q350 105 350 113 L350 167 Q350 175 342 175 L325 175" class="wire reply"/><polygon points="315,175 325,170 325,180" class="head reply"/><text x="360" y="124" class="tiny">hit / miss</text>
+            <path d="M270 158 L270 73 Q270 65 278 65 L420 65" class="wire async"/><polygon points="430,65 420,70 420,60" class="head async"/><text x="350" y="57" text-anchor="middle" class="tiny">fill after row</text>
           </g>
         </svg>
-        <figcaption><span class="lang-zh">现在方向明确：灰线把 lookup 送进缓存，绿色 hit 返回服务；miss 才回源，存储结果再向左回填。写提交仍然绕过缓存直达权威存储。</span><span class="lang-en">Direction is now explicit: gray sends the lookup into cache, green returns a hit, only a miss reaches origin, and the store result fills back toward cache. Writes still bypass cache and commit to the authority.</span></figcaption>
+        <figcaption><span class="lang-zh">缓存是旁路：API 先查 Cache；miss 后仍由 API 读 Durable store，拿到行再回填。它不是夹在服务与存储之间的透明代理。</span><span class="lang-en">The cache is look-aside: the API checks Cache, reads Durable store itself on a miss, then fills Cache after the row returns. It is not a transparent inline proxy.</span></figcaption>
       </div>
       <div class="slide">
-        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="wm3t wm3d">
-          <title id="wm3t">Queue detaches fan-out from the write commit</title>
-          <desc id="wm3d">The fixed read and write paths remain. After commit, the write pipeline emits asynchronously to a queue, and the queue delivers to fan-out. Reads do not cross the queue.</desc>
-          <circle cx="58" cy="92" r="22" class="box"/><circle cx="58" cy="84" r="7" class="box"/><path d="M44 106 Q58 94 72 106" class="wire"/><text x="58" y="136" text-anchor="middle" class="sub">Caller</text>
-          <rect x="120" y="54" width="190" height="74" rx="12" class="box"/><text x="215" y="85" text-anchor="middle" class="label">Read-heavy API</text><text x="215" y="108" text-anchor="middle" class="sub">product · profile</text>
-          <rect x="120" y="184" width="190" height="74" rx="12" class="box ok"/><text x="215" y="215" text-anchor="middle" class="label">Write pipeline</text><text x="215" y="238" text-anchor="middle" class="sub">commit, then emit</text>
-          <rect x="120" y="316" width="190" height="64" rx="12" class="box alt"/><text x="215" y="343" text-anchor="middle" class="label">Fan-out</text><text x="215" y="365" text-anchor="middle" class="sub">feed · notify</text>
-          <rect x="452" y="58" width="150" height="68" rx="10" class="cache"/><rect x="460" y="66" width="134" height="52" rx="7" class="cache-detail"/><text x="527" y="98" text-anchor="middle" class="label">Cache</text>
-          <path d="M750 82 V166 A80 16 0 0 0 910 166 V82 Z" class="store"/><ellipse cx="830" cy="82" rx="80" ry="16" class="store"/><text x="830" y="124" text-anchor="middle" class="label">Durable store</text><text x="830" y="147" text-anchor="middle" class="sub">source of truth</text>
-          <line x1="82" y1="92" x2="108" y2="92" class="wire"/><line x1="310" y1="78" x2="440" y2="78" class="wire"/><line x1="452" y1="108" x2="322" y2="108" class="wire hit"/>
-          <path d="M310 118 C480 152 620 164 738 150" class="wire"/><line x1="750" y1="106" x2="614" y2="106" class="wire reply"/><path d="M310 221 C500 221 620 188 738 164" class="wire"/>
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d1s3t d1s3d">
+          <title id="d1s3t">An outbox relay publishes only committed events</title>
+          <desc id="d1s3d">Service atomically commits rows and outbox to Source of truth. Relay polls committed outbox rows below the store, publishes rightward to Queue, and Queue delivers rightward to Worker.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <circle cx="45" cy="176" r="12" class="box"/><path d="M25 222 Q45 190 65 222" class="wire"/><text x="45" y="244" text-anchor="middle" class="label">Caller</text>
+          <rect x="135" y="158" width="180" height="84" rx="12" class="box"/><text x="225" y="197" text-anchor="middle" class="label">Service</text><text x="225" y="216" text-anchor="middle" class="sub">read · write</text>
+          <path d="M485 150 V232 A75 12 0 0 0 635 232 V150" class="store"/><ellipse cx="560" cy="150" rx="75" ry="12" class="store"/><text x="560" y="201" text-anchor="middle" class="label">Source of truth</text><text x="560" y="219" text-anchor="middle" class="sub">rows + outbox</text>
+          <path d="M71 191 L125 191" class="wire"/><polygon points="135,191 125,196 125,186" class="head"/><text x="103" y="182" text-anchor="middle" class="tiny">GET / PUT</text>
+          <path d="M135 209 L81 209" class="wire reply"/><polygon points="71,209 81,204 81,214" class="head reply"/><text x="103" y="226" text-anchor="middle" class="tiny">JSON / ack</text>
+          <path d="M315 191 L475 191" class="wire"/><polygon points="485,191 475,196 475,186" class="head"/><text x="400" y="182" text-anchor="middle" class="tiny">read / commit</text>
+          <path d="M485 209 L325 209" class="wire reply"/><polygon points="315,209 325,204 325,214" class="head reply"/><text x="400" y="226" text-anchor="middle" class="tiny">row / ack</text>
+          <rect x="437" y="55" width="150" height="70" rx="8" class="cache"/><rect x="430" y="48" width="150" height="70" rx="8" class="cache"/><text x="505" y="80" text-anchor="middle" class="label">Cache</text><text x="505" y="99" text-anchor="middle" class="sub">droppable</text>
+          <path d="M210 158 L210 93 Q210 85 218 85 L420 85" class="wire"/><polygon points="430,85 420,90 420,80" class="head"/><text x="320" y="76" text-anchor="middle" class="tiny">lookup</text>
+          <path d="M430 105 L358 105 Q350 105 350 113 L350 167 Q350 175 342 175 L325 175" class="wire reply"/><polygon points="315,175 325,170 325,180" class="head reply"/><text x="360" y="124" class="tiny">hit / miss</text>
+          <path d="M270 158 L270 73 Q270 65 278 65 L420 65" class="wire async"/><polygon points="430,65 420,70 420,60" class="head async"/><text x="350" y="57" text-anchor="middle" class="tiny">fill after row</text>
           <g class="is-new">
-            <path d="M430 202 h170 a19 19 0 0 1 0 38 h-170 a19 19 0 0 1 0-38" class="queue"/><text x="515" y="226" text-anchor="middle" class="label">Queue</text>
-            <path d="M310 235 C350 235 382 221 418 221" class="wire async"/><text x="345" y="226" class="tiny">emit</text>
-            <path d="M430 240 C386 278 350 326 322 344" class="wire async"/><text x="337" y="294" class="tiny">deliver</text>
+            <rect x="490" y="285" width="140" height="56" rx="12" class="box"/><text x="560" y="310" text-anchor="middle" class="label">Relay</text><text x="560" y="329" text-anchor="middle" class="sub">poll outbox</text>
+            <path d="M701 288 h78 a26 26 0 0 1 0 52 h-78 a26 26 0 0 1 0 -52" class="queue"/><path d="M777 297 v34" class="queue"/><path d="M769 297 v34" class="queue"/><path d="M761 297 v34" class="queue"/><text x="724" y="320" text-anchor="middle" class="label">Queue</text>
+            <rect x="840" y="276" width="105" height="76" rx="12" class="box alt"/><text x="892.5" y="311" text-anchor="middle" class="label">Worker</text><text x="892.5" y="330" text-anchor="middle" class="sub">fan-out</text>
+            <path d="M540 285 L540 253.6" class="wire"/><polygon points="540,243.6 545,253.6 535,253.6" class="head"/><text x="529" y="270" text-anchor="end" class="tiny">poll</text>
+            <path d="M580 243.6 L580 275" class="wire reply"/><polygon points="580,285 575,275 585,275" class="head reply"/><text x="591" y="270" class="tiny">events</text>
+            <path d="M630 315 L665 315" class="wire async"/><polygon points="675,315 665,320 665,310" class="head async"/><text x="652" y="306" text-anchor="middle" class="tiny">publish</text>
+            <path d="M805 315 L830 315" class="wire async"/><polygon points="840,315 830,320 830,310" class="head async"/><text x="822" y="333" text-anchor="middle" class="tiny">deliver</text>
           </g>
         </svg>
-        <figcaption><span class="lang-zh">提交成功后才沿橙色虚线进入队列，队列再投递给扇出；方向不再用“depends on”含糊带过。读路径的位置和上一帧完全不变。</span><span class="lang-en">Only after commit does dashed orange enter the queue, which then delivers to fan-out. Direction is no longer hidden behind “depends on,” and the read path stays in exactly the same place.</span></figcaption>
+        <figcaption><span class="lang-zh">写侧不是“提交后顺手发消息”的双写：Service 原子提交业务行与 outbox；Relay 只读已提交记录，再向右经 Queue 投递 Worker。</span><span class="lang-en">The write side is not a dual write that emits after commit: Service atomically commits business rows plus outbox. Relay reads committed rows, then delivery continues rightward through Queue to Worker.</span></figcaption>
       </div>
       <div class="slide">
-        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="wm4t wm4d">
-          <title id="wm4t">Only once-only work depends on coordination</title>
-          <desc id="wm4d">The completed map keeps the read, write, queue, and fan-out paths fixed. Once-only work has its own synchronous dependency on coordination, while the read API has none.</desc>
-          <circle cx="58" cy="92" r="22" class="box"/><circle cx="58" cy="84" r="7" class="box"/><path d="M44 106 Q58 94 72 106" class="wire"/><text x="58" y="136" text-anchor="middle" class="sub">Caller</text>
-          <rect x="120" y="54" width="190" height="74" rx="12" class="box"/><text x="215" y="85" text-anchor="middle" class="label">Read-heavy API</text><text x="215" y="108" text-anchor="middle" class="sub">product · profile</text>
-          <rect x="120" y="184" width="190" height="74" rx="12" class="box ok"/><text x="215" y="215" text-anchor="middle" class="label">Write pipeline</text><text x="215" y="238" text-anchor="middle" class="sub">commit, then emit</text>
-          <rect x="120" y="316" width="190" height="64" rx="12" class="box alt"/><text x="215" y="343" text-anchor="middle" class="label">Fan-out</text><text x="215" y="365" text-anchor="middle" class="sub">feed · notify</text>
-          <rect x="452" y="58" width="150" height="68" rx="10" class="cache"/><rect x="460" y="66" width="134" height="52" rx="7" class="cache-detail"/><text x="527" y="98" text-anchor="middle" class="label">Cache</text>
-          <path d="M750 82 V166 A80 16 0 0 0 910 166 V82 Z" class="store"/><ellipse cx="830" cy="82" rx="80" ry="16" class="store"/><text x="830" y="124" text-anchor="middle" class="label">Durable store</text><text x="830" y="147" text-anchor="middle" class="sub">source of truth</text>
-          <path d="M430 202 h170 a19 19 0 0 1 0 38 h-170 a19 19 0 0 1 0-38" class="queue"/><text x="515" y="226" text-anchor="middle" class="label">Queue</text>
-          <line x1="82" y1="92" x2="108" y2="92" class="wire"/><line x1="310" y1="78" x2="440" y2="78" class="wire"/><line x1="452" y1="108" x2="322" y2="108" class="wire hit"/>
-          <path d="M310 118 C480 152 620 164 738 150" class="wire"/><line x1="750" y1="106" x2="614" y2="106" class="wire reply"/><path d="M310 221 C500 221 620 188 738 164" class="wire"/>
-          <path d="M310 235 C350 235 382 221 418 221" class="wire async"/><path d="M430 240 C386 278 350 326 322 344" class="wire async"/>
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d1s4t d1s4d">
+          <title id="d1s4t">Coordination is a conditional invariant, not another default hop</title>
+          <desc id="d1s4d">The clean read, write, cache, outbox, queue, and worker paths stay fixed. A note says coordination is added only when once-only work requires a lease; it is not inserted into every request path.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <circle cx="45" cy="176" r="12" class="box"/><path d="M25 222 Q45 190 65 222" class="wire"/><text x="45" y="244" text-anchor="middle" class="label">Caller</text>
+          <rect x="135" y="158" width="180" height="84" rx="12" class="box"/><text x="225" y="197" text-anchor="middle" class="label">Service</text><text x="225" y="216" text-anchor="middle" class="sub">read · write</text>
+          <path d="M485 150 V232 A75 12 0 0 0 635 232 V150" class="store"/><ellipse cx="560" cy="150" rx="75" ry="12" class="store"/><text x="560" y="201" text-anchor="middle" class="label">Source of truth</text><text x="560" y="219" text-anchor="middle" class="sub">rows + outbox</text>
+          <path d="M71 191 L125 191" class="wire"/><polygon points="135,191 125,196 125,186" class="head"/><text x="103" y="182" text-anchor="middle" class="tiny">GET / PUT</text>
+          <path d="M135 209 L81 209" class="wire reply"/><polygon points="71,209 81,204 81,214" class="head reply"/><text x="103" y="226" text-anchor="middle" class="tiny">JSON / ack</text>
+          <path d="M315 191 L475 191" class="wire"/><polygon points="485,191 475,196 475,186" class="head"/><text x="400" y="182" text-anchor="middle" class="tiny">read / commit</text>
+          <path d="M485 209 L325 209" class="wire reply"/><polygon points="315,209 325,204 325,214" class="head reply"/><text x="400" y="226" text-anchor="middle" class="tiny">row / ack</text>
+          <rect x="437" y="55" width="150" height="70" rx="8" class="cache"/><rect x="430" y="48" width="150" height="70" rx="8" class="cache"/><text x="505" y="80" text-anchor="middle" class="label">Cache</text><text x="505" y="99" text-anchor="middle" class="sub">droppable</text>
+          <path d="M210 158 L210 93 Q210 85 218 85 L420 85" class="wire"/><polygon points="430,85 420,90 420,80" class="head"/><text x="320" y="76" text-anchor="middle" class="tiny">lookup</text>
+          <path d="M430 105 L358 105 Q350 105 350 113 L350 167 Q350 175 342 175 L325 175" class="wire reply"/><polygon points="315,175 325,170 325,180" class="head reply"/><text x="360" y="124" class="tiny">hit / miss</text>
+          <path d="M270 158 L270 73 Q270 65 278 65 L420 65" class="wire async"/><polygon points="430,65 420,70 420,60" class="head async"/><text x="350" y="57" text-anchor="middle" class="tiny">fill after row</text>
+          <rect x="490" y="285" width="140" height="56" rx="12" class="box"/><text x="560" y="310" text-anchor="middle" class="label">Relay</text><text x="560" y="329" text-anchor="middle" class="sub">poll outbox</text>
+          <path d="M701 288 h78 a26 26 0 0 1 0 52 h-78 a26 26 0 0 1 0 -52" class="queue"/><path d="M777 297 v34" class="queue"/><path d="M769 297 v34" class="queue"/><path d="M761 297 v34" class="queue"/><text x="724" y="320" text-anchor="middle" class="label">Queue</text>
+          <rect x="840" y="276" width="105" height="76" rx="12" class="box alt"/><text x="892.5" y="311" text-anchor="middle" class="label">Worker</text><text x="892.5" y="330" text-anchor="middle" class="sub">fan-out</text>
+          <path d="M540 285 L540 253.6" class="wire"/><polygon points="540,243.6 545,253.6 535,253.6" class="head"/><text x="529" y="270" text-anchor="end" class="tiny">poll</text>
+          <path d="M580 243.6 L580 275" class="wire reply"/><polygon points="580,285 575,275 585,275" class="head reply"/><text x="591" y="270" class="tiny">events</text>
+          <path d="M630 315 L665 315" class="wire async"/><polygon points="675,315 665,320 665,310" class="head async"/><text x="652" y="306" text-anchor="middle" class="tiny">publish</text>
+          <path d="M805 315 L830 315" class="wire async"/><polygon points="840,315 830,320 830,310" class="head async"/><text x="822" y="333" text-anchor="middle" class="tiny">deliver</text>
           <g class="is-new">
-            <rect x="430" y="318" width="190" height="64" rx="12" class="box"/><text x="525" y="345" text-anchor="middle" class="label">Once-only work</text><text x="525" y="367" text-anchor="middle" class="sub">id · lock · rate limit</text>
-            <rect x="710" y="312" width="200" height="70" rx="12" class="box alt"/><text x="810" y="341" text-anchor="middle" class="label">Coordination</text><text x="810" y="364" text-anchor="middle" class="sub">lease · sequence · lock</text>
-            <line x1="620" y1="350" x2="698" y2="350" class="wire"/><text x="640" y="339" class="tiny">acquire</text>
+            <rect x="640" y="62" width="280" height="20" rx="10" class="badge"/><text x="780" y="76" text-anchor="middle" class="badge-text">COORDINATION · only for once-only</text>
+            <text x="640" y="105" class="tiny">not a default hop on every request</text>
           </g>
         </svg>
-        <figcaption><span class="lang-zh">只能做一次的工作单独依赖协调器，箭头不再穿过队列，也不从写路径额外拉一条含义重复的线。读路径没有指向协调器的箭头。</span><span class="lang-en">Once-only work gets its own coordination dependency. No connector crosses the queue, and the write path no longer carries a redundant line. The read path has no arrow to coordination.</span></figcaption>
+        <figcaption><span class="lang-zh">最后只加一条决策注记：真正有“只能做一次”不变式时才加租约。普通读、写和投递不因此多绕一跳。</span><span class="lang-en">The last stroke is a decision note: add a lease only when a true once-only invariant requires it. Ordinary reads, writes, and delivery do not gain another hop.</span></figcaption>
       </div>
     </figure>
     <div class="bilingual">
       <div class="lang-zh"><p class="col-kicker">按依赖把这张图走一遍</p>
-        <p>读多的 API 先打缓存，命中就不再碰存储；未命中才读存储并回填。写路径先把权威状态提交到存储，成功之后才异步进队列。扇出消费队列，不占用这次 GET 的回程。发号、加锁、扣限流先依赖协调器。商品详情是读家族，所以后面四步只加缓存和存储之间的笔画，不把协调器放进 GET。</p>
-        <p>这样画，是因为约束不同，依赖就不同。读多而且单次要快，才会在存储前加一层可丢的内存。扇出可以晚几秒，所以用队列把发送从提交里解开。重复扣款或重复发号不能靠「大概不会撞」来赌，所以那些题依赖协调，而不是依赖缓存。面试里先说自己落在哪一个家族，再决定哪条箭头是同步的。本章后面用商品详情把读家族走完；短链那种读写都重的题在 <a href="ch09.html">Ch09</a>，那是另一条请求，不要把短链的盒子抄到这张地图上充数。</p>
+        <p>读多的 API 先查缓存，命中就不再碰存储；未命中才由 Service 读权威存储并回填。写路径在一次事务里提交业务行与 outbox，Relay 只读已提交记录，再异步发到 Queue；这不是「提交后再顺手 emit」的双写。Worker 消费队列，不占用用户请求的回程。只有真正存在「必须做一次」不变式时才加租约，所以协调只是注记，不是每个请求的默认一跳。</p>
+        <p>这样画，是因为约束不同，依赖就不同。读多而且单次要快，才会在主路径上方加一层可丢的内存。扇出可以晚几秒，才让 outbox relay 把事件投到队列。重复扣款或重复发号不能靠「大概不会撞」来赌，所以那些操作才可能需要协调。面试里先说自己落在哪一个家族，再决定哪条边是同步的。本章后面用商品详情把读家族走完；短链那种读写都重的题在 <a href="ch09.html">Ch09</a>，不要把它的盒子抄到这张地图上充数。</p>
         <p>有的读不该走缓存：峰值远低于存储能稳定服务的速率，而且不允许陈旧。那时箭头只指存储。命中率接近零时，缓存只多一个故障域。写路径若必须和扇出同成败，才改用同步调用；否则队列是对的。</p>
         <p>把协调器放进读路径，锁一抖动，本来不用加锁的 GET 会一起失败，所以终图没有那根箭头。队列若画成同步，扇出堆积会拖进读的预算；异步边表示这条边失败时，存储里的提交仍然算数。</p>
         <p>常见的错法是把地图画成章节名，或把 cache、queue、CDN 当开场词表。没有箭头，就没有依赖。阅读顺序不要画进这张图：本章之后看 <a href="ch02.html">Ch02</a>、<a href="ch03.html">Ch03</a>，再用小题把四步跑顺，然后做 <a href="ch09.html">Ch09</a> 这种完整题。M5 只做推理、RAG 和 Agent 基建，不做推荐。机制后读 <a class="chip" href="ch37.html">Ch37</a> 和 <a class="chip" href="ch38.html">Ch38</a>。这门课不在浏览器里写代码。</p>
       </div>
       <div class="lang-en"><p class="col-kicker">Walk the map by dependency</p>
-        <p>A read-heavy API hits the cache first. A hit is done and does not touch the store. A miss, or a fill, reads the store and puts the result back. The write pipeline commits authoritative state to the store first; only after that commit does it emit on the async edge into the queue. Fan-out consumes the queue and does not put “the notification must leave” on the synchronous return of a user read. Once-only work — issuing a unique id, taking a lock, spending rate-limit budget — depends on coordination, takes a lease or a sequence, then writes the store. Product detail is the read family in the upper left, so the next four steps only add strokes between its cache and its store. They do not put a coordinator on the GET path.</p>
-        <p>The drawing is shaped that way because different constraints create different dependencies. A read that is both frequent and latency-sensitive earns a droppable memory layer in front of the store. Fan-out that can be a few seconds late earns a queue that detaches delivery from the commit. A double charge or a double id cannot be waved off as “probably unique,” so those prompts depend on coordination rather than on a cache. In the interview, name the family first, then say which arrow is synchronous. The rest of this chapter walks the read family on product detail. A prompt where both reads and writes are hard, such as <a href="ch09.html">Ch09</a>, is a different request. Do not paste short-link boxes onto this map to look complete.</p>
+        <p>A read-heavy API checks Cache first. A hit does not touch the store. On a miss, Service reads the source of truth and fills Cache after the row returns. The write path atomically commits business rows plus an outbox entry; Relay reads committed outbox rows and only then publishes asynchronously to Queue. That is not a dual write that commits and then casually emits. Worker consumes Queue without occupying the user request’s reply path. Coordination is only a note until a true once-only invariant earns a lease; it is not a default hop on every request.</p>
+        <p>The drawing is shaped that way because different constraints create different dependencies. A read that is both frequent and latency-sensitive earns a droppable memory branch above the main spine. Fan-out that can be a few seconds late earns an outbox relay and a queue. A double charge or duplicate id cannot be waved off as “probably unique,” so that operation may earn coordination. In the interview, name the family first, then say which edge is synchronous. The rest of this chapter walks the read family on product detail. A prompt where both reads and writes are hard, such as <a href="ch09.html">Ch09</a>, is a different request. Do not paste its boxes onto this map to look complete.</p>
         <p>Some reads should not go through a cache: the peak sits far under what the store can serve steadily, and the product forbids staleness. That read arrow should point only at the store. A cache is a liability when the hit rate would be near zero or a 30-second-old price would be an incident: you add a failure domain and do not buy the freshness this prompt needs. In the other direction, a write that must succeed or fail together with fan-out should not use a queue. A synchronous fan-out call ties notification availability to checkout, and that is worth drawing only when the product says an order without a notification is a failed order.</p>
         <p>The failure window on the map is specific. Put coordination on the read path and a lock-service blip fails GETs that never needed a lock. That is why the finished map has no arrow from the read API to coordination. If the queue edge is drawn as synchronous, fan-out backlog drags commit latency into the read budget. The async edge is the statement that a failure on that edge does not undo the commit already in the store. The cache-versus-store window is calculated on the product example below: the authoritative row can already be new while the cache still returns the old price inside the allowed stale time.</p>
         <p>The common mistake is a row of chapter titles, or an opening vocabulary list of cache, queue, CDN, and Redis. A word list does not tell the interviewer who depends on whom, or which edge is synchronous. The correction is to keep only dependencies that have an arrow, and to say why that edge is synchronous. Reading order on this site is a different fact and does not belong on the drawing: this chapter, then <a href="ch02.html">Ch02</a> for how an architecture grows out of pain, then <a href="ch03.html">Ch03</a> until estimates are fluent, then small problems — rate limit, hashing, KV, unique ids, locks — until the four steps are automatic, then a full case such as <a href="ch09.html">Ch09</a>. M5 is LLM inference, RAG, and Agent infrastructure, not recommenders. Storage and cache mechanisms in M6 come later; open <a class="chip" href="ch37.html">Ch37 · storage</a> and <a class="chip" href="ch38.html">Ch38 · cache</a> when a design needs them. There is no in-browser coding assignment. A system-design interview is explaining dependencies so they still fit on the board.</p>
@@ -237,104 +210,108 @@
     <p class="cite"><span class="lang-zh">时间盒大约 3 到 8 分钟。问到能写假设就停，不要问满 10 分钟。</span><span class="lang-en">About 3 to 8 minutes. Stop once the assumptions are written down. Do not interview them for 10 minutes.</span></p>
     <figure class="deck">
       <div class="slide">
-        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="sc1t sc1d">
-          <title id="sc1t">Draw the trust boundary around edge, service, and store</title>
-          <desc id="sc1d">The product read still runs from client to edge to Product Service to Product Store. A trust boundary now encloses the edge, the service, and the store. The client stays outside and is marked untrusted.</desc>
-          <circle cx="62" cy="156" r="26" class="box"/><circle cx="62" cy="146" r="8" class="box"/><path d="M46 174 Q62 160 78 174" class="wire"/>
-          <text x="62" y="210" text-anchor="middle" class="label">Client</text>
-          <rect x="140" y="118" width="120" height="76" rx="38" class="box alt"/><text x="200" y="152" text-anchor="middle" class="label">Edge</text><text x="200" y="172" text-anchor="middle" class="sub">TLS · route</text>
-          <rect x="330" y="110" width="172" height="92" rx="12" class="box"/><text x="416" y="152" text-anchor="middle" class="label">Product Service</text><text x="416" y="174" text-anchor="middle" class="sub">GET /products/{id}</text>
-          <ellipse cx="868" cy="118" rx="68" ry="15" class="store"/><rect x="800" y="118" width="136" height="84" class="store"/><ellipse cx="868" cy="202" rx="68" ry="15" class="store"/>
-          <text x="868" y="158" text-anchor="middle" class="label">Product Store</text><text x="868" y="178" text-anchor="middle" class="sub">rows live here</text>
-          <line x1="90" y1="156" x2="128" y2="156" class="wire"/><polygon points="128,150 140,156 128,162" class="head"/>
-          <line x1="260" y1="156" x2="318" y2="156" class="wire"/><polygon points="318,150 330,156 318,162" class="head"/>
-          <path d="M502 188 C620 248 700 248 786 180" class="wire"/><polygon points="786,174 800,180 786,186" class="head"/>
-          <text x="560" y="268" class="tiny">GET /v1/products/42</text>
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d2s1t d2s1d">
+          <title id="d2s1t">Scope begins with one complete request and reply inside a trust boundary</title>
+          <desc id="d2s1d">Untrusted Client sends GET through Edge to Product Service and Product Store. Product Store returns a row to Product Service, which returns JSON through Edge to Client. Edge, service, and store are inside the trust boundary.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
           <g class="is-new">
-            <rect x="118" y="36" width="822" height="252" rx="20" class="boundary"/>
-            <text x="136" y="58" class="tiny">TRUST BOUNDARY</text>
-            <text x="62" y="232" text-anchor="middle" class="tiny">untrusted</text>
+            <rect x="94" y="22" width="852" height="346" rx="18" class="boundary"/><text x="112" y="45" class="tiny">SYSTEM TRUST BOUNDARY</text>
+            <circle cx="45" cy="166" r="12" class="box"/><path d="M25 212 Q45 180 65 212" class="wire"/><text x="45" y="234" text-anchor="middle" class="label">Client</text>
+            <rect x="115" y="155" width="120" height="70" rx="35" class="box alt"/><text x="175" y="187" text-anchor="middle" class="label">Edge</text><text x="175" y="206" text-anchor="middle" class="sub">TLS · route</text>
+            <rect x="320" y="150" width="160" height="80" rx="12" class="box"/><text x="400" y="187" text-anchor="middle" class="label">Product Service</text><text x="400" y="206" text-anchor="middle" class="sub">stateless</text>
+            <path d="M780 150 V250 A70 12 0 0 0 920 250 V150" class="store"/><ellipse cx="850" cy="150" rx="70" ry="12" class="store"/><text x="850" y="210" text-anchor="middle" class="label">Product Store</text><text x="850" y="228" text-anchor="middle" class="sub">source of truth</text>
+            <path d="M71 181 L106.2 181" class="wire"/><polygon points="116.2,181 106.2,186 106.2,176" class="head"/><text x="94" y="173" text-anchor="middle" class="tiny">GET</text>
+            <path d="M233.8 181 L310 181" class="wire"/><polygon points="320,181 310,186 310,176" class="head"/><text x="277" y="173" text-anchor="middle" class="tiny">/products/42</text>
+            <path d="M480 181 L770 181" class="wire"/><polygon points="780,181 770,186 770,176" class="head"/><text x="650" y="173" text-anchor="middle" class="tiny">origin read</text>
+            <path d="M780 199 L490 199" class="wire reply"/><polygon points="480,199 490,194 490,204" class="head reply"/><text x="650" y="217" text-anchor="middle" class="tiny">row / not found</text>
+            <path d="M320 199 L243.8 199" class="wire reply"/><polygon points="233.8,199 243.8,194 243.8,204" class="head reply"/><text x="277" y="217" text-anchor="middle" class="tiny">JSON</text>
+            <path d="M116.2 199 L81 199" class="wire reply"/><polygon points="71,199 81,194 81,204" class="head reply"/><text x="94" y="217" text-anchor="middle" class="tiny">200 / 404</text>
           </g>
         </svg>
-        <figcaption><span class="lang-zh">这一笔把信任边界划在客户端外面：id 是不可信输入，边缘、服务和存储在边界内。边界还没有告诉你结账在不在范围内。</span><span class="lang-en">This stroke puts the trust boundary outside the client: the id is untrusted input, and the edge, service, and store sit inside. The boundary does not yet say whether checkout is in scope.</span></figcaption>
+        <figcaption><span class="lang-zh">先闭合正常路径：Client → Edge → Product Service → Product Store，回程也逐跳返回。虚线是信任边界，不是“本轮需求范围”。</span><span class="lang-en">Close the healthy loop first: Client to Edge to Product Service to Product Store, with every reply hop drawn. The dashed line is a trust boundary, not the scope of this interview round.</span></figcaption>
       </div>
       <div class="slide">
-        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="sc2t sc2d">
-          <title id="sc2t">Mark the in-scope functional path</title>
-          <desc id="sc2d">Inside the trust boundary, the functional path is a single product read that returns JSON. Product Service is marked as the in-scope handler.</desc>
-          <circle cx="62" cy="156" r="26" class="box"/><circle cx="62" cy="146" r="8" class="box"/><path d="M46 174 Q62 160 78 174" class="wire"/>
-          <text x="62" y="210" text-anchor="middle" class="label">Client</text><text x="62" y="232" text-anchor="middle" class="tiny">untrusted</text>
-          <rect x="118" y="36" width="822" height="252" rx="20" class="boundary"/><text x="136" y="58" class="tiny">TRUST BOUNDARY</text>
-          <rect x="140" y="118" width="120" height="76" rx="38" class="box alt"/><text x="200" y="152" text-anchor="middle" class="label">Edge</text><text x="200" y="172" text-anchor="middle" class="sub">TLS · route</text>
-          <ellipse cx="868" cy="118" rx="68" ry="15" class="store"/><rect x="800" y="118" width="136" height="84" class="store"/><ellipse cx="868" cy="202" rx="68" ry="15" class="store"/>
-          <text x="868" y="158" text-anchor="middle" class="label">Product Store</text><text x="868" y="178" text-anchor="middle" class="sub">rows live here</text>
-          <line x1="90" y1="156" x2="128" y2="156" class="wire"/><polygon points="128,150 140,156 128,162" class="head"/>
-          <line x1="260" y1="156" x2="318" y2="156" class="wire"/><polygon points="318,150 330,156 318,162" class="head"/>
-          <path d="M502 188 C620 248 700 248 786 180" class="wire"/><polygon points="786,174 800,180 786,186" class="head"/>
-          <text x="560" y="268" class="tiny">GET /v1/products/42</text>
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d2s2t d2s2d">
+          <title id="d2s2t">The functional contract is one product JSON or not found</title>
+          <desc id="d2s2d">The complete request and reply stay fixed. A new badge marks the in-scope function as one product JSON for an id; an unknown id returns not found on the same reply path.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="94" y="22" width="852" height="346" rx="18" class="boundary"/><text x="112" y="45" class="tiny">SYSTEM TRUST BOUNDARY</text>
+          <circle cx="45" cy="166" r="12" class="box"/><path d="M25 212 Q45 180 65 212" class="wire"/><text x="45" y="234" text-anchor="middle" class="label">Client</text>
+          <rect x="115" y="155" width="120" height="70" rx="35" class="box alt"/><text x="175" y="187" text-anchor="middle" class="label">Edge</text><text x="175" y="206" text-anchor="middle" class="sub">TLS · route</text>
+          <rect x="320" y="150" width="160" height="80" rx="12" class="box"/><text x="400" y="187" text-anchor="middle" class="label">Product Service</text><text x="400" y="206" text-anchor="middle" class="sub">stateless</text>
+          <path d="M780 150 V250 A70 12 0 0 0 920 250 V150" class="store"/><ellipse cx="850" cy="150" rx="70" ry="12" class="store"/><text x="850" y="210" text-anchor="middle" class="label">Product Store</text><text x="850" y="228" text-anchor="middle" class="sub">source of truth</text>
+          <path d="M71 181 L106.2 181" class="wire"/><polygon points="116.2,181 106.2,186 106.2,176" class="head"/><text x="94" y="173" text-anchor="middle" class="tiny">GET</text>
+          <path d="M233.8 181 L310 181" class="wire"/><polygon points="320,181 310,186 310,176" class="head"/><text x="277" y="173" text-anchor="middle" class="tiny">/products/42</text>
+          <path d="M480 181 L770 181" class="wire"/><polygon points="780,181 770,186 770,176" class="head"/><text x="650" y="173" text-anchor="middle" class="tiny">origin read</text>
+          <path d="M780 199 L490 199" class="wire reply"/><polygon points="480,199 490,194 490,204" class="head reply"/><text x="650" y="217" text-anchor="middle" class="tiny">row / not found</text>
+          <path d="M320 199 L243.8 199" class="wire reply"/><polygon points="233.8,199 243.8,194 243.8,204" class="head reply"/><text x="277" y="217" text-anchor="middle" class="tiny">JSON</text>
+          <path d="M116.2 199 L81 199" class="wire reply"/><polygon points="71,199 81,194 81,204" class="head reply"/><text x="94" y="217" text-anchor="middle" class="tiny">200 / 404</text>
           <g class="is-new">
-            <rect x="330" y="110" width="172" height="92" rx="12" class="box ok"/><text x="416" y="146" text-anchor="middle" class="label">Product Service</text><text x="416" y="168" text-anchor="middle" class="sub">in scope</text><text x="416" y="188" text-anchor="middle" class="tiny">functional · one JSON</text>
+            <rect x="320" y="66" width="250" height="20" rx="10" class="badge"/><text x="445" y="80" text-anchor="middle" class="badge-text">FUNCTION · one JSON or 404</text>
           </g>
         </svg>
-        <figcaption><span class="lang-zh">这一笔标出功能：范围内只有「按 id 返回一份商品 JSON」。功能说的是正常响应里有什么，不是延迟，也不是可用性。</span><span class="lang-en">This stroke marks function: the only in-scope behavior is “return one product JSON for an id.” Function is what a healthy response contains, not latency and not availability.</span></figcaption>
+        <figcaption><span class="lang-zh">功能只写一件事：按 id 返回商品 JSON，未知 id 是 404。延迟、可用性和陈旧度不塞进这句话。</span><span class="lang-en">The function is one sentence: return product JSON by id, or 404 for an unknown id. Latency, availability, and staleness do not belong in that sentence.</span></figcaption>
       </div>
       <div class="slide">
-        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="sc3t sc3d">
-          <title id="sc3t">Place checkout and search outside the boundary with no wire</title>
-          <desc id="sc3d">Checkout, search, and recommendations sit in a box below the trust boundary. No arrow connects them to Product Service or the store.</desc>
-          <circle cx="62" cy="156" r="26" class="box"/><circle cx="62" cy="146" r="8" class="box"/><path d="M46 174 Q62 160 78 174" class="wire"/>
-          <text x="62" y="210" text-anchor="middle" class="label">Client</text>
-          <rect x="118" y="36" width="822" height="252" rx="20" class="boundary"/><text x="136" y="58" class="tiny">TRUST BOUNDARY</text>
-          <rect x="140" y="118" width="120" height="76" rx="38" class="box alt"/><text x="200" y="152" text-anchor="middle" class="label">Edge</text><text x="200" y="172" text-anchor="middle" class="sub">TLS · route</text>
-          <rect x="330" y="110" width="172" height="92" rx="12" class="box ok"/><text x="416" y="146" text-anchor="middle" class="label">Product Service</text><text x="416" y="168" text-anchor="middle" class="sub">in scope</text><text x="416" y="188" text-anchor="middle" class="tiny">functional · one JSON</text>
-          <ellipse cx="868" cy="118" rx="68" ry="15" class="store"/><rect x="800" y="118" width="136" height="84" class="store"/><ellipse cx="868" cy="202" rx="68" ry="15" class="store"/>
-          <text x="868" y="158" text-anchor="middle" class="label">Product Store</text><text x="868" y="178" text-anchor="middle" class="sub">rows live here</text>
-          <line x1="90" y1="156" x2="128" y2="156" class="wire"/><polygon points="128,150 140,156 128,162" class="head"/>
-          <line x1="260" y1="156" x2="318" y2="156" class="wire"/><polygon points="318,150 330,156 318,162" class="head"/>
-          <path d="M502 188 C620 248 700 248 786 180" class="wire"/><polygon points="786,174 800,180 786,186" class="head"/>
-          <text x="560" y="268" class="tiny">GET /v1/products/42</text>
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d2s3t d2s3d">
+          <title id="d2s3t">Out-of-scope features are notes with no accidental wire</title>
+          <desc id="d2s3d">The product-detail request remains unchanged. Checkout, search, and recommendations appear in a no-wire note inside the system trust boundary but outside this design round.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="94" y="22" width="852" height="346" rx="18" class="boundary"/><text x="112" y="45" class="tiny">SYSTEM TRUST BOUNDARY</text>
+          <circle cx="45" cy="166" r="12" class="box"/><path d="M25 212 Q45 180 65 212" class="wire"/><text x="45" y="234" text-anchor="middle" class="label">Client</text>
+          <rect x="115" y="155" width="120" height="70" rx="35" class="box alt"/><text x="175" y="187" text-anchor="middle" class="label">Edge</text><text x="175" y="206" text-anchor="middle" class="sub">TLS · route</text>
+          <rect x="320" y="150" width="160" height="80" rx="12" class="box"/><text x="400" y="187" text-anchor="middle" class="label">Product Service</text><text x="400" y="206" text-anchor="middle" class="sub">stateless</text>
+          <path d="M780 150 V250 A70 12 0 0 0 920 250 V150" class="store"/><ellipse cx="850" cy="150" rx="70" ry="12" class="store"/><text x="850" y="210" text-anchor="middle" class="label">Product Store</text><text x="850" y="228" text-anchor="middle" class="sub">source of truth</text>
+          <path d="M71 181 L106.2 181" class="wire"/><polygon points="116.2,181 106.2,186 106.2,176" class="head"/><text x="94" y="173" text-anchor="middle" class="tiny">GET</text>
+          <path d="M233.8 181 L310 181" class="wire"/><polygon points="320,181 310,186 310,176" class="head"/><text x="277" y="173" text-anchor="middle" class="tiny">/products/42</text>
+          <path d="M480 181 L770 181" class="wire"/><polygon points="780,181 770,186 770,176" class="head"/><text x="650" y="173" text-anchor="middle" class="tiny">origin read</text>
+          <path d="M780 199 L490 199" class="wire reply"/><polygon points="480,199 490,194 490,204" class="head reply"/><text x="650" y="217" text-anchor="middle" class="tiny">row / not found</text>
+          <path d="M320 199 L243.8 199" class="wire reply"/><polygon points="233.8,199 243.8,194 243.8,204" class="head reply"/><text x="277" y="217" text-anchor="middle" class="tiny">JSON</text>
+          <path d="M116.2 199 L81 199" class="wire reply"/><polygon points="71,199 81,194 81,204" class="head reply"/><text x="94" y="217" text-anchor="middle" class="tiny">200 / 404</text>
+          <rect x="320" y="66" width="250" height="20" rx="10" class="badge"/><text x="445" y="80" text-anchor="middle" class="badge-text">FUNCTION · one JSON or 404</text>
           <g class="is-new">
-            <rect x="118" y="340" width="250" height="64" rx="12" class="box"/><text x="243" y="366" text-anchor="middle" class="label">Out of scope</text><text x="243" y="388" text-anchor="middle" class="sub">checkout · search · recs</text>
-            <text x="390" y="376" class="tiny">no wire in</text>
+            <rect x="565" y="286" width="315" height="58" rx="12" class="box alt"/><text x="722.5" y="312" text-anchor="middle" class="label">Not in this round</text><text x="722.5" y="331" text-anchor="middle" class="sub">checkout · search · recommendations</text>
+            <text x="722" y="276" text-anchor="middle" class="clock">NO WIRE</text>
           </g>
         </svg>
-        <figcaption><span class="lang-zh">这一笔把结账、搜索和推荐放到边界外，并且不连线。不做，是图上的决定，不是口头说完就忘。</span><span class="lang-en">This stroke parks checkout, search, and recommendations outside the boundary and does not wire them. Out of scope is a decision on the drawing, not a sentence you forget.</span></figcaption>
+        <figcaption><span class="lang-zh">把 checkout、search、recommendations 标成“本轮不做”，但别说它们在信任边界之外：安全边界与面试范围是两件事。</span><span class="lang-en">Mark checkout, search, and recommendations as out of this round, but do not claim they sit outside the trust boundary. Security boundary and interview scope are different decisions.</span></figcaption>
       </div>
       <div class="slide">
-        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="sc4t sc4d">
-          <title id="sc4t">Call out non-functional budgets inside the boundary</title>
-          <desc id="sc4d">The in-scope path remains one product read. Inside the trust boundary the non-functional budgets are p99 80 ms, 99.9 percent availability, and staleness of at most 30 seconds. Checkout stays outside with no wire.</desc>
-          <circle cx="62" cy="156" r="26" class="box"/><circle cx="62" cy="146" r="8" class="box"/><path d="M46 174 Q62 160 78 174" class="wire"/>
-          <text x="62" y="210" text-anchor="middle" class="label">Client</text>
-          <rect x="118" y="36" width="822" height="252" rx="20" class="boundary"/><text x="136" y="58" class="tiny">TRUST BOUNDARY</text>
-          <rect x="140" y="118" width="120" height="76" rx="38" class="box alt"/><text x="200" y="152" text-anchor="middle" class="label">Edge</text><text x="200" y="172" text-anchor="middle" class="sub">TLS · route</text>
-          <rect x="330" y="110" width="172" height="92" rx="12" class="box ok"/><text x="416" y="146" text-anchor="middle" class="label">Product Service</text><text x="416" y="168" text-anchor="middle" class="sub">in scope</text><text x="416" y="188" text-anchor="middle" class="tiny">functional · one JSON</text>
-          <ellipse cx="868" cy="118" rx="68" ry="15" class="store"/><rect x="800" y="118" width="136" height="84" class="store"/><ellipse cx="868" cy="202" rx="68" ry="15" class="store"/>
-          <text x="868" y="158" text-anchor="middle" class="label">Product Store</text><text x="868" y="178" text-anchor="middle" class="sub">rows live here</text>
-          <line x1="90" y1="156" x2="128" y2="156" class="wire"/><polygon points="128,150 140,156 128,162" class="head"/>
-          <line x1="260" y1="156" x2="318" y2="156" class="wire"/><polygon points="318,150 330,156 318,162" class="head"/>
-          <path d="M502 188 C620 248 700 248 786 180" class="wire"/><polygon points="786,174 800,180 786,186" class="head"/>
-          <text x="560" y="250" class="tiny">GET /v1/products/42</text>
-          <rect x="118" y="340" width="250" height="64" rx="12" class="box"/><text x="243" y="366" text-anchor="middle" class="label">Out of scope</text><text x="243" y="388" text-anchor="middle" class="sub">checkout · search · recs</text>
-          <text x="390" y="376" class="tiny">no wire in</text>
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d2s4t d2s4d">
+          <title id="d2s4t">Non-functional budgets constrain the same request path</title>
+          <desc id="d2s4d">The functional path and no-wire scope note stay fixed. A new badge records assumed p99 80 milliseconds, 99.9 percent monthly availability, and at most 30 seconds of browse staleness.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="94" y="22" width="852" height="346" rx="18" class="boundary"/><text x="112" y="45" class="tiny">SYSTEM TRUST BOUNDARY</text>
+          <circle cx="45" cy="166" r="12" class="box"/><path d="M25 212 Q45 180 65 212" class="wire"/><text x="45" y="234" text-anchor="middle" class="label">Client</text>
+          <rect x="115" y="155" width="120" height="70" rx="35" class="box alt"/><text x="175" y="187" text-anchor="middle" class="label">Edge</text><text x="175" y="206" text-anchor="middle" class="sub">TLS · route</text>
+          <rect x="320" y="150" width="160" height="80" rx="12" class="box"/><text x="400" y="187" text-anchor="middle" class="label">Product Service</text><text x="400" y="206" text-anchor="middle" class="sub">stateless</text>
+          <path d="M780 150 V250 A70 12 0 0 0 920 250 V150" class="store"/><ellipse cx="850" cy="150" rx="70" ry="12" class="store"/><text x="850" y="210" text-anchor="middle" class="label">Product Store</text><text x="850" y="228" text-anchor="middle" class="sub">source of truth</text>
+          <path d="M71 181 L106.2 181" class="wire"/><polygon points="116.2,181 106.2,186 106.2,176" class="head"/><text x="94" y="173" text-anchor="middle" class="tiny">GET</text>
+          <path d="M233.8 181 L310 181" class="wire"/><polygon points="320,181 310,186 310,176" class="head"/><text x="277" y="173" text-anchor="middle" class="tiny">/products/42</text>
+          <path d="M480 181 L770 181" class="wire"/><polygon points="780,181 770,186 770,176" class="head"/><text x="650" y="173" text-anchor="middle" class="tiny">origin read</text>
+          <path d="M780 199 L490 199" class="wire reply"/><polygon points="480,199 490,194 490,204" class="head reply"/><text x="650" y="217" text-anchor="middle" class="tiny">row / not found</text>
+          <path d="M320 199 L243.8 199" class="wire reply"/><polygon points="233.8,199 243.8,194 243.8,204" class="head reply"/><text x="277" y="217" text-anchor="middle" class="tiny">JSON</text>
+          <path d="M116.2 199 L81 199" class="wire reply"/><polygon points="71,199 81,194 81,204" class="head reply"/><text x="94" y="217" text-anchor="middle" class="tiny">200 / 404</text>
+          <rect x="565" y="286" width="315" height="58" rx="12" class="box alt"/><text x="722.5" y="312" text-anchor="middle" class="label">Not in this round</text><text x="722.5" y="331" text-anchor="middle" class="sub">checkout · search · recommendations</text>
+          <text x="722" y="276" text-anchor="middle" class="clock">NO WIRE</text>
           <g class="is-new">
-            <text x="140" y="276" class="tiny">non-functional · p99 80ms · 99.9% · stale ≤ 30s</text>
+            <rect x="286" y="66" width="390" height="20" rx="10" class="badge"/><text x="481" y="80" text-anchor="middle" class="badge-text">ASSUME · p99 80ms · 99.9% · stale ≤30s</text>
           </g>
         </svg>
-        <figcaption><span class="lang-zh">这一笔把非功能写进边界内部：p99、可用性和陈旧上限。它们还不是缓存。缓存要等下一步用寻道预算证明 5,000 QPS 不能每条都去寻道。</span><span class="lang-en">This stroke writes the non-functional budgets inside the boundary: p99, availability, and the staleness cap. They are not a cache yet. The cache waits until the next step shows that 5,000 QPS cannot each pay a disk seek.</span></figcaption>
+        <figcaption><span class="lang-zh">这三个数是 assumption：p99 80 ms、月可用性 99.9%、浏览旧价 ≤30 s。它们约束同一条路径，但还没有自动变成缓存或第二机房。</span><span class="lang-en">These are assumptions: p99 80 ms, 99.9% monthly availability, and browse staleness at most 30 seconds. They constrain the path but do not automatically become a cache or a second region.</span></figcaption>
       </div>
     </figure>
     <div class="bilingual">
       <div class="lang-zh"><p class="col-kicker">问完就写假设，不要追问到烦</p>
-        <p>范围内的路径是：不可信的客户端把商品 id 送到边缘，边缘只做 TLS 和路由，商品服务读存储里的一行，正常时返回 JSON。未知 id 返回 404。这是功能契约。非功能写在同一张图的边界里，但是另一句话：p99 80 毫秒、99.9%、价格最多陈旧 30 秒。把「要返回价格」和「价格可以旧 30 秒」说成同一件事，后面缓存的 TTL 就没有依据。30 秒是产品假设。如果面试官说价格必须实时，TTL 策略会整个换掉，结账却仍然在边界外，因为实时价格也不等于要在这轮设计支付。</p>
+        <p>范围内的路径是：不可信的客户端把商品 id 送到边缘，边缘只做 TLS 和路由，商品服务读存储里的一行，正常时返回 JSON。未知 id 返回 404。这是功能契约。非功能写在同一张图的系统信任边界里，但是另一句话：p99 80 毫秒、99.9%、价格最多陈旧 30 秒。把「要返回价格」和「价格可以旧 30 秒」说成同一件事，后面缓存的 TTL 就没有依据。30 秒是产品假设。如果面试官说价格必须实时，TTL 策略会整个换掉，结账却仍然在本轮设计范围外，因为实时价格也不等于要在这轮设计支付。</p>
         <p>大约问 5 到 7 个就停：同一 GET 覆盖移动端和网页；不做结账；不是个性化价格；浏览可以旧 30 秒；规模用上面的日活；这轮单机房；p99 按 80 毫秒。对方把问题抛回来，就把假设写在白板左侧再进入估算。问太少会加错组件，问太久会吃掉深挖。</p>
-        <p>最小记录先写在旁边，不单独开一组图：<code>Product(id PK, title, price_cents, currency, availability, image_urls, version, updated_at)</code>。version 是为了后面比较缓存里的价格和权威行，不是为了在第一步引入协调器。id 是主键，按 id 读一行，所以这条路径不是搜索。搜索盒已经放在边界外，就是为了挡住「那我们顺手做个查询」。</p>
+        <p>最小记录先写在旁边，不单独开一组图：<code>Product(id PK, title, price_cents, currency, availability, image_urls, version, updated_at)</code>。version 是为了后面比较缓存里的价格和权威行，不是为了在第一步引入协调器。id 是主键，按 id 读一行，所以这条路径不是搜索。搜索被标成本轮不做且没有连线，就是为了挡住「那我们顺手做个查询」。</p>
         <p>这一步最常见的错是把非功能当成组件名。听到 80 毫秒就画缓存，听到 99.9% 就画三机房，听到陈旧就画队列。80 毫秒只说明同步路径不能做三次串行寻道；99.9% 还没证明需要第二机房；30 秒陈旧只说明浏览读可以接受一个有界的旧值。组件要等估算证明某个预算装不下再加。另一个错是把结账口头排除，图上却从商品服务拉一根线到支付。没有那根线，才算排除。</p>
       </div>
       <div class="lang-en"><p class="col-kicker">Write the assumption and stop interviewing them</p>
         <p>The in-scope path is: an untrusted client sends a product id to the edge, the edge does TLS and routing only, Product Service reads one row, and a healthy call returns JSON. An unknown id returns 404. That is the functional contract. Non-function is on the same picture, inside the boundary, and it is a different sentence: p99 80 ms, 99.9%, and a price that may be 30 seconds stale. If “return a price” and “the price may be 30 seconds old” collapse into one remark, the later TTL has nothing to hang on. Thirty seconds is a product assumption. If they require a live price, the TTL policy changes, and checkout is still outside, because a live price is not a decision to design payments in this round.</p>
         <p>Ask about five to seven questions, then stop. Same GET for mobile and web: assume yes. Checkout in this round: assume no. Personalized price: assume no, one catalog price. May the browse be 30 seconds stale: assume yes. Scale: use the DAU above, do not invent “very large” live. Multi-region: assume one region this round. Latency: 80 ms. When they bounce a question back, write the assumption on the left of the board, say you will proceed and change it if they disagree, and move to the estimate. Too few questions add the wrong box because you never established that reads dominate. Too many questions spend the ten minutes on clarification and the deep dive disappears.</p>
-        <p>Write the minimum record beside the picture. It does not need its own deck: <code>Product(id PK, title, price_cents, currency, availability, image_urls, version, updated_at)</code>. Version exists so a later step can compare a cached price with the authoritative row. It is not a reason to introduce coordination in step 1. The id is the primary key and the read is one row, so this path is not search. The search box is already outside the boundary to stop “let’s add query while we are here.”</p>
+        <p>Write the minimum record beside the picture. It does not need its own deck: <code>Product(id PK, title, price_cents, currency, availability, image_urls, version, updated_at)</code>. Version exists so a later step can compare a cached price with the authoritative row. It is not a reason to introduce coordination in step 1. The id is the primary key and the read is one row, so this path is not search. Search is marked out of this round with no wire, which stops “let’s add query while we are here” without confusing scope with trust.</p>
         <p>The usual miss at this step turns a non-functional phrase into a component name. Hearing 80 ms and drawing a cache, hearing 99.9% and drawing three regions, hearing staleness and drawing a queue. Eighty milliseconds only says the synchronous path cannot pay three serial seeks. 99.9% has not yet shown that a second region is required. Thirty seconds of staleness only says a browse may return a bounded old value. A component waits until the estimate shows a budget that does not fit. The other miss excludes checkout out loud and then draws a wire from Product Service to payments. The missing wire is the exclusion.</p>
       </div>
     </div>
@@ -342,113 +319,116 @@
 
   <section>
     <h2><span class="lang-zh">第二步 · 估算：一个数把缓存画上去</span><span class="lang-en">Step 2 · Estimate: one number adds the cache</span></h2>
-    <p class="cite"><span class="lang-zh">大约 4 分钟。平均 QPS 不够，要把它和寻道预算比完。Dean 的 10 ms 寻道来自他的大规模系统讲座幻灯片，不是博客转述。[2]</span><span class="lang-en">About four minutes. Average QPS is not enough until you compare it with the seek budget. Dean’s 10 ms seek is from his large-systems talk slides, not a blog recap. [2]</span></p>
+    <p class="cite"><span class="lang-zh">大约 4 分钟。平均 QPS 不够，要把它和示意性寻道上限比完。Dean 的 10 ms 数量级来自他的大规模系统讲座幻灯片，不是博客转述；它不是当代硬件基准。[2]</span><span class="lang-en">About four minutes. Average QPS is not enough until you compare it with an illustrative seek ceiling. Dean’s 10 ms order of magnitude comes from his large-systems talk slides, not a blog recap; it is not a benchmark for current hardware. [2]</span></p>
     <figure class="deck">
       <div class="slide">
-        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="es1t es1d">
-          <title id="es1t">Average QPS is already ten times one disk seek budget</title>
-          <desc id="es1d">The scoped product read remains client, edge, Product Service, and Product Store, with checkout outside. The new marks are 1,000 average QPS and a 100 seeks per second budget on the store. No cache yet.</desc>
-          <text x="480" y="24" text-anchor="middle" class="clock">1,000 avg QPS</text>
-          <circle cx="62" cy="156" r="26" class="box"/><circle cx="62" cy="146" r="8" class="box"/><path d="M46 174 Q62 160 78 174" class="wire"/>
-          <text x="62" y="210" text-anchor="middle" class="label">Client</text>
-          <rect x="118" y="36" width="822" height="252" rx="20" class="boundary"/><text x="136" y="58" class="tiny">TRUST BOUNDARY</text>
-          <rect x="140" y="118" width="120" height="76" rx="38" class="box alt"/><text x="200" y="152" text-anchor="middle" class="label">Edge</text><text x="200" y="172" text-anchor="middle" class="sub">TLS · route</text>
-          <rect x="330" y="110" width="172" height="92" rx="12" class="box ok"/><text x="416" y="146" text-anchor="middle" class="label">Product Service</text><text x="416" y="168" text-anchor="middle" class="sub">in scope</text><text x="416" y="188" text-anchor="middle" class="tiny">functional · one JSON</text>
-          <ellipse cx="868" cy="118" rx="68" ry="15" class="store"/><rect x="800" y="118" width="136" height="84" class="store"/><ellipse cx="868" cy="202" rx="68" ry="15" class="store"/>
-          <text x="868" y="156" text-anchor="middle" class="label">Product Store</text><text x="868" y="176" text-anchor="middle" class="sub">rows live here</text>
-          <line x1="90" y1="156" x2="128" y2="156" class="wire"/><polygon points="128,150 140,156 128,162" class="head"/>
-          <line x1="260" y1="156" x2="318" y2="156" class="wire"/><polygon points="318,150 330,156 318,162" class="head"/>
-          <path d="M502 188 C620 248 700 248 786 180" class="wire"/><polygon points="786,174 800,180 786,186" class="head"/>
-          <rect x="118" y="340" width="250" height="64" rx="12" class="box"/><text x="243" y="366" text-anchor="middle" class="label">Out of scope</text><text x="243" y="388" text-anchor="middle" class="sub">checkout · search · recs</text>
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d3s1t d3s1d">
+          <title id="d3s1t">Average traffic already exceeds the illustrative seek ceiling</title>
+          <desc id="d3s1d">The complete product read goes from Client through Edge and Product Service to Product Store and returns hop by hop. Badges compare 1000 average QPS with an illustrative mathematical ceiling of 100 serial ten-millisecond seeks per second.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
           <g class="is-new">
-            <text x="800" y="228" text-anchor="middle" class="clock">seek budget 100/s</text>
-            <text x="140" y="276" class="tiny">1,000 / 100 = 10× one disk</text>
+            <rect x="94" y="22" width="852" height="346" rx="18" class="boundary"/><text x="112" y="45" class="tiny">SYSTEM TRUST BOUNDARY</text>
+            <circle cx="45" cy="166" r="12" class="box"/><path d="M25 212 Q45 180 65 212" class="wire"/><text x="45" y="234" text-anchor="middle" class="label">Client</text>
+            <rect x="115" y="155" width="120" height="70" rx="35" class="box alt"/><text x="175" y="187" text-anchor="middle" class="label">Edge</text><text x="175" y="206" text-anchor="middle" class="sub">TLS · route</text>
+            <rect x="320" y="150" width="160" height="80" rx="12" class="box"/><text x="400" y="187" text-anchor="middle" class="label">Product Service</text><text x="400" y="206" text-anchor="middle" class="sub">stateless</text>
+            <path d="M780 150 V250 A70 12 0 0 0 920 250 V150" class="store"/><ellipse cx="850" cy="150" rx="70" ry="12" class="store"/><text x="850" y="210" text-anchor="middle" class="label">Product Store</text><text x="850" y="228" text-anchor="middle" class="sub">source of truth</text>
+            <path d="M71 181 L106.2 181" class="wire"/><polygon points="116.2,181 106.2,186 106.2,176" class="head"/><text x="94" y="173" text-anchor="middle" class="tiny">GET</text>
+            <path d="M233.8 181 L310 181" class="wire"/><polygon points="320,181 310,186 310,176" class="head"/><text x="277" y="173" text-anchor="middle" class="tiny">/products/42</text>
+            <path d="M480 181 L770 181" class="wire"/><polygon points="780,181 770,186 770,176" class="head"/><text x="650" y="173" text-anchor="middle" class="tiny">origin read</text>
+            <path d="M780 199 L490 199" class="wire reply"/><polygon points="480,199 490,194 490,204" class="head reply"/><text x="650" y="217" text-anchor="middle" class="tiny">row / not found</text>
+            <path d="M320 199 L243.8 199" class="wire reply"/><polygon points="233.8,199 243.8,194 243.8,204" class="head reply"/><text x="277" y="217" text-anchor="middle" class="tiny">JSON</text>
+            <path d="M116.2 199 L81 199" class="wire reply"/><polygon points="71,199 81,194 81,204" class="head reply"/><text x="94" y="217" text-anchor="middle" class="tiny">200 / 404</text>
+            <rect x="300" y="48" width="170" height="20" rx="10" class="badge"/><text x="385" y="62" text-anchor="middle" class="badge-text">1,000 avg QPS</text>
+            <rect x="760" y="48" width="165" height="20" rx="10" class="badge"/><text x="842.5" y="62" text-anchor="middle" class="badge-text">≤100 seek/s</text>
           </g>
         </svg>
-        <figcaption><span class="lang-zh">这一笔还没加盒子。它把 1,000 平均 QPS 和每秒 100 次寻道放在一起：平均已经是单盘串行寻道的 10 倍，所以「每条请求都寻道」不成立。</span><span class="lang-en">This stroke adds no box. It places 1,000 average QPS next to 100 seeks per second: the average is already 10× one disk’s serial seeks, so “every request seeks” is already false.</span></figcaption>
+        <figcaption><span class="lang-zh">先不加盒子：8,640,000 × 10 ÷ 86,400 = 1,000 QPS；若每次随机寻道按 10 ms 串行，1,000 ÷ 10 = 100/s 只是 100% 忙碌下的数学上限。</span><span class="lang-en">Add no box yet: 8,640,000 × 10 ÷ 86,400 = 1,000 QPS. At an assumed serial 10 ms per random seek, 1,000 ÷ 10 = 100/s is only the mathematical ceiling at 100% busy.</span></figcaption>
       </div>
       <div class="slide">
-        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="es2t es2d">
-          <title id="es2t">Peak QPS widens the gap to fifty times the seek budget</title>
-          <desc id="es2d">The same architecture now shows 5,000 peak QPS. Five thousand divided by the 100 seeks per second budget is 50. The store is still the only data box.</desc>
-          <circle cx="62" cy="156" r="26" class="box"/><circle cx="62" cy="146" r="8" class="box"/><path d="M46 174 Q62 160 78 174" class="wire"/>
-          <text x="62" y="210" text-anchor="middle" class="label">Client</text>
-          <rect x="118" y="36" width="822" height="252" rx="20" class="boundary"/><text x="136" y="58" class="tiny">TRUST BOUNDARY</text>
-          <rect x="140" y="118" width="120" height="76" rx="38" class="box alt"/><text x="200" y="152" text-anchor="middle" class="label">Edge</text><text x="200" y="172" text-anchor="middle" class="sub">TLS · route</text>
-          <rect x="330" y="110" width="172" height="92" rx="12" class="box ok"/><text x="416" y="146" text-anchor="middle" class="label">Product Service</text><text x="416" y="168" text-anchor="middle" class="sub">in scope</text><text x="416" y="188" text-anchor="middle" class="tiny">functional · one JSON</text>
-          <ellipse cx="868" cy="118" rx="68" ry="15" class="store"/><rect x="800" y="118" width="136" height="84" class="store"/><ellipse cx="868" cy="202" rx="68" ry="15" class="store"/>
-          <text x="868" y="156" text-anchor="middle" class="label">Product Store</text><text x="868" y="176" text-anchor="middle" class="sub">cannot seek 5,000/s</text>
-          <line x1="90" y1="156" x2="128" y2="156" class="wire"/><polygon points="128,150 140,156 128,162" class="head"/>
-          <line x1="260" y1="156" x2="318" y2="156" class="wire"/><polygon points="318,150 330,156 318,162" class="head"/>
-          <path d="M502 188 C620 248 700 248 786 180" class="wire"/><polygon points="786,174 800,180 786,186" class="head"/>
-          <rect x="118" y="340" width="250" height="64" rx="12" class="box"/><text x="243" y="366" text-anchor="middle" class="label">Out of scope</text><text x="243" y="388" text-anchor="middle" class="sub">checkout · search · recs</text>
-          <text x="800" y="228" text-anchor="middle" class="tiny">seek budget 100/s</text>
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d3s2t d3s2d">
+          <title id="d3s2t">Peak traffic is fifty times the illustrative seek ceiling</title>
+          <desc id="d3s2d">The request path stays fixed. A new peak badge shows 5000 QPS, and the comparison states 5000 divided by 100 equals 50, so every request cannot require a random seek.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="94" y="22" width="852" height="346" rx="18" class="boundary"/><text x="112" y="45" class="tiny">SYSTEM TRUST BOUNDARY</text>
+          <circle cx="45" cy="166" r="12" class="box"/><path d="M25 212 Q45 180 65 212" class="wire"/><text x="45" y="234" text-anchor="middle" class="label">Client</text>
+          <rect x="115" y="155" width="120" height="70" rx="35" class="box alt"/><text x="175" y="187" text-anchor="middle" class="label">Edge</text><text x="175" y="206" text-anchor="middle" class="sub">TLS · route</text>
+          <rect x="320" y="150" width="160" height="80" rx="12" class="box"/><text x="400" y="187" text-anchor="middle" class="label">Product Service</text><text x="400" y="206" text-anchor="middle" class="sub">stateless</text>
+          <path d="M780 150 V250 A70 12 0 0 0 920 250 V150" class="store"/><ellipse cx="850" cy="150" rx="70" ry="12" class="store"/><text x="850" y="210" text-anchor="middle" class="label">Product Store</text><text x="850" y="228" text-anchor="middle" class="sub">source of truth</text>
+          <path d="M71 181 L106.2 181" class="wire"/><polygon points="116.2,181 106.2,186 106.2,176" class="head"/><text x="94" y="173" text-anchor="middle" class="tiny">GET</text>
+          <path d="M233.8 181 L310 181" class="wire"/><polygon points="320,181 310,186 310,176" class="head"/><text x="277" y="173" text-anchor="middle" class="tiny">/products/42</text>
+          <path d="M480 181 L770 181" class="wire"/><polygon points="780,181 770,186 770,176" class="head"/><text x="650" y="173" text-anchor="middle" class="tiny">origin read</text>
+          <path d="M780 199 L490 199" class="wire reply"/><polygon points="480,199 490,194 490,204" class="head reply"/><text x="650" y="217" text-anchor="middle" class="tiny">row / not found</text>
+          <path d="M320 199 L243.8 199" class="wire reply"/><polygon points="233.8,199 243.8,194 243.8,204" class="head reply"/><text x="277" y="217" text-anchor="middle" class="tiny">JSON</text>
+          <path d="M116.2 199 L81 199" class="wire reply"/><polygon points="71,199 81,194 81,204" class="head reply"/><text x="94" y="217" text-anchor="middle" class="tiny">200 / 404</text>
+          <rect x="760" y="48" width="165" height="20" rx="10" class="badge"/><text x="842.5" y="62" text-anchor="middle" class="badge-text">≤100 seek/s</text>
           <g class="is-new">
-            <text x="480" y="24" text-anchor="middle" class="clock">5,000 peak QPS</text>
-            <text x="140" y="276" class="tiny">5,000 / 100 = 50× one disk</text>
+            <rect x="300" y="48" width="170" height="20" rx="10" class="badge"/><text x="385" y="62" text-anchor="middle" class="badge-text">5,000 peak QPS</text>
+            <text x="620" y="62" text-anchor="middle" class="clock">5,000 ÷ 100 = 50×</text>
           </g>
         </svg>
-        <figcaption><span class="lang-zh">这一笔把图上的数从 1,000 改成 5,000。5,000 ÷ 100 = 50，峰值是单盘寻道预算的 50 倍。数变了，路径还没变，所以下一笔必须改路径。</span><span class="lang-en">This stroke changes the number on the drawing from 1,000 to 5,000. 5,000 ÷ 100 = 50, so the peak is 50× one disk’s seek budget. The number changed and the path did not, so the next stroke has to change the path.</span></figcaption>
+        <figcaption><span class="lang-zh">峰值再乘 5：1,000 × 5 = 5,000；5,000 ÷ 100 = 50。路径没变而容量差了 50 倍，下一笔才有理由改路径。</span><span class="lang-en">Peak multiplies by five: 1,000 × 5 = 5,000; 5,000 ÷ 100 = 50. The path has not changed while the capacity gap is 50×, so the next stroke must change the path.</span></figcaption>
       </div>
       <div class="slide">
-        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="es3t es3d">
-          <title id="es3t">Insert a cache so the common path does not seek</title>
-          <desc id="es3d">A cache now sits between Product Service and Product Store. The common path is a cache hit. The lower wire remains the miss path into the store. Peak load is still 5,000 QPS.</desc>
-          <text x="480" y="24" text-anchor="middle" class="clock">5,000 peak QPS</text>
-          <circle cx="62" cy="156" r="26" class="box"/><circle cx="62" cy="146" r="8" class="box"/><path d="M46 174 Q62 160 78 174" class="wire"/>
-          <text x="62" y="210" text-anchor="middle" class="label">Client</text>
-          <rect x="118" y="36" width="822" height="252" rx="20" class="boundary"/><text x="136" y="58" class="tiny">TRUST BOUNDARY</text>
-          <rect x="140" y="118" width="120" height="76" rx="38" class="box alt"/><text x="200" y="152" text-anchor="middle" class="label">Edge</text><text x="200" y="172" text-anchor="middle" class="sub">TLS · route</text>
-          <rect x="330" y="110" width="172" height="92" rx="12" class="box ok"/><text x="416" y="146" text-anchor="middle" class="label">Product Service</text><text x="416" y="170" text-anchor="middle" class="sub">in scope</text>
-          <ellipse cx="868" cy="118" rx="68" ry="15" class="store"/><rect x="800" y="118" width="136" height="84" class="store"/><ellipse cx="868" cy="202" rx="68" ry="15" class="store"/>
-          <text x="868" y="156" text-anchor="middle" class="label">Product Store</text><text x="868" y="176" text-anchor="middle" class="sub">misses only</text>
-          <line x1="90" y1="156" x2="128" y2="156" class="wire"/><polygon points="128,150 140,156 128,162" class="head"/>
-          <line x1="260" y1="156" x2="318" y2="156" class="wire"/><polygon points="318,150 330,156 318,162" class="head"/>
-          <path d="M502 200 C640 268 720 250 786 190" class="wire"/><polygon points="786,184 800,188 788,198" class="head"/><text x="640" y="262" class="tiny">miss</text>
-          <rect x="118" y="340" width="250" height="64" rx="12" class="box"/><text x="243" y="366" text-anchor="middle" class="label">Out of scope</text><text x="243" y="388" text-anchor="middle" class="sub">checkout · search · recs</text>
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d3s3t d3s3d">
+          <title id="d3s3t">A look-aside cache removes seeks from the common path</title>
+          <desc id="d3s3d">Client, Edge, and Product Service stay fixed. Product Service looks up Cache and receives hit or miss. On a miss Product Service reads Product Store, receives the row, and fills Cache. The common reply returns through Product Service and Edge.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="94" y="22" width="852" height="346" rx="18" class="boundary"/><text x="112" y="45" class="tiny">SYSTEM TRUST BOUNDARY</text>
+          <circle cx="45" cy="166" r="12" class="box"/><path d="M25 212 Q45 180 65 212" class="wire"/><text x="45" y="234" text-anchor="middle" class="label">Client</text>
+          <rect x="115" y="155" width="120" height="70" rx="35" class="box alt"/><text x="175" y="187" text-anchor="middle" class="label">Edge</text><text x="175" y="206" text-anchor="middle" class="sub">TLS · route</text>
+          <rect x="320" y="150" width="160" height="80" rx="12" class="box"/><text x="400" y="187" text-anchor="middle" class="label">Product Service</text><text x="400" y="206" text-anchor="middle" class="sub">stateless</text>
+          <path d="M780 150 V250 A70 12 0 0 0 920 250 V150" class="store"/><ellipse cx="850" cy="150" rx="70" ry="12" class="store"/><text x="850" y="210" text-anchor="middle" class="label">Product Store</text><text x="850" y="228" text-anchor="middle" class="sub">source of truth</text>
+          <path d="M71 181 L106.2 181" class="wire"/><polygon points="116.2,181 106.2,186 106.2,176" class="head"/><text x="94" y="173" text-anchor="middle" class="tiny">GET</text>
+          <path d="M233.8 181 L310 181" class="wire"/><polygon points="320,181 310,186 310,176" class="head"/><text x="277" y="173" text-anchor="middle" class="tiny">/products/42</text>
+          <path d="M480 181 L770 181" class="wire"/><polygon points="780,181 770,186 770,176" class="head"/><text x="650" y="173" text-anchor="middle" class="tiny">origin read</text>
+          <path d="M780 199 L490 199" class="wire reply"/><polygon points="480,199 490,194 490,204" class="head reply"/><text x="650" y="217" text-anchor="middle" class="tiny">row / not found</text>
+          <path d="M320 199 L243.8 199" class="wire reply"/><polygon points="233.8,199 243.8,194 243.8,204" class="head reply"/><text x="277" y="217" text-anchor="middle" class="tiny">JSON</text>
+          <path d="M116.2 199 L81 199" class="wire reply"/><polygon points="71,199 81,194 81,204" class="head reply"/><text x="94" y="217" text-anchor="middle" class="tiny">200 / 404</text>
+          <rect x="760" y="48" width="165" height="20" rx="10" class="badge"/><text x="842.5" y="62" text-anchor="middle" class="badge-text">≤100 seek/s</text>
           <g class="is-new">
-            <rect x="564" y="120" width="136" height="72" rx="10" class="cache"/><rect x="572" y="128" width="120" height="56" rx="7" class="cache-detail"/>
-            <text x="632" y="151" text-anchor="middle" class="label">Cache</text><text x="632" y="173" text-anchor="middle" class="sub">not the truth</text>
-            <line x1="502" y1="140" x2="552" y2="140" class="wire"/><text x="512" y="130" class="tiny">lookup</text>
-            <line x1="564" y1="174" x2="514" y2="174" class="wire hit"/><text x="526" y="190" class="tiny">hit</text>
-            <line x1="800" y1="146" x2="712" y2="146" class="wire reply"/><text x="736" y="136" class="tiny">fill</text>
+            <rect x="567" y="77" width="150" height="70" rx="8" class="cache"/><rect x="560" y="70" width="150" height="70" rx="8" class="cache"/><text x="635" y="102" text-anchor="middle" class="label">Cache</text><text x="635" y="121" text-anchor="middle" class="sub">droppable</text>
+            <path d="M380 150 L380 123 Q380 115 388 115 L550 115" class="wire"/><polygon points="560,115 550,120 550,110" class="head"/><text x="470" y="106" text-anchor="middle" class="tiny">lookup</text>
+            <path d="M560 133 L528 133 Q520 133 520 141 L520 157 Q520 165 512 165 L490 165" class="wire reply"/><polygon points="480,165 490,160 490,170" class="head reply"/><text x="523" y="151" text-anchor="middle" class="tiny">hit / miss</text>
+            <path d="M440 150 L440 98 Q440 90 448 90 L550 90" class="wire async"/><polygon points="560,90 550,95 550,85" class="head async"/><text x="500" y="81" text-anchor="middle" class="tiny">fill after row</text>
+            <rect x="300" y="48" width="170" height="20" rx="10" class="badge"/><text x="385" y="62" text-anchor="middle" class="badge-text">5,000 peak QPS</text>
           </g>
         </svg>
-        <figcaption><span class="lang-zh">这一笔才加缓存：常见路径打到内存，存储只接未命中。缓存不是权威。5,000 对 100 的差距是它出现的理由，不是「读多所以大家都加 Redis」。</span><span class="lang-en">This stroke is the cache: the common path hits memory, and the store takes misses only. The cache is not authority. The gap between 5,000 and 100 is why it appears, not the slogan that read-heavy systems always add Redis.</span></figcaption>
+        <figcaption><span class="lang-zh">这一笔才加 Cache，而且是 look-aside：服务查缓存；miss 时服务自己读 Product Store；行回来后再 fill。正常响应仍由服务经 Edge 逐跳返回。</span><span class="lang-en">Only now add Cache, and make it look-aside: the service checks cache, reads Product Store itself on a miss, then fills after the row returns. The response still returns through service and Edge.</span></figcaption>
       </div>
       <div class="slide">
-        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="es4t es4d">
-          <title id="es4t">Require about a 98 percent hit rate to fit the seek budget</title>
-          <desc id="es4d">At 5,000 peak QPS the cache must absorb about 98 percent of reads so the store sees about 100 misses per second, matching the one-disk seek budget. Hits return from cache. Misses and fills still reach Product Store.</desc>
-          <text x="480" y="24" text-anchor="middle" class="clock">5,000 peak · need ~98% hit</text>
-          <circle cx="62" cy="156" r="26" class="box"/><circle cx="62" cy="146" r="8" class="box"/><path d="M46 174 Q62 160 78 174" class="wire"/>
-          <text x="62" y="210" text-anchor="middle" class="label">Client</text>
-          <rect x="118" y="36" width="822" height="252" rx="20" class="boundary"/><text x="136" y="58" class="tiny">TRUST BOUNDARY</text>
-          <rect x="140" y="118" width="120" height="76" rx="38" class="box alt"/><text x="200" y="152" text-anchor="middle" class="label">Edge</text><text x="200" y="172" text-anchor="middle" class="sub">TLS · route</text>
-          <rect x="330" y="110" width="172" height="92" rx="12" class="box ok"/><text x="416" y="146" text-anchor="middle" class="label">Product Service</text><text x="416" y="170" text-anchor="middle" class="sub">in scope</text>
-          <rect x="564" y="120" width="136" height="72" rx="10" class="cache"/><rect x="572" y="128" width="120" height="56" rx="7" class="cache-detail"/>
-          <text x="632" y="151" text-anchor="middle" class="label">Cache</text><text x="632" y="173" text-anchor="middle" class="sub">not the truth</text>
-          <ellipse cx="868" cy="118" rx="68" ry="15" class="store"/><rect x="800" y="118" width="136" height="84" class="store"/><ellipse cx="868" cy="202" rx="68" ry="15" class="store"/>
-          <text x="868" y="156" text-anchor="middle" class="label">Product Store</text><text x="868" y="176" text-anchor="middle" class="sub">~100 miss QPS</text>
-          <line x1="90" y1="156" x2="128" y2="156" class="wire"/><polygon points="128,150 140,156 128,162" class="head"/>
-          <line x1="260" y1="156" x2="318" y2="156" class="wire"/><polygon points="318,150 330,156 318,162" class="head"/>
-          <line x1="502" y1="140" x2="552" y2="140" class="wire"/><text x="512" y="130" class="tiny">lookup</text>
-          <line x1="564" y1="174" x2="514" y2="174" class="wire hit"/><text x="526" y="190" class="tiny">hit</text>
-          <line x1="800" y1="146" x2="712" y2="146" class="wire reply"/><text x="736" y="136" class="tiny">fill</text>
-          <path d="M502 200 C640 268 720 250 786 190" class="wire"/><polygon points="786,184 800,188 788,198" class="head"/>
-          <rect x="118" y="340" width="250" height="64" rx="12" class="box"/><text x="243" y="366" text-anchor="middle" class="label">Out of scope</text><text x="243" y="388" text-anchor="middle" class="sub">checkout · search · recs</text>
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d3s4t d3s4d">
+          <title id="d3s4t">A ninety-eight percent hit requirement leaves one hundred misses per second</title>
+          <desc id="d3s4d">The complete look-aside path stays fixed. At 5000 peak QPS a 98 percent hit requirement leaves 5000 times 0.02 equals 100 miss QPS at Product Store; this is a requirement, not a measurement.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="94" y="22" width="852" height="346" rx="18" class="boundary"/><text x="112" y="45" class="tiny">SYSTEM TRUST BOUNDARY</text>
+          <circle cx="45" cy="166" r="12" class="box"/><path d="M25 212 Q45 180 65 212" class="wire"/><text x="45" y="234" text-anchor="middle" class="label">Client</text>
+          <rect x="115" y="155" width="120" height="70" rx="35" class="box alt"/><text x="175" y="187" text-anchor="middle" class="label">Edge</text><text x="175" y="206" text-anchor="middle" class="sub">TLS · route</text>
+          <rect x="320" y="150" width="160" height="80" rx="12" class="box"/><text x="400" y="187" text-anchor="middle" class="label">Product Service</text><text x="400" y="206" text-anchor="middle" class="sub">stateless</text>
+          <path d="M780 150 V250 A70 12 0 0 0 920 250 V150" class="store"/><ellipse cx="850" cy="150" rx="70" ry="12" class="store"/><text x="850" y="210" text-anchor="middle" class="label">Product Store</text><text x="850" y="228" text-anchor="middle" class="sub">source of truth</text>
+          <path d="M71 181 L106.2 181" class="wire"/><polygon points="116.2,181 106.2,186 106.2,176" class="head"/><text x="94" y="173" text-anchor="middle" class="tiny">GET</text>
+          <path d="M233.8 181 L310 181" class="wire"/><polygon points="320,181 310,186 310,176" class="head"/><text x="277" y="173" text-anchor="middle" class="tiny">/products/42</text>
+          <path d="M480 181 L770 181" class="wire"/><polygon points="780,181 770,186 770,176" class="head"/><text x="650" y="173" text-anchor="middle" class="tiny">origin read</text>
+          <path d="M780 199 L490 199" class="wire reply"/><polygon points="480,199 490,194 490,204" class="head reply"/><text x="650" y="217" text-anchor="middle" class="tiny">row / not found</text>
+          <path d="M320 199 L243.8 199" class="wire reply"/><polygon points="233.8,199 243.8,194 243.8,204" class="head reply"/><text x="277" y="217" text-anchor="middle" class="tiny">JSON</text>
+          <path d="M116.2 199 L81 199" class="wire reply"/><polygon points="71,199 81,194 81,204" class="head reply"/><text x="94" y="217" text-anchor="middle" class="tiny">200 / 404</text>
+          <rect x="567" y="77" width="150" height="70" rx="8" class="cache"/><rect x="560" y="70" width="150" height="70" rx="8" class="cache"/><text x="635" y="102" text-anchor="middle" class="label">Cache</text><text x="635" y="121" text-anchor="middle" class="sub">droppable</text>
+          <path d="M380 150 L380 123 Q380 115 388 115 L550 115" class="wire"/><polygon points="560,115 550,120 550,110" class="head"/><text x="470" y="106" text-anchor="middle" class="tiny">lookup</text>
+          <path d="M560 133 L528 133 Q520 133 520 141 L520 157 Q520 165 512 165 L490 165" class="wire reply"/><polygon points="480,165 490,160 490,170" class="head reply"/><text x="523" y="151" text-anchor="middle" class="tiny">hit / miss</text>
+          <path d="M440 150 L440 98 Q440 90 448 90 L550 90" class="wire async"/><polygon points="560,90 550,95 550,85" class="head async"/><text x="500" y="81" text-anchor="middle" class="tiny">fill after row</text>
+          <rect x="760" y="48" width="165" height="20" rx="10" class="badge"/><text x="842.5" y="62" text-anchor="middle" class="badge-text">≤100 seek/s</text>
           <g class="is-new">
-            <text x="600" y="276" class="clock">5,000 × 0.02 = 100</text>
+            <rect x="286" y="48" width="390" height="20" rx="10" class="badge"/><text x="481" y="62" text-anchor="middle" class="badge-text">REQUIRE · ≥98% hit · ≤100 miss/s</text>
+            <text x="650" y="279" text-anchor="middle" class="clock">5,000 × (1 − 0.98) = 100</text>
           </g>
         </svg>
-        <figcaption><span class="lang-zh">终图把命中率写成存储负担：要让未命中落在每秒 100 次附近，5,000 的峰值需要大约 98% 命中，因为 5,000 × 0.02 = 100。这是设计要求，不是测出来的命中率。</span><span class="lang-en">The finished frame turns hit rate into store load: to land near 100 misses per second, a 5,000 peak needs about a 98% hit rate, because 5,000 × 0.02 = 100. That is a design requirement, not a measured hit rate.</span></figcaption>
+        <figcaption><span class="lang-zh">终图把命中率变成存储负担：5,000 × (1−0.98) = 100 miss/s。98% 是在这组假设下的最低设计要求，不是公开生产数据。</span><span class="lang-en">The final frame turns hit rate into store load: 5,000 × (1−0.98) = 100 miss/s. Ninety-eight percent is the minimum requirement under these assumptions, not published production data.</span></figcaption>
       </div>
     </figure>
     <div class="bilingual">
       <div class="lang-zh"><p class="col-kicker">把除法展开到它改变路径</p>
-        <p>Jeff Dean 的讲座幻灯片里，同机房往返是 500,000 纳秒，也就是 0.5 毫秒；一次磁盘寻道是 10,000,000 纳秒，也就是 10 毫秒；主存访问是 100 纳秒。[2] 单盘如果串行做随机寻道，一秒钟有 1,000 毫秒，1,000 ÷ 10 = 100，所以寻道预算大约是每秒 100 次。这不是某台机器的基准测试，而是用他公开的数量级挡住「存储什么都扛得住」。</p>
+        <p>Jeff Dean 的讲座幻灯片里，同机房往返是 500,000 纳秒，也就是 0.5 毫秒；一次磁盘寻道是 10,000,000 纳秒，也就是 10 毫秒；主存访问是 100 纳秒。[2] 单盘如果串行做随机寻道，一秒钟有 1,000 毫秒，1,000 ÷ 10 = 100，所以在 100% 忙碌、不留排队余量的极端假设下，数学上限才是每秒 100 次。真正的安全 gate 必须更低，并由当代硬件、缓冲池命中、排队与压测数据重算。这里只用公开数量级挡住「存储什么都扛得住」。</p>
         <p>平均 1,000 QPS 已经是 100 的 10 倍：1,000 ÷ 100 = 10。峰值 5,000 ÷ 100 = 50。所以即使用平均而不是峰值，也不能让每次详情阅读都去寻道。缓存这一笔是被这个倍数逼出来的。命中走内存：缓存若在另一台机器上，还要加上约 0.5 毫秒的机房往返，仍远小于 80 毫秒的假设预算。未命中才有资格去存储。</p>
-        <p>98% 不是拍脑袋的命中率。存储每秒只能按预算吃下约 100 次寻道，峰值是 5,000，未命中比例最多约 100 ÷ 5,000 = 0.02，所以命中率要到约 98%。验算：5,000 × 0.02 = 100。若你随口说 90%，未命中是 5,000 × 0.1 = 500，仍是单盘预算的 5 倍，缓存并没有把寻道问题解决完。90% 只有在你同时把寻道预算提高到 500（大约五块盘，或明确改口说热行已经在数据库缓冲池里、未命中不再寻道）时才站得住。面试里要把这句话说出来，否则 98% 看起来像魔术。</p>
+        <p>98% 不是拍脑袋的命中率。在「未命中都变成 10 ms 串行寻道」这个故意保守的教学假设下，先用≤100/s 作上限，峰值是 5,000，未命中比例最多约 100 ÷ 5,000 = 0.02，所以命中率要到约 98%。验算：5,000 × 0.02 = 100。若你随口说 90%，未命中是 5,000 × 0.1 = 500，仍是这个示意上限的 5 倍。90% 只有在你把实测回源容量提高到至少 500/s（例如加盘，或证明热行已在数据库缓冲池里、未命中不再寻道）时才站得住。面试里要把假设一起说出来，否则 98% 看起来像魔术。</p>
         <p>Dean 的缩略图例子里，30 次串行寻道 × 10 毫秒 = 300 毫秒，再加传输大约 560 毫秒；改成并行就落到一次寻道的量级。[2] 所以这轮把价格和可售标记放进同一行，同步路径只有一次存储读。他也写过：要能承受大约 10 到 20 倍的规模变化，但适合眼下的方案常常不适合 100 倍。[2] 十倍增长留到追问。</p>
         <p>若热行已经在数据库内存里，寻道预算就不再是 100，缓存的理由改成尾延迟。Dean 和 Barroso 写过，大约 100 毫秒内的响应才显得顺，规模变大后尾部会主导体验。[3] SRE 监控章里，平均 100 毫秒、每秒 1,000 请求时，仍可能有 1% 的请求要 5 秒；页面若等多个后端，一个后端的 99 分位会变成用户看到的典型延迟。[4] 一次同步存储读，就是不让三条尾巴叠进同一次 GET。80 毫秒仍是假设。</p>
         <p>替代方案是不加缓存，加盘直到寻道容量盖住 5,000。五块串行盘大约 500 次每秒，仍差一个数量级；大约 50 块盘才对齐。访问若非常均匀、缓存几乎不命中，加盘更好，因为 98% 依赖请求集中在少数 SKU，而那是假设，不是这里引用的测量。面试官若说每个 SKU 一样热，就删掉缓存，只谈盘或副本。</p>
@@ -456,9 +436,9 @@
         <p>常见错法是算出 QPS 却不改图，或只说「缓存抗住高并发」却不说命中率。3 GB 也不会迫使分片，溢出的是寻道而不是容量。SRE 的过载章还提醒：用 QPS 代表容量经常失真，不同请求耗的资源不一样。[5] 白板上的每秒 100 次寻道是数量级替身，有实测就替换，不要说成生产限流配置。</p>
       </div>
       <div class="lang-en"><p class="col-kicker">Expand the division until it changes the path</p>
-        <p>In Jeff Dean’s talk slides, a round trip in the same datacenter is 500,000 nanoseconds, or 0.5 ms; a disk seek is 10,000,000 nanoseconds, or 10 ms; a main-memory reference is 100 nanoseconds. [2] If one disk serves random seeks serially, a second has 1,000 milliseconds, and 1,000 ÷ 10 = 100, so the seek budget is about 100 per second. That is not a benchmark of a particular machine. It uses his published order of magnitude to block “the store can take anything.”</p>
+        <p>In Jeff Dean’s talk slides, a round trip in the same datacenter is 500,000 nanoseconds, or 0.5 ms; a disk seek is 10,000,000 nanoseconds, or 10 ms; a main-memory reference is 100 nanoseconds. [2] If one disk serves random seeks serially, a second has 1,000 milliseconds and 1,000 ÷ 10 = 100. That is a mathematical ceiling at 100% busy with no queueing headroom, not a safe production capacity or a benchmark for current hardware. A real gate must be lower and recalculated from the actual device, buffer-pool hit rate, queueing, and load tests. The published order of magnitude is used only to block “the store can take anything.”</p>
         <p>Average 1,000 QPS is already 10× that budget: 1,000 ÷ 100 = 10. The peak is 5,000 ÷ 100 = 50. So even the average, not only the peak, forbids a seek on every detail view. The cache stroke is forced by that multiple. A hit is memory. If the cache is another machine, add about 0.5 ms of datacenter round trip, which is still far under the assumed 80 ms budget. Only a miss is allowed to touch the store.</p>
-        <p>Ninety-eight percent is not a decorative hit rate. The store can take about 100 seeks per second on this budget, the peak is 5,000, and the miss fraction can be at most about 100 ÷ 5,000 = 0.02, so the hit rate has to be about 98%. Check: 5,000 × 0.02 = 100. If you casually say 90%, misses are 5,000 × 0.1 = 500, still 5× one disk, and the cache has not finished the seek problem. Ninety percent stands only if you also raise the seek budget to 500 — about five disks — or you explicitly switch assumptions and say hot rows already live in the database buffer pool so a miss does not seek. Say that sentence. Otherwise 98% looks like a magic trick.</p>
+        <p>Ninety-eight percent is not a decorative hit rate. Under the deliberately conservative teaching assumption that every miss becomes a serial 10 ms seek, use ≤100/s as the ceiling. The peak is 5,000, so the miss fraction can be at most about 100 ÷ 5,000 = 0.02 and the hit rate has to be about 98%. Check: 5,000 × 0.02 = 100. If you casually say 90%, misses are 5,000 × 0.1 = 500, still 5× this illustrative ceiling. Ninety percent stands only if measured origin capacity is at least 500/s—perhaps through more disks, or because hot rows live in the database buffer pool and misses do not seek. Say the assumption with the result. Otherwise 98% looks like a magic trick.</p>
         <p>In Dean’s thumbnail example, 30 serial seeks × 10 ms = 300 ms, and with transfer the total is about 560 ms; in parallel the work falls to one seek. [2] This round keeps price and availability on the same row, one store read on the synchronous path. He also writes that a design should survive about a 10× to 20× change in scale, while the fit for today is often wrong at 100×. [2] A further 10× waits for the follow-up.</p>
         <p>If hot rows already live in database memory, the seek budget is no longer 100 and the cache is about tail latency. Dean and Barroso write that responses on the order of 100 ms feel fluid, and that at larger scale the tail dominates. [3] The SRE monitoring chapter notes that at a mean of 100 ms and 1,000 requests per second, 1% of requests may still take 5 seconds, and a page that waits on several backends feels one backend’s 99th percentile. [4] One synchronous store read keeps three tails from stacking on this GET. The 80 ms target is still an assumption.</p>
         <p>The alternative is no cache, and enough disks to cover 5,000 seeks. Five serial disks are about 500 per second, still an order of magnitude short; about 50 disks line up. When access is uniform and a cache would almost never hit, disks are the better stroke, because 98% assumes concentration on a few SKUs and that concentration is not a measurement cited here. If every SKU is equally hot, delete the cache and talk about disks or replicas.</p>
@@ -472,77 +452,97 @@
     <p class="cite"><span class="lang-zh">大约 10 到 15 分钟。结束的标志是面试官认可这张图，不是你自己画完。</span><span class="lang-en">About 10 to 15 minutes. This step ends when they buy the picture, not when you finish drawing.</span></p>
     <figure class="deck">
       <div class="slide">
-        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="hl1t hl1d">
-          <title id="hl1t">Separate stateless compute from authoritative state</title>
-          <desc id="hl1d">Product Service owns no rows. Cache is droppable. Product Store is the source of truth. Request, hit reply, miss, and fill arrows point at the receiver of each action.</desc>
-          <text x="480" y="24" text-anchor="middle" class="clock">5,000 peak · ~98% hit</text>
-          <circle cx="62" cy="156" r="26" class="box"/><circle cx="62" cy="146" r="8" class="box"/><path d="M46 174 Q62 160 78 174" class="wire"/><text x="62" y="210" text-anchor="middle" class="label">Client</text>
-          <rect x="118" y="36" width="822" height="252" rx="20" class="boundary"/><text x="136" y="58" class="tiny">TRUST BOUNDARY</text>
-          <rect x="140" y="118" width="120" height="76" rx="38" class="box alt"/><text x="200" y="152" text-anchor="middle" class="label">Edge</text><text x="200" y="172" text-anchor="middle" class="sub">TLS · route</text>
-          <rect x="330" y="110" width="172" height="92" rx="12" class="box ok"/><text x="416" y="146" text-anchor="middle" class="label">Product Service</text><text x="416" y="168" text-anchor="middle" class="sub">stateless</text><text x="416" y="188" text-anchor="middle" class="tiny">owns no rows</text>
-          <rect x="564" y="120" width="136" height="72" rx="10" class="cache"/><rect x="572" y="128" width="120" height="56" rx="7" class="cache-detail"/><text x="632" y="151" text-anchor="middle" class="label">Cache</text><text x="632" y="173" text-anchor="middle" class="sub">droppable</text>
-          <path d="M800 118 V202 A68 15 0 0 0 936 202 V118 Z" class="store"/><ellipse cx="868" cy="118" rx="68" ry="15" class="store"/><text x="868" y="157" text-anchor="middle" class="label">Product Store</text><text x="868" y="179" text-anchor="middle" class="sub">source of truth</text>
-          <line x1="90" y1="156" x2="128" y2="156" class="wire"/><line x1="260" y1="156" x2="318" y2="156" class="wire"/>
-          <line x1="502" y1="140" x2="552" y2="140" class="wire"/><text x="511" y="130" class="tiny">lookup</text>
-          <line x1="564" y1="176" x2="514" y2="176" class="wire hit"/><text x="526" y="192" class="tiny">hit</text>
-          <path d="M502 200 C640 268 720 250 788 190" class="wire"/><text x="642" y="260" class="tiny">miss</text>
-          <line x1="800" y1="146" x2="712" y2="146" class="wire reply"/><text x="736" y="136" class="tiny">fill</text>
-          <rect x="118" y="340" width="220" height="60" rx="12" class="box"/><text x="228" y="366" text-anchor="middle" class="label">Out of scope</text><text x="228" y="386" text-anchor="middle" class="sub">checkout · search</text>
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d4s1t d4s1d">
+          <title id="d4s1t">The high-level diagram starts with the synchronous ingress and reply</title>
+          <desc id="d4s1d">Client sends GET to Edge and Edge sends it to stateless Product Service. Product Service returns JSON to Edge and Edge returns 200 or 404 to Client.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <g class="is-new">
+            <rect x="94" y="22" width="852" height="346" rx="18" class="boundary"/><text x="112" y="45" class="tiny">SYSTEM TRUST BOUNDARY</text>
+            <circle cx="45" cy="166" r="12" class="box"/><path d="M25 212 Q45 180 65 212" class="wire"/><text x="45" y="234" text-anchor="middle" class="label">Client</text>
+            <rect x="115" y="155" width="120" height="70" rx="35" class="box alt"/><text x="175" y="187" text-anchor="middle" class="label">Edge</text><text x="175" y="206" text-anchor="middle" class="sub">TLS · route</text>
+            <rect x="320" y="150" width="160" height="80" rx="12" class="box"/><text x="400" y="187" text-anchor="middle" class="label">Product Service</text><text x="400" y="206" text-anchor="middle" class="sub">stateless</text>
+            <path d="M71 181 L106.2 181" class="wire"/><polygon points="116.2,181 106.2,186 106.2,176" class="head"/><text x="94" y="173" text-anchor="middle" class="tiny">GET</text>
+            <path d="M233.8 181 L310 181" class="wire"/><polygon points="320,181 310,186 310,176" class="head"/><text x="277" y="173" text-anchor="middle" class="tiny">/products/42</text>
+            <path d="M320 199 L243.8 199" class="wire reply"/><polygon points="233.8,199 243.8,194 243.8,204" class="head reply"/><text x="277" y="217" text-anchor="middle" class="tiny">JSON</text>
+            <path d="M116.2 199 L81 199" class="wire reply"/><polygon points="71,199 81,194 81,204" class="head reply"/><text x="94" y="217" text-anchor="middle" class="tiny">200 / 404</text>
+          </g>
         </svg>
-        <figcaption><span class="lang-zh">状态边界一次说清：服务无状态，缓存可丢，存储权威；灰线是 lookup 和 miss，绿色箭头才是 hit 与 fill 的返回方向。</span><span class="lang-en">State boundaries are explicit: the service is stateless, cache is droppable, and the store is authoritative. Gray carries lookup and miss; green carries hit and fill back.</span></figcaption>
+        <figcaption><span class="lang-zh">高层图先闭合入口与回程：GET 经 Edge 到无状态 Product Service；JSON 再经 Edge 返回。无状态表示服务不拥有商品行，不表示系统没有状态。</span><span class="lang-en">The high-level picture first closes ingress and reply: GET reaches stateless Product Service through Edge; JSON returns through Edge. Stateless means the service does not own product rows, not that the system has no state.</span></figcaption>
       </div>
       <div class="slide">
-        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="hl2t hl2d">
-          <title id="hl2t">Label the forward path as one synchronous GET</title>
-          <desc id="hl2d">The same fixed nodes and arrows are labeled as one synchronous GET. No client reply has been drawn yet.</desc>
-          <text x="480" y="24" text-anchor="middle" class="clock">5,000 peak · ~98% hit</text>
-          <circle cx="62" cy="156" r="26" class="box"/><circle cx="62" cy="146" r="8" class="box"/><path d="M46 174 Q62 160 78 174" class="wire"/><text x="62" y="210" text-anchor="middle" class="label">Client</text>
-          <rect x="118" y="36" width="822" height="252" rx="20" class="boundary"/><text x="136" y="58" class="tiny">TRUST BOUNDARY</text>
-          <rect x="140" y="118" width="120" height="76" rx="38" class="box alt"/><text x="200" y="152" text-anchor="middle" class="label">Edge</text><text x="200" y="172" text-anchor="middle" class="sub">TLS · route</text>
-          <rect x="330" y="110" width="172" height="92" rx="12" class="box ok"/><text x="416" y="146" text-anchor="middle" class="label">Product Service</text><text x="416" y="168" text-anchor="middle" class="sub">stateless</text><text x="416" y="188" text-anchor="middle" class="tiny">owns no rows</text>
-          <rect x="564" y="120" width="136" height="72" rx="10" class="cache"/><rect x="572" y="128" width="120" height="56" rx="7" class="cache-detail"/><text x="632" y="151" text-anchor="middle" class="label">Cache</text><text x="632" y="173" text-anchor="middle" class="sub">droppable</text>
-          <path d="M800 118 V202 A68 15 0 0 0 936 202 V118 Z" class="store"/><ellipse cx="868" cy="118" rx="68" ry="15" class="store"/><text x="868" y="157" text-anchor="middle" class="label">Product Store</text><text x="868" y="179" text-anchor="middle" class="sub">source of truth</text>
-          <line x1="90" y1="156" x2="128" y2="156" class="wire"/><line x1="260" y1="156" x2="318" y2="156" class="wire"/><line x1="502" y1="140" x2="552" y2="140" class="wire"/><line x1="564" y1="176" x2="514" y2="176" class="wire hit"/><path d="M502 200 C640 268 720 250 788 190" class="wire"/><line x1="800" y1="146" x2="712" y2="146" class="wire reply"/>
-          <rect x="118" y="340" width="220" height="60" rx="12" class="box"/><text x="228" y="366" text-anchor="middle" class="label">Out of scope</text><text x="228" y="386" text-anchor="middle" class="sub">checkout · search</text>
-          <g class="is-new"><text x="200" y="104" text-anchor="middle" class="clock">sync GET</text><text x="528" y="98" class="tiny">lookup</text><text x="636" y="260" class="tiny">miss only</text></g>
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d4s2t d4s2d">
+          <title id="d4s2t">Product Store is authoritative and every origin reply returns to the service</title>
+          <desc id="d4s2d">Product Store is added as source of truth. Product Service sends an origin read to Product Store, Product Store returns the row or not found to Product Service, and the existing reply continues through Edge to Client.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="94" y="22" width="852" height="346" rx="18" class="boundary"/><text x="112" y="45" class="tiny">SYSTEM TRUST BOUNDARY</text>
+          <circle cx="45" cy="166" r="12" class="box"/><path d="M25 212 Q45 180 65 212" class="wire"/><text x="45" y="234" text-anchor="middle" class="label">Client</text>
+          <rect x="115" y="155" width="120" height="70" rx="35" class="box alt"/><text x="175" y="187" text-anchor="middle" class="label">Edge</text><text x="175" y="206" text-anchor="middle" class="sub">TLS · route</text>
+          <rect x="320" y="150" width="160" height="80" rx="12" class="box"/><text x="400" y="187" text-anchor="middle" class="label">Product Service</text><text x="400" y="206" text-anchor="middle" class="sub">stateless</text>
+          <path d="M71 181 L106.2 181" class="wire"/><polygon points="116.2,181 106.2,186 106.2,176" class="head"/><text x="94" y="173" text-anchor="middle" class="tiny">GET</text>
+          <path d="M233.8 181 L310 181" class="wire"/><polygon points="320,181 310,186 310,176" class="head"/><text x="277" y="173" text-anchor="middle" class="tiny">/products/42</text>
+          <path d="M320 199 L243.8 199" class="wire reply"/><polygon points="233.8,199 243.8,194 243.8,204" class="head reply"/><text x="277" y="217" text-anchor="middle" class="tiny">JSON</text>
+          <path d="M116.2 199 L81 199" class="wire reply"/><polygon points="71,199 81,194 81,204" class="head reply"/><text x="94" y="217" text-anchor="middle" class="tiny">200 / 404</text>
+          <g class="is-new">
+            <path d="M780 150 V250 A70 12 0 0 0 920 250 V150" class="store"/><ellipse cx="850" cy="150" rx="70" ry="12" class="store"/><text x="850" y="210" text-anchor="middle" class="label">Product Store</text><text x="850" y="228" text-anchor="middle" class="sub">source of truth</text>
+            <path d="M480 181 L770 181" class="wire"/><polygon points="780,181 770,186 770,176" class="head"/><text x="650" y="173" text-anchor="middle" class="tiny">origin read</text>
+            <path d="M780 199 L490 199" class="wire reply"/><polygon points="480,199 490,194 490,204" class="head reply"/><text x="650" y="217" text-anchor="middle" class="tiny">row / not found</text>
+          </g>
         </svg>
-        <figcaption><span class="lang-zh">向前路径是同步 GET：调用方在等。命中停在缓存，未命中才落到存储；客户端回程还没出现。</span><span class="lang-en">The forward path is a synchronous GET: the caller waits. A hit stops at cache and only a miss reaches the store. The client reply is still absent.</span></figcaption>
+        <figcaption><span class="lang-zh">权威存储只多一条完整往返：Service → Product Store → Service。Product Store 不会越过服务直接把结果送给客户端。</span><span class="lang-en">Authority adds one complete round trip: Service to Product Store and back to Service. Product Store never skips the service and replies directly to the client.</span></figcaption>
       </div>
       <div class="slide">
-        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="hl3t hl3d">
-          <title id="hl3t">Return product JSON through the edge</title>
-          <desc id="hl3d">Product Service returns 200 JSON through Edge to the client. Separate green arrows make both reply hops visible. The response does not bypass Edge or wait on a queue.</desc>
-          <text x="480" y="24" text-anchor="middle" class="clock">5,000 peak · ~98% hit</text>
-          <circle cx="62" cy="156" r="26" class="box"/><circle cx="62" cy="146" r="8" class="box"/><path d="M46 174 Q62 160 78 174" class="wire"/><text x="62" y="210" text-anchor="middle" class="label">Client</text>
-          <rect x="118" y="36" width="822" height="252" rx="20" class="boundary"/><text x="136" y="58" class="tiny">TRUST BOUNDARY</text>
-          <rect x="140" y="118" width="120" height="76" rx="38" class="box alt"/><text x="200" y="152" text-anchor="middle" class="label">Edge</text><text x="200" y="172" text-anchor="middle" class="sub">TLS · route</text>
-          <rect x="330" y="110" width="172" height="92" rx="12" class="box ok"/><text x="416" y="146" text-anchor="middle" class="label">Product Service</text><text x="416" y="168" text-anchor="middle" class="sub">stateless</text><text x="416" y="188" text-anchor="middle" class="tiny">owns no rows</text>
-          <rect x="564" y="120" width="136" height="72" rx="10" class="cache"/><rect x="572" y="128" width="120" height="56" rx="7" class="cache-detail"/><text x="632" y="151" text-anchor="middle" class="label">Cache</text><text x="632" y="173" text-anchor="middle" class="sub">droppable</text>
-          <path d="M800 118 V202 A68 15 0 0 0 936 202 V118 Z" class="store"/><ellipse cx="868" cy="118" rx="68" ry="15" class="store"/><text x="868" y="157" text-anchor="middle" class="label">Product Store</text><text x="868" y="179" text-anchor="middle" class="sub">source of truth</text>
-          <line x1="90" y1="146" x2="128" y2="146" class="wire"/><line x1="260" y1="146" x2="318" y2="146" class="wire"/><line x1="502" y1="140" x2="552" y2="140" class="wire"/><line x1="564" y1="176" x2="514" y2="176" class="wire hit"/><path d="M502 200 C640 268 720 250 788 190" class="wire"/><line x1="800" y1="146" x2="712" y2="146" class="wire reply"/>
-          <text x="200" y="104" text-anchor="middle" class="tiny">sync GET</text>
-          <rect x="118" y="340" width="220" height="60" rx="12" class="box"/><text x="228" y="366" text-anchor="middle" class="label">Out of scope</text><text x="228" y="386" text-anchor="middle" class="sub">checkout · search</text>
-          <g class="is-new"><line x1="330" y1="184" x2="272" y2="184" class="wire reply"/><path d="M140 182 C118 182 104 174 90 164" class="wire reply"/><text x="190" y="222" class="tiny">sync 200 JSON</text></g>
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d4s3t d4s3d">
+          <title id="d4s3t">The cache stays look-aside while Product Store remains authoritative</title>
+          <desc id="d4s3d">Product Service looks up Cache and receives hit or miss. On a miss Product Service reads Product Store, receives the row, fills Cache, and returns through Edge. Product Store remains source of truth.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="94" y="22" width="852" height="346" rx="18" class="boundary"/><text x="112" y="45" class="tiny">SYSTEM TRUST BOUNDARY</text>
+          <circle cx="45" cy="166" r="12" class="box"/><path d="M25 212 Q45 180 65 212" class="wire"/><text x="45" y="234" text-anchor="middle" class="label">Client</text>
+          <rect x="115" y="155" width="120" height="70" rx="35" class="box alt"/><text x="175" y="187" text-anchor="middle" class="label">Edge</text><text x="175" y="206" text-anchor="middle" class="sub">TLS · route</text>
+          <rect x="320" y="150" width="160" height="80" rx="12" class="box"/><text x="400" y="187" text-anchor="middle" class="label">Product Service</text><text x="400" y="206" text-anchor="middle" class="sub">stateless</text>
+          <path d="M780 150 V250 A70 12 0 0 0 920 250 V150" class="store"/><ellipse cx="850" cy="150" rx="70" ry="12" class="store"/><text x="850" y="210" text-anchor="middle" class="label">Product Store</text><text x="850" y="228" text-anchor="middle" class="sub">source of truth</text>
+          <path d="M71 181 L106.2 181" class="wire"/><polygon points="116.2,181 106.2,186 106.2,176" class="head"/><text x="94" y="173" text-anchor="middle" class="tiny">GET</text>
+          <path d="M233.8 181 L310 181" class="wire"/><polygon points="320,181 310,186 310,176" class="head"/><text x="277" y="173" text-anchor="middle" class="tiny">/products/42</text>
+          <path d="M480 181 L770 181" class="wire"/><polygon points="780,181 770,186 770,176" class="head"/><text x="650" y="173" text-anchor="middle" class="tiny">origin read</text>
+          <path d="M780 199 L490 199" class="wire reply"/><polygon points="480,199 490,194 490,204" class="head reply"/><text x="650" y="217" text-anchor="middle" class="tiny">row / not found</text>
+          <path d="M320 199 L243.8 199" class="wire reply"/><polygon points="233.8,199 243.8,194 243.8,204" class="head reply"/><text x="277" y="217" text-anchor="middle" class="tiny">JSON</text>
+          <path d="M116.2 199 L81 199" class="wire reply"/><polygon points="71,199 81,194 81,204" class="head reply"/><text x="94" y="217" text-anchor="middle" class="tiny">200 / 404</text>
+          <g class="is-new">
+            <rect x="567" y="77" width="150" height="70" rx="8" class="cache"/><rect x="560" y="70" width="150" height="70" rx="8" class="cache"/><text x="635" y="102" text-anchor="middle" class="label">Cache</text><text x="635" y="121" text-anchor="middle" class="sub">droppable</text>
+            <path d="M380 150 L380 123 Q380 115 388 115 L550 115" class="wire"/><polygon points="560,115 550,120 550,110" class="head"/><text x="470" y="106" text-anchor="middle" class="tiny">lookup</text>
+            <path d="M560 133 L528 133 Q520 133 520 141 L520 157 Q520 165 512 165 L490 165" class="wire reply"/><polygon points="480,165 490,160 490,170" class="head reply"/><text x="523" y="151" text-anchor="middle" class="tiny">hit / miss</text>
+            <path d="M440 150 L440 98 Q440 90 448 90 L550 90" class="wire async"/><polygon points="560,90 550,95 550,85" class="head async"/><text x="500" y="81" text-anchor="middle" class="tiny">fill after row</text>
+          </g>
         </svg>
-        <figcaption><span class="lang-zh">200 沿绿色箭头先回 Edge，再回 Client；不再用一条大弧线跳过入口。每一跳都能对应超时、状态码和观测点。</span><span class="lang-en">The 200 follows green from service to Edge, then to Client. It no longer uses one large arc that visually skips the entry layer, so each hop can own a timeout, status, and observation point.</span></figcaption>
+        <figcaption><span class="lang-zh">缓存加入后，origin 线没有消失，只改名为 miss 路径；Cache hit 和 Product Store row 都先回 Product Service，再共用同一条客户端回程。</span><span class="lang-en">After Cache appears, the origin line remains as the miss path. Both a cache hit and a store row return to Product Service before sharing the client reply path.</span></figcaption>
       </div>
       <div class="slide">
-        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="hl4t hl4d">
-          <title id="hl4t">Complete one-region high-level read and leave extras unwired</title>
-          <desc id="hl4d">The completed high-level diagram keeps the synchronous request and two-hop reply. Queue and Region B are muted and explicitly unwired because no current constraint earns them.</desc>
-          <text x="480" y="24" text-anchor="middle" class="clock">5,000 peak · ~98% hit</text>
-          <circle cx="62" cy="156" r="26" class="box"/><circle cx="62" cy="146" r="8" class="box"/><path d="M46 174 Q62 160 78 174" class="wire"/><text x="62" y="210" text-anchor="middle" class="label">Client</text>
-          <rect x="118" y="36" width="822" height="252" rx="20" class="boundary"/><text x="136" y="58" class="tiny">TRUST BOUNDARY</text>
-          <rect x="140" y="118" width="120" height="76" rx="38" class="box alt"/><text x="200" y="152" text-anchor="middle" class="label">Edge</text><text x="200" y="172" text-anchor="middle" class="sub">TLS · route</text>
-          <rect x="330" y="110" width="172" height="92" rx="12" class="box ok"/><text x="416" y="146" text-anchor="middle" class="label">Product Service</text><text x="416" y="168" text-anchor="middle" class="sub">stateless</text><text x="416" y="188" text-anchor="middle" class="tiny">owns no rows</text>
-          <rect x="564" y="120" width="136" height="72" rx="10" class="cache"/><rect x="572" y="128" width="120" height="56" rx="7" class="cache-detail"/><text x="632" y="151" text-anchor="middle" class="label">Cache</text><text x="632" y="173" text-anchor="middle" class="sub">droppable</text>
-          <path d="M800 118 V202 A68 15 0 0 0 936 202 V118 Z" class="store"/><ellipse cx="868" cy="118" rx="68" ry="15" class="store"/><text x="868" y="157" text-anchor="middle" class="label">Product Store</text><text x="868" y="179" text-anchor="middle" class="sub">source of truth</text>
-          <line x1="90" y1="146" x2="128" y2="146" class="wire"/><line x1="260" y1="146" x2="318" y2="146" class="wire"/><line x1="502" y1="140" x2="552" y2="140" class="wire"/><line x1="564" y1="176" x2="514" y2="176" class="wire hit"/><path d="M502 200 C640 268 720 250 788 190" class="wire"/><line x1="800" y1="146" x2="712" y2="146" class="wire reply"/>
-          <line x1="330" y1="184" x2="272" y2="184" class="wire reply"/><path d="M140 182 C118 182 104 174 90 164" class="wire reply"/><text x="190" y="222" class="tiny">sync 200 JSON</text>
-          <rect x="118" y="340" width="200" height="60" rx="12" class="box"/><text x="218" y="366" text-anchor="middle" class="label">Out of scope</text><text x="218" y="386" text-anchor="middle" class="sub">checkout · search</text>
-          <g class="is-new muted"><path d="M400 352 h130 a16 16 0 0 1 0 32 h-130 a16 16 0 0 1 0-32" class="queue"/><text x="465" y="374" text-anchor="middle" class="label">Queue</text><rect x="620" y="340" width="150" height="60" rx="12" class="box alt"/><text x="695" y="366" text-anchor="middle" class="label">Region B</text><text x="695" y="386" text-anchor="middle" class="sub">not wired</text><text x="560" y="332" class="tiny">deliberately no arrow</text></g>
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d4s4t d4s4d">
+          <title id="d4s4t">Queue and Region B remain rejected notes, not decorative components</title>
+          <desc id="d4s4d">The complete look-aside architecture stays fixed. Notes state that Queue is not drawn because writes are about 0.6 QPS with no fan-out, and Region B is not drawn because a 150 millisecond cross-continent round trip exceeds the assumed 80 millisecond target.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="94" y="22" width="852" height="346" rx="18" class="boundary"/><text x="112" y="45" class="tiny">SYSTEM TRUST BOUNDARY</text>
+          <circle cx="45" cy="166" r="12" class="box"/><path d="M25 212 Q45 180 65 212" class="wire"/><text x="45" y="234" text-anchor="middle" class="label">Client</text>
+          <rect x="115" y="155" width="120" height="70" rx="35" class="box alt"/><text x="175" y="187" text-anchor="middle" class="label">Edge</text><text x="175" y="206" text-anchor="middle" class="sub">TLS · route</text>
+          <rect x="320" y="150" width="160" height="80" rx="12" class="box"/><text x="400" y="187" text-anchor="middle" class="label">Product Service</text><text x="400" y="206" text-anchor="middle" class="sub">stateless</text>
+          <path d="M780 150 V250 A70 12 0 0 0 920 250 V150" class="store"/><ellipse cx="850" cy="150" rx="70" ry="12" class="store"/><text x="850" y="210" text-anchor="middle" class="label">Product Store</text><text x="850" y="228" text-anchor="middle" class="sub">source of truth</text>
+          <path d="M71 181 L106.2 181" class="wire"/><polygon points="116.2,181 106.2,186 106.2,176" class="head"/><text x="94" y="173" text-anchor="middle" class="tiny">GET</text>
+          <path d="M233.8 181 L310 181" class="wire"/><polygon points="320,181 310,186 310,176" class="head"/><text x="277" y="173" text-anchor="middle" class="tiny">/products/42</text>
+          <path d="M480 181 L770 181" class="wire"/><polygon points="780,181 770,186 770,176" class="head"/><text x="650" y="173" text-anchor="middle" class="tiny">origin read</text>
+          <path d="M780 199 L490 199" class="wire reply"/><polygon points="480,199 490,194 490,204" class="head reply"/><text x="650" y="217" text-anchor="middle" class="tiny">row / not found</text>
+          <path d="M320 199 L243.8 199" class="wire reply"/><polygon points="233.8,199 243.8,194 243.8,204" class="head reply"/><text x="277" y="217" text-anchor="middle" class="tiny">JSON</text>
+          <path d="M116.2 199 L81 199" class="wire reply"/><polygon points="71,199 81,194 81,204" class="head reply"/><text x="94" y="217" text-anchor="middle" class="tiny">200 / 404</text>
+          <rect x="567" y="77" width="150" height="70" rx="8" class="cache"/><rect x="560" y="70" width="150" height="70" rx="8" class="cache"/><text x="635" y="102" text-anchor="middle" class="label">Cache</text><text x="635" y="121" text-anchor="middle" class="sub">droppable</text>
+          <path d="M380 150 L380 123 Q380 115 388 115 L550 115" class="wire"/><polygon points="560,115 550,120 550,110" class="head"/><text x="470" y="106" text-anchor="middle" class="tiny">lookup</text>
+          <path d="M560 133 L528 133 Q520 133 520 141 L520 157 Q520 165 512 165 L490 165" class="wire reply"/><polygon points="480,165 490,160 490,170" class="head reply"/><text x="523" y="151" text-anchor="middle" class="tiny">hit / miss</text>
+          <path d="M440 150 L440 98 Q440 90 448 90 L550 90" class="wire async"/><polygon points="560,90 550,95 550,85" class="head async"/><text x="500" y="81" text-anchor="middle" class="tiny">fill after row</text>
+          <g class="is-new">
+            <text x="145" y="300" class="clock">NOT DRAWN · Queue</text>
+            <text x="145" y="320" class="tiny">~0.6 write/s · no fan-out</text>
+            <text x="145" y="346" class="clock">NOT DRAWN · Region B</text>
+            <text x="145" y="364" class="tiny">~150ms RTT &gt; 80ms target</text>
+          </g>
         </svg>
-        <figcaption><span class="lang-zh">终图只有一条完整读路径。队列和第二机房以弱化状态保留为“被拒绝的方案”，没有箭头就表示它们不参与当前请求。</span><span class="lang-en">The final frame has one complete read path. Queue and Region B remain muted as rejected options; no arrow means they do not participate in this request.</span></figcaption>
+        <figcaption><span class="lang-zh">终图把“没画什么”也说清：写约 0.6 QPS 且无扇出，不加 Queue；跨洲往返约 150 ms 超过 80 ms 假设，不接 Region B。没证据的盒子不进图。</span><span class="lang-en">The final frame states what stays absent: about 0.6 writes/s and no fan-out do not earn Queue; about 150 ms cross-continent RTT exceeds the assumed 80 ms target, so Region B stays disconnected.</span></figcaption>
       </div>
     </figure>
     <div class="bilingual">
@@ -568,88 +568,120 @@
     <p class="cite"><span class="lang-zh">大约 10 到 25 分钟挖这一条，最后 3 到 5 分钟收口。不要换成第二套架构。</span><span class="lang-en">Spend about 10 to 25 minutes on this one failure, then 3 to 5 minutes to close. Do not switch to a second architecture.</span></p>
     <figure class="deck">
       <div class="slide">
-        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="fl1t fl1d">
-          <title id="fl1t">Healthy read hits cache and returns through the edge</title>
-          <desc id="fl1d">A synchronous request reaches Product Service and cache. The cache hit returns to Product Service, then a two-hop green 200 response passes through Edge to the client. Product Store is not on the hit path.</desc>
-          <text x="480" y="24" text-anchor="middle" class="clock">healthy · cache hit</text>
-          <circle cx="62" cy="156" r="26" class="box"/><circle cx="62" cy="146" r="8" class="box"/><path d="M46 174 Q62 160 78 174" class="wire"/><text x="62" y="210" text-anchor="middle" class="label">Client</text>
-          <rect x="118" y="36" width="822" height="252" rx="20" class="boundary"/><text x="136" y="58" class="tiny">TRUST BOUNDARY</text>
-          <rect x="140" y="118" width="120" height="76" rx="38" class="box alt"/><text x="200" y="152" text-anchor="middle" class="label">Edge</text><text x="200" y="172" text-anchor="middle" class="sub">TLS · route</text>
-          <rect x="330" y="100" width="172" height="112" rx="12" class="box ok"/><text x="416" y="136" text-anchor="middle" class="label">Product Service</text><text x="416" y="160" text-anchor="middle" class="sub">stateless</text><text x="416" y="184" text-anchor="middle" class="tiny">normal path</text>
-          <rect x="564" y="120" width="136" height="72" rx="10" class="cache"/><rect x="572" y="128" width="120" height="56" rx="7" class="cache-detail"/><text x="632" y="151" text-anchor="middle" class="label">Cache</text><text x="632" y="173" text-anchor="middle" class="sub">hit</text>
-          <path d="M800 118 V202 A68 15 0 0 0 936 202 V118 Z" class="store"/><ellipse cx="868" cy="118" rx="68" ry="15" class="store"/><text x="868" y="157" text-anchor="middle" class="label">Product Store</text><text x="868" y="179" text-anchor="middle" class="sub">not touched</text>
-          <line x1="90" y1="146" x2="128" y2="146" class="wire"/><line x1="260" y1="146" x2="318" y2="146" class="wire"/><line x1="502" y1="140" x2="552" y2="140" class="wire"/><line x1="564" y1="176" x2="514" y2="176" class="wire hit"/>
-          <line x1="330" y1="184" x2="272" y2="184" class="wire reply"/><path d="M140 182 C118 182 104 174 90 164" class="wire reply"/><text x="190" y="222" class="tiny">200 JSON</text>
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s1t d5s1d">
+          <title id="d5s1t">The healthy request returns from a cache hit hop by hop</title>
+          <desc id="d5s1d">Client sends GET through Edge to Product Service. Product Service looks up Cache, Cache returns a hit, Product Service returns JSON to Edge, and Edge returns 200 to Client. The origin miss path is present but muted.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <g class="is-new">
+            <rect x="94" y="22" width="852" height="346" rx="18" class="boundary"/><text x="112" y="45" class="tiny">SYSTEM TRUST BOUNDARY</text>
+            <circle cx="45" cy="166" r="12" class="box"/><path d="M25 212 Q45 180 65 212" class="wire"/><text x="45" y="234" text-anchor="middle" class="label">Client</text>
+            <rect x="115" y="155" width="120" height="70" rx="35" class="box alt"/><text x="175" y="187" text-anchor="middle" class="label">Edge</text><text x="175" y="206" text-anchor="middle" class="sub">TLS · route</text>
+            <rect x="320" y="150" width="160" height="80" rx="12" class="box"/><text x="400" y="187" text-anchor="middle" class="label">Product Service</text><text x="400" y="206" text-anchor="middle" class="sub">stateless</text>
+            <rect x="567" y="77" width="150" height="70" rx="8" class="cache"/><rect x="560" y="70" width="150" height="70" rx="8" class="cache"/><text x="635" y="102" text-anchor="middle" class="label">Cache</text><text x="635" y="121" text-anchor="middle" class="sub">healthy hit</text>
+            <path d="M780 150 V250 A70 12 0 0 0 920 250 V150" class="store"/><ellipse cx="850" cy="150" rx="70" ry="12" class="store"/><text x="850" y="210" text-anchor="middle" class="label">Product Store</text><text x="850" y="228" text-anchor="middle" class="sub">source of truth</text>
+            <path d="M71 181 L106.2 181" class="wire"/><polygon points="116.2,181 106.2,186 106.2,176" class="head"/><text x="94" y="173" text-anchor="middle" class="tiny">GET</text>
+            <path d="M233.8 181 L310 181" class="wire"/><polygon points="320,181 310,186 310,176" class="head"/><text x="277" y="173" text-anchor="middle" class="tiny">/products/42</text>
+            <path d="M380 150 L380 123 Q380 115 388 115 L550 115" class="wire"/><polygon points="560,115 550,120 550,110" class="head"/><text x="470" y="106" text-anchor="middle" class="tiny">lookup</text>
+            <path d="M560 133 L528 133 Q520 133 520 141 L520 157 Q520 165 512 165 L490 165" class="wire reply"/><polygon points="480,165 490,160 490,170" class="head reply"/><text x="523" y="151" text-anchor="middle" class="tiny">hit / miss</text>
+            <path d="M320 199 L243.8 199" class="wire reply"/><polygon points="233.8,199 243.8,194 243.8,204" class="head reply"/><text x="277" y="217" text-anchor="middle" class="tiny">JSON</text>
+            <path d="M116.2 199 L81 199" class="wire reply"/><polygon points="71,199 81,194 81,204" class="head reply"/><text x="94" y="217" text-anchor="middle" class="tiny">200 / 404</text>
+            <g class="muted"><path d="M480 181 L770 181" class="wire"/><polygon points="780,181 770,186 770,176" class="head"/><text x="650" y="173" text-anchor="middle" class="tiny">origin read</text></g>
+            <g class="muted"><path d="M780 199 L490 199" class="wire reply"/><polygon points="480,199 490,194 490,204" class="head reply"/><text x="650" y="217" text-anchor="middle" class="tiny">row / not found</text></g>
+          </g>
         </svg>
-        <figcaption><span class="lang-zh">健康基线只有缓存命中：lookup 向右，hit 向左，200 再经过 Edge 回到 Client。存储明确不在这一跳上。</span><span class="lang-en">The healthy baseline is only a cache hit: lookup goes right, hit goes left, and 200 returns through Edge to Client. The store is explicitly off this hop.</span></figcaption>
+        <figcaption><span class="lang-zh">健康基线先画全：cache hit 回到 Product Service，再经 Edge 回 Client；Product Store 的 miss 往返留在图上但淡化，表示本次没有触发。</span><span class="lang-en">Draw the healthy baseline completely: a cache hit returns to Product Service, then through Edge to Client. The origin miss round trip stays muted because this request did not take it.</span></figcaption>
       </div>
       <div class="slide">
-        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="fl2t fl2d">
-          <title id="fl2t">A dead cache opens an uncapped origin fallback</title>
-          <desc id="fl2d">The cache circuit is open. Product Service bypasses it on a dashed red fallback toward Product Store. The path is still uncapped and therefore unsafe.</desc>
-          <text x="480" y="24" text-anchor="middle" class="clock">cache tier down · unsafe fallback</text>
-          <circle cx="62" cy="156" r="26" class="box"/><circle cx="62" cy="146" r="8" class="box"/><path d="M46 174 Q62 160 78 174" class="wire"/><text x="62" y="210" text-anchor="middle" class="label">Client</text>
-          <rect x="118" y="36" width="822" height="252" rx="20" class="boundary"/><text x="136" y="58" class="tiny">TRUST BOUNDARY</text>
-          <rect x="140" y="118" width="120" height="76" rx="38" class="box alt"/><text x="200" y="152" text-anchor="middle" class="label">Edge</text><text x="200" y="172" text-anchor="middle" class="sub">TLS · route</text>
-          <rect x="330" y="100" width="172" height="112" rx="12" class="box ok"/><text x="416" y="136" text-anchor="middle" class="label">Product Service</text><text x="416" y="160" text-anchor="middle" class="sub">stateless</text><text x="416" y="184" text-anchor="middle" class="tiny">no origin cap yet</text>
-          <rect x="564" y="120" width="136" height="72" rx="10" class="cache bad"/><rect x="572" y="128" width="120" height="56" rx="7" class="cache-detail"/><text x="632" y="151" text-anchor="middle" class="label">Cache down</text><text x="632" y="173" text-anchor="middle" class="sub">circuit open</text>
-          <path d="M800 118 V202 A68 15 0 0 0 936 202 V118 Z" class="store"/><ellipse cx="868" cy="118" rx="68" ry="15" class="store"/><text x="868" y="157" text-anchor="middle" class="label">Product Store</text><text x="868" y="179" text-anchor="middle" class="sub">source of truth</text>
-          <line x1="90" y1="146" x2="128" y2="146" class="wire"/><line x1="260" y1="146" x2="318" y2="146" class="wire"/>
-          <line x1="330" y1="184" x2="272" y2="184" class="wire reply"/><path d="M140 182 C118 182 104 174 90 164" class="wire reply"/><text x="176" y="222" class="tiny">200 if origin survives</text>
-          <g class="is-new"><path d="M502 198 C638 270 720 248 788 190" class="wire fail"/><text x="620" y="268" class="tiny">uncapped fallback</text></g>
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s2t d5s2d">
+          <title id="d5s2t">A dead cache opens the circuit before origin is flooded</title>
+          <desc id="d5s2d">The healthy hit is muted. Cache is marked down and returns timeout or circuit-open failure to Product Service. Product Service attempts a failure fallback toward Product Store; the origin reply still returns to Product Service.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="94" y="22" width="852" height="346" rx="18" class="boundary"/><text x="112" y="45" class="tiny">SYSTEM TRUST BOUNDARY</text>
+          <circle cx="45" cy="166" r="12" class="box"/><path d="M25 212 Q45 180 65 212" class="wire"/><text x="45" y="234" text-anchor="middle" class="label">Client</text>
+          <rect x="115" y="155" width="120" height="70" rx="35" class="box alt"/><text x="175" y="187" text-anchor="middle" class="label">Edge</text><text x="175" y="206" text-anchor="middle" class="sub">TLS · route</text>
+          <rect x="320" y="150" width="160" height="80" rx="12" class="box"/><text x="400" y="187" text-anchor="middle" class="label">Product Service</text><text x="400" y="206" text-anchor="middle" class="sub">no origin cap yet</text>
+          <path d="M780 150 V250 A70 12 0 0 0 920 250 V150" class="store"/><ellipse cx="850" cy="150" rx="70" ry="12" class="store"/><text x="850" y="210" text-anchor="middle" class="label">Product Store</text><text x="850" y="228" text-anchor="middle" class="sub">source of truth</text>
+          <path d="M71 181 L106.2 181" class="wire"/><polygon points="116.2,181 106.2,186 106.2,176" class="head"/><text x="94" y="173" text-anchor="middle" class="tiny">GET</text>
+          <path d="M233.8 181 L310 181" class="wire"/><polygon points="320,181 310,186 310,176" class="head"/><text x="277" y="173" text-anchor="middle" class="tiny">/products/42</text>
+          <g class="muted"><path d="M380 150 L380 123 Q380 115 388 115 L550 115" class="wire"/><polygon points="560,115 550,120 550,110" class="head"/><text x="470" y="106" text-anchor="middle" class="tiny">lookup</text></g>
+          <g class="muted"><path d="M560 133 L528 133 Q520 133 520 141 L520 157 Q520 165 512 165 L490 165" class="wire reply"/><polygon points="480,165 490,160 490,170" class="head reply"/><text x="523" y="151" text-anchor="middle" class="tiny">hit / miss</text></g>
+          <g class="muted"><path d="M320 199 L243.8 199" class="wire reply"/><polygon points="233.8,199 243.8,194 243.8,204" class="head reply"/><text x="277" y="217" text-anchor="middle" class="tiny">JSON</text></g>
+          <g class="muted"><path d="M116.2 199 L81 199" class="wire reply"/><polygon points="71,199 81,194 81,204" class="head reply"/><text x="94" y="217" text-anchor="middle" class="tiny">200 / 404</text></g>
+          <g class="is-new">
+            <rect x="567" y="77" width="150" height="70" rx="8" class="cache bad"/><rect x="560" y="70" width="150" height="70" rx="8" class="cache bad"/><text x="635" y="102" text-anchor="middle" class="label">Cache down</text><text x="635" y="121" text-anchor="middle" class="sub">circuit open</text>
+            <path d="M560 133 L528 133 Q520 133 520 141 L520 157 Q520 165 512 165 L490 165" class="wire fail"/><polygon points="480,165 490,160 490,170" class="head fail"/><text x="523" y="151" text-anchor="middle" class="tiny">timeout / open</text>
+            <path d="M480 181 L770 181" class="wire fail"/><polygon points="780,181 770,186 770,176" class="head fail"/><text x="650" y="173" text-anchor="middle" class="tiny">fallback · admitted only</text>
+            <path d="M780 199 L490 199" class="wire reply"/><polygon points="480,199 490,194 490,204" class="head reply"/><text x="650" y="217" text-anchor="middle" class="tiny">row / not found</text>
+          </g>
         </svg>
-        <figcaption><span class="lang-zh">缓存熔断后服务直接回源，但红线尚未限流。它把 5,000 QPS 暴露给只能承受约 100 次寻道的存储，所以仍是危险状态。</span><span class="lang-en">After the cache circuit opens, the service goes straight to origin, but the red path is still uncapped. It exposes 5,000 QPS to a store budgeted for about 100 seeks, so this frame remains unsafe.</span></figcaption>
+        <figcaption><span class="lang-zh">Cache timeout 先回到服务，熔断后才讨论回源。若没有 gate，5,000 QPS 会一起走红色 fallback，这一帧故意保留这个危险。</span><span class="lang-en">The cache timeout returns to the service first; only then does fallback begin. Without a gate, all 5,000 QPS can take the red fallback, and this frame intentionally shows that unsafe state.</span></figcaption>
       </div>
       <div class="slide">
-        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="fl3t fl3d">
-          <title id="fl3t">Enforce the origin budget at Product Service</title>
-          <desc id="fl3d">Product Service enforces an origin gate of about 100 reads per second, derived from store capacity. Admitted fallback reaches Product Store. Over-budget calls leave Product Service as a dashed red 503 response through Edge to the client.</desc>
-          <text x="480" y="24" text-anchor="middle" class="clock">admit 100/s · reject before the store</text>
-          <circle cx="62" cy="156" r="26" class="box"/><circle cx="62" cy="146" r="8" class="box"/><path d="M46 174 Q62 160 78 174" class="wire"/><text x="62" y="210" text-anchor="middle" class="label">Client</text>
-          <rect x="118" y="36" width="822" height="252" rx="20" class="boundary"/><text x="136" y="58" class="tiny">TRUST BOUNDARY</text>
-          <rect x="140" y="118" width="120" height="76" rx="38" class="box alt"/><text x="200" y="152" text-anchor="middle" class="label">Edge</text><text x="200" y="172" text-anchor="middle" class="sub">TLS · route</text>
-          <rect x="330" y="100" width="172" height="112" rx="12" class="box ok"/><text x="416" y="136" text-anchor="middle" class="label">Product Service</text><text x="416" y="160" text-anchor="middle" class="sub">origin gate · 100/s</text><text x="416" y="184" text-anchor="middle" class="tiny">shed locally</text>
-          <rect x="564" y="120" width="136" height="72" rx="10" class="cache bad"/><rect x="572" y="128" width="120" height="56" rx="7" class="cache-detail"/><text x="632" y="151" text-anchor="middle" class="label">Cache down</text><text x="632" y="173" text-anchor="middle" class="sub">circuit open</text>
-          <rect x="772" y="76" width="172" height="170" rx="16" class="boundary"/><text x="788" y="98" class="tiny">STORE BUDGET · ~100/s</text>
-          <path d="M800 118 V202 A68 15 0 0 0 936 202 V118 Z" class="store"/><ellipse cx="868" cy="118" rx="68" ry="15" class="store"/><text x="868" y="157" text-anchor="middle" class="label">Product Store</text><text x="868" y="179" text-anchor="middle" class="sub">source of truth</text>
-          <line x1="90" y1="136" x2="128" y2="136" class="wire"/><line x1="260" y1="136" x2="318" y2="136" class="wire"/>
-          <path d="M502 198 C638 270 720 248 788 190" class="wire fail"/><text x="620" y="268" class="tiny">admit ≤ 100/s</text>
-          <line x1="330" y1="174" x2="272" y2="174" class="wire reply"/><path d="M140 172 C118 172 104 166 90 160" class="wire reply"/><text x="164" y="216" class="tiny">200 if admitted</text>
-          <g class="is-new"><line x1="330" y1="202" x2="272" y2="202" class="wire fail"/><path d="M140 192 C116 192 102 178 90 168" class="wire fail"/><text x="250" y="244" text-anchor="middle" class="tiny">503 · over budget</text></g>
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s3t d5s3d">
+          <title id="d5s3t">The service admits at most one hundred origin reads and sheds the rest</title>
+          <desc id="d5s3d">Cache remains down. Product Service now contains an illustrative origin gate of at most 100 per second. Admitted fallback reads reach Product Store, the row returns to Product Service, and the existing reply spine returns through Edge to Client.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="94" y="22" width="852" height="346" rx="18" class="boundary"/><text x="112" y="45" class="tiny">SYSTEM TRUST BOUNDARY</text>
+          <circle cx="45" cy="166" r="12" class="box"/><path d="M25 212 Q45 180 65 212" class="wire"/><text x="45" y="234" text-anchor="middle" class="label">Client</text>
+          <rect x="115" y="155" width="120" height="70" rx="35" class="box alt"/><text x="175" y="187" text-anchor="middle" class="label">Edge</text><text x="175" y="206" text-anchor="middle" class="sub">TLS · route</text>
+          <rect x="320" y="150" width="160" height="80" rx="12" class="box"/><text x="400" y="187" text-anchor="middle" class="label">Product Service</text><text x="400" y="206" text-anchor="middle" class="sub">stateless</text>
+          <path d="M780 150 V250 A70 12 0 0 0 920 250 V150" class="store"/><ellipse cx="850" cy="150" rx="70" ry="12" class="store"/><text x="850" y="210" text-anchor="middle" class="label">Product Store</text><text x="850" y="228" text-anchor="middle" class="sub">source of truth</text>
+          <rect x="567" y="77" width="150" height="70" rx="8" class="cache bad"/><rect x="560" y="70" width="150" height="70" rx="8" class="cache bad"/><text x="635" y="102" text-anchor="middle" class="label">Cache down</text><text x="635" y="121" text-anchor="middle" class="sub">circuit open</text>
+          <path d="M71 181 L106.2 181" class="wire"/><polygon points="116.2,181 106.2,186 106.2,176" class="head"/><text x="94" y="173" text-anchor="middle" class="tiny">GET</text>
+          <path d="M233.8 181 L310 181" class="wire"/><polygon points="320,181 310,186 310,176" class="head"/><text x="277" y="173" text-anchor="middle" class="tiny">/products/42</text>
+          <g class="muted"><path d="M380 150 L380 123 Q380 115 388 115 L550 115" class="wire"/><polygon points="560,115 550,120 550,110" class="head"/><text x="470" y="106" text-anchor="middle" class="tiny">lookup</text></g>
+          <path d="M560 133 L528 133 Q520 133 520 141 L520 157 Q520 165 512 165 L490 165" class="wire fail"/><polygon points="480,165 490,160 490,170" class="head fail"/><text x="523" y="151" text-anchor="middle" class="tiny">timeout / open</text>
+          <path d="M480 181 L770 181" class="wire fail"/><polygon points="780,181 770,186 770,176" class="head fail"/><text x="650" y="173" text-anchor="middle" class="tiny">fallback · admitted only</text>
+          <path d="M780 199 L490 199" class="wire reply"/><polygon points="480,199 490,194 490,204" class="head reply"/><text x="650" y="217" text-anchor="middle" class="tiny">row / not found</text>
+          <g class="is-new">
+            <rect x="320" y="150" width="160" height="80" rx="12" class="box ok"/><text x="400" y="187" text-anchor="middle" class="label">Product Service</text><text x="400" y="206" text-anchor="middle" class="sub">origin gate ≤100/s</text>
+            <path d="M320 199 L243.8 199" class="wire reply"/><polygon points="233.8,199 243.8,194 243.8,204" class="head reply"/>
+            <path d="M116.2 199 L81 199" class="wire reply"/><polygon points="71,199 81,194 81,204" class="head reply"/>
+            <rect x="330" y="48" width="300" height="20" rx="10" class="badge"/><text x="480" y="62" text-anchor="middle" class="badge-text">ADMIT · ≤100/s to origin</text>
+          </g>
         </svg>
-        <figcaption><span class="lang-zh">上限由存储能力推导，但在 Product Service 执行：约 100 QPS 才能沿红色回源线进入存储；超出的请求直接沿 503 回程经过 Edge，存储根本看不到它们。</span><span class="lang-en">Store capacity derives the cap, but Product Service enforces it. Only about 100 QPS may follow the fallback into the store; overflow returns 503 through Edge and never reaches the store.</span></figcaption>
+        <figcaption><span class="lang-zh">先只画被放行的一类：gate 在 Product Service 里执行，最多约 100/s 回源，Product Store 的行回到服务，再沿原有回程逐跳返回。</span><span class="lang-en">Draw only the admitted cohort first. Product Service enforces the gate, at most about 100/s reach origin, the row returns to the service, and the existing reply spine returns hop by hop.</span></figcaption>
       </div>
       <div class="slide">
-        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="fl4t fl4d">
-          <title id="fl4t">Complete failure arithmetic with two explicit outcomes</title>
-          <desc id="fl4d">At a 5,000 QPS peak and an origin cap of about 100, Product Service admits about 100 requests to Product Store and returns 200 for successful reads. It rejects about 4,900 before the store and returns 503 through Edge.</desc>
-          <text x="480" y="24" text-anchor="middle" class="clock">5,000 − 100 = ~4,900 shed</text>
-          <circle cx="62" cy="156" r="26" class="box"/><circle cx="62" cy="146" r="8" class="box"/><path d="M46 174 Q62 160 78 174" class="wire"/><text x="62" y="210" text-anchor="middle" class="label">Client</text>
-          <rect x="118" y="36" width="822" height="252" rx="20" class="boundary"/><text x="136" y="58" class="tiny">TRUST BOUNDARY</text>
-          <rect x="140" y="118" width="120" height="76" rx="38" class="box alt"/><text x="200" y="152" text-anchor="middle" class="label">Edge</text><text x="200" y="172" text-anchor="middle" class="sub">TLS · route</text>
-          <rect x="330" y="100" width="172" height="112" rx="12" class="box ok"/><text x="416" y="136" text-anchor="middle" class="label">Product Service</text><text x="416" y="160" text-anchor="middle" class="sub">origin gate · 100/s</text><text x="416" y="184" text-anchor="middle" class="tiny">shed locally</text>
-          <rect x="564" y="120" width="136" height="72" rx="10" class="cache bad"/><rect x="572" y="128" width="120" height="56" rx="7" class="cache-detail"/><text x="632" y="151" text-anchor="middle" class="label">Cache down</text><text x="632" y="173" text-anchor="middle" class="sub">circuit open</text>
-          <rect x="772" y="76" width="172" height="170" rx="16" class="boundary"/><text x="788" y="98" class="tiny">STORE BUDGET · ~100/s</text>
-          <path d="M800 118 V202 A68 15 0 0 0 936 202 V118 Z" class="store"/><ellipse cx="868" cy="118" rx="68" ry="15" class="store"/><text x="868" y="157" text-anchor="middle" class="label">Product Store</text><text x="868" y="179" text-anchor="middle" class="sub">source of truth</text>
-          <line x1="90" y1="136" x2="128" y2="136" class="wire"/><line x1="260" y1="136" x2="318" y2="136" class="wire"/>
-          <path d="M502 198 C638 270 720 248 788 190" class="wire fail"/><text x="620" y="268" class="tiny">~100/s admitted</text>
-          <line x1="330" y1="174" x2="272" y2="174" class="wire reply"/><path d="M140 172 C118 172 104 166 90 160" class="wire reply"/><text x="164" y="216" class="tiny">200 if found</text>
-          <line x1="330" y1="202" x2="272" y2="202" class="wire fail"/><path d="M140 192 C116 192 102 178 90 168" class="wire fail"/>
-          <g class="is-new"><rect x="330" y="322" width="220" height="62" rx="12" class="box bad"/><text x="440" y="348" text-anchor="middle" class="label">503 before origin</text><text x="440" y="370" text-anchor="middle" class="sub">~4,900/s at peak</text><path d="M416 224 V310" class="wire fail"/></g>
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s4t d5s4d">
+          <title id="d5s4t">Excess traffic returns 503 hop by hop before origin</title>
+          <desc id="d5s4d">Cache remains down and Product Service keeps the origin gate. At most 100 per second take the admitted origin path. Excess traffic returns failure from Product Service to Edge and from Edge to Client. A note allows a local stale copy only when one already exists and is at most 30 seconds old.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="94" y="22" width="852" height="346" rx="18" class="boundary"/><text x="112" y="45" class="tiny">SYSTEM TRUST BOUNDARY</text>
+          <circle cx="45" cy="166" r="12" class="box"/><path d="M25 212 Q45 180 65 212" class="wire"/><text x="45" y="234" text-anchor="middle" class="label">Client</text>
+          <rect x="115" y="155" width="120" height="70" rx="35" class="box alt"/><text x="175" y="187" text-anchor="middle" class="label">Edge</text><text x="175" y="206" text-anchor="middle" class="sub">TLS · route</text>
+          <rect x="320" y="150" width="160" height="80" rx="12" class="box ok"/><text x="400" y="187" text-anchor="middle" class="label">Product Service</text><text x="400" y="206" text-anchor="middle" class="sub">origin gate ≤100/s</text>
+          <path d="M780 150 V250 A70 12 0 0 0 920 250 V150" class="store"/><ellipse cx="850" cy="150" rx="70" ry="12" class="store"/><text x="850" y="210" text-anchor="middle" class="label">Product Store</text><text x="850" y="228" text-anchor="middle" class="sub">source of truth</text>
+          <rect x="567" y="77" width="150" height="70" rx="8" class="cache bad"/><rect x="560" y="70" width="150" height="70" rx="8" class="cache bad"/><text x="635" y="102" text-anchor="middle" class="label">Cache down</text><text x="635" y="121" text-anchor="middle" class="sub">circuit open</text>
+          <path d="M71 181 L106.2 181" class="wire"/><polygon points="116.2,181 106.2,186 106.2,176" class="head"/><text x="94" y="173" text-anchor="middle" class="tiny">GET</text>
+          <path d="M233.8 181 L310 181" class="wire"/><polygon points="320,181 310,186 310,176" class="head"/><text x="277" y="173" text-anchor="middle" class="tiny">/products/42</text>
+          <g class="muted"><path d="M380 150 L380 123 Q380 115 388 115 L550 115" class="wire"/><polygon points="560,115 550,120 550,110" class="head"/><text x="470" y="106" text-anchor="middle" class="tiny">lookup</text></g>
+          <path d="M560 133 L528 133 Q520 133 520 141 L520 157 Q520 165 512 165 L490 165" class="wire fail"/><polygon points="480,165 490,160 490,170" class="head fail"/><text x="523" y="151" text-anchor="middle" class="tiny">timeout / open</text>
+          <path d="M480 181 L770 181" class="wire fail"/><polygon points="780,181 770,186 770,176" class="head fail"/><text x="650" y="173" text-anchor="middle" class="tiny">fallback · admitted only</text>
+          <path d="M780 199 L490 199" class="wire reply"/><polygon points="480,199 490,194 490,204" class="head reply"/><text x="650" y="217" text-anchor="middle" class="tiny">row / not found</text>
+          <g class="muted"><path d="M320 199 L243.8 199" class="wire reply"/><polygon points="233.8,199 243.8,194 243.8,204" class="head reply"/></g>
+          <g class="muted"><path d="M116.2 199 L81 199" class="wire reply"/><polygon points="71,199 81,194 81,204" class="head reply"/></g>
+          <g class="is-new">
+            <path d="M300 215 L234.5 215" class="wire fail"/><polygon points="224.5,215 234.5,210 234.5,220" class="head fail"/><text x="263" y="242" text-anchor="middle" class="tiny">503</text>
+            <path d="M115.5 215 L98 215 Q90 215 90 207 L90 203.5 Q90 199 85.5 199 L81 199" class="wire fail"/><polygon points="71,199 81,194 81,204" class="head fail"/>
+            <rect x="260" y="48" width="440" height="20" rx="10" class="badge"/><text x="480" y="62" text-anchor="middle" class="badge-text">≤100/s admitted · ≈4,900/s shed before origin</text>
+            <text x="560" y="302" class="clock">degrade only if a local copy already exists</text>
+            <text x="560" y="324" class="tiny">age ≤30s; otherwise 503 · never stretch TTL</text>
+          </g>
         </svg>
-        <figcaption><span class="lang-zh">终图只有两个结果：约 100 QPS 被放行，读到行后返回 200；峰值剩余约 4,900 QPS 在服务侧就变成 503。拒绝箭头不再从 Store 发出。</span><span class="lang-en">The final frame has two outcomes: about 100 QPS are admitted and may return 200; the remaining roughly 4,900 QPS become 503 at the service. The rejection arrow no longer originates at the store.</span></figcaption>
+        <figcaption><span class="lang-zh">最后再加拒绝线：超出 gate 的约 4,900/s 由 Product Service → Edge → Client 逐跳返回 503。本机旧副本只是注记里的可选降级：必须已经存在且年龄 ≤30 秒。</span><span class="lang-en">Add rejection last: the roughly 4,900/s above the gate return 503 from Product Service to Edge to Client, hop by hop. A local stale copy remains an optional note, not another network loop: it must already exist and be at most 30 seconds old.</span></figcaption>
       </div>
     </figure>
     <div class="bilingual">
       <div class="lang-zh"><p class="col-kicker">故障时请求实际怎么走</p>
-        <p>缓存层熔断后，商品服务不再等缓存，但恢复边界只放行大约每秒 100 次，仍是单盘寻道预算，直到有实测替换。放行且读到行返回 200，没有行返回 404，没放行的在服务侧 503，并带 Retry-After，不要无界重试。5,000 − 100 ≈ 4,900。5,000 ÷ 100 = 50，和估算是同一个倍数，所以缓存层是故障域，不是可有可无的加速器。</p>
+        <p>缓存层熔断后，商品服务不再等缓存。白板上先沿用≤100/s 这个教学上限表示「回源必须有界」；生产值必须根据压测、目标利用率、缓冲池命中和安全余量替换，不能把 100 照抄成限流配置。按示例数字，放行且读到行返回 200，没有行返回 404，没放行的在服务侧 503，并带 Retry-After，不要无界重试。5,000 − 100 ≈ 4,900，5,000 ÷ 100 = 50；这个难看的比例说明缓存层是故障域，不是可有可无的加速器。</p>
         <p>选 503 而不是无限排队，是因为超时本身就是决定。Brewer 把分区在操作上看成通信的时间上限：一直重试等于选择一致性并放弃这一次调用的可用性。[1] 停下来的是超出预算的 GET。放行的约 100 次仍读权威行，没有用旧值换可用。SRE 的过载章写过：极端过载下应返回错误，尽快拒绝，免得依赖把资源花在完不成的工作上；本地旧副本只在你还握着那份副本时才算降级。[5] 缓存整层都没了，冷实例也没有副本，所以这张图拒绝超出的请求，不发明命中。</p>
         <p>进程内存里还有这份商品、而且没超过 30 秒时，直接返回那份旧 JSON，不去打已经过载的存储。窗口过了或本地没有这个 id，就 503，不要偷偷把 TTL 拉长。存储自己挂了是另一条故障：缓存还热时才讨论旧值；未知 id 和超时不能变成 404。等面试官指向存储再加那条红线。</p>
         <p>熔断刚打开时，各实例会一起回源。总上限由存储能力算出，但必须由共享限流器或集中配额执行，不能每台服务都以为自己有 100。放行的读看到存储里的当前行；被 503 的请求什么都看不到。</p>
         <p>「缓存挂了就查数据库」会把 5,000 打进预算只有 100 的存储，浏览和改价一起死。先说放行数从哪道除法来，再说其余请求的状态码。深挖时不要把队列、第二机房和推荐补上；那些盒子是故意不连的。</p>
       </div>
       <div class="lang-en"><p class="col-kicker">What the request does during the failure</p>
-        <p>After the cache tier is broken, Product Service stops waiting on it. It tries to read the store, but the recovery boundary admits only about 100 per second. That number is still the one-disk serial seek budget, still an assumption until someone gives you a measurement. An admitted request returns 200 when the row exists and 404 when it does not. A request that is not admitted returns 503 inside the service process, preferably with Retry-After, and it does not retry without a bound. Subtract 100 from the peak of 5,000 and about 4,900 QPS fail. The ratio is ugly on purpose: the cache tier is a failure domain, not an optional accelerator. 5,000 ÷ 100 = 50, the same multiple as in the estimate.</p>
+        <p>After the cache tier opens its circuit, Product Service stops waiting on it. On the whiteboard, ≤100/s remains an illustrative ceiling that proves origin fallback must be bounded. A production value must replace it using load tests, target utilization, buffer-pool behavior, and safety headroom; never copy 100 into a rate-limit configuration. With the teaching number, an admitted request returns 200 when the row exists and 404 when it does not. A request that is not admitted returns 503 inside the service process, preferably with Retry-After, and does not retry without a bound. Subtract 100 from the peak of 5,000 and about 4,900 QPS fail; 5,000 ÷ 100 = 50. The ugly ratio is intentional: the cache tier is a failure domain, not an optional accelerator.</p>
         <p>Choosing 503 over an unbounded queue is a timeout decision. Brewer treats a partition, operationally, as a time bound on communication: retrying forever chooses consistency and gives up availability for that call; stopping does the reverse. [1] What stops here are the GETs over budget. The 100 that are admitted still read the authoritative row, so they did not trade a stale value for availability. The overload chapter of the SRE book says that under extreme overload a service may not even have time to build a degraded response and should serve an error, and that rejecting quickly is better than spending the dependency’s CPU on work it cannot finish. It also lists a local copy that may not be fully up to date as one form of degradation, which applies when you still have that copy. [5] If the whole cache tier is gone, the copy is not in that tier. A cold service instance does not have it either. The first failure picture therefore rejects the overflow instead of inventing a hit that is not there.</p>
         <p>The alternative is better when a copy is still in process memory. If 30 seconds of staleness is allowed and this instance’s local cache still holds the id inside that age, return that JSON and do not touch a store that is already over budget. You buy availability and you pay the staleness already written down as an assumption. Past the window, or with no local key, return 503. Do not quietly stretch the TTL to “save” availability. The store itself being down is a different failure and does not belong on this same stroke. When the store is down and the cache is still warm, that is the moment to discuss serving an old value inside the stale window. An unknown id and a timeout still must not become 404. Add that red line when they point at the store. Two failure stories on one picture and the close falls apart.</p>
         <p>Two concurrency windows remain. First, the instant the circuit opens, every instance falls through together. Store capacity derives one global cap, but a shared limiter or centrally allocated quota must enforce it; 100 per service process would still overload origin. Second, there is no extra magic between a merchant’s just-committed price and an admitted read: the admitted read sees the current row, and a shed read sees nothing. Do not say “the 503 users will be consistent when they refresh” as if that covers the page they cannot load now.</p>
@@ -768,7 +800,7 @@
     <h2><span class="lang-zh">引用与延伸阅读</span><span class="lang-en">References and further reading</span></h2>
     <ol class="references">
       <li>[1] Eric Brewer, <a href="https://www.infoq.com/articles/cap-twelve-years-later-how-the-rules-have-changed/"><em>CAP Twelve Years Later: How the “Rules” Have Changed</em></a>, IEEE Computer, 2012. The “2 of 3” formulation is misleading; during a partition the choice is per operation, and operationally a partition is a timeout.</li>
-      <li>[2] Jeff Dean, <a href="https://static.googleusercontent.com/media/research.google.com/en//people/jeff/stanford-295-talk.pdf"><em>Software Engineering Advice from Building Large-Scale Distributed Systems</em></a>, talk slides. Numbers used here: datacenter round trip 0.5 ms, disk seek 10 ms, California–Netherlands–California about 150 ms; serial thumbnail seeks; design for 10×–20×, not blindly for 100×.</li>
+      <li>[2] Jeff Dean, <a href="https://www.cs.princeton.edu/courses/archive/spring17/cos518/papers/jeff-dean-numbers.pdf"><em>Software Engineering Advice from Building Large-Scale Distributed Systems</em></a>, talk slides (Princeton course mirror). Pages 12–20 were checked for the 0.5 ms datacenter round trip, 10 ms disk seek, roughly 150 ms California–Netherlands–California round trip, the 560 ms serial-thumbnail calculation, and the 10×–20× versus 100× growth guidance.</li>
       <li>[3] Jeffrey Dean and Luiz André Barroso, <a href="https://research.google/pubs/the-tail-at-scale/"><em>The Tail at Scale</em></a>, Communications of the ACM, 56 (2013), pp. 74–80. Interactive responses on the order of 100 ms; at large scale the tail dominates.</li>
       <li>[4] Rob Ewaschuk, edited by Betsy Beyer, <a href="https://sre.google/sre-book/monitoring-distributed-systems/"><em>Monitoring Distributed Systems</em></a>, Google SRE book. The four golden signals are latency, traffic, errors, and saturation; mean latency hides a tail that a fan-in page will feel.</li>
       <li>[5] Alejandro Forero Cuervo, edited by Sarah Chavis, <a href="https://sre.google/sre-book/handling-overload/"><em>Handling Overload</em></a>, Google SRE book. Under extreme overload, serve errors; a stale local copy is a degradation only when the copy exists; QPS is a weak capacity model.</li>

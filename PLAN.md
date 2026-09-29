@@ -11,24 +11,32 @@
 | 计划 | 内容 | 状态 | 触发语 |
 |---|---|---|---|
 | 1 | 静态壳 + 样板 Ch01、Ch09 | **已完成 · 2026-09-27** | 「开始计划 1」 |
-| 2 | 五路重构 Ch01–Ch45 | **进行中 · 第二波已回 2026-09-28** | 「开始重构」/「重构下一波」 |
+| 2 | 五路重构 Ch01–Ch45 | **进行中 · 2026-09-29 起按 [`OPUS_REFACTOR.md`](./OPUS_REFACTOR.md) 重构；旧规范写成的章全部待复审** | 「开始重构」/「重构下一波」/「复审 chNN」 |
 | 3 | 推 GitHub 并开 Pages | **已推送 · 2026-09-28** · https://socoo123.github.io/system_design_web/ | 「提交并部署」 |
 
 国庆（10/1–10/7）只读主线 M1–M5。要在 10/1 能开读，计划 2 需在 9/30 前至少把 Ch01–Ch35 部署出去。用户说「赶国庆」时，车道连续写完剩余章。
 
 ### 五条车道（计划 2 才填）
 
-各写各的 `chapters/chNN.html`。Ch01、Ch09 由计划 1 写成样板后，A 从 Ch02 写到 Ch08，不要重写样板。
+各写各的 `chapters/chNN.html`。
 
-| Agent | 章 | 下一章 | 进行中（锁） | 本车道已完成 |
-|---|---|---|---|---|
-| A | Ch01–Ch09 | Ch04 | — | Ch01, Ch09, Ch02, Ch03 |
-| B | Ch10–Ch18 | Ch12 | — | Ch10, Ch11 |
-| C | Ch19–Ch27 | Ch21 | — | Ch19, Ch20 |
-| D | Ch28–Ch36 | Ch30 | — | Ch28, Ch29 |
-| E | Ch37–Ch45 | Ch39 | — | Ch37, Ch38 |
+| Agent | 章 | 下一章 | 进行中（锁） | 待复审 | 本车道已完成（过 Opus 验收） |
+|---|---|---|---|---|---|
+| A | Ch01–Ch09 | Ch04 | — | Ch09 | Ch01, Ch02, Ch03 |
+| B | Ch10–Ch18 | Ch12 | — | Ch10, Ch11 | — |
+| C | Ch19–Ch27 | Ch21 | — | Ch19, Ch20 | — |
+| D | Ch28–Ch36 | Ch30 | — | Ch28, Ch29 | — |
+| E | Ch37–Ch45 | Ch39 | — | Ch37, Ch38 | — |
 
-锁：动笔前把自己的「进行中」写成 `ChNN · 日期`，只改自己那一行。`node tools/check.mjs` 通过后清锁，下一章改为车道内下一章，已完成里追加章号。上下文被清、锁非空 → 先写完锁住的那一章。
+**质量基线是根目录 [`OPUS_REFACTOR.md`](./OPUS_REFACTOR.md)，样板页是 `chapters/ch02.html` 和 `chapters/ch03.html`。** 所有章节——新写、重写、复审——都必须按它 §2 的流程走完：逐张渲染现状 → 列 bug 清单 → 用 `tools/board-kit.mjs` 从一份坐标重画 → 正文逐段对图、重算数字 → 下载原文核引用 → 按 §8 验收。旧的 `CH09_REFACTOR_SPEC.md` 已删除，Ch09 不再是样板。
+
+「待复审」是按旧规范写完、但没过 Opus 验收的章。2026-09-29 用 `node tools/audit-chapter.mjs` 扫过：这 10 章全部缺图例、仍用旧式三段圆柱，Ch11、Ch19、Ch28、Ch29、Ch38 的一手引用不足 6 条。Ch02 就是这样一章，逐张渲染后几乎每张图都有回程跳跃、箭头指空或机制画反。复审是整章按 §2 重做，不是在旧图上补图例、改颜色。复审通过后从「待复审」移到「已完成」。
+
+`tools/check.mjs` 的 deck 数量仍然有效：Ch01–Ch08 为 4–6 组，Ch09–Ch35 为 5–7 组，Ch36–Ch45 为 6–8 组；每组 3–6 帧；`viewBox` 横版。设计题与基础章中文可见汉字目标 6,500–9,000；方法章（Ch01–Ch03）至少 5,500。英文事实、数字、图注与中文逐项对齐。不要把样板章的 deck 标题套到别的主题上。
+
+车道 agent 不得改 `assets/js/slides.js`、`assets/css/style.css`、`tools/board-kit.mjs` 和 `OPUS_REFACTOR.md`；发现全站 bug 先报告。
+
+锁：动笔前把自己的「进行中」写成 `ChNN · 日期`，只改自己那一行。`node tools/check.mjs` 和 `node tools/audit-chapter.mjs chNN` 都通过、且逐张截图看过后清锁；新章把「下一章」改为车道内下一章，复审章从「待复审」删掉；两种都在「已完成」里追加章号。上下文被清、锁非空 → 先写完锁住的那一章。
 
 ## 1. 计划 1 · 静态壳
 
@@ -49,7 +57,7 @@ tools/check.mjs
 
 壳保留：首页六模块卡片、护眼 / 深色、已读进度、章节目录、文末闪卡、M6 相关芯片、中文 / 对照 / EN。图不再在浏览器里跑 D2 WASM。
 
-样板只写两章，后面五路照着抄版式：
+样板只写两章，后面五路照着抄版式（这是计划 1 的历史；计划 2 的样板已改为 Ch02、Ch03，见 §0）：
 
 - **Ch01** 方法章：4 步法怎么在白板上一步步画出来
 - **Ch09** 设计题：短链，一条请求路径拆成一套幻灯片
@@ -60,17 +68,18 @@ tools/check.mjs
 
 ## 2. 计划 2 · 五路重构全部章节
 
-这是图文重做，不只是把 JSON 倒成 HTML。原料在 `legacy/src/content/chapters/chXX.json`（中文正文和英文口播）。版式照 `chapters/ch01.html` 和 `chapters/ch09.html`。D2 退场。每张架构图改成一套内联 SVG 幻灯片，顺序就是面试时在白板上落笔的顺序：第一张只有入口，逐张把组件加上去，最后一张才是完整图，旁边一行口述「这一笔讲什么」。失败路径和 trade-off 各用自己的一套。
+这是按 [`OPUS_REFACTOR.md`](./OPUS_REFACTOR.md) 重做，不是把 JSON 压成提词器。原料在 `legacy/src/content/chapters/chXX.json`。版式以 `chapters/ch02.html`、`chapters/ch03.html` 为准，图元用 `tools/board-kit.mjs`，播放器是现有的 `assets/js/slides.js`。D2 退场。
 
-幻灯片：
+细则全在 `OPUS_REFACTOR.md`，这里只列最容易犯的：
 
-- `<figure class="deck">` 里每步一个 `<div class="slide">`，里面 `<svg>` + `<figcaption>`
-- `viewBox` 横版，例如 `0 0 960 420`。宽小于高就重画
-- 颜色用 CSS 变量。标签短，jargon 留英文
-- 一组 3–6 张。时序也按步翻页
-- 一组讲完，用一句话链到对应 M6 章
-
-正文同时改三件事：事实和过时默认方案按 2026 面试改掉；中英对不上的地方改齐；一句能讲清的不要铺成教材。专业词留英文（trade-off、fan-out、hard part）。英文口播从该章 `bodyEn` / `reviewMdEn` 迁进同一页。
+- **逐张渲染再交付。** `node tools/render-slides.mjs chNN`，每张 PNG 都看过。`check.mjs` 通过不代表图对。
+- **回程逐跳。** Cache → App → LB → Edge → Client，任何一跳都不能省；故障红线也逐跳。
+- **箭头落在边框上。** 不指空白，不戳进框，不缺箭头头。
+- **图上机制和正文一致。** look-aside、outbox、lease、复制 fan-out 最容易画反（规范 §3 G4）。
+- **一份坐标生成一组 deck。** 帧间节点不动、只加一笔；同一节点全章同名；每张有图例、`title`、`desc`。
+- **存储用 path 身 + ellipse 盖**，不用旧式 `ellipse + rect + ellipse`。
+- **每个数字重算一遍，最坏情况假设写出来；每条引用打开原文找到那个数。**
+- 保留顶栏、护眼/深色、中文/对照/EN、文末闪卡和已读按钮。不用 D2、Mermaid、Canvas、外站 CDN。
 
 阅读预算：
 
@@ -105,12 +114,14 @@ tools/check.mjs
 
 1. 读本文件 §0。`chapters/ch01.html` 与 `chapters/ch09.html` 不存在 → 不要派，先做计划 1。
 2. 有锁的车道只续写锁住的那一章。
-3. **同时派 5 个** `generalPurpose`。默认每路 **1 章** 然后停。
-4. 用户说「赶国庆」或「重构本车道剩余」：该车道把剩余章连续写完，每章仍先上锁、写完解锁。
-5. 每人都读本文件 §1–§2 和两份样板。只改自己的 `chapters/chNN.html`。
-6. 写完跑 `node tools/check.mjs`，只改 §0 自己那一行。
-7. 五路都回来后，父代理抽查横版 SVG、翻页、中英都在，再问要不要下一波。
+3. **同时派 5 个** `generalPurpose`。默认每路 **1 章** 然后停。选章顺序：锁 → 「待复审」里章号最小的 → 「下一章」。
+4. 用户说「赶国庆」或「重构本车道剩余」：该车道先把剩余新章连续写完，再逐章清「待复审」，每章仍先上锁、写完解锁。
+5. 每人都读本文件 §0–§2、`OPUS_REFACTOR.md` 全文，以及样板 `chapters/ch02.html`、`chapters/ch03.html`。只改自己的 `chapters/chNN.html`。不得改播放器、样式、`tools/board-kit.mjs` 和规范文件。
+6. 写完跑 `node tools/check.mjs`、`node tools/audit-chapter.mjs chNN`，逐张看 `render-slides` 截图，按 `OPUS_REFACTOR.md` §8.3 汇报。只改 §0 自己那一行。
+7. 五路都回来后，父代理自己跑 `audit-chapter.mjs`，并用 `render-slides.mjs` 抽看每章每组的最后一帧和一张故障帧，按 `OPUS_REFACTOR.md` §8.2 一票否决项验收。不过就退回原车道，不算完成。再问要不要下一波。
 8. 某路写完就停。不要把别路的章切过来，除非用户点名收割。
+
+用户说「复审 chNN」或「按 opus 重构 chNN」：单代理只做这一章，按 `OPUS_REFACTOR.md` §2 走完，照样上锁、解锁、更新 §0。
 
 ## 3. 计划 3 · 提交并部署
 
