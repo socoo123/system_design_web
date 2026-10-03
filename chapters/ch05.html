@@ -1,0 +1,760 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="parchment" data-locale="zh">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ch05 · 一致性哈希</title>
+  <link rel="icon" href="../favicon.ico" sizes="48x48">
+  <link rel="stylesheet" href="../assets/css/style.css">
+  <script src="../assets/js/boot.js"></script>
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="../index.html"><span class="brand-logo">SD</span><span class="lang-zh">系统设计面试</span><span class="lang-en">System Design Interview</span></a>
+  <span class="spacer"></span>
+  <a class="map-link" href="../index.html"><span class="lang-zh">课程地图</span><span class="lang-en">Map</span></a>
+  <div class="seg" role="group" aria-label="language">
+    <button type="button" data-locale-set="zh">中文</button>
+    <button type="button" data-locale-set="both"><span class="lang-zh">对照</span><span class="lang-en">Both</span></button>
+    <button type="button" data-locale-set="en">EN</button>
+  </div>
+  <div class="seg" role="group" aria-label="theme">
+    <button type="button" data-theme-set="parchment"><span class="lang-zh">护眼</span><span class="lang-en">Paper</span></button>
+    <button type="button" data-theme-set="dracula"><span class="lang-zh">深色</span><span class="lang-en">Dark</span></button>
+  </div>
+</header>
+<main class="wrap">
+<article class="chapter" id="ch05" data-ch="ch05">
+  <header>
+    <div class="ch-kicker"><span class="lang-zh">CHAPTER 05 · 经典构件</span><span class="lang-en">CHAPTER 05 · building block</span></div>
+    <h1><span class="lang-zh">一致性哈希</span><span class="lang-en">Consistent hashing</span></h1>
+    <p class="ch-meta-line"><span class="lang-zh">约 40 分钟 · 前置：Ch02、Ch03 · 5 组演进图：从归属函数走到安全交接</span><span class="lang-en">~40 min · after Ch02, Ch03 · 5 evolution decks, from placement to safe handoff</span></p>
+  </header>
+
+  <section class="goal">
+    <h2><span class="lang-zh">这一章结束你能做什么</span><span class="lang-en">What you can do after this chapter</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="col-kicker">中文</p><ul>
+        <li>用完整余数周期证明取模的重映射比例，分别算清扩容、缩容的期望迁移量。</li>
+        <li>在展开的环上手算归属、环回和区间切分，解释为什么查找不沿服务器逐跳发送。</li>
+        <li>把虚拟节点、热点、复制与版本交接分开讲，指出“新归属已算出”之后还缺哪些步骤。</li>
+      </ul></div>
+      <div class="lang-en"><p class="col-kicker">English</p><ul>
+        <li>Prove modulo remapping over a full residue cycle and distinguish expected addition and removal movement.</li>
+        <li>Resolve ownership, wraparound and interval splits on an unfolded ring without implying network traversal.</li>
+        <li>Separate virtual nodes, hot keys, replication and epoch handoff, and explain what remains after computing a new owner.</li>
+      </ul></div>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">开场：先说放置合同，再选分区函数</span><span class="lang-en">Open with the placement contract</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="say">我先按缓存或 KV 的分区来答：节点有稳定名字，会任意加减，希望只改变必要的 key 归属。取模把机器数放进公式，十台加到十一台会重映射约 90.91%。环把固定 token 排序，用 key 的 hash 找顺时针下一点；旧点不动时，新增机器只拿走自己的区间。均匀随机、等容量假设下，百万 key 扩容期望迁约九万零九百零九个。虚拟节点改善区间分布并分散接管，实际迁移还要版本、复制与交接协议。</p>
+        <p>先问三个会改变设计的问题：数据是可丢缓存还是权威记录；节点是任意命名机器还是只能追加的逻辑桶；负载按 key 数、字节还是请求成本衡量。缓存换归属后可以从权威库重建，但会增加回源；权威记录必须在新位置准备好再切流量。节点只能追加时可以讨论 Jump Hash，任意下线时环更容易解释。几条澄清足够推进，不必把所有哈希变体摆上白板。</p>
+        <p>本章把 owner 定义为第一责任机器，不代表只有一份数据。复制数、读写 quorum、冲突合并留给后续 KV 章节；本章只指出它们与放置函数的接口。名称中的“一致性”指成员变化时映射扰动较小，不是读写的强一致性。Karger 等人的 1997 年论文讨论这种平滑变化，以及客户端视图不同的情况；它没有把所有成员视图自动变成同一个版本。[1]</p>
+        <p>图上的环展开成从左到右的有序点，末端环回。箭头在前四组图中表达索引顺序或归属变化，最后一组才表达通信时序。Router 是执行放置规则的路由层，可以实现在客户端库、代理或存储协调节点中；算法本身不要求另建独立服务。相同 epoch 下，用同一套规则可在本地算出目标，避免每个请求询问配置中心。</p>
+      </div>
+      <div class="lang-en"><p class="say">I will use cache or KV partitioning: machines have stable names, arbitrary additions and removals are allowed, and only necessary ownership should change. Modulo remaps about 90.91% when ten machines become eleven. A ring sorts fixed tokens and resolves the first clockwise token from a key’s hash. With old tokens unchanged, a newcomer takes only its intervals. Under uniform, equal-capacity assumptions, one million keys move about 90,909 in expectation. Virtual nodes improve interval distribution and spread takeover; actual migration still needs versions, copying and handoff.</p>
+        <p>Clarify disposable cache versus authoritative records, arbitrary named machines versus append-only logical buckets, and whether load means key count, bytes or request cost. Cache entries can be rebuilt but origin traffic rises. Authoritative records must be ready before routing changes. Append-only buckets make Jump Hash relevant; arbitrary removal is easier to explain with a ring. These questions are enough to proceed without presenting every variant.</p>
+        <p>Owner means first-responsible machine, not the only copy. Replication, quorums and conflict resolution belong to the KV chapter; here we identify their placement interfaces. “Consistent” refers to limited mapping disruption under membership changes, not strongly consistent reads and writes. Karger et al.’s 1997 paper discusses smoothness and differing client views, not automatic agreement on one membership version. [1]</p>
+        <p>The ring is unfolded into a sorted line with wraparound. Arrows in the first four decks mean index order or ownership transitions; the final deck shows communication. Router is a routing role implemented in a client library, proxy or storage coordinator, not necessarily a separate service. Given one epoch and one rule set, it resolves placement locally without querying a configuration center for every request.</p>
+      </div>
+    </div>
+    <table>
+      <thead><tr><th><span class="lang-zh">假设</span><span class="lang-en">Assumption</span></th><th><span class="lang-zh">取值与边界</span><span class="lang-en">Value and boundary</span></th><th><span class="lang-zh">它推动的决定</span><span class="lang-en">Design consequence</span></th></tr></thead>
+      <tbody>
+        <tr><td><span class="lang-zh">A1 · 统计模型</span><span class="lang-en">A1 · Statistical model</span></td><td><span class="lang-zh">独立均匀 hash；等容量；百万 key；10 台加 1 台</span><span class="lang-en">Independent uniform hashes; equal capacity; 1M keys; 10→11 machines</span></td><td><span class="lang-zh">迁移量是期望，新增时旧 token 固定</span><span class="lang-en">Movement is an expectation; old tokens stay fixed on addition</span></td></tr>
+        <tr><td><span class="lang-zh">A2 · 三点教学环</span><span class="lang-en">A2 · Three-token teaching ring</span></td><td><span class="lang-zh">整数 0–99；S0@10、S1@40、S2@75；新增 S3@25</span><span class="lang-en">Integers 0–99; S0@10, S1@40, S2@75; add S3@25</span></td><td><span class="lang-zh">查找取第一个≥hash 的点；移动 15 个位置</span><span class="lang-en">First token ≥hash; 15 positions change owner</span></td></tr>
+        <tr><td><span class="lang-zh">A3 · 虚拟节点教学环</span><span class="lang-en">A3 · Vnode teaching ring</span></td><td>S0: 10,60; S1: 30,95; S2: 45,80</td><td><span class="lang-zh">每台两点只作演示；删除 S1 向两台交接</span><span class="lang-en">Two tokens each illustrate takeover spread, not production sizing</span></td></tr>
+        <tr><td><span class="lang-zh">A4 · 环索引预算</span><span class="lang-en">A4 · Ring index budget</span></td><td><span class="lang-zh">100 台×160 点；每项暂按 16 B</span><span class="lang-en">100 machines×160 tokens; provisional 16 B/entry</span></td><td><span class="lang-zh">16,000 点；每个 Router 的原始条目约 256 KB</span><span class="lang-en">16,000 tokens; about 256 KB of raw entries per Router</span></td></tr>
+        <tr><td><span class="lang-zh">A5 · 数据与迁移带宽</span><span class="lang-en">A5 · Data and migration bandwidth</span></td><td><span class="lang-zh">每 key 1 KB；有效复制 10 MB/s；十进制单位</span><span class="lang-en">1 KB/key; effective copying 10 MB/s; decimal units</span></td><td><span class="lang-zh">扩容约 90.91 MB，理想复制约 9.09 s，未计追平</span><span class="lang-en">About 90.91 MB and 9.09 s ideal copying, before catch-up</span></td></tr>
+        <tr><td><span class="lang-zh">A6 · 请求容量</span><span class="lang-en">A6 · Request capacity</span></td><td><span class="lang-zh">总读 10,000/s；10 台；每台计划上限 1,500/s</span><span class="lang-en">10,000 reads/s; 10 machines; planned cap 1,500/s each</span></td><td><span class="lang-zh">只在负载均匀且单台故障时，剩余平均约 1,111/s</span><span class="lang-en">Uniform load and one failure give about 1,111/s per survivor</span></td></tr>
+        <tr><td><span class="lang-zh">A7 · 热点反例</span><span class="lang-en">A7 · Hot-key counterexample</span></td><td><span class="lang-zh">40% 请求集中到一个共享 key，其余均匀</span><span class="lang-en">40% of requests hit one shared key; the rest are uniform</span></td><td><span class="lang-zh">热点 owner 约 4,600/s，超过 1,500/s</span><span class="lang-en">Hot owner sees about 4,600/s, over its 1,500/s cap</span></td></tr>
+        <tr><td><span class="lang-zh">A8 · 缓存扩容窗口</span><span class="lang-en">A8 · Cache expansion window</span></td><td><span class="lang-zh">正常命中 95%；新机起初全冷；key 与读量均匀</span><span class="lang-en">95% healthy hit rate; newcomer initially cold; uniform keys and reads</span></td><td><span class="lang-zh">瞬时回源约 1,364/s；库预算 800/s</span><span class="lang-en">About 1,364 origin reads/s initially; database budget 800/s</span></td></tr>
+        <tr><td><span class="lang-zh">A9 · 交接模型</span><span class="lang-en">A9 · Handoff model</span></td><td><span class="lang-zh">ep7→ep8；迁移时短暂停写或缓冲；旧 owner 接受隔离规则</span><span class="lang-en">ep7→ep8; short write pause or buffering; old owner enforces fencing</span></td><td><span class="lang-zh">先快照与追平，后激活；多 Router 协调是必要条件</span><span class="lang-en">Snapshot and catch up before activation; coordinate multiple Routers</span></td></tr>
+      </tbody>
+    </table>
+    <div class="bilingual">
+      <div class="lang-zh"><p>以上全是教学假设，不是某家产品的生产规模。A1 用来算期望，A2、A3 用来做可枚举的反例，两者不能混着当实测。A4 只估路由元数据，A5 只估一份逻辑数据的迁移；已有副本、索引和日志另算。容量数字决定是否预热、限速和留余量，不是靠“哈希够均匀”跳过压测。</p></div>
+      <div class="lang-en"><p>These are teaching assumptions, not production figures. A1 derives expectations; A2/A3 are enumerable examples. A4 estimates routing metadata and A5 one logical copy’s movement; replicas, indexes and logs are extra. Capacity determines warming, throttling and headroom rather than replacing measurement with “the hash is uniform.”</p></div>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">第一笔：取模为什么会让幸存机器之间也搬家</span><span class="lang-en">Modulo also remaps between surviving machines</span></h2>
+    <figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d1s1t d1s1d">
+          <title id="d1s1t">Start with modulo on three machines</title>
+          <desc id="d1s1d">For hash 0, modulo 3 assigns S0. Vertical arrows represent a local assignment or an ownership change, not network traffic.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="20" y="20" width="920" height="364" rx="18" class="boundary"/><text x="40" y="44" class="tiny">MODULO · vertical arrows show ownership before and after expansion</text>
+          <g class="is-new">
+            <rect x="155" y="72" width="150" height="48" rx="12" class="box"/><text x="230" y="93" text-anchor="middle" class="label">hash = 0</text><text x="230" y="112" text-anchor="middle" class="sub">same key, same hash</text>
+            <rect x="155" y="167" width="150" height="48" rx="12" class="box"/><text x="230" y="188" text-anchor="middle" class="label">S0</text><text x="230" y="207" text-anchor="middle" class="sub">N = 3</text>
+            <path d="M230 120 L230 157" class="wire"/><polygon points="230,167 225,157 235,157" class="head"/>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">先固定同一个 hash，再改变分区函数的除数。hash=0 在三台时归 S0；这里画的是归属状态，不是请求在机器之间转发。</span><span class="lang-en">Keep the hash fixed while changing the divisor. Hash 0 belongs to S0 with three machines. These are ownership states, not forwarding hops.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d1s2t d1s2d">
+          <title id="d1s2t">Some keys stay after expansion</title>
+          <desc id="d1s2d">Modulo 4 still assigns hash 0 to S0. The green transition marks an unchanged owner.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="20" y="20" width="920" height="364" rx="18" class="boundary"/><text x="40" y="44" class="tiny">MODULO · vertical arrows show ownership before and after expansion</text>
+          <rect x="155" y="72" width="150" height="48" rx="12" class="box"/><text x="230" y="93" text-anchor="middle" class="label">hash = 0</text><text x="230" y="112" text-anchor="middle" class="sub">same key, same hash</text>
+          <rect x="155" y="167" width="150" height="48" rx="12" class="box"/><text x="230" y="188" text-anchor="middle" class="label">S0</text><text x="230" y="207" text-anchor="middle" class="sub">N = 3</text>
+          <path d="M230 120 L230 157" class="wire"/><polygon points="230,167 225,157 235,157" class="head"/>
+          <g class="is-new">
+            <rect x="155" y="272" width="150" height="48" rx="12" class="box"/><text x="230" y="293" text-anchor="middle" class="label">S0</text><text x="230" y="312" text-anchor="middle" class="sub">N = 4</text>
+            <path d="M230 215 L230 262" class="wire reply"/><polygon points="230,272 225,262 235,262" class="head reply"/><text x="247" y="248" class="tiny">stays</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">加 S3 后，hash=0 仍归 S0，说明取模扩容并非每个 key 都搬。要证明扰动大，应数完整余数周期，而不是把“几乎全量”当作定理。</span><span class="lang-en">Adding S3 leaves hash 0 on S0. Modulo does not move every key; count a full residue cycle to quantify its disruption.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d1s3t d1s3d">
+          <title id="d1s3t">A key moves from an existing owner to the new machine</title>
+          <desc id="d1s3d">Hash 3 maps to S0 with modulo 3 and S3 with modulo 4. The red transition marks reassignment.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="20" y="20" width="920" height="364" rx="18" class="boundary"/><text x="40" y="44" class="tiny">MODULO · vertical arrows show ownership before and after expansion</text>
+          <rect x="155" y="72" width="150" height="48" rx="12" class="box"/><text x="230" y="93" text-anchor="middle" class="label">hash = 0</text><text x="230" y="112" text-anchor="middle" class="sub">same key, same hash</text>
+          <rect x="155" y="167" width="150" height="48" rx="12" class="box"/><text x="230" y="188" text-anchor="middle" class="label">S0</text><text x="230" y="207" text-anchor="middle" class="sub">N = 3</text>
+          <path d="M230 120 L230 157" class="wire"/><polygon points="230,167 225,157 235,157" class="head"/>
+          <rect x="155" y="272" width="150" height="48" rx="12" class="box"/><text x="230" y="293" text-anchor="middle" class="label">S0</text><text x="230" y="312" text-anchor="middle" class="sub">N = 4</text>
+          <path d="M230 215 L230 262" class="wire reply"/><polygon points="230,272 225,262 235,262" class="head reply"/><text x="247" y="248" class="tiny">stays</text>
+          <g class="is-new">
+            <rect x="405" y="72" width="150" height="48" rx="12" class="box"/><text x="480" y="93" text-anchor="middle" class="label">hash = 3</text><text x="480" y="112" text-anchor="middle" class="sub">same key, same hash</text>
+            <rect x="405" y="167" width="150" height="48" rx="12" class="box"/><text x="480" y="188" text-anchor="middle" class="label">S0</text><text x="480" y="207" text-anchor="middle" class="sub">N = 3</text>
+            <path d="M480 120 L480 157" class="wire"/><polygon points="480,167 475,157 485,157" class="head"/>
+            <rect x="405" y="272" width="150" height="48" rx="12" class="box bad"/><text x="480" y="293" text-anchor="middle" class="label">S3</text><text x="480" y="312" text-anchor="middle" class="sub">N = 4</text>
+            <path d="M480 215 L480 262" class="wire fail"/><polygon points="480,272 475,262 485,262" class="head fail"/><text x="497" y="248" class="tiny">moves</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">hash=3：3%3=0，3%4=3。它从 S0 改到新人 S3；这部分移动本来就可能是扩容所需。下一笔检查旧机器之间会不会也互换。</span><span class="lang-en">For hash 3, 3%3=0 and 3%4=3: S0 changes to new S3. Some movement to the newcomer is expected; the next stroke checks movement between old machines.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d1s4t d1s4d">
+          <title id="d1s4t">Modulo also moves keys between surviving machines</title>
+          <desc id="d1s4d">Hash 4 maps to S1 with modulo 3 and S0 with modulo 4, even though both machines survive.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="20" y="20" width="920" height="364" rx="18" class="boundary"/><text x="40" y="44" class="tiny">MODULO · vertical arrows show ownership before and after expansion</text>
+          <rect x="155" y="72" width="150" height="48" rx="12" class="box"/><text x="230" y="93" text-anchor="middle" class="label">hash = 0</text><text x="230" y="112" text-anchor="middle" class="sub">same key, same hash</text>
+          <rect x="155" y="167" width="150" height="48" rx="12" class="box"/><text x="230" y="188" text-anchor="middle" class="label">S0</text><text x="230" y="207" text-anchor="middle" class="sub">N = 3</text>
+          <path d="M230 120 L230 157" class="wire"/><polygon points="230,167 225,157 235,157" class="head"/>
+          <rect x="155" y="272" width="150" height="48" rx="12" class="box"/><text x="230" y="293" text-anchor="middle" class="label">S0</text><text x="230" y="312" text-anchor="middle" class="sub">N = 4</text>
+          <path d="M230 215 L230 262" class="wire reply"/><polygon points="230,272 225,262 235,262" class="head reply"/><text x="247" y="248" class="tiny">stays</text>
+          <rect x="405" y="72" width="150" height="48" rx="12" class="box"/><text x="480" y="93" text-anchor="middle" class="label">hash = 3</text><text x="480" y="112" text-anchor="middle" class="sub">same key, same hash</text>
+          <rect x="405" y="167" width="150" height="48" rx="12" class="box"/><text x="480" y="188" text-anchor="middle" class="label">S0</text><text x="480" y="207" text-anchor="middle" class="sub">N = 3</text>
+          <path d="M480 120 L480 157" class="wire"/><polygon points="480,167 475,157 485,157" class="head"/>
+          <rect x="405" y="272" width="150" height="48" rx="12" class="box bad"/><text x="480" y="293" text-anchor="middle" class="label">S3</text><text x="480" y="312" text-anchor="middle" class="sub">N = 4</text>
+          <path d="M480 215 L480 262" class="wire fail"/><polygon points="480,272 475,262 485,262" class="head fail"/><text x="497" y="248" class="tiny">moves</text>
+          <g class="is-new">
+            <rect x="655" y="72" width="150" height="48" rx="12" class="box"/><text x="730" y="93" text-anchor="middle" class="label">hash = 4</text><text x="730" y="112" text-anchor="middle" class="sub">same key, same hash</text>
+            <rect x="655" y="167" width="150" height="48" rx="12" class="box"/><text x="730" y="188" text-anchor="middle" class="label">S1</text><text x="730" y="207" text-anchor="middle" class="sub">N = 3</text>
+            <path d="M730 120 L730 157" class="wire"/><polygon points="730,167 725,157 735,157" class="head"/>
+            <rect x="655" y="272" width="150" height="48" rx="12" class="box bad"/><text x="730" y="293" text-anchor="middle" class="label">S0</text><text x="730" y="312" text-anchor="middle" class="sub">N = 4</text>
+            <path d="M730 215 L730 262" class="wire fail"/><polygon points="730,272 725,262 735,262" class="head fail"/><text x="747" y="248" class="tiny">moves</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">hash=4：4%3=1，4%4=0。S1 和 S0 都没下线，key 仍要换机器。取模让扩容扰动了幸存节点之间的归属。</span><span class="lang-en">For hash 4, 4%3=1 and 4%4=0. S1 and S0 both survive, yet ownership changes between them.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d1s5t d1s5d">
+          <title id="d1s5t">Quantify the unnecessary remapping</title>
+          <desc id="d1s5d">The three examples remain on the board. In the complete period of 12 hashes, only 0, 1 and 2 keep their numeric owners: 9 of 12 move.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="20" y="20" width="920" height="364" rx="18" class="boundary"/><text x="40" y="44" class="tiny">MODULO · vertical arrows show ownership before and after expansion</text>
+          <rect x="155" y="72" width="150" height="48" rx="12" class="box"/><text x="230" y="93" text-anchor="middle" class="label">hash = 0</text><text x="230" y="112" text-anchor="middle" class="sub">same key, same hash</text>
+          <rect x="155" y="167" width="150" height="48" rx="12" class="box"/><text x="230" y="188" text-anchor="middle" class="label">S0</text><text x="230" y="207" text-anchor="middle" class="sub">N = 3</text>
+          <path d="M230 120 L230 157" class="wire"/><polygon points="230,167 225,157 235,157" class="head"/>
+          <rect x="155" y="272" width="150" height="48" rx="12" class="box"/><text x="230" y="293" text-anchor="middle" class="label">S0</text><text x="230" y="312" text-anchor="middle" class="sub">N = 4</text>
+          <path d="M230 215 L230 262" class="wire reply"/><polygon points="230,272 225,262 235,262" class="head reply"/><text x="247" y="248" class="tiny">stays</text>
+          <rect x="405" y="72" width="150" height="48" rx="12" class="box"/><text x="480" y="93" text-anchor="middle" class="label">hash = 3</text><text x="480" y="112" text-anchor="middle" class="sub">same key, same hash</text>
+          <rect x="405" y="167" width="150" height="48" rx="12" class="box"/><text x="480" y="188" text-anchor="middle" class="label">S0</text><text x="480" y="207" text-anchor="middle" class="sub">N = 3</text>
+          <path d="M480 120 L480 157" class="wire"/><polygon points="480,167 475,157 485,157" class="head"/>
+          <rect x="405" y="272" width="150" height="48" rx="12" class="box bad"/><text x="480" y="293" text-anchor="middle" class="label">S3</text><text x="480" y="312" text-anchor="middle" class="sub">N = 4</text>
+          <path d="M480 215 L480 262" class="wire fail"/><polygon points="480,272 475,262 485,262" class="head fail"/><text x="497" y="248" class="tiny">moves</text>
+          <rect x="655" y="72" width="150" height="48" rx="12" class="box"/><text x="730" y="93" text-anchor="middle" class="label">hash = 4</text><text x="730" y="112" text-anchor="middle" class="sub">same key, same hash</text>
+          <rect x="655" y="167" width="150" height="48" rx="12" class="box"/><text x="730" y="188" text-anchor="middle" class="label">S1</text><text x="730" y="207" text-anchor="middle" class="sub">N = 3</text>
+          <path d="M730 120 L730 157" class="wire"/><polygon points="730,167 725,157 735,157" class="head"/>
+          <rect x="655" y="272" width="150" height="48" rx="12" class="box bad"/><text x="730" y="293" text-anchor="middle" class="label">S0</text><text x="730" y="312" text-anchor="middle" class="sub">N = 4</text>
+          <path d="M730 215 L730 262" class="wire fail"/><polygon points="730,272 725,262 735,262" class="head fail"/><text x="747" y="248" class="tiny">moves</text>
+          <g class="is-new">
+            <text x="480" y="348" text-anchor="middle" class="clock">0..11: only 0, 1, 2 stay → 9 / 12 = 75% move</text>
+            <text x="480" y="367" text-anchor="middle" class="tiny">Assume stable old IDs: 10 → 11 moves 10 / 11 ≈ 90.91%</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">完整周期 0–11 只有 0、1、2 不变，9/12=75% 重映射。旧桶编号固定时，10→11 的迁移比例是 10/11≈90.91%，远大于新机应接的 1/11。</span><span class="lang-en">Across 0–11, only 0, 1 and 2 stay: 9/12=75% move. With stable old IDs, 10→11 remaps 10/11≈90.91%, far above the newcomer’s 1/11 share.</span></figcaption>
+      </div>
+    </figure>
+    <h3><span class="lang-zh">固定旧编号，才能比较同一台机器</span><span class="lang-en">Keep old IDs stable when comparing owners</span></h3>
+    <div class="bilingual">
+      <div class="lang-zh"><p>先用 N=3，桶号 0、1、2 分别对应 S0、S1、S2；扩容只在尾部加 S3，旧编号不变。hash=0 始终归 S0；hash=3 从 S0 到 S3；hash=4 却从 S1 到 S0。第三条是关键：扩容需要新人接一份负载，取模却让旧机器之间也搬数据。若把服务器列表重新排序，同一个桶号还可能换物理机，那是额外扰动，不能混进余数证明里。</p>
+        <p>3 与 4 的最小公倍数为 12，所以枚举 hash 0–11 就能看完整周期。要让 h%3=h%4=r，r 只能是 0、1、2，且 h−r 同时是 3 和 4 的倍数。在这个周期只有 h=0、1、2 成立，其余 9 个重映射，迁移比例 9/12=75%。旧稿的 8 个 key 缩容例子只有局部样本，能展示问题，却不能证明一般迁移比例。</p>
+        <p>同理，n 与 n+1 互质，周期为 n(n+1)；相等余数只有 n 个，所以保留比例 n/[n(n+1)]=1/(n+1)，移动比例 n/(n+1)。A1 的 10→11 因此移动 10/11≈90.91%，百万 key 约 909,091 个换机器。前提是 hash 在这个周期近似均匀，且原桶编号不变；小样本和偏斜 key 集未必得到这个百分比。</p>
+        <p>取模 O(1)、内存小，固定 worker 池完全可以用它。会动态变化的缓存集群更在乎暖数据和归属稳定性，才需要另选放置函数。取模变更也不会在逻辑上保证每个请求都 miss：旧值可能有重复副本，新位置也可能预热。它增加的是大范围失配风险；到底有多少回源，要把新位置的命中状态和请求分布带进容量计算。</p>
+      </div>
+      <div class="lang-en"><p>With N=3, buckets 0/1/2 refer to S0/S1/S2. Append S3 while keeping old IDs stable. Hash 0 stays on S0, hash 3 moves from S0 to S3, but hash 4 moves from S1 to S0. Expansion needs some newcomer load; modulo also causes old-to-old movement. Reordering the server list adds a different disturbance that should not be mixed into the residue proof.</p>
+        <p>The least common multiple of 3 and 4 is 12. For h%3=h%4=r, r must be 0, 1 or 2, and h−r must be divisible by both. Only h=0/1/2 satisfy this in 0–11. Nine of twelve move: 75%. The old eight-key removal example is a partial sample, useful for illustration but not a general remapping proof.</p>
+        <p>Since n and n+1 are coprime, the cycle is n(n+1), with n equal residues. The retained fraction is 1/(n+1) and movement n/(n+1). Thus 10→11 moves 10/11≈90.91%, about 909,091 of one million keys. This assumes hashes uniform across the residue cycle and stable old bucket IDs; small or skewed populations may differ.</p>
+        <p>Modulo gives O(1) lookup with little memory and is reasonable for a fixed worker pool. Changing cache membership prioritizes warm entries and stable placement. Modulo does not logically force every request to miss: duplicates or warming may exist. It creates broad placement mismatch risk; actual origin traffic depends on destination hit state and request distribution.</p>
+      </div>
+    </div>
+    <table>
+      <thead><tr><th>hash</th><th>N=3</th><th>N=4</th><th><span class="lang-zh">归属变化</span><span class="lang-en">Ownership change</span></th></tr></thead>
+      <tbody>
+        <tr><td>0, 1, 2</td><td>S0, S1, S2</td><td>S0, S1, S2</td><td><span class="lang-zh">3 个保留</span><span class="lang-en">3 retained</span></td></tr>
+        <tr><td>3, 4, 5</td><td>S0, S1, S2</td><td>S3, S0, S1</td><td><span class="lang-zh">3 个移动</span><span class="lang-en">3 moved</span></td></tr>
+        <tr><td>6, 7, 8</td><td>S0, S1, S2</td><td>S2, S3, S0</td><td><span class="lang-zh">3 个移动</span><span class="lang-en">3 moved</span></td></tr>
+        <tr><td>9, 10, 11</td><td>S0, S1, S2</td><td>S1, S2, S3</td><td><span class="lang-zh">3 个移动</span><span class="lang-en">3 moved</span></td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">第二笔：环是本地有序索引，顺时针不是 RPC 接力</span><span class="lang-en">A ring is a local sorted index</span></h2>
+    <figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d2s1t d2s1d">
+          <title id="d2s1t">Sort stable node tokens</title>
+          <desc id="d2s1d">S0 at 10, S1 at 40 and S2 at 75 form a sorted token order. The arrows mean clockwise order, not requests forwarded between servers.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="20" y="20" width="920" height="364" rx="18" class="boundary"/><text x="40" y="44" class="tiny">RING LOOKUP · arrows show local successor lookup, not network hops</text>
+          <g class="is-new">
+            <rect x="170" y="150" width="120" height="50" rx="25" class="box alt"/><text x="230" y="181" text-anchor="middle" class="label">S0 @ 10</text><rect x="460" y="150" width="120" height="50" rx="25" class="box alt"/><text x="520" y="181" text-anchor="middle" class="label">S1 @ 40</text><rect x="750" y="150" width="120" height="50" rx="25" class="box alt"/><text x="810" y="181" text-anchor="middle" class="label">S2 @ 75</text><path d="M290 175 L450 175" class="wire"/><polygon points="460,175 450,180 450,170" class="head"/><path d="M580 175 L740 175" class="wire"/><polygon points="750,175 740,180 740,170" class="head"/><text x="376" y="167" text-anchor="middle" class="tiny">clockwise</text><text x="665" y="167" text-anchor="middle" class="tiny">clockwise</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">把三个固定 token 排序，顺时针对应从左往右。图上的连线只是本地索引的顺序；真正请求只会发给选中的那台机器。</span><span class="lang-en">Sort three fixed tokens; clockwise becomes left to right. The lines show local index order. A real request goes directly to the selected machine.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d2s2t d2s2d">
+          <title id="d2s2t">Find the first token at or above the key hash</title>
+          <desc id="d2s2d">Hash 25 resolves locally to the first token at or above it, S1 at 40. S0 is not contacted.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="20" y="20" width="920" height="364" rx="18" class="boundary"/><text x="40" y="44" class="tiny">RING LOOKUP · arrows show local successor lookup, not network hops</text>
+          <rect x="170" y="150" width="120" height="50" rx="25" class="box alt"/><text x="230" y="181" text-anchor="middle" class="label">S0 @ 10</text><rect x="460" y="150" width="120" height="50" rx="25" class="box alt"/><text x="520" y="181" text-anchor="middle" class="label">S1 @ 40</text><rect x="750" y="150" width="120" height="50" rx="25" class="box alt"/><text x="810" y="181" text-anchor="middle" class="label">S2 @ 75</text><path d="M290 175 L450 175" class="wire"/><polygon points="460,175 450,180 450,170" class="head"/><path d="M580 175 L740 175" class="wire"/><polygon points="750,175 740,180 740,170" class="head"/><text x="376" y="167" text-anchor="middle" class="tiny">clockwise</text><text x="665" y="167" text-anchor="middle" class="tiny">clockwise</text>
+          <g class="is-new">
+            <rect x="340" y="70" width="140" height="44" rx="12" class="box"/><text x="410" y="98" text-anchor="middle" class="label">hash = 25</text><path d="M410 114 L410 122 Q410 130 418 130 L515 130 Q520 130 520 135 L520 140" class="wire"/><polygon points="520,150 515,140 525,140" class="head"/><text x="505" y="87" class="tiny">lower_bound → S1</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">hash=25 用 lower_bound 找第一个≥25 的点，得到 S1@40。不需要先访问 S0，也不需要沿环发 RPC；二分是在 Router 的本地数组中完成。</span><span class="lang-en">For hash 25, lower_bound finds the first token ≥25, S1@40. Router searches its local array; it does not contact S0 or walk the ring over RPC.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d2s3t d2s3d">
+          <title id="d2s3t">Make the interval endpoint explicit</title>
+          <desc id="d2s3d">S1 at 40 owns keys in (10,40], including a key whose hash is exactly 40.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="20" y="20" width="920" height="364" rx="18" class="boundary"/><text x="40" y="44" class="tiny">RING LOOKUP · arrows show local successor lookup, not network hops</text>
+          <rect x="170" y="150" width="120" height="50" rx="25" class="box alt"/><text x="230" y="181" text-anchor="middle" class="label">S0 @ 10</text><rect x="460" y="150" width="120" height="50" rx="25" class="box alt"/><text x="520" y="181" text-anchor="middle" class="label">S1 @ 40</text><rect x="750" y="150" width="120" height="50" rx="25" class="box alt"/><text x="810" y="181" text-anchor="middle" class="label">S2 @ 75</text><path d="M290 175 L450 175" class="wire"/><polygon points="460,175 450,180 450,170" class="head"/><path d="M580 175 L740 175" class="wire"/><polygon points="750,175 740,180 740,170" class="head"/><text x="376" y="167" text-anchor="middle" class="tiny">clockwise</text><text x="665" y="167" text-anchor="middle" class="tiny">clockwise</text>
+          <rect x="340" y="70" width="140" height="44" rx="12" class="box"/><text x="410" y="98" text-anchor="middle" class="label">hash = 25</text><path d="M410 114 L410 122 Q410 130 418 130 L515 130 Q520 130 520 135 L520 140" class="wire"/><polygon points="520,150 515,140 525,140" class="head"/><text x="505" y="87" class="tiny">lower_bound → S1</text>
+          <g class="is-new">
+            <text x="520" y="242" text-anchor="middle" class="clock">hash 40 → S1: endpoint included</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">补上等号：hash=40 也归 S1，所以区间是 (10,40]。把查找写成严格大于，会在 token 相等时把 key 错送下一台。</span><span class="lang-en">Hash 40 also belongs to S1, so its interval is (10,40]. A strict-greater-than search would send exact matches to the wrong machine.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d2s4t d2s4d">
+          <title id="d2s4t">Wrap a key beyond the last token</title>
+          <desc id="d2s4d">Hash 90 is beyond S2 at 75. The local lookup wraps to S0 at 10, without contacting S2.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="20" y="20" width="920" height="364" rx="18" class="boundary"/><text x="40" y="44" class="tiny">RING LOOKUP · arrows show local successor lookup, not network hops</text>
+          <rect x="170" y="150" width="120" height="50" rx="25" class="box alt"/><text x="230" y="181" text-anchor="middle" class="label">S0 @ 10</text><rect x="460" y="150" width="120" height="50" rx="25" class="box alt"/><text x="520" y="181" text-anchor="middle" class="label">S1 @ 40</text><rect x="750" y="150" width="120" height="50" rx="25" class="box alt"/><text x="810" y="181" text-anchor="middle" class="label">S2 @ 75</text><path d="M290 175 L450 175" class="wire"/><polygon points="460,175 450,180 450,170" class="head"/><path d="M580 175 L740 175" class="wire"/><polygon points="750,175 740,180 740,170" class="head"/><text x="376" y="167" text-anchor="middle" class="tiny">clockwise</text><text x="665" y="167" text-anchor="middle" class="tiny">clockwise</text>
+          <rect x="340" y="70" width="140" height="44" rx="12" class="box"/><text x="410" y="98" text-anchor="middle" class="label">hash = 25</text><path d="M410 114 L410 122 Q410 130 418 130 L515 130 Q520 130 520 135 L520 140" class="wire"/><polygon points="520,150 515,140 525,140" class="head"/><text x="505" y="87" class="tiny">lower_bound → S1</text>
+          <text x="520" y="242" text-anchor="middle" class="clock">hash 40 → S1: endpoint included</text>
+          <g class="is-new">
+            <rect x="740" y="70" width="145" height="44" rx="12" class="box"/><text x="812.5" y="98" text-anchor="middle" class="label">hash = 90</text><path d="M812 114 L812 121 Q812 128 819 128 L896 128 Q904 128 904 136 L904 302 Q904 310 896 310 L238 310 Q230 310 230 302 L230 210" class="wire"/><polygon points="230,200 235,210 225,210" class="head"/><text x="560" y="330" text-anchor="middle" class="tiny">past the maximum → wrap to S0</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">hash=90 超过最大 token=75，数组查找越界便回到首项 S0。环回是一次索引处理，不是 S2 再把请求转给 S0。</span><span class="lang-en">Hash 90 exceeds the maximum token 75, so the array lookup wraps to S0. Wraparound is index handling, not S2 forwarding a request to S0.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d2s5t d2s5d">
+          <title id="d2s5t">Write each exact ownership interval</title>
+          <desc id="d2s5d">The completed local lookup shows hash 25 to S1 and hash 90 to S0. The interval labels specify each owner in the 0–99 teaching space.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="20" y="20" width="920" height="364" rx="18" class="boundary"/><text x="40" y="44" class="tiny">RING LOOKUP · arrows show local successor lookup, not network hops</text>
+          <rect x="170" y="150" width="120" height="50" rx="25" class="box alt"/><text x="230" y="181" text-anchor="middle" class="label">S0 @ 10</text><rect x="460" y="150" width="120" height="50" rx="25" class="box alt"/><text x="520" y="181" text-anchor="middle" class="label">S1 @ 40</text><rect x="750" y="150" width="120" height="50" rx="25" class="box alt"/><text x="810" y="181" text-anchor="middle" class="label">S2 @ 75</text><path d="M290 175 L450 175" class="wire"/><polygon points="460,175 450,180 450,170" class="head"/><path d="M580 175 L740 175" class="wire"/><polygon points="750,175 740,180 740,170" class="head"/><text x="376" y="167" text-anchor="middle" class="tiny">clockwise</text><text x="665" y="167" text-anchor="middle" class="tiny">clockwise</text>
+          <rect x="340" y="70" width="140" height="44" rx="12" class="box"/><text x="410" y="98" text-anchor="middle" class="label">hash = 25</text><path d="M410 114 L410 122 Q410 130 418 130 L515 130 Q520 130 520 135 L520 140" class="wire"/><polygon points="520,150 515,140 525,140" class="head"/><text x="505" y="87" class="tiny">lower_bound → S1</text>
+          <text x="520" y="242" text-anchor="middle" class="clock">hash 40 → S1: endpoint included</text>
+          <rect x="740" y="70" width="145" height="44" rx="12" class="box"/><text x="812.5" y="98" text-anchor="middle" class="label">hash = 90</text><path d="M812 114 L812 121 Q812 128 819 128 L896 128 Q904 128 904 136 L904 302 Q904 310 896 310 L238 310 Q230 310 230 302 L230 210" class="wire"/><polygon points="230,200 235,210 225,210" class="head"/><text x="560" y="330" text-anchor="middle" class="tiny">past the maximum → wrap to S0</text>
+          <g class="is-new">
+            <text x="480" y="365" text-anchor="middle" class="tiny">S0: (75,99] + [0,10]     S1: (10,40]     S2: (40,75]</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">最后把责任区间写全：S0 接跨零段，S1 接 (10,40]，S2 接 (40,75]。同一 epoch、相同序列化与哈希算法，是多 Router 得出相同归属的前提。</span><span class="lang-en">Complete the ownership intervals: S0 spans zero, S1 owns (10,40], and S2 owns (40,75]. Routers agree only with the same epoch, serialization and hash algorithm.</span></figcaption>
+      </div>
+    </figure>
+    <h3><span class="lang-zh">先命中 token，再得到物理 owner</span><span class="lang-en">Resolve a token, then its physical owner</span></h3>
+    <div class="bilingual">
+      <div class="lang-zh"><p>A2 把 hash 空间缩成 0–99，放三个 token：10→S0，40→S1，75→S2。Router 持有这份排序后的表，先把 key 按固定规则序列化、计算 hash，再找第一个不小于它的 token。hash=25 得到 40→S1；hash=40 也得到 S1；hash=90 的二分结果越界，就取首项 10→S0。环回没有跨机器通信，最终只向选中的 owner 发请求。</p>
+        <p>采用左开右闭区间，S1 接 (10,40]，S2 接 (40,75]，S0 接 (75,99]∪[0,10]。在整数教学空间，分别有 30、35、35 个 hash 位置。空成员表必须返回明确的不可路由错误，不能取首项；重复 token 必须按统一规则处理。端点采用 ≥ 是本章约定，若系统选另一种约定也可以，但所有路由者和数据分区工具必须一致。</p>
+        <p>所谓“不依赖 N”，准确说是不把节点数当作取模除数。映射仍依赖当前 token 集合、owner 映射和版本。一个 Router 看到 ep7，另一个看到 ep8，hash=18 就会去不同机器；节点名字、字节序或种子不同，也会得到不同结果。“各自算得一样”只在输入协议与成员视图一致时成立，故障检测和成员发布要另设计。</p>
+        <p>节点身份要稳定。若每次重启都用临时 IP 生成新 token，一次普通滚动发布就可能表现为全批节点删除后重新加入。用稳定的节点标识和显式 token 清单，把网络地址更新与责任区间变化分开；token 对应的 owner 可以换地址，hash 位置不必跟着跳。客户端库升级也要保留同一套序列化测试向量，不能把语言的默认字符串 hash 当成跨进程协议。</p>
+      </div>
+      <div class="lang-en"><p>A2 uses hashes 0–99 and tokens 10→S0, 40→S1, 75→S2. Router stores this sorted table, serializes the key consistently, hashes it, and finds the first token at or above the result. Hash 25 resolves to S1, as does hash 40. Hash 90 exceeds the maximum and wraps to S0. Lookup performs no network traversal; the real request goes directly to its owner.</p>
+        <p>With left-open, right-closed intervals, S1 owns (10,40], S2 (40,75], and S0 (75,99]∪[0,10], holding 30/35/35 integer positions. An empty membership must fail explicitly. Duplicate tokens need a shared rule. Using ≥ is this chapter’s convention; other endpoint conventions work if all routers and partitioning tools agree.</p>
+        <p>“Independent of N” means machine count is not a modulo divisor. Placement still depends on the token set, owner map and epoch. Routers at ep7 and ep8 send hash 18 to different machines; different serialization, byte order or seeds also disagree. Determinism requires matching inputs and membership. Failure detection and version publication are separate mechanisms.</p>
+        <p>Use stable node identities. Hashing a temporary IP on every restart makes rolling deployment resemble mass deletion and insertion. Separate endpoint updates from ownership changes through stable IDs and explicit token lists. Preserve serialization test vectors across client-library upgrades; a language’s default string hash is not a cross-process protocol.</p>
+      </div>
+    </div>
+    <h3><span class="lang-zh">查找预算买的是每个 Router 的索引</span><span class="lang-en">Lookup memory is per Router</span></h3>
+    <div class="bilingual">
+      <div class="lang-zh"><p>A4 的 100×160=16,000 点，用排序数组二分最多约 14 次比较，因为 2¹⁴=16,384。每项暂按 16 B，原始条目为 16,000×16=256,000 B，约 256 KB，另加数组、字符串和对象开销。每个 Router 都需要这份索引，而不是整个集群只存一份。更新时构建完整的新数组再原子换引用，可让一条请求始终按同一 epoch 查找；这只解决本地半更新，没解决跨 Router 交接。</p>
+        <p>排序数组读多改少时简单，代价是成员变更需要构建和分发新快照。平衡树也可以做 O(log T) 查找；逐点扫描是 O(T)，只有很小的教学环才适合直接扫。哈希与序列化的成本也算在请求路径里，尤其大 key；“二分只十几次”不是整个路由动作的延迟承诺。</p></div>
+      <div class="lang-en"><p>A4 gives 100×160=16,000 tokens. Binary search needs at most about 14 comparisons since 2¹⁴=16,384. At a provisional 16 B each, raw entries use 256,000 B, about 256 KB, plus container, string and object overhead. Each Router needs a copy. Build a full replacement array and swap its reference atomically so one request uses one epoch. This prevents a locally half-updated index, not cross-Router handoff races.</p>
+        <p>A sorted array suits frequent reads and rare membership changes, at the cost of snapshot rebuilding and distribution. A balanced tree also supports O(log T); scanning is O(T) and appropriate only for small examples. Hashing and serialization remain on the request path, particularly for large keys. Fourteen comparisons are not a routing latency guarantee.</p></div>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">第三笔：加点切一段，删点交下一家</span><span class="lang-en">Addition splits a range; removal hands it forward</span></h2>
+    <figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d3s1t d3s1d">
+          <title id="d3s1t">The old ring owns thirty positions on S1</title>
+          <desc id="d3s1d">Epoch 7 has S0 at 10, S1 at 40 and S2 at 75. S1 owns the 30 integer positions from 11 through 40.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="20" y="20" width="920" height="364" rx="18" class="boundary"/><text x="40" y="44" class="tiny">OWNERSHIP VERSIONS · each row is a different membership, not three replicas</text>
+          <g class="is-new">
+            <rect x="145" y="72" width="90" height="44" rx="22" class="box alt"/><text x="190" y="100" text-anchor="middle" class="label">S0 @ 10</text><rect x="355" y="72" width="90" height="44" rx="22" class="box alt"/><text x="400" y="100" text-anchor="middle" class="label">S1 @ 40</text><rect x="600" y="72" width="90" height="44" rx="22" class="box alt"/><text x="645" y="100" text-anchor="middle" class="label">S2 @ 75</text>
+            <text x="40" y="159" class="tiny">ep7</text><rect x="120" y="138" width="70" height="36" rx="4" class="box"/><text x="155" y="162" text-anchor="middle" class="label">S0</text><rect x="190" y="138" width="210" height="36" rx="4" class="box"/><text x="295" y="162" text-anchor="middle" class="label">S1</text><rect x="400" y="138" width="245" height="36" rx="4" class="box"/><text x="522.5" y="162" text-anchor="middle" class="label">S2</text><rect x="645" y="138" width="175" height="36" rx="4" class="box"/><text x="732.5" y="162" text-anchor="middle" class="label">S0</text><text x="480" y="197" text-anchor="middle" class="tiny">S1 owns (10,40]: 30 of 100 hash positions</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">ep7 的 S1 接 hash 11–40，共 30 个位置。先把旧责任区间写清，才能说明扩容究竟切走哪一段；条带表示归属，不表示数据已经复制。</span><span class="lang-en">At ep7, S1 owns hashes 11–40, 30 positions. Establish old ownership before cutting it. A band shows assignment, not completed data transfer.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d3s2t d3s2d">
+          <title id="d3s2t">Insert S3 without moving existing tokens</title>
+          <desc id="d3s2d">Epoch 8 adds S3 at 25. Its ownership band splits the old S1 interval into (10,25] for S3 and (25,40] for S1.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="20" y="20" width="920" height="364" rx="18" class="boundary"/><text x="40" y="44" class="tiny">OWNERSHIP VERSIONS · each row is a different membership, not three replicas</text>
+          <rect x="145" y="72" width="90" height="44" rx="22" class="box alt"/><text x="190" y="100" text-anchor="middle" class="label">S0 @ 10</text><rect x="355" y="72" width="90" height="44" rx="22" class="box alt"/><text x="400" y="100" text-anchor="middle" class="label">S1 @ 40</text><rect x="600" y="72" width="90" height="44" rx="22" class="box alt"/><text x="645" y="100" text-anchor="middle" class="label">S2 @ 75</text>
+          <text x="40" y="159" class="tiny">ep7</text><rect x="120" y="138" width="70" height="36" rx="4" class="box"/><text x="155" y="162" text-anchor="middle" class="label">S0</text><rect x="190" y="138" width="210" height="36" rx="4" class="box"/><text x="295" y="162" text-anchor="middle" class="label">S1</text><rect x="400" y="138" width="245" height="36" rx="4" class="box"/><text x="522.5" y="162" text-anchor="middle" class="label">S2</text><rect x="645" y="138" width="175" height="36" rx="4" class="box"/><text x="732.5" y="162" text-anchor="middle" class="label">S0</text><text x="480" y="197" text-anchor="middle" class="tiny">S1 owns (10,40]: 30 of 100 hash positions</text>
+          <g class="is-new">
+            <rect x="250" y="72" width="90" height="44" rx="22" class="box alt"/><text x="295" y="100" text-anchor="middle" class="label">S3 @ 25</text><text x="40" y="254" class="tiny">ep8</text><rect x="120" y="233" width="70" height="36" rx="4" class="box"/><text x="155" y="257" text-anchor="middle" class="label">S0</text><rect x="190" y="233" width="105" height="36" rx="4" class="box ok"/><text x="242.5" y="257" text-anchor="middle" class="label">S3</text><rect x="295" y="233" width="105" height="36" rx="4" class="box"/><text x="347.5" y="257" text-anchor="middle" class="label">S1</text><rect x="400" y="233" width="245" height="36" rx="4" class="box"/><text x="522.5" y="257" text-anchor="middle" class="label">S2</text><rect x="645" y="233" width="175" height="36" rx="4" class="box"/><text x="732.5" y="257" text-anchor="middle" class="label">S0</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">只新增 S3@25，三个旧 token 保持原位。(10,40] 被切成两段；图保留 ep7 和 ep8 两行，便于核对同一 hash 的前后归属。</span><span class="lang-en">Add only S3@25; keep all old tokens fixed. The old interval splits in two. Both epoch rows remain so each hash can be compared.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d3s3t d3s3d">
+          <title id="d3s3t">Only the captured interval changes owners</title>
+          <desc id="d3s3d">An orange ownership transition moves (10,25] from the ep7 S1 band to the ep8 S3 band. Other owners remain unchanged.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="20" y="20" width="920" height="364" rx="18" class="boundary"/><text x="40" y="44" class="tiny">OWNERSHIP VERSIONS · each row is a different membership, not three replicas</text>
+          <rect x="145" y="72" width="90" height="44" rx="22" class="box alt"/><text x="190" y="100" text-anchor="middle" class="label">S0 @ 10</text><rect x="355" y="72" width="90" height="44" rx="22" class="box alt"/><text x="400" y="100" text-anchor="middle" class="label">S1 @ 40</text><rect x="600" y="72" width="90" height="44" rx="22" class="box alt"/><text x="645" y="100" text-anchor="middle" class="label">S2 @ 75</text>
+          <text x="40" y="159" class="tiny">ep7</text><rect x="120" y="138" width="70" height="36" rx="4" class="box"/><text x="155" y="162" text-anchor="middle" class="label">S0</text><rect x="190" y="138" width="210" height="36" rx="4" class="box"/><text x="295" y="162" text-anchor="middle" class="label">S1</text><rect x="400" y="138" width="245" height="36" rx="4" class="box"/><text x="522.5" y="162" text-anchor="middle" class="label">S2</text><rect x="645" y="138" width="175" height="36" rx="4" class="box"/><text x="732.5" y="162" text-anchor="middle" class="label">S0</text><text x="480" y="197" text-anchor="middle" class="tiny">S1 owns (10,40]: 30 of 100 hash positions</text>
+          <rect x="250" y="72" width="90" height="44" rx="22" class="box alt"/><text x="295" y="100" text-anchor="middle" class="label">S3 @ 25</text><text x="40" y="254" class="tiny">ep8</text><rect x="120" y="233" width="70" height="36" rx="4" class="box"/><text x="155" y="257" text-anchor="middle" class="label">S0</text><rect x="190" y="233" width="105" height="36" rx="4" class="box ok"/><text x="242.5" y="257" text-anchor="middle" class="label">S3</text><rect x="295" y="233" width="105" height="36" rx="4" class="box"/><text x="347.5" y="257" text-anchor="middle" class="label">S1</text><rect x="400" y="233" width="245" height="36" rx="4" class="box"/><text x="522.5" y="257" text-anchor="middle" class="label">S2</text><rect x="645" y="233" width="175" height="36" rx="4" class="box"/><text x="732.5" y="257" text-anchor="middle" class="label">S0</text>
+          <g class="is-new">
+            <path d="M246 174 L246 223" class="wire async"/><polygon points="246,233 241,223 251,223" class="head async"/><text x="430" y="219" text-anchor="middle" class="tiny">(10,25] moves S1 → S3; 15 / 100 = 15%</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">hash 11–25 从 S1 改到 S3，共 15/100=15%。这个固定坐标例子不能写成四台必然各 25%；1/(n+1) 是均匀随机放点时的期望。</span><span class="lang-en">Hashes 11–25 change from S1 to S3: 15/100=15%. Fixed coordinates do not guarantee four equal 25% shares; 1/(n+1) is a random-placement expectation.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d3s4t d3s4d">
+          <title id="d3s4t">Remove an arbitrary named machine</title>
+          <desc id="d3s4d">Epoch 9 removes S1. Its ep8 interval (25,40] moves to clockwise successor S2, which now owns (25,75].</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="20" y="20" width="920" height="364" rx="18" class="boundary"/><text x="40" y="44" class="tiny">OWNERSHIP VERSIONS · each row is a different membership, not three replicas</text>
+          <rect x="145" y="72" width="90" height="44" rx="22" class="box alt"/><text x="190" y="100" text-anchor="middle" class="label">S0 @ 10</text><rect x="355" y="72" width="90" height="44" rx="22" class="box alt"/><text x="400" y="100" text-anchor="middle" class="label">S1 @ 40</text><rect x="600" y="72" width="90" height="44" rx="22" class="box alt"/><text x="645" y="100" text-anchor="middle" class="label">S2 @ 75</text>
+          <text x="40" y="159" class="tiny">ep7</text><rect x="120" y="138" width="70" height="36" rx="4" class="box"/><text x="155" y="162" text-anchor="middle" class="label">S0</text><rect x="190" y="138" width="210" height="36" rx="4" class="box"/><text x="295" y="162" text-anchor="middle" class="label">S1</text><rect x="400" y="138" width="245" height="36" rx="4" class="box"/><text x="522.5" y="162" text-anchor="middle" class="label">S2</text><rect x="645" y="138" width="175" height="36" rx="4" class="box"/><text x="732.5" y="162" text-anchor="middle" class="label">S0</text><text x="480" y="197" text-anchor="middle" class="tiny">S1 owns (10,40]: 30 of 100 hash positions</text>
+          <rect x="250" y="72" width="90" height="44" rx="22" class="box alt"/><text x="295" y="100" text-anchor="middle" class="label">S3 @ 25</text><text x="40" y="254" class="tiny">ep8</text><rect x="120" y="233" width="70" height="36" rx="4" class="box"/><text x="155" y="257" text-anchor="middle" class="label">S0</text><rect x="190" y="233" width="105" height="36" rx="4" class="box ok"/><text x="242.5" y="257" text-anchor="middle" class="label">S3</text><rect x="295" y="233" width="105" height="36" rx="4" class="box"/><text x="347.5" y="257" text-anchor="middle" class="label">S1</text><rect x="400" y="233" width="245" height="36" rx="4" class="box"/><text x="522.5" y="257" text-anchor="middle" class="label">S2</text><rect x="645" y="233" width="175" height="36" rx="4" class="box"/><text x="732.5" y="257" text-anchor="middle" class="label">S0</text>
+          <path d="M246 174 L246 223" class="wire async"/><polygon points="246,233 241,223 251,223" class="head async"/><text x="430" y="219" text-anchor="middle" class="tiny">(10,25] moves S1 → S3; 15 / 100 = 15%</text>
+          <g class="is-new">
+            <text x="40" y="339" class="tiny">ep9</text><rect x="120" y="318" width="70" height="36" rx="4" class="box"/><text x="155" y="342" text-anchor="middle" class="label">S0</text><rect x="190" y="318" width="105" height="36" rx="4" class="box"/><text x="242.5" y="342" text-anchor="middle" class="label">S3</text><rect x="295" y="318" width="350" height="36" rx="4" class="box ok"/><text x="470" y="342" text-anchor="middle" class="label">S2</text><rect x="645" y="318" width="175" height="36" rx="4" class="box"/><text x="732.5" y="342" text-anchor="middle" class="label">S0</text><path d="M344 269 L344 308" class="wire fail"/><polygon points="344,318 339,308 349,308" class="head fail"/><text x="520" y="302" text-anchor="middle" class="tiny">remove S1 → (25,40] goes to S2</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">接着摘掉 S1：它的 (25,40] 交给顺时针下一台 S2，S2 扩成 (25,75]。这只改归属；若 S1 突然坏且没有副本，改路由也拿不回原数据。</span><span class="lang-en">Removing S1 sends (25,40] to successor S2, expanding S2 to (25,75]. This changes assignment only; a crash without a replica does not recover data.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d3s5t d3s5d">
+          <title id="d3s5t">Separate a hand calculation from an expectation</title>
+          <desc id="d3s5d">All three ownership versions remain visible. The ep8 shares are S0 35%, S1 15%, S2 35% and S3 15%.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="20" y="20" width="920" height="364" rx="18" class="boundary"/><text x="40" y="44" class="tiny">OWNERSHIP VERSIONS · each row is a different membership, not three replicas</text>
+          <rect x="145" y="72" width="90" height="44" rx="22" class="box alt"/><text x="190" y="100" text-anchor="middle" class="label">S0 @ 10</text><rect x="355" y="72" width="90" height="44" rx="22" class="box alt"/><text x="400" y="100" text-anchor="middle" class="label">S1 @ 40</text><rect x="600" y="72" width="90" height="44" rx="22" class="box alt"/><text x="645" y="100" text-anchor="middle" class="label">S2 @ 75</text>
+          <text x="40" y="159" class="tiny">ep7</text><rect x="120" y="138" width="70" height="36" rx="4" class="box"/><text x="155" y="162" text-anchor="middle" class="label">S0</text><rect x="190" y="138" width="210" height="36" rx="4" class="box"/><text x="295" y="162" text-anchor="middle" class="label">S1</text><rect x="400" y="138" width="245" height="36" rx="4" class="box"/><text x="522.5" y="162" text-anchor="middle" class="label">S2</text><rect x="645" y="138" width="175" height="36" rx="4" class="box"/><text x="732.5" y="162" text-anchor="middle" class="label">S0</text><text x="480" y="197" text-anchor="middle" class="tiny">S1 owns (10,40]: 30 of 100 hash positions</text>
+          <rect x="250" y="72" width="90" height="44" rx="22" class="box alt"/><text x="295" y="100" text-anchor="middle" class="label">S3 @ 25</text><text x="40" y="254" class="tiny">ep8</text><rect x="120" y="233" width="70" height="36" rx="4" class="box"/><text x="155" y="257" text-anchor="middle" class="label">S0</text><rect x="190" y="233" width="105" height="36" rx="4" class="box ok"/><text x="242.5" y="257" text-anchor="middle" class="label">S3</text><rect x="295" y="233" width="105" height="36" rx="4" class="box"/><text x="347.5" y="257" text-anchor="middle" class="label">S1</text><rect x="400" y="233" width="245" height="36" rx="4" class="box"/><text x="522.5" y="257" text-anchor="middle" class="label">S2</text><rect x="645" y="233" width="175" height="36" rx="4" class="box"/><text x="732.5" y="257" text-anchor="middle" class="label">S0</text>
+          <path d="M246 174 L246 223" class="wire async"/><polygon points="246,233 241,223 251,223" class="head async"/><text x="430" y="219" text-anchor="middle" class="tiny">(10,25] moves S1 → S3; 15 / 100 = 15%</text>
+          <text x="40" y="339" class="tiny">ep9</text><rect x="120" y="318" width="70" height="36" rx="4" class="box"/><text x="155" y="342" text-anchor="middle" class="label">S0</text><rect x="190" y="318" width="105" height="36" rx="4" class="box"/><text x="242.5" y="342" text-anchor="middle" class="label">S3</text><rect x="295" y="318" width="350" height="36" rx="4" class="box ok"/><text x="470" y="342" text-anchor="middle" class="label">S2</text><rect x="645" y="318" width="175" height="36" rx="4" class="box"/><text x="732.5" y="342" text-anchor="middle" class="label">S0</text><path d="M344 269 L344 308" class="wire fail"/><polygon points="344,318 339,308 349,308" class="head fail"/><text x="520" y="302" text-anchor="middle" class="tiny">remove S1 → (25,40] goes to S2</text>
+          <g class="is-new">
+            <text x="480" y="368" text-anchor="middle" class="tiny">ep7 → ep8: S0 35%, S1 15%, S2 35%, S3 15% · fixed example ≠ expected 25%</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">ep8 的实际份额是 35%、15%、35%、15%，总计 100%。一致性保证新增节点不会迫使旧节点之间互换 key；它没有承诺这组点恰好均匀。</span><span class="lang-en">Epoch 8 shares are 35%, 15%, 35%, 15%, totaling 100%. Adding a node avoids old-to-old reassignment; it does not guarantee this fixed ring is balanced.</span></figcaption>
+      </div>
+    </figure>
+    <h3><span class="lang-zh">手算固定坐标，再算随机模型的期望</span><span class="lang-en">Separate fixed coordinates from expectation</span></h3>
+    <div class="bilingual">
+      <div class="lang-zh"><p>ep7 的 S1 原先接 (10,40]。在 25 加 S3 后，顺时针第一点变成 25 的那部分，也就是 (10,25]，改由 S3 接；(25,40] 仍归 S1。S0、S2 的区间没有改变，hash=25 恰好归新人。新增只在有新 token 插入的区间改变归属，没必要把旧节点之间的 key 重新洗牌，这就是图上的单调性。</p>
+        <p>这组坐标实际移动 15 个 hash 位置，占 15%；四台份额为 S0 35%、S1 15%、S2 35%、S3 15%。它不是均匀环。再从 ep8 删除 S1，(25,40] 交给下一点 S2@75，S2 负责 (25,75]，得到 50%；S0 35%、S3 15% 保留。删除前后的数组要一起展示，不能用“总是迁 1/n”盖掉这次明确的 15%。</p>
+        <p>A1 才能用对称性算期望：n 台等容量、每台相同数量的独立均匀 token，旧 token 不动，新增同样一台后，每台期望份额是 1/(n+1)。新人所占 key 全来自原 owner，因此期望迁 K/(n+1)。删一台时移走的是它原有的份额，期望 K/n。百万 key 从十台加到十一台是 1,000,000/11≈90,909；从十台删一台是 100,000，两个分母不同。</p>
+        <p>这些是 key 数期望，不是字节、QPS 或迁移时长保证。若某个区间集中了一批大对象，15% 的 key 可能远超 15% 的数据；若热门对象落在小段上，移动很少 key 也会改变很多请求。容量规划应同时记录区间的 key 数、总字节和请求成本。新机按权重加入时，期望份额变成新权重/总权重，还要检查权重更新有没有移动旧 token。</p>
+      </div>
+      <div class="lang-en"><p>S1 initially owns (10,40] at ep7. Adding S3 at 25 captures (10,25]; (25,40] stays on S1. S0/S2 are unchanged, and hash 25 goes to S3. With old tokens fixed, ownership changes only in intervals captured by new tokens, avoiding old-to-old reshuffling.</p>
+        <p>This chosen ring moves 15 positions, 15%, and gives S0/S1/S2/S3 shares of 35%/15%/35%/15%. Removing S1 from ep8 passes (25,40] to S2, expanding S2 to (25,75] or 50%; S0 and S3 retain 35% and 15%. Show the versions rather than replacing this concrete 15% with “always 1/n.”</p>
+        <p>A1 supports an expectation by symmetry: equal-capacity machines with equal counts of independent uniform tokens, keeping old tokens fixed. A newcomer’s expected share is 1/(n+1), all taken from existing owners, so movement is K/(n+1). Removal moves the deleted machine’s old expected K/n share. One million keys on ten machines therefore move about 90,909 on addition and 100,000 on removal.</p>
+        <p>These expectations count keys, not bytes, QPS or duration. Large objects or hot requests can concentrate in a small interval. Measure interval key count, bytes and request cost separately. Weighted addition uses new weight/total weight in expectation, while checking whether weight changes also move old tokens.</p>
+      </div>
+    </div>
+    <h3><span class="lang-zh">迁移时间决定扩容要提前多久</span><span class="lang-en">Movement time determines expansion lead time</span></h3>
+    <div class="bilingual">
+      <div class="lang-zh"><p>A5 每 key 1 KB，用十进制单位，新增一台期望复制 90,909×1,000 B≈90.91 MB。有效复制速度 10 MB/s，理想时间 90.91/10≈9.09 s。取模约移动 909.09 MB，同速约 90.91 s，量级差十倍。这里只复制一份逻辑数据，没算副本、索引构建、校验与并发更新；9.09 秒是简化模型，不是切换截止时间。</p>
+        <p>复制不能吃掉用户请求的所有磁盘与网络余量。给迁移单独限速，按下游 p99 和积压调整；源机本来就过载时，扩容复制可能先让它更慢。若变更产生增量的速度接近追平速度，快照传完也收不了尾。先估可用复制能力，再决定批次、提前量和写暂停窗口；“机器已启动”只说明准备工作开始。</p></div>
+      <div class="lang-en"><p>At A5’s 1 KB/key in decimal units, addition copies about 90,909×1,000 B=90.91 MB. Effective 10 MB/s copying gives an ideal 9.09 s. Modulo moves about 909.09 MB, or 90.91 s at the same speed, ten times as much. This models one logical copy and excludes replicas, index building, validation and concurrent changes; it is not a cutover deadline.</p>
+        <p>Migration competes with user traffic for disk and network. Throttle it separately and adjust using downstream p99 and backlog. Copying from an already overloaded source may initially worsen latency. If incoming deltas approach catch-up throughput, snapshot completion does not finish the job. Estimate available copying capacity before choosing batches, lead time and the write pause.</p></div>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">第四笔：虚拟节点把一大段变成多小段</span><span class="lang-en">Virtual nodes divide ownership into smaller ranges</span></h2>
+    <figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d4s1t d4s1d">
+          <title id="d4s1t">Begin with one token per physical machine</title>
+          <desc id="d4s1d">Three token identifiers S0#0, S1#0 and S2#0 correspond to physical machines S0, S1 and S2.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="20" y="20" width="920" height="364" rx="18" class="boundary"/><text x="40" y="44" class="tiny">VIRTUAL NODES · #i is a token identifier, not a separate machine</text>
+          <g class="is-new">
+            <rect x="170" y="91" width="80" height="50" rx="25" class="box alt"/><text x="210" y="113" text-anchor="middle" class="label">S0#0</text><text x="210" y="132" text-anchor="middle" class="sub">@ 10</text>
+            <rect x="310" y="91" width="80" height="50" rx="25" class="box alt"/><text x="350" y="113" text-anchor="middle" class="label">S1#0</text><text x="350" y="132" text-anchor="middle" class="sub">@ 30</text>
+            <rect x="415" y="91" width="80" height="50" rx="25" class="box alt"/><text x="455" y="113" text-anchor="middle" class="label">S2#0</text><text x="455" y="132" text-anchor="middle" class="sub">@ 45</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">先给每台机器一个 token。#0 是标识，不是另开一个进程；后面增加的是同一台物理机在哈希空间里的责任入口。</span><span class="lang-en">Start with one token per machine. #0 is an identifier, not another process. Additional tokens create more ownership entry points for the same physical machine.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d4s2t d4s2d">
+          <title id="d4s2t">Add another token for every machine</title>
+          <desc id="d4s2d">S0#1, S2#1 and S1#1 complete six sorted tokens. The wrap arrow is the local sorted-ring order.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="20" y="20" width="920" height="364" rx="18" class="boundary"/><text x="40" y="44" class="tiny">VIRTUAL NODES · #i is a token identifier, not a separate machine</text>
+          <rect x="170" y="91" width="80" height="50" rx="25" class="box alt"/><text x="210" y="113" text-anchor="middle" class="label">S0#0</text><text x="210" y="132" text-anchor="middle" class="sub">@ 10</text>
+          <rect x="310" y="91" width="80" height="50" rx="25" class="box alt"/><text x="350" y="113" text-anchor="middle" class="label">S1#0</text><text x="350" y="132" text-anchor="middle" class="sub">@ 30</text>
+          <rect x="415" y="91" width="80" height="50" rx="25" class="box alt"/><text x="455" y="113" text-anchor="middle" class="label">S2#0</text><text x="455" y="132" text-anchor="middle" class="sub">@ 45</text>
+          <g class="is-new">
+            <rect x="520" y="91" width="80" height="50" rx="25" class="box alt"/><text x="560" y="113" text-anchor="middle" class="label">S0#1</text><text x="560" y="132" text-anchor="middle" class="sub">@ 60</text>
+            <rect x="660" y="91" width="80" height="50" rx="25" class="box alt"/><text x="700" y="113" text-anchor="middle" class="label">S2#1</text><text x="700" y="132" text-anchor="middle" class="sub">@ 80</text>
+            <rect x="765" y="91" width="80" height="50" rx="25" class="box alt"/><text x="805" y="113" text-anchor="middle" class="label">S1#1</text><text x="805" y="132" text-anchor="middle" class="sub">@ 95</text>
+            <path d="M250 116 L300 116" class="wire"/><polygon points="310,116 300,121 300,111" class="head"/><path d="M390 116 L405 116" class="wire"/><polygon points="415,116 405,121 405,111" class="head"/><path d="M495 116 L510 116" class="wire"/><polygon points="520,116 510,121 510,111" class="head"/><path d="M600 116 L650 116" class="wire"/><polygon points="660,116 650,121 650,111" class="head"/><path d="M740 116 L755 116" class="wire"/><polygon points="765,116 755,121 755,111" class="head"/><path d="M845 116 L894 116 Q902 116 902 124 L902 162 Q902 170 894 170 L128 170 Q120 170 120 162 L120 124 Q120 116 128 116 L160 116" class="wire"/><polygon points="170,116 160,121 160,111" class="head"/><text x="480" y="162" text-anchor="middle" class="tiny">clockwise order + wrap</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">每台再放一个点，环变成六个 token、仍是三台物理机。查找先命中 token，再取其 owner；客户端连接数和副本数都不会因此翻倍。</span><span class="lang-en">Add one token per machine: six tokens, still three physical machines. Resolve token then owner; connection and replica counts do not double.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d4s3t d4s3d">
+          <title id="d4s3t">Sum all intervals owned by the same machine</title>
+          <desc id="d4s3d">The live ownership band sums to S0 30%, S1 35% and S2 35% in this chosen six-token ring.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="20" y="20" width="920" height="364" rx="18" class="boundary"/><text x="40" y="44" class="tiny">VIRTUAL NODES · #i is a token identifier, not a separate machine</text>
+          <rect x="170" y="91" width="80" height="50" rx="25" class="box alt"/><text x="210" y="113" text-anchor="middle" class="label">S0#0</text><text x="210" y="132" text-anchor="middle" class="sub">@ 10</text>
+          <rect x="310" y="91" width="80" height="50" rx="25" class="box alt"/><text x="350" y="113" text-anchor="middle" class="label">S1#0</text><text x="350" y="132" text-anchor="middle" class="sub">@ 30</text>
+          <rect x="415" y="91" width="80" height="50" rx="25" class="box alt"/><text x="455" y="113" text-anchor="middle" class="label">S2#0</text><text x="455" y="132" text-anchor="middle" class="sub">@ 45</text>
+          <rect x="520" y="91" width="80" height="50" rx="25" class="box alt"/><text x="560" y="113" text-anchor="middle" class="label">S0#1</text><text x="560" y="132" text-anchor="middle" class="sub">@ 60</text>
+          <rect x="660" y="91" width="80" height="50" rx="25" class="box alt"/><text x="700" y="113" text-anchor="middle" class="label">S2#1</text><text x="700" y="132" text-anchor="middle" class="sub">@ 80</text>
+          <rect x="765" y="91" width="80" height="50" rx="25" class="box alt"/><text x="805" y="113" text-anchor="middle" class="label">S1#1</text><text x="805" y="132" text-anchor="middle" class="sub">@ 95</text>
+          <path d="M250 116 L300 116" class="wire"/><polygon points="310,116 300,121 300,111" class="head"/><path d="M390 116 L405 116" class="wire"/><polygon points="415,116 405,121 405,111" class="head"/><path d="M495 116 L510 116" class="wire"/><polygon points="520,116 510,121 510,111" class="head"/><path d="M600 116 L650 116" class="wire"/><polygon points="660,116 650,121 650,111" class="head"/><path d="M740 116 L755 116" class="wire"/><polygon points="765,116 755,121 755,111" class="head"/><path d="M845 116 L894 116 Q902 116 902 124 L902 162 Q902 170 894 170 L128 170 Q120 170 120 162 L120 124 Q120 116 128 116 L160 116" class="wire"/><polygon points="170,116 160,121 160,111" class="head"/><text x="480" y="162" text-anchor="middle" class="tiny">clockwise order + wrap</text>
+          <g class="is-new">
+            <rect x="140" y="205" width="70" height="36" rx="4" class="box"/><text x="175" y="229" text-anchor="middle" class="label">S0</text><rect x="210" y="205" width="140" height="36" rx="4" class="box"/><text x="280" y="229" text-anchor="middle" class="label">S1</text><rect x="350" y="205" width="105" height="36" rx="4" class="box"/><text x="402.5" y="229" text-anchor="middle" class="label">S2</text><rect x="455" y="205" width="105" height="36" rx="4" class="box"/><text x="507.5" y="229" text-anchor="middle" class="label">S0</text><rect x="560" y="205" width="140" height="36" rx="4" class="box"/><text x="630" y="229" text-anchor="middle" class="label">S2</text><rect x="700" y="205" width="105" height="36" rx="4" class="box"/><text x="752.5" y="229" text-anchor="middle" class="label">S1</text><rect x="805" y="205" width="35" height="36" rx="4" class="box"/><text x="822.5" y="229" text-anchor="middle" class="label">S0</text><text x="85" y="228" class="tiny">live</text><text x="480" y="269" text-anchor="middle" class="tiny">6 tokens, 3 machines → S0 30%, S1 35%, S2 35%</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">S0 两段合计 30%，S1、S2 各 35%。这里的改善来自选定坐标，不是“两点就够”的经验值；真实点数应按区间分布与负载验证。</span><span class="lang-en">The chosen coordinates give S0 30% and S1/S2 35% each. This is an example, not a claim that two tokens suffice; validate interval and load distributions.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d4s4t d4s4d">
+          <title id="d4s4t">Removing one physical machine moves multiple small ranges</title>
+          <desc id="d4s4d">Removing both S1 tokens sends (10,30] to S2 and (80,95] to S0. Failure arrows connect each live S1 band to its new owner band.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="20" y="20" width="920" height="364" rx="18" class="boundary"/><text x="40" y="44" class="tiny">VIRTUAL NODES · #i is a token identifier, not a separate machine</text>
+          <rect x="170" y="91" width="80" height="50" rx="25" class="box alt"/><text x="210" y="113" text-anchor="middle" class="label">S0#0</text><text x="210" y="132" text-anchor="middle" class="sub">@ 10</text>
+          <rect x="310" y="91" width="80" height="50" rx="25" class="box alt"/><text x="350" y="113" text-anchor="middle" class="label">S1#0</text><text x="350" y="132" text-anchor="middle" class="sub">@ 30</text>
+          <rect x="415" y="91" width="80" height="50" rx="25" class="box alt"/><text x="455" y="113" text-anchor="middle" class="label">S2#0</text><text x="455" y="132" text-anchor="middle" class="sub">@ 45</text>
+          <rect x="520" y="91" width="80" height="50" rx="25" class="box alt"/><text x="560" y="113" text-anchor="middle" class="label">S0#1</text><text x="560" y="132" text-anchor="middle" class="sub">@ 60</text>
+          <rect x="660" y="91" width="80" height="50" rx="25" class="box alt"/><text x="700" y="113" text-anchor="middle" class="label">S2#1</text><text x="700" y="132" text-anchor="middle" class="sub">@ 80</text>
+          <rect x="765" y="91" width="80" height="50" rx="25" class="box alt"/><text x="805" y="113" text-anchor="middle" class="label">S1#1</text><text x="805" y="132" text-anchor="middle" class="sub">@ 95</text>
+          <path d="M250 116 L300 116" class="wire"/><polygon points="310,116 300,121 300,111" class="head"/><path d="M390 116 L405 116" class="wire"/><polygon points="415,116 405,121 405,111" class="head"/><path d="M495 116 L510 116" class="wire"/><polygon points="520,116 510,121 510,111" class="head"/><path d="M600 116 L650 116" class="wire"/><polygon points="660,116 650,121 650,111" class="head"/><path d="M740 116 L755 116" class="wire"/><polygon points="765,116 755,121 755,111" class="head"/><path d="M845 116 L894 116 Q902 116 902 124 L902 162 Q902 170 894 170 L128 170 Q120 170 120 162 L120 124 Q120 116 128 116 L160 116" class="wire"/><polygon points="170,116 160,121 160,111" class="head"/><text x="480" y="162" text-anchor="middle" class="tiny">clockwise order + wrap</text>
+          <rect x="140" y="205" width="70" height="36" rx="4" class="box"/><text x="175" y="229" text-anchor="middle" class="label">S0</text><rect x="210" y="205" width="140" height="36" rx="4" class="box"/><text x="280" y="229" text-anchor="middle" class="label">S1</text><rect x="350" y="205" width="105" height="36" rx="4" class="box"/><text x="402.5" y="229" text-anchor="middle" class="label">S2</text><rect x="455" y="205" width="105" height="36" rx="4" class="box"/><text x="507.5" y="229" text-anchor="middle" class="label">S0</text><rect x="560" y="205" width="140" height="36" rx="4" class="box"/><text x="630" y="229" text-anchor="middle" class="label">S2</text><rect x="700" y="205" width="105" height="36" rx="4" class="box"/><text x="752.5" y="229" text-anchor="middle" class="label">S1</text><rect x="805" y="205" width="35" height="36" rx="4" class="box"/><text x="822.5" y="229" text-anchor="middle" class="label">S0</text><text x="85" y="228" class="tiny">live</text><text x="480" y="269" text-anchor="middle" class="tiny">6 tokens, 3 machines → S0 30%, S1 35%, S2 35%</text>
+          <g class="is-new">
+            <rect x="140" y="313" width="70" height="36" rx="4" class="box"/><text x="175" y="337" text-anchor="middle" class="label">S0</text><rect x="210" y="313" width="245" height="36" rx="4" class="box ok"/><text x="332.5" y="337" text-anchor="middle" class="label">S2</text><rect x="455" y="313" width="105" height="36" rx="4" class="box"/><text x="507.5" y="337" text-anchor="middle" class="label">S0</text><rect x="560" y="313" width="140" height="36" rx="4" class="box"/><text x="630" y="337" text-anchor="middle" class="label">S2</text><rect x="700" y="313" width="140" height="36" rx="4" class="box ok"/><text x="770" y="337" text-anchor="middle" class="label">S0</text><text x="55" y="336" class="tiny">S1 down</text><path d="M280 241 L280 303" class="wire fail"/><polygon points="280,313 275,303 285,303" class="head fail"/><path d="M756 241 L756 303" class="wire fail"/><polygon points="756,313 751,303 761,303" class="head fail"/><text x="390" y="296" text-anchor="middle" class="tiny">20% → S2</text><text x="845" y="289" text-anchor="middle" class="tiny">15% → S0</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">下线物理 S1 要删掉它的两个 token。20% 的 (10,30] 交给 S2，15% 的 (80,95] 交给 S0，不再全压同一个邻居。</span><span class="lang-en">Removing physical S1 removes both its tokens. Its 20% interval (10,30] goes to S2 and its 15% interval (80,95] goes to S0, spreading the takeover.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d4s5t d4s5d">
+          <title id="d4s5t">Spread takeover without claiming perfect balance</title>
+          <desc id="d4s5d">The final failure state gives S0 45% and S2 55%. The six live tokens remain as the before-state reference.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="20" y="20" width="920" height="364" rx="18" class="boundary"/><text x="40" y="44" class="tiny">VIRTUAL NODES · #i is a token identifier, not a separate machine</text>
+          <rect x="170" y="91" width="80" height="50" rx="25" class="box alt"/><text x="210" y="113" text-anchor="middle" class="label">S0#0</text><text x="210" y="132" text-anchor="middle" class="sub">@ 10</text>
+          <rect x="310" y="91" width="80" height="50" rx="25" class="box alt"/><text x="350" y="113" text-anchor="middle" class="label">S1#0</text><text x="350" y="132" text-anchor="middle" class="sub">@ 30</text>
+          <rect x="415" y="91" width="80" height="50" rx="25" class="box alt"/><text x="455" y="113" text-anchor="middle" class="label">S2#0</text><text x="455" y="132" text-anchor="middle" class="sub">@ 45</text>
+          <rect x="520" y="91" width="80" height="50" rx="25" class="box alt"/><text x="560" y="113" text-anchor="middle" class="label">S0#1</text><text x="560" y="132" text-anchor="middle" class="sub">@ 60</text>
+          <rect x="660" y="91" width="80" height="50" rx="25" class="box alt"/><text x="700" y="113" text-anchor="middle" class="label">S2#1</text><text x="700" y="132" text-anchor="middle" class="sub">@ 80</text>
+          <rect x="765" y="91" width="80" height="50" rx="25" class="box alt"/><text x="805" y="113" text-anchor="middle" class="label">S1#1</text><text x="805" y="132" text-anchor="middle" class="sub">@ 95</text>
+          <path d="M250 116 L300 116" class="wire"/><polygon points="310,116 300,121 300,111" class="head"/><path d="M390 116 L405 116" class="wire"/><polygon points="415,116 405,121 405,111" class="head"/><path d="M495 116 L510 116" class="wire"/><polygon points="520,116 510,121 510,111" class="head"/><path d="M600 116 L650 116" class="wire"/><polygon points="660,116 650,121 650,111" class="head"/><path d="M740 116 L755 116" class="wire"/><polygon points="765,116 755,121 755,111" class="head"/><path d="M845 116 L894 116 Q902 116 902 124 L902 162 Q902 170 894 170 L128 170 Q120 170 120 162 L120 124 Q120 116 128 116 L160 116" class="wire"/><polygon points="170,116 160,121 160,111" class="head"/><text x="480" y="162" text-anchor="middle" class="tiny">clockwise order + wrap</text>
+          <rect x="140" y="205" width="70" height="36" rx="4" class="box"/><text x="175" y="229" text-anchor="middle" class="label">S0</text><rect x="210" y="205" width="140" height="36" rx="4" class="box"/><text x="280" y="229" text-anchor="middle" class="label">S1</text><rect x="350" y="205" width="105" height="36" rx="4" class="box"/><text x="402.5" y="229" text-anchor="middle" class="label">S2</text><rect x="455" y="205" width="105" height="36" rx="4" class="box"/><text x="507.5" y="229" text-anchor="middle" class="label">S0</text><rect x="560" y="205" width="140" height="36" rx="4" class="box"/><text x="630" y="229" text-anchor="middle" class="label">S2</text><rect x="700" y="205" width="105" height="36" rx="4" class="box"/><text x="752.5" y="229" text-anchor="middle" class="label">S1</text><rect x="805" y="205" width="35" height="36" rx="4" class="box"/><text x="822.5" y="229" text-anchor="middle" class="label">S0</text><text x="85" y="228" class="tiny">live</text><text x="480" y="269" text-anchor="middle" class="tiny">6 tokens, 3 machines → S0 30%, S1 35%, S2 35%</text>
+          <rect x="140" y="313" width="70" height="36" rx="4" class="box"/><text x="175" y="337" text-anchor="middle" class="label">S0</text><rect x="210" y="313" width="245" height="36" rx="4" class="box ok"/><text x="332.5" y="337" text-anchor="middle" class="label">S2</text><rect x="455" y="313" width="105" height="36" rx="4" class="box"/><text x="507.5" y="337" text-anchor="middle" class="label">S0</text><rect x="560" y="313" width="140" height="36" rx="4" class="box"/><text x="630" y="337" text-anchor="middle" class="label">S2</text><rect x="700" y="313" width="140" height="36" rx="4" class="box ok"/><text x="770" y="337" text-anchor="middle" class="label">S0</text><text x="55" y="336" class="tiny">S1 down</text><path d="M280 241 L280 303" class="wire fail"/><polygon points="280,313 275,303 285,303" class="head fail"/><path d="M756 241 L756 303" class="wire fail"/><polygon points="756,313 751,303 761,303" class="head fail"/><text x="390" y="296" text-anchor="middle" class="tiny">20% → S2</text><text x="845" y="289" text-anchor="middle" class="tiny">15% → S0</text>
+          <g class="is-new">
+            <text x="480" y="365" text-anchor="middle" class="tiny">S0 45%, S2 55% · two small transfers; v=2 demonstrates spread, not guaranteed balance</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">接管后 S0=30%+15%=45%，S2=35%+20%=55%。vnode 可以分散迁出区间，但邻居重复、热门 key 和容量不足仍可能导致过载。</span><span class="lang-en">After takeover, S0=30%+15%=45% and S2=35%+20%=55%. Vnodes spread intervals, but repeated neighbors, hot keys and insufficient capacity can still overload survivors.</span></figcaption>
+      </div>
+    </figure>
+    <h3><span class="lang-zh">虚拟的是位置，不是机器和副本</span><span class="lang-en">A vnode is a position, not another machine or replica</span></h3>
+    <div class="bilingual">
+      <div class="lang-zh"><p>一个物理节点只有一个随机点时，责任区间取决于它与前驱的间距。三点教学环已经有 30%、35%、35%，更差的随机布局也可能让一台独占大半。虚拟节点给同一物理 owner 多个分散位置，查找仍命中顺时针 token，然后通过 owner 映射回 S0 等物理机。增加的是路由表中的责任入口，进程、连接池和数据副本不按 token 数翻倍。</p>
+        <p>A3 用两点演示：S0@10、60，S1@30、95，S2@45、80。S0 接跨零的 15% 加 (45,60] 的 15%，共 30%；S1 接 20%+15%=35%；S2 接 15%+20%=35%。删物理 S1 必须删除它的所有 token，(10,30] 转给 S2，(80,95] 转给 S0，接管后分别为 55% 与 45%。只删一个点会留下指向故障机器的另一部分路由。</p>
+        <p>vnode 的收益来自多个小区间累加：随机差异有机会互相抵消，删一台也能交给多个邻居。Dynamo 论文 §4.2 说明多 token 对分布、增减与异构容量的作用。[2] 但两点只是教学图，不是推荐参数；实际布局可能让多个点的下一 owner 都相同。按机架或地域选择副本时还要避开共享故障域，不能因为 token 名字不同就当成独立机器。</p>
+        <p>加权可给强机更多 token，例如容量权重 2:1:1、每个权重单位 100 点，期望份额为 200/400=50%、25%、25%。这是随机模型下的期望，不保证每组散点恰好如此。更改权重或重建实现若同时改变旧点数量，会带来额外迁移。libketama 源码按容量比例与节点数计算点数，取整也参与结果；不能不查配置就把所有加权变更当成“只拿新机那份”。[4]</p>
+      </div>
+      <div class="lang-en"><p>With one random token per machine, ownership depends on the predecessor gap. Even three points can be very uneven. Vnodes give one physical owner multiple dispersed positions. Lookup still resolves a clockwise token, then its physical owner. More entries do not multiply processes, connection pools or replicas.</p>
+        <p>A3 places S0 at 10/60, S1 at 30/95 and S2 at 45/80. S0 gets 15% across zero plus 15%, totaling 30%; S1 gets 20%+15%=35%; S2 gets 15%+20%=35%. Removing physical S1 removes both tokens. Its (10,30] goes to S2 and (80,95] to S0, yielding 55% and 45%. Deleting only one token leaves routes to the failed machine.</p>
+        <p>Summing smaller random ranges lets deviations partly cancel and spreads takeover. Dynamo §4.2 describes multiple-token placement and capacity weighting. [2] Two tokens are illustrative, not a sizing recommendation; several successor tokens may have the same physical owner. Replica selection must also consider rack or regional failure domains.</p>
+        <p>For capacity weights 2:1:1 and 100 tokens per weight unit, expected shares are 200/400=50%, 25%, 25%, not exact outcomes. Weight changes or implementations that rebuild old token counts cause extra movement. Libketama’s source derives token counts from capacity proportions and node count, including rounding. Audit the configuration before assuming weighted changes move only the newcomer’s share. [4]</p>
+      </div>
+    </div>
+    <h3><span class="lang-zh">点数、误差与哈希位宽都要有出处</span><span class="lang-en">Source token counts, deviation and hash width</span></h3>
+    <div class="bilingual">
+      <div class="lang-zh"><p>Richard Jones 的 2007 年 Ketama 原文给出每服务器约 100–200 个点，并明确说 continuum 是 32 位空间。[3] 源码用 MD5 摘要拆出 32 位点，同容量时 40 份摘要×每份 4 点=160 点。[4] MD5 的摘要长度是 128 位，不等于这个实现的环宽；Dynamo 则在论文里明确采用 128 位 key 标识。[2] 本章用 160 做索引预算有依据，但不把它升级成所有系统的默认配置。</p>
+        <p>Jump Hash 论文图 2 比较经典随机环的空间份额，100 点时 σ/μ=0.0996996，约 9.97%；1,000 点时为 0.0315723，约 3.16%。[5] 这是哈希空间份额的相对标准差，不是最大偏差，也不是请求 p99 或某集群的 SLA。点数增加十倍，索引和变更工作也增加；热门 key 和大对象分布仍需另测，不能拿这组误差当实际负载保证。</p>
+        <p>32 位空间也不能一律说碰撞可忽略。token 冲突会让一个位置对应多个 owner，必须拒绝并重新分配，或规定所有客户端一致的排序与去重办法。key 的 hash 碰撞通常只是两个 key 去同一机器，存储仍用完整 key 区分，并不必然覆盖值。不同位置的 vnode 更不代表多副本；挑复制目标时要数不同物理 owner，连续三个 token 可能只来自两台机器，Dynamo §4.3 专门提醒这一点。[2]</p>
+      </div>
+      <div class="lang-en"><p>Richard Jones’s 2007 Ketama article gives roughly 100–200 points per server and a 32-bit continuum. [3] The source extracts 32-bit points from MD5; equal-capacity servers use 40 digests×4 points=160 tokens. [4] A 128-bit MD5 digest does not imply a 128-bit ring. Dynamo explicitly uses 128-bit key identifiers. [2] This supports our 160-token index budget, not a universal default.</p>
+        <p>Jump Hash’s Figure 2 reports classical random-ring space-share σ/μ of 0.0996996, about 9.97%, at 100 points, and 0.0315723, about 3.16%, at 1,000. [5] These are relative standard deviations, not maximum imbalance, request p99 or production SLAs. Ten times more tokens increases indexing and update work; hot keys and object sizes still require measurement.</p>
+        <p>Do not universally dismiss 32-bit collisions. Conflicting tokens need reassignment or a deterministic shared ordering/deduplication rule. Colliding key hashes ordinarily colocate distinct full keys rather than overwrite values. Vnodes are not replicas: replication must count distinct physical owners. Three successor tokens might belong to two machines, as Dynamo §4.3 notes. [2]</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">第五笔：先准备数据，再交出写权限</span><span class="lang-en">Prepare data before handing over write authority</span></h2>
+    <figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s1t d5s1d">
+          <title id="d5s1t">Serve with the old authoritative epoch</title>
+          <desc id="d5s1d">Client sends a GET for hash 18 to Router. Router uses ep7 and reads S1. The value returns S1 to Router to Client. S3 is a provisioned candidate, not an active owner.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="20" y="20" width="920" height="364" rx="18" class="boundary"/><text x="40" y="44" class="tiny">SAFE CUTOVER · time flows down; one Router stands for the coordinated routing layer</text>
+          <g class="is-new">
+            <rect x="30" y="57" width="120" height="48" rx="12" class="box"/><text x="90" y="78" text-anchor="middle" class="label">Client</text><text x="90" y="97" text-anchor="middle" class="sub">two reads</text><path d="M90 105 V379" class="wire muted"/><rect x="250" y="57" width="120" height="48" rx="12" class="box"/><text x="310" y="78" text-anchor="middle" class="label">Router</text><text x="310" y="97" text-anchor="middle" class="sub">epoch authority</text><path d="M310 105 V379" class="wire muted"/><rect x="510" y="57" width="120" height="48" rx="12" class="box"/><text x="570" y="78" text-anchor="middle" class="label">S1</text><text x="570" y="97" text-anchor="middle" class="sub">old owner</text><path d="M570 105 V379" class="wire muted"/><rect x="760" y="57" width="120" height="48" rx="12" class="box"/><text x="820" y="78" text-anchor="middle" class="label">S3</text><text x="820" y="97" text-anchor="middle" class="sub">candidate</text><path d="M820 105 V379" class="wire muted"/>
+            <path d="M90 131 L300 131" class="wire"/><polygon points="310,131 300,136 300,126" class="head"/><text x="200" y="123" text-anchor="middle" class="tiny">GET key; hash 18</text><path d="M310 158 L560 158" class="wire"/><polygon points="570,158 560,163 560,153" class="head"/><text x="440" y="150" text-anchor="middle" class="tiny">ep7 → S1</text><path d="M570 187 L320 187" class="wire reply"/><polygon points="310,187 320,182 320,192" class="head reply"/><text x="440" y="179" text-anchor="middle" class="tiny">value</text><path d="M310 213 L100 213" class="wire reply"/><polygon points="90,213 100,208 100,218" class="head reply"/><text x="200" y="205" text-anchor="middle" class="tiny">200</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">hash=18 在 ep7 仍由 S1 服务，回程 S1→Router→Client。S3 是准备中的候选机，已有位置不代表能提前承接读写。</span><span class="lang-en">Hash 18 is served by S1 at ep7, with reply S1→Router→Client. Provisioned S3 is a candidate; it is not ready to accept reads or writes.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s2t d5s2d">
+          <title id="d5s2t">Copy the captured range before routing to it</title>
+          <desc id="d5s2d">S1 sends a snapshot of (10,25] to S3 asynchronously. The authoritative read path stays on S1.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="20" y="20" width="920" height="364" rx="18" class="boundary"/><text x="40" y="44" class="tiny">SAFE CUTOVER · time flows down; one Router stands for the coordinated routing layer</text>
+          <rect x="30" y="57" width="120" height="48" rx="12" class="box"/><text x="90" y="78" text-anchor="middle" class="label">Client</text><text x="90" y="97" text-anchor="middle" class="sub">two reads</text><path d="M90 105 V379" class="wire muted"/><rect x="250" y="57" width="120" height="48" rx="12" class="box"/><text x="310" y="78" text-anchor="middle" class="label">Router</text><text x="310" y="97" text-anchor="middle" class="sub">epoch authority</text><path d="M310 105 V379" class="wire muted"/><rect x="510" y="57" width="120" height="48" rx="12" class="box"/><text x="570" y="78" text-anchor="middle" class="label">S1</text><text x="570" y="97" text-anchor="middle" class="sub">old owner</text><path d="M570 105 V379" class="wire muted"/><rect x="760" y="57" width="120" height="48" rx="12" class="box"/><text x="820" y="78" text-anchor="middle" class="label">S3</text><text x="820" y="97" text-anchor="middle" class="sub">candidate</text><path d="M820 105 V379" class="wire muted"/>
+          <path d="M90 131 L300 131" class="wire"/><polygon points="310,131 300,136 300,126" class="head"/><text x="200" y="123" text-anchor="middle" class="tiny">GET key; hash 18</text><path d="M310 158 L560 158" class="wire"/><polygon points="570,158 560,163 560,153" class="head"/><text x="440" y="150" text-anchor="middle" class="tiny">ep7 → S1</text><path d="M570 187 L320 187" class="wire reply"/><polygon points="310,187 320,182 320,192" class="head reply"/><text x="440" y="179" text-anchor="middle" class="tiny">value</text><path d="M310 213 L100 213" class="wire reply"/><polygon points="90,213 100,208 100,218" class="head reply"/><text x="200" y="205" text-anchor="middle" class="tiny">200</text>
+          <g class="is-new">
+            <path d="M570 236 L810 236" class="wire async"/><polygon points="820,236 810,241 810,231" class="head async"/><text x="695" y="228" text-anchor="middle" class="tiny">snapshot (10,25]</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">先把 (10,25] 的快照从 S1 复制到 S3，旧环继续服务。复制可以重复，校验要能发现缺项；快照完成也不代表期间发生的更新已经追平。</span><span class="lang-en">Copy a snapshot of (10,25] from S1 to S3 while the old ring serves. Make copying repeatable and verify missing records; snapshot completion alone does not cover concurrent updates.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s3t d5s3d">
+          <title id="d5s3t">Fence old writes and apply the final delta</title>
+          <desc id="d5s3d">S1 fences writes to the moving range and sends its final delta to S3. S3 validates and acknowledges readiness back to S1.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="20" y="20" width="920" height="364" rx="18" class="boundary"/><text x="40" y="44" class="tiny">SAFE CUTOVER · time flows down; one Router stands for the coordinated routing layer</text>
+          <rect x="30" y="57" width="120" height="48" rx="12" class="box"/><text x="90" y="78" text-anchor="middle" class="label">Client</text><text x="90" y="97" text-anchor="middle" class="sub">two reads</text><path d="M90 105 V379" class="wire muted"/><rect x="250" y="57" width="120" height="48" rx="12" class="box"/><text x="310" y="78" text-anchor="middle" class="label">Router</text><text x="310" y="97" text-anchor="middle" class="sub">epoch authority</text><path d="M310 105 V379" class="wire muted"/><rect x="510" y="57" width="120" height="48" rx="12" class="box"/><text x="570" y="78" text-anchor="middle" class="label">S1</text><text x="570" y="97" text-anchor="middle" class="sub">old owner</text><path d="M570 105 V379" class="wire muted"/><rect x="760" y="57" width="120" height="48" rx="12" class="box"/><text x="820" y="78" text-anchor="middle" class="label">S3</text><text x="820" y="97" text-anchor="middle" class="sub">candidate</text><path d="M820 105 V379" class="wire muted"/>
+          <path d="M90 131 L300 131" class="wire"/><polygon points="310,131 300,136 300,126" class="head"/><text x="200" y="123" text-anchor="middle" class="tiny">GET key; hash 18</text><path d="M310 158 L560 158" class="wire"/><polygon points="570,158 560,163 560,153" class="head"/><text x="440" y="150" text-anchor="middle" class="tiny">ep7 → S1</text><path d="M570 187 L320 187" class="wire reply"/><polygon points="310,187 320,182 320,192" class="head reply"/><text x="440" y="179" text-anchor="middle" class="tiny">value</text><path d="M310 213 L100 213" class="wire reply"/><polygon points="90,213 100,208 100,218" class="head reply"/><text x="200" y="205" text-anchor="middle" class="tiny">200</text>
+          <path d="M570 236 L810 236" class="wire async"/><polygon points="820,236 810,241 810,231" class="head async"/><text x="695" y="228" text-anchor="middle" class="tiny">snapshot (10,25]</text>
+          <g class="is-new">
+            <path d="M570 258 L810 258" class="wire async"/><polygon points="820,258 810,263 810,253" class="head async"/><text x="695" y="250" text-anchor="middle" class="tiny">fence old writes + final delta</text><path d="M820 282 L580 282" class="wire reply"/><polygon points="570,282 580,277 580,287" class="head reply"/><text x="695" y="274" text-anchor="middle" class="tiny">validated; ready</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">本例在交接点暂停或缓冲该段写，先让 S1 拒绝继续提交旧 epoch，再补最终增量。S3 校验并确认就绪后，才能进入发布；代价是这段短写窗口。</span><span class="lang-en">This example pauses or buffers writes at handoff, fences old-epoch commits, and sends the final delta. S3 validates readiness before publication; the cost is a short write window.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s4t d5s4d">
+          <title id="d5s4t">Activate a new epoch only after readiness</title>
+          <desc id="d5s4d">S1 reports readiness and its write fence to Router. Router activates ep8 only after that report, coordinating admission for the moving range.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="20" y="20" width="920" height="364" rx="18" class="boundary"/><text x="40" y="44" class="tiny">SAFE CUTOVER · time flows down; one Router stands for the coordinated routing layer</text>
+          <rect x="30" y="57" width="120" height="48" rx="12" class="box"/><text x="90" y="78" text-anchor="middle" class="label">Client</text><text x="90" y="97" text-anchor="middle" class="sub">two reads</text><path d="M90 105 V379" class="wire muted"/><rect x="250" y="57" width="120" height="48" rx="12" class="box"/><text x="310" y="78" text-anchor="middle" class="label">Router</text><text x="310" y="97" text-anchor="middle" class="sub">epoch authority</text><path d="M310 105 V379" class="wire muted"/><rect x="510" y="57" width="120" height="48" rx="12" class="box"/><text x="570" y="78" text-anchor="middle" class="label">S1</text><text x="570" y="97" text-anchor="middle" class="sub">old owner</text><path d="M570 105 V379" class="wire muted"/><rect x="760" y="57" width="120" height="48" rx="12" class="box"/><text x="820" y="78" text-anchor="middle" class="label">S3</text><text x="820" y="97" text-anchor="middle" class="sub">candidate</text><path d="M820 105 V379" class="wire muted"/>
+          <path d="M90 131 L300 131" class="wire"/><polygon points="310,131 300,136 300,126" class="head"/><text x="200" y="123" text-anchor="middle" class="tiny">GET key; hash 18</text><path d="M310 158 L560 158" class="wire"/><polygon points="570,158 560,163 560,153" class="head"/><text x="440" y="150" text-anchor="middle" class="tiny">ep7 → S1</text><path d="M570 187 L320 187" class="wire reply"/><polygon points="310,187 320,182 320,192" class="head reply"/><text x="440" y="179" text-anchor="middle" class="tiny">value</text><path d="M310 213 L100 213" class="wire reply"/><polygon points="90,213 100,208 100,218" class="head reply"/><text x="200" y="205" text-anchor="middle" class="tiny">200</text>
+          <path d="M570 236 L810 236" class="wire async"/><polygon points="820,236 810,241 810,231" class="head async"/><text x="695" y="228" text-anchor="middle" class="tiny">snapshot (10,25]</text>
+          <path d="M570 258 L810 258" class="wire async"/><polygon points="820,258 810,263 810,253" class="head async"/><text x="695" y="250" text-anchor="middle" class="tiny">fence old writes + final delta</text><path d="M820 282 L580 282" class="wire reply"/><polygon points="570,282 580,277 580,287" class="head reply"/><text x="695" y="274" text-anchor="middle" class="tiny">validated; ready</text>
+          <g class="is-new">
+            <path d="M570 305 L320 305" class="wire reply"/><polygon points="310,305 320,300 320,310" class="head reply"/><text x="440" y="297" text-anchor="middle" class="tiny">ready; old writes fenced</text><text x="610" y="317" class="clock">activate ep8</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">Router 收到“新机就绪、旧写已隔离”再激活 ep8。它代表协调后的路由层；多实例部署必须处理旧 epoch，不能只广播一个新数组便宣布切完。</span><span class="lang-en">Router activates ep8 after new-owner readiness and old-write fencing. It represents coordinated routing; multiple instances must handle stale epochs, not merely receive a broadcast array.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s5t d5s5d">
+          <title id="d5s5t">Read the new owner and return through every hop</title>
+          <desc id="d5s5d">A second GET enters Client to Router. Router uses ep8 to read S3. The value returns S3 to Router to Client, while the earlier trace remains visible as a before-state.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="20" y="20" width="920" height="364" rx="18" class="boundary"/><text x="40" y="44" class="tiny">SAFE CUTOVER · time flows down; one Router stands for the coordinated routing layer</text>
+          <rect x="30" y="57" width="120" height="48" rx="12" class="box"/><text x="90" y="78" text-anchor="middle" class="label">Client</text><text x="90" y="97" text-anchor="middle" class="sub">two reads</text><path d="M90 105 V379" class="wire muted"/><rect x="250" y="57" width="120" height="48" rx="12" class="box"/><text x="310" y="78" text-anchor="middle" class="label">Router</text><text x="310" y="97" text-anchor="middle" class="sub">epoch authority</text><path d="M310 105 V379" class="wire muted"/><rect x="510" y="57" width="120" height="48" rx="12" class="box"/><text x="570" y="78" text-anchor="middle" class="label">S1</text><text x="570" y="97" text-anchor="middle" class="sub">old owner</text><path d="M570 105 V379" class="wire muted"/><rect x="760" y="57" width="120" height="48" rx="12" class="box"/><text x="820" y="78" text-anchor="middle" class="label">S3</text><text x="820" y="97" text-anchor="middle" class="sub">candidate</text><path d="M820 105 V379" class="wire muted"/>
+          <path d="M90 131 L300 131" class="wire"/><polygon points="310,131 300,136 300,126" class="head"/><text x="200" y="123" text-anchor="middle" class="tiny">GET key; hash 18</text><path d="M310 158 L560 158" class="wire"/><polygon points="570,158 560,163 560,153" class="head"/><text x="440" y="150" text-anchor="middle" class="tiny">ep7 → S1</text><path d="M570 187 L320 187" class="wire reply"/><polygon points="310,187 320,182 320,192" class="head reply"/><text x="440" y="179" text-anchor="middle" class="tiny">value</text><path d="M310 213 L100 213" class="wire reply"/><polygon points="90,213 100,208 100,218" class="head reply"/><text x="200" y="205" text-anchor="middle" class="tiny">200</text>
+          <path d="M570 236 L810 236" class="wire async"/><polygon points="820,236 810,241 810,231" class="head async"/><text x="695" y="228" text-anchor="middle" class="tiny">snapshot (10,25]</text>
+          <path d="M570 258 L810 258" class="wire async"/><polygon points="820,258 810,263 810,253" class="head async"/><text x="695" y="250" text-anchor="middle" class="tiny">fence old writes + final delta</text><path d="M820 282 L580 282" class="wire reply"/><polygon points="570,282 580,277 580,287" class="head reply"/><text x="695" y="274" text-anchor="middle" class="tiny">validated; ready</text>
+          <path d="M570 305 L320 305" class="wire reply"/><polygon points="310,305 320,300 320,310" class="head reply"/><text x="440" y="297" text-anchor="middle" class="tiny">ready; old writes fenced</text><text x="610" y="317" class="clock">activate ep8</text>
+          <g class="is-new">
+            <path d="M90 328 L300 328" class="wire"/><polygon points="310,328 300,333 300,323" class="head"/><text x="200" y="320" text-anchor="middle" class="tiny">GET again</text><path d="M310 347 L810 347" class="wire"/><polygon points="820,347 810,352 810,342" class="head"/><text x="565" y="339" text-anchor="middle" class="tiny">ep8 → S3</text><path d="M820 369 L320 369" class="wire reply"/><polygon points="310,369 320,364 320,374" class="head reply"/><path d="M310 369 L100 369" class="wire reply"/><polygon points="90,369 100,364 100,374" class="head reply"/><text x="575" y="362" text-anchor="middle" class="tiny">value</text><text x="195" y="362" text-anchor="middle" class="tiny">200</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">再次 GET 才沿 ep8 发给 S3，回程仍逐跳返回。若在复制期间失败，保持 ep7；若新机已接受新写，回滚就要迁回这些增量，不能直接切旧环。</span><span class="lang-en">Only the next GET uses ep8 and S3; the reply still returns hop by hop. Failure during preparation keeps ep7. Once S3 accepts new writes, rollback must reconcile those deltas before restoring the old ring.</span></figcaption>
+      </div>
+    </figure>
+    <h3><span class="lang-zh">环的数学性质，不会自动完成迁移协议</span><span class="lang-en">Ring properties do not perform migration</span></h3>
+    <div class="bilingual">
+      <div class="lang-zh"><p>hash=18 在 ep7 去 S1，ep8 去 S3。若先广播 ep8 再复制，第一笔 GET 可能直接读空，新 PUT 还可能和旧 Router 发给 S1 的写分叉。图里的 S3 先作为候选机出现，S1 仍是权威 owner；从 S1 复制 (10,25] 快照并记录迁移期间的增量，校验范围与内容。条带上的新归属只是规划结果，不能当作数据就绪证明。</p>
+        <p>A9 选择容易解释的交接：在最后阶段暂停或缓冲该段写，等待旧在途写完成，使 S1 对旧 epoch 的新提交实行隔离，再送最终增量。S3 校验并确认就绪，Router 才激活 ep8。这里的隔离也叫 fencing，意思是旧 owner 不再有权提交这段新写；不是只给配置加一个递增数字。旧写没有被服务端挡住，客户端带版本号也防不了分叉。</p>
+        <p>Router 在图中代表协调后的路由层，不暗示只部署一台。多 Router 不会同时收到消息，切换期间要能识别旧 epoch：旧 owner 拒绝或重定向旧路由，Router 刷新后限次重试，避免旧版仍写 S1、新版开始写 S3。读是否暂时继续给旧值，应由读合同决定；若要求交接后看到新写，就不能让旧 Router 默默长期读保留快照。</p>
+        <p>这版短写窗口的代价要说出来：受迁移区间影响的写要等待、进入有上限的缓冲，或收到明确的可重试错误。缓冲满不能无限排队，重复写需要操作标识与去重。替代方案是持续转发、双版本路由或复制协议内的领导权切换，它们能缩小窗口，却引入故障时的补偿与幂等；“直接双写”两次独立成功失败不相等，不能替代交接协议。</p>
+        <p>故障分阶段处理。快照尚未完成时 S3 坏了，ep7 继续服务，重试复制即可；S1 突然坏了则需要已有副本或备份恢复，环本身不会造出丢失的值。交接隔离后协调层失联，优先暂停受影响写，确认权威 epoch 再恢复。ep8 已经接受新写时回滚，必须把新增量迁回并重新交权，否则退回旧环会把已确认更新藏起来。</p>
+        <p>旧副本要延迟清理：确认新版本稳定，旧请求和增量处理结束，校验通过，再按保留策略回收旧区间。保留旧数据可以帮助故障恢复，但保留不代表旧写权限仍开放。环位置、物理数据、路由版本、写权限是四种状态；只检查“新配置已发出”，会遗漏后三者的不同完成时间。</p>
+      </div>
+      <div class="lang-en"><p>Hash 18 goes to S1 at ep7 and S3 at ep8. Publishing ep8 before copying can yield empty reads and split writes between old and new Routers. S3 first appears as a candidate while S1 remains authoritative. Copy the snapshot of (10,25], capture concurrent deltas and validate the range. Planned ownership is not readiness evidence.</p>
+        <p>A9 uses a simple handoff: pause or buffer writes for the final stage, drain old in-flight writes, fence further old-epoch commits at S1, then send the final delta. S3 validates readiness before Router activates ep8. Fencing removes old write authority; a larger configuration number alone does not prevent stale clients from committing on S1.</p>
+        <p>Router represents a coordinated layer, not a single deployed instance. Multiple Routers receive updates at different times. Old owners must reject or redirect stale epochs, and Routers refresh with bounded retries. Reads from retained old copies require an explicit staleness contract; read-after-write expectations cannot tolerate indefinitely serving an old snapshot.</p>
+        <p>The write window costs waiting, bounded buffering or explicit retryable errors. A full buffer cannot grow forever; repeated writes need operation IDs and deduplication. Forwarding, dual-version routing or a replication protocol’s leadership transfer can reduce the window but add failure recovery and idempotency. Independent dual writes do not form a safe handoff protocol.</p>
+        <p>Failures are phase-dependent. A candidate failure before readiness leaves ep7 serving. Sudden loss of S1 needs existing replicas or backup; hashing cannot recreate records. Coordination loss after fencing pauses affected writes until authority is known. Rolling back after ep8 accepts writes requires moving those deltas back and transferring authority again.</p>
+        <p>Reclaim old data only after the new epoch is stable, old requests and deltas are drained, and validation passes. Retaining recovery data does not retain write permission. Ring positions, physical data, routing epochs and write authority have different completion times; “configuration sent” verifies only one.</p>
+      </div>
+    </div>
+    <h3><span class="lang-zh">真实系统会把迁移状态做成显式协议</span><span class="lang-en">Real systems expose migration states</span></h3>
+    <div class="bilingual">
+      <div class="lang-zh"><p>Redis Cluster 用 16,384 个固定 hash slot，再把 slot 分配给节点，节点数变化时 hash 到 slot 的公式不变；它不是本章的随机 token 环。规范列出 MIGRATING、IMPORTING 状态以及 ASK、MOVED 重定向，说明数据搬运和路由更新之间需要过渡协议。[7] 这里只借它验证“不能只有新映射”的事实，图上的暂停写模型并非照抄 Redis 的迁移过程。</p>
+        <p>Apache Cassandra 文档也将 token、物理 endpoint 与 host ID 分开，描述 vnode 和成员信息传播。[6] 若设计 KV，应继续补复制、故障检测和修复；缓存则能舍弃值，但仍要保护回源容量。计划下线可以先迁数据再摘成员，故障摘除却可能没有源机可搬，两者共用新的归属函数，不能共用“源机复制完即可”的恢复保证。</p></div>
+      <div class="lang-en"><p>Redis Cluster hashes into 16,384 fixed slots, then assigns slots to machines. Node count changes do not alter key-to-slot hashing; this is not a random-token ring. Its MIGRATING/IMPORTING states and ASK/MOVED redirects demonstrate the need for a transition protocol between moving data and updating routes. [7] Our write-pause model illustrates the requirement, not Redis’s exact migration procedure.</p>
+        <p>Cassandra distinguishes tokens, physical endpoints and host IDs and describes vnodes and membership propagation. [6] A KV design still needs replication, failure detection and repair. Cache values may be discarded, but origin capacity must be protected. Planned removal can copy before detaching; crash recovery may have no source available. Both compute new placement without sharing the same recovery guarantee.</p></div>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">少迁 key 之后，仍要算热点和回源</span><span class="lang-en">Limited movement still needs hotspot and origin budgets</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p>A6 总读 10,000/s，十台负载真正均匀时平均 1,000/s，低于每台计划 1,500/s。掉一台且接管分散时，剩余平均 10,000/9≈1,111/s，仍有余量。但“平均没超”不等于每台安全；若单 token 布局把失效节点的整份流量压给一个原本 1,000/s 的邻居，它会到 2,000/s，超过上限。vnode 改善接管分布，容量告警仍要看最忙节点。</p>
+        <p>A7 把 40% 请求放在共享热点 <code>post:9</code>，热点本身 10,000×0.4=4,000/s，其余 6,000/s 均匀分摊，热点 owner 约 4,000+6,000/10=4,600/s。增加这个 owner 的 token 不会把同一个 key 分出去，甚至可能给它更多普通区间。加机器也不保证热点恰好移动，更不保证搬走后能承受 4,000/s；它只是换了一个拥堵地点。</p>
+        <p>热点读可以用请求合并、应用内短缓存、专用副本或复制热点值，代价是失效与陈旧窗口。热点写要先问是否可拆：计数能按子 key 分片再聚合，要求单 key 原子顺序的余额不能随意加盐。拆 key 改了数据模型和读放大；多个读副本改了读路由与复制协议。要把选择接回语义，不能只说“加随机后缀”就宣布问题解决。</p>
+        <p>A8 的缓存扩容有另一笔负载：新机接 1/11 的读且起初全 miss，约 10,000/11=909.09/s；其余 10/11 保持 95% 命中，回源约 10,000×10/11×0.05=454.55/s。合计 1,363.64/s，约 1,364，比原来的 500/s 高约 2.73 倍，也超库预算 800/s。虽然只换 9.09% 的归属，暖数据缺失已足够把回源打穿。</p>
+        <p>若先把新机预热到命中率 h，回源是 454.55+909.09×(1−h)。要不超过 800，需 h≥1−(800−454.55)/909.09≈62%。这只是在均匀读假设下的静态下限，不包含重试或既有故障余量。可分批切区间、限制冷读回源、只允许一个加载者，再按产品合同给旧值或拒绝；预热要验证有代表性的键分布，不能只报“复制完了多少 key”。</p>
+      </div>
+      <div class="lang-en"><p>A6’s 10,000 reads/s across ten uniformly loaded machines averages 1,000/s, below a planned 1,500/s cap. After one failure with dispersed takeover, the average is 10,000/9≈1,111/s. This does not bound the busiest machine. A single-token ring could move a full 1,000/s onto an already 1,000/s neighbor, giving 2,000/s. Vnodes improve takeover distribution; monitor the maximum load.</p>
+        <p>A7 concentrates 40% on shared key <code>post:9</code>: 4,000/s plus about 6,000/10=600/s background gives its owner 4,600/s. More vnodes on that owner do not split the key. Adding machines neither guarantees that the hot key moves nor makes 4,000/s affordable at its destination.</p>
+        <p>Hot reads can use coalescing, short local caching, dedicated replicas or replicated hot values, with invalidation and staleness costs. Hot writes require semantic analysis: sharded counters can aggregate subkeys, but an atomically ordered balance cannot be arbitrarily salted. Splitting keys changes the data model and read amplification; read replicas change routing and replication.</p>
+        <p>In A8, a cold newcomer handles 1/11 of reads, all misses: 909.09/s. The remaining 10/11 retains 95% hits, producing 454.55 origin reads/s. Total origin load is 1,363.64/s, about 1,364, or 2.73× the previous 500/s and above the 800/s budget. Moving only 9.09% of ownership can still overload origin.</p>
+        <p>If the newcomer is warmed to hit rate h, origin load is 454.55+909.09×(1−h). Staying within 800 requires h≥62%. This static threshold assumes uniform reads and excludes retries and failure headroom. Switch ranges in batches, cap cold origin reads and use one loader per key, then serve stale data or reject according to the product contract. Warming must cover representative requests, not merely a count of copied keys.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">变体只回答约束，不抢走主线</span><span class="lang-en">Variants answer a constraint, not replace the main story</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p>环加 vnode 是本章选择，因为命名节点可任意增减、需要可解释区间和权重。Jump Hash 的输入是 key 与桶数，输出 0…N−1；论文给出极小的额外内存与期望 O(log N) 时间，限制是连续桶编号。[5] 追加尾桶很合适，任意删除中间逻辑桶需要额外映射层。物理机器坏了也可以由副本接管同一逻辑桶，所以不能把它硬说成“存储节点不能故障”。</p>
+        <p>Maglev 面向软件网络负载均衡，用预计算表提供快速后端选择；2016 论文 §5.3 的默认表大小是 65,537。[8] 查表快不等于成员变化免费，构表、分发和连接跟踪仍有工作；它的扰动性质也不能直接套成本章固定 token 环的严格区间证明。网络 LB 的细节留到 Ch39，本章只说清为什么“每包查表”与“数据区间迁移”关注不同约束。</p>
+        <p>固定 slot 表则把 key→slot 与 slot→machine 拆开，迁移一批 slot 时，不必重算所有 key 的 slot。粒度有限、slot 可能有热点，表也需要版本和迁移协议。哪种放置函数都不能独自完成可用性、读写一致性或热点保护；面试时先给满足当前约束的一个方案，再用一两句说明替代条件，比背变体名字更容易核验。</p></div>
+      <div class="lang-en"><p>This chapter chooses ring+vnodes for named, arbitrarily removable machines, explicit ranges and weighting. Jump Hash maps key and bucket count to 0…N−1 with minimal extra memory and expected O(log N) time, but requires sequential bucket IDs. [5] Appending buckets fits; removing an arbitrary logical middle bucket needs indirection. Physical failure can still be handled by replicas taking over the same logical bucket.</p>
+        <p>Maglev targets software network load balancing with a precomputed backend lookup table; its 2016 paper §5.3 uses 65,537 as the default table size. [8] Fast lookup still requires rebuilding, distribution and connection tracking. Its disruption properties should not be replaced with this ring’s exact interval argument. Ch39 covers packet-level balancing; here distinguish it from data-range migration.</p>
+        <p>Fixed slots separate key→slot from slot→machine. Moving slots preserves key-to-slot hashing, but granularity, hotspots, versions and migration remain. No placement function alone supplies availability, read/write consistency or hotspot protection. Select one design for the current constraints and state the conditions for alternatives.</p></div>
+    </div>
+    <table>
+      <thead><tr><th><span class="lang-zh">方案</span><span class="lang-en">Scheme</span></th><th><span class="lang-zh">本章会怎么选</span><span class="lang-en">Selection condition</span></th><th><span class="lang-zh">必须补的边界</span><span class="lang-en">Required boundary</span></th></tr></thead>
+      <tbody>
+        <tr><td><span class="lang-zh">环 + vnode</span><span class="lang-en">Ring + vnodes</span></td><td><span class="lang-zh">任意命名节点；解释区间与加权</span><span class="lang-en">Named machines; explicit ranges and weights</span></td><td>O(log T); T=n×v</td></tr>
+        <tr><td>Jump Hash</td><td><span class="lang-zh">逻辑桶连续，主要追加尾桶</span><span class="lang-en">Sequential logical buckets, mainly append-only</span></td><td><span class="lang-zh">期望 O(log N)；任意删桶需间接层</span><span class="lang-en">Expected O(log N); arbitrary removal needs indirection</span></td></tr>
+        <tr><td>Maglev</td><td><span class="lang-zh">软件 LB 后端查表；深入见 Ch39</span><span class="lang-en">Software LB backend lookup; details in Ch39</span></td><td><span class="lang-zh">表构建与连接保持另算</span><span class="lang-en">Account for table construction and connection persistence</span></td></tr>
+        <tr><td><span class="lang-zh">固定 slot</span><span class="lang-en">Fixed slots</span></td><td><span class="lang-zh">固定分区粒度；显式分配给机器</span><span class="lang-en">Fixed partition granularity and explicit assignment</span></td><td><span class="lang-zh">不是随机 token 环；迁移仍要协议</span><span class="lang-en">Not a random-token ring; migration still needs a protocol</span></td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">追问与验算：证明改动真的局部</span><span class="lang-en">Follow-ups: verify that changes are local</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p>“一致性怎么测？”先验证端点和环回：在 A2 中查 10、11、25、40、41、75、76、99，旧环应依次去 S0、S1、S1、S1、S2、S2、S0、S0。再加入 S3@25，枚举全部 100 个位置，只有 11–25 改归属，其余完全相同。这个测试检验单调性；看平均节点 key 数相近，只能检验分布，发现不了无谓迁移。</p>
+        <p>“机器重启会怎样？”稳定身份和 token 清单不变时，地址更新不应改变 owner；若用新身份加入，就需要按删除与新增评估扰动。“客户端版本不同呢？”对相同字节 key 和同一清单，跨语言测试向量必须得到相同 hash、token、owner；旧 epoch 请求在交接后必须被服务端拒绝或重定向。仅比较配置文件大小没有意义。</p>
+        <p>“加一台为什么不能立即救过载？”它需要初始化、复制或预热，再追平与切流量；迁移还占用过载源机的资源。“有 vnode 还需要留余量吗？”需要，节点故障后总容量少了一台，热点和不均匀不会随着平均除法消失。扩容实验至少记录实际移动 key、移动字节、最忙 owner、缓存命中与回源 p99；只有新机变绿，不足以验收。</p>
+      </div>
+      <div class="lang-en"><p>“How do you test consistency?” Check A2 endpoints and wraparound: hashes 10/11/25/40/41/75/76/99 resolve to S0/S1/S1/S1/S2/S2/S0/S0. Add S3@25 and enumerate all 100 positions: only 11–25 change. This verifies monotonicity; similar average key counts test distribution but cannot detect needless reassignment.</p>
+        <p>“What about restarts?” Stable identities and tokens keep ownership while endpoints change; new identities require deletion/addition analysis. Cross-language vectors must agree on hash, token and owner for the same bytes and membership. After handoff, servers must reject or redirect stale epochs rather than merely compare configuration sizes.</p>
+        <p>“Why not add a machine immediately?” Initialization, copying or warming, catch-up and activation take time and consume source resources. Vnodes do not replace headroom: failure removes capacity and averages conceal hotspots. Measure changed keys, bytes, maximum owner load, hit rate and origin p99; a healthy newcomer alone is insufficient.</p>
+      </div>
+    </div>
+    <table>
+      <thead><tr><th><span class="lang-zh">翻车说法</span><span class="lang-en">Weak claim</span></th><th><span class="lang-zh">改成可检验的结论</span><span class="lang-en">Testable replacement</span></th></tr></thead>
+      <tbody>
+        <tr><td><span class="lang-zh">加减都迁 K/n</span><span class="lang-en">Addition and removal both move K/n</span></td><td><span class="lang-zh">等容量模型：加 K/(n+1)，删 K/n；固定点另枚举</span><span class="lang-en">Equal-capacity model: add K/(n+1), remove K/n; enumerate fixed points</span></td></tr>
+        <tr><td><span class="lang-zh">不依赖 N，就不用成员信息</span><span class="lang-en">Independent of N means no membership information</span></td><td><span class="lang-zh">不取模 N，仍依赖 token 集合与 epoch</span><span class="lang-en">No modulo N; still depends on tokens and epoch</span></td></tr>
+        <tr><td><span class="lang-zh">顺时针一台台问</span><span class="lang-en">Contact machines clockwise</span></td><td><span class="lang-zh">本地二分后直达 owner；响应逐跳回 Router、Client</span><span class="lang-en">Search locally, contact owner directly, return via Router to Client</span></td></tr>
+        <tr><td><span class="lang-zh">160 个 vnode 就保证均匀</span><span class="lang-en">160 vnodes guarantee balanced load</span></td><td><span class="lang-zh">点数是实现选择，区间份额与请求成本分别检验</span><span class="lang-en">Token count is a choice; verify space share and request cost separately</span></td></tr>
+        <tr><td><span class="lang-zh">删节点就是自动 failover</span><span class="lang-en">Removing a node automatically recovers data</span></td><td><span class="lang-zh">只算新归属；已有副本、交权与数据准备另做</span><span class="lang-en">Compute new ownership; replicas, handoff and readiness are separate</span></td></tr>
+        <tr><td><span class="lang-zh">只动 9.09%，库不会受影响</span><span class="lang-en">Only 9.09% moves, so origin is safe</span></td><td><span class="lang-zh">A8 冷机回源约 1,364/s，超过 800/s，需要预热或封顶</span><span class="lang-en">A8 cold origin load is about 1,364/s, above 800/s; warm or cap it</span></td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">收尾：归属、容量、交接各说一句</span><span class="lang-en">Close on placement, capacity and handoff</span></h2>
+    <div class="bilingual">
+      <div class="lang-zh"><p class="say">旧桶编号固定时，取模十到十一台重映射约 90.91%；环保留旧 token，等容量随机模型只需迁新人期望的 9.09%。查找是在本地有序表中找 successor，不沿机器接力。vnode 将责任分成多段，可改善分布和接管，但一个热 key 仍落同一 owner。扩容先复制或预热、追平与隔离旧写，再激活新 epoch；缓存冷启动在本例会把回源从 500/s 拉到约 1,364/s，所以迁得少仍要容量封顶。</p>
+        <p>合上页面，先手算 hash=90 的环回，再说新增 S3@25 时只变哪一段，最后解释新机就绪之前为何仍走 S1。能讲出这三条路径，就能接下一章的复制与 quorum。Ch02 给过按用户分片的直觉，Ch03 教你把 key 数、字节和 QPS 分开；本章提供放置函数，复制和分区故障不应被一句“已有一致性哈希”带过。</p></div>
+      <div class="lang-en"><p class="say">With stable old IDs, modulo 10→11 remaps about 90.91%. Keeping old ring tokens fixed moves only the newcomer’s expected 9.09% under an equal-capacity random model. Lookup finds a successor locally, not through server forwarding. Vnodes spread responsibility and takeover without splitting one hot key. Expansion copies or warms, catches up, fences old writes, then activates the next epoch. In this example a cold cache raises origin from 500/s to about 1,364/s, so limited movement still needs a capacity cap.</p>
+        <p>Close the page and resolve hash 90, identify the range captured by S3@25, then explain why reads remain on S1 until readiness. These paths connect placement to the next chapter’s replication and quorums. Ch02 introduces user sharding and Ch03 separates counts, bytes and QPS. A placement function does not settle replication or partition failures.</p></div>
+    </div>
+    <p class="cite"><span class="lang-zh">站内延伸：</span><span class="lang-en">Course follow-ups:</span> <a class="chip" href="ch02.html">Ch02</a> <a class="chip" href="ch03.html">Ch03</a> <a class="chip" href="ch04.html">Ch04</a> <span class="chip" aria-disabled="true"><span class="lang-zh">Ch06 · 待重构</span><span class="lang-en">Ch06 · planned</span></span> <span class="chip" aria-disabled="true"><span class="lang-zh">Ch39 · 待重构</span><span class="lang-en">Ch39 · planned</span></span> <span class="chip" aria-disabled="true"><span class="lang-zh">Ch41 · 待重构</span><span class="lang-en">Ch41 · planned</span></span></p>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">引用</span><span class="lang-en">References</span></h2>
+    <ol class="references">
+      <li>[1] David Karger et al., <a href="https://people.csail.mit.edu/karger/Papers/web.pdf"><em>Consistent Hashing and Random Trees: Distributed Caching Protocols for Relieving Hot Spots on the World Wide Web</em></a>, STOC, 1997. <span class="lang-zh">用于平滑成员变化、分布与不同视图的概念；本章余数与区间算式自行推导。</span><span class="lang-en">Smooth membership changes, distribution and differing views; residue and interval calculations here are derived locally.</span></li>
+      <li>[2] Giuseppe DeCandia et al., <a href="https://www.allthingsdistributed.com/files/amazon-dynamo-sosp2007.pdf"><em>Dynamo: Amazon’s Highly Available Key-value Store</em></a>, SOSP, 2007, §§4.2–4.3. <span class="lang-zh">核对 128 位 key 标识、多个 token、容量加权，以及副本必须取不同物理节点。</span><span class="lang-en">128-bit key identifiers, multiple tokens, capacity weighting and distinct physical replica owners.</span></li>
+      <li>[3] Richard Jones, <a href="https://www.metabrew.com/article/libketama-consistent-hashing-algo-memcached-clients"><em>libketama: Consistent Hashing library for memcached clients</em></a>, 2007-04-10. <span class="lang-zh">核对每服务器约 100–200 点、32 位 continuum 与末端环回。</span><span class="lang-en">About 100–200 points/server, a 32-bit continuum and wraparound.</span></li>
+      <li>[4] Richard Jones / libketama project, <a href="https://github.com/RJ/ketama/blob/master/libketama/ketama.c"><em>libketama/ketama.c</em></a>, <span class="lang-zh">源代码，核对于 2026-10-02。核对摘要拆分成 32 位点、同容量 40×4=160 点，以及加权点数的取整。</span><span class="lang-en">Source inspected 2026-10-02: 32-bit points extracted from digests, equal-capacity 40×4=160 tokens and rounded weighted token counts.</span></li>
+      <li>[5] John Lamping and Eric Veach, <a href="https://arxiv.org/abs/1406.2294"><em>A Fast, Minimal Memory, Consistent Hash Algorithm</em></a>, 2014, Figure 2. <span class="lang-zh">核对 Jump 的连续桶限制、期望对数时间；经典环 100 点与 1,000 点的 σ/μ 为 0.0996996、0.0315723。</span><span class="lang-en">Sequential bucket restriction, expected logarithmic time; classical-ring σ/μ values 0.0996996 and 0.0315723 at 100 and 1,000 points.</span></li>
+      <li>[6] Apache Cassandra, <a href="https://cassandra.apache.org/doc/latest/cassandra/architecture/dynamo.html"><em>Architecture: Dynamo</em></a>, <span class="lang-zh">项目文档，核对于 2026-10-02。用于区分 token、endpoint、host ID 与成员传播；不引用可变的默认 token 数。</span><span class="lang-en">Project documentation inspected 2026-10-02: tokens, endpoints, host IDs and membership propagation; no changing default token count is claimed.</span></li>
+      <li>[7] Redis, <a href="https://redis.io/docs/latest/operate/oss_and_stack/reference/cluster-spec/"><em>Redis Cluster specification</em></a>, <span class="lang-zh">项目规范，核对于 2026-10-02。核对 16,384 slots、MIGRATING / IMPORTING 与 ASK / MOVED 的迁移语义。</span><span class="lang-en">Specification inspected 2026-10-02: 16,384 slots, MIGRATING/IMPORTING and ASK/MOVED migration semantics.</span></li>
+      <li>[8] Danielle E. Eisenbud et al., <a href="https://www.usenix.org/system/files/conference/nsdi16/nsdi16-paper-eisenbud.pdf"><em>Maglev: A Fast and Reliable Software Network Load Balancer</em></a>, NSDI, 2016, §5.3. <span class="lang-zh">核对软件网络 LB 的查表用途与文中的默认表大小 65,537；未把它当成通用 KV 分区默认。</span><span class="lang-en">Software network LB table lookup and the paper’s default 65,537 entries; no universal KV default is inferred.</span></li>
+    </ol>
+  </section>
+
+  <section>
+    <h2><span class="lang-zh">闪卡</span><span class="lang-en">Flashcards</span></h2>
+    <p class="cite"><span class="lang-zh">点一下翻面。先说假设，再说数字或路径。</span><span class="lang-en">Click to flip. State assumptions before numbers or paths.</span></p>
+    <div class="cards-grid">
+      <button type="button" class="flip"><span class="q"><span class="lang-zh">取模 3→4 为什么移动 75%？</span><span class="lang-en">Why does modulo 3→4 move 75%?</span></span><span class="a"><span class="lang-zh">旧编号固定、hash 均匀时，周期 12 只有 0、1、2 的余数不变，9/12=75%。</span><span class="lang-en">Stable old IDs and uniform hashes: only 0/1/2 retain their remainders in a 12-value cycle; 9/12=75%.</span></span></button>
+      <button type="button" class="flip"><span class="q"><span class="lang-zh">百万 key、十台加一台，环期望迁多少？</span><span class="lang-en">1M keys, ten machines, add one: expected movement?</span></span><span class="a"><span class="lang-zh">等容量随机 token、旧点不动：K/(n+1)=1,000,000/11≈90,909，即 9.09%。</span><span class="lang-en">Equal-capacity random tokens, old points fixed: K/(n+1)=1M/11≈90,909, or 9.09%.</span></span></button>
+      <button type="button" class="flip"><span class="q"><span class="lang-zh">同样十台删一台呢？</span><span class="lang-en">Remove one of ten machines?</span></span><span class="a"><span class="lang-zh">移动它原有份额，期望 K/n=100,000；不表示数据已恢复。</span><span class="lang-en">Its old expected share K/n=100,000 moves; data recovery is separate.</span></span></button>
+      <button type="button" class="flip"><span class="q"><span class="lang-zh">hash=25、40、90 在三点环分别落谁？</span><span class="lang-en">Where do hashes 25/40/90 go on the three-token ring?</span></span><span class="a"><span class="lang-zh">S1、S1、S0。找第一个≥hash 的点，超过 75 环回 10。</span><span class="lang-en">S1, S1, S0. First token ≥hash; past 75 wraps to 10.</span></span></button>
+      <button type="button" class="flip"><span class="q"><span class="lang-zh">顺时针查找会先向 S0 发 RPC 吗？</span><span class="lang-en">Does clockwise lookup send an RPC to S0 first?</span></span><span class="a"><span class="lang-zh">不会。Router 本地二分后直达 owner；索引顺序不是网络拓扑。</span><span class="lang-en">No. Router searches locally then contacts the owner directly; index order is not network topology.</span></span></button>
+      <button type="button" class="flip"><span class="q"><span class="lang-zh">新增 S3@25 只改哪段？</span><span class="lang-en">Which range changes when adding S3@25?</span></span><span class="a"><span class="lang-zh">(10,25] 从 S1 到 S3；整数教学空间移动 15%，不强行套 25%。</span><span class="lang-en">(10,25] moves S1→S3: 15% in the integer example, not automatically 25%.</span></span></button>
+      <button type="button" class="flip"><span class="q"><span class="lang-zh">“不依赖 N”省掉了什么，没省掉什么？</span><span class="lang-en">What does independence from N remove or retain?</span></span><span class="a"><span class="lang-zh">省掉取模除数；仍需要 token 集合、owner 映射、哈希协议与 epoch。</span><span class="lang-en">Removes the modulo divisor; still needs tokens, owner map, hashing protocol and epoch.</span></span></button>
+      <button type="button" class="flip"><span class="q"><span class="lang-zh">vnode 和副本有何区别？</span><span class="lang-en">How do vnodes differ from replicas?</span></span><span class="a"><span class="lang-zh">vnode 是同一物理机的多个责任位置；副本是数据拷贝，要选不同物理 owner 与故障域。</span><span class="lang-en">Vnodes are multiple ownership positions for one machine; replicas copy data to distinct owners and failure domains.</span></span></button>
+      <button type="button" class="flip"><span class="q"><span class="lang-zh">两点示例删 S1 后谁接哪段？</span><span class="lang-en">In the two-token example, who takes S1’s ranges?</span></span><span class="a"><span class="lang-zh">(10,30] 的 20% 给 S2，(80,95] 的 15% 给 S0；最终 55% 与 45%。</span><span class="lang-en">20% at (10,30] goes to S2; 15% at (80,95] to S0; final shares 55% and 45%.</span></span></button>
+      <button type="button" class="flip"><span class="q"><span class="lang-zh">Ketama 用 MD5，所以环是 128 位？</span><span class="lang-en">Does Ketama’s MD5 imply a 128-bit ring?</span></span><span class="a"><span class="lang-zh">不是。原实现从摘要提取 32 位点；同容量 40×4=160 点，别混淆摘要与环宽。</span><span class="lang-en">No. The original extracts 32-bit points; equal-capacity 40×4=160 tokens. Digest width is not ring width.</span></span></button>
+      <button type="button" class="flip"><span class="q"><span class="lang-zh">40% 请求落一颗热 key，多放 vnode 能救吗？</span><span class="lang-en">Can more vnodes fix one key taking 40% of requests?</span></span><span class="a"><span class="lang-zh">不能。同一 key 仍归同一 owner；本例 4,000+600≈4,600/s，需按读写语义另做热点方案。</span><span class="lang-en">No. One key keeps one owner: about 4,000+600=4,600/s here. Choose separate measures by read/write semantics.</span></span></button>
+      <button type="button" class="flip"><span class="q"><span class="lang-zh">为何只迁 9.09% 仍可能打穿回源？</span><span class="lang-en">Why can moving 9.09% still overload origin?</span></span><span class="a"><span class="lang-zh">冷新机 909.09/s，加其余 miss 454.55/s，约 1,364/s&gt;800/s；简化模型需预热到至少 62%。</span><span class="lang-en">Cold newcomer 909.09/s plus 454.55/s old misses gives about 1,364/s&gt;800/s; simplified warming threshold is 62%.</span></span></button>
+      <button type="button" class="flip"><span class="q"><span class="lang-zh">安全交接的顺序？</span><span class="lang-en">What is the safe handoff order?</span></span><span class="a"><span class="lang-zh">旧环服务→快照→隔离旧写、补最终增量→新机校验→激活新 epoch；回滚要处理新写。</span><span class="lang-en">Serve old epoch→snapshot→fence and final delta→validate→activate new epoch; rollback reconciles new writes.</span></span></button>
+      <button type="button" class="flip"><span class="q"><span class="lang-zh">Jump、Maglev 各用一句回答哪条约束？</span><span class="lang-en">Which constraints do Jump and Maglev answer?</span></span><span class="a"><span class="lang-zh">Jump 适合连续逻辑桶与低索引内存；Maglev 面向软件网络 LB 查表。两者都不替代数据交接。</span><span class="lang-en">Jump suits sequential logical buckets with little indexing memory; Maglev suits network LB table lookup. Neither replaces data handoff.</span></span></button>
+    </div>
+  </section>
+
+  <p><button type="button" class="read-toggle"><span class="when-off"><span class="lang-zh">我已学完本章</span><span class="lang-en">Mark this chapter done</span></span><span class="when-on"><span class="lang-zh">已学完本章</span><span class="lang-en">Completed</span></span></button></p>
+  <p class="cite"><span class="lang-zh">进度存在这台浏览器里。</span><span class="lang-en">Saved in this browser only.</span></p>
+</article>
+</main>
+<script src="../assets/js/nav.js"></script>
+<script src="../assets/js/lang.js"></script>
+<script src="../assets/js/slides.js"></script>
+<script src="../assets/js/progress.js"></script>
+</body>
+</html>

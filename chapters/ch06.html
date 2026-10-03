@@ -1,0 +1,1046 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="parchment" data-locale="zh">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ch06 · 键值存储</title>
+  <link rel="icon" href="../favicon.ico" sizes="48x48">
+  <link rel="stylesheet" href="../assets/css/style.css">
+  <script src="../assets/js/boot.js"></script>
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="../index.html"><span class="brand-logo">SD</span><span class="lang-zh">系统设计面试</span><span class="lang-en">System Design Interview</span></a>
+  <span class="spacer"></span>
+  <a class="map-link" href="../index.html"><span class="lang-zh">课程地图</span><span class="lang-en">Map</span></a>
+  <div class="seg" role="group" aria-label="language">
+    <button type="button" data-locale-set="zh">中文</button>
+    <button type="button" data-locale-set="both"><span class="lang-zh">对照</span><span class="lang-en">Both</span></button>
+    <button type="button" data-locale-set="en">EN</button>
+  </div>
+  <div class="seg" role="group" aria-label="theme">
+    <button type="button" data-theme-set="parchment"><span class="lang-zh">护眼</span><span class="lang-en">Paper</span></button>
+    <button type="button" data-theme-set="dracula"><span class="lang-zh">深色</span><span class="lang-en">Dark</span></button>
+  </div>
+</header>
+<main class="wrap">
+<article class="chapter" id="ch06" data-ch="ch06">
+  <header>
+<div class="ch-kicker"><span class="lang-zh">CHAPTER 06 · 经典构件</span><span class="lang-en">CHAPTER 06 · building block</span></div>
+<h1><span class="lang-zh">键值存储</span><span class="lang-en">Key-value store</span></h1>
+<p class="ch-meta-line"><span class="lang-zh">约 40 分钟 · 前置：Ch03、Ch05 · 6 组演进图，从复制确认到安全删除</span><span class="lang-en">~40 min · after Ch03, Ch05 · 6 evolution decks, from replication to safe deletion</span></p>
+</header>
+<section class="goal">
+<h2><span class="lang-zh">这一章结束你能做什么</span><span class="lang-en">What you can do after this chapter</span></h2>
+<div class="bilingual"><div class="lang-zh"><p>从一次 PUT 画到三个物理副本，标出何时成功、谁仍在追平。手算读写集合的交集，并指出严格 quorum 在少数分区为什么失败。把时间戳冲突、节点内耐久和副本修复分开解释，最后沿一条删除走到墓碑安全回收。</p></div><div class="lang-en"><p>Draw one PUT fanning out to three physical replicas, marking success and outstanding work. Calculate read/write overlap and explain failure on a minority partition. Separate timestamp conflicts, local durability and replica repair, then walk deletion through safe tombstone reclamation.</p></div></div>
+</section>
+
+<section>
+<h2><span class="lang-zh">30 秒开场：先定数据契约，再定 N、W、R</span><span class="lang-en">The 30-second opening: define the contract before N, W and R</span></h2>
+<div class="bilingual"><div class="lang-zh"><p>我设计一个单地域、小 value、按 key 访问的分布式 KV。示例存可覆盖的用户偏好字段，允许竞争更新选一个胜者；不承担余额、库存扣减和登录撤销的权威判断。环上取三台不同物理机，Coordinator 并行发送，默认等两份耐久 ACK。读取两份并比较版本。3/2/2 在固定副本集合内相交，但少数分区会失败；需要继续接写时另谈 sloppy quorum 的代价。节点内用 WAL、memtable、SSTable，后台修复漏写，删除保留墓碑。</p></div><div class="lang-en"><p>I design a single-region distributed KV with small values and key-based access. The example stores replaceable user-preference fields whose competing updates may select one winner; it does not authorize balances, inventory deductions or login revocation. Choose three distinct physical owners, fan out in parallel and wait for two durable ACKs. Read two copies and reconcile versions. 3/2/2 intersects within fixed membership but fails on a minority partition; continued writes require a separate sloppy-quorum trade-off. Locally use WAL, Memtable and SSTables; repair missed writes and retain deletion tombstones.</p></div></div>
+<div class="bilingual"><div class="lang-zh"><p>“键值存储”只规定访问形态，没有自动替你选择 AP、CP 或某种引擎。先问四件事：value 可以覆盖吗，写后读能接受什么结果，分区时哪一侧必须继续服务，删除多久后必须生效。购物车加购需要保留并发意图，购物车快照却可能只保留一个版本；同一个产品名不能代替数据语义。把每个字段的契约说清，比先背系统标签更能推动设计。</p></div><div class="lang-en"><p>“Key-value” describes access shape; it does not select AP, CP or an engine. Ask whether overwrites are acceptable, what a read after a write must return, which partition must keep serving, and when deletion must take effect. Cart additions may need to preserve concurrent intent while a cart snapshot might choose one version. A product label cannot replace field semantics.</p></div></div>
+<div class="bilingual"><div class="lang-zh"><p>本章 API 是 <code>get(key)</code>、<code>put(key,value,mutation_id,ts)</code> 和 <code>delete(key,mutation_id,ts)</code>，单次操作只涉及一个 key。客户端收到超时，状态标成结果未知；可重试同一 mutation，不能据此执行一次新的业务扣减。扫描、二级索引和跨 key 事务先留在边界外。10 KB 上限是本章为了限制复制与尾延迟写下的约束，大 value 仍可以属于 KV；需要上传图片时换成对象引用，并另算对象存储路径。</p></div><div class="lang-en"><p>The API is <code>get(key)</code>, <code>put(key,value,mutation_id,ts)</code> and <code>delete(key,mutation_id,ts)</code>, one key per operation. A timeout is an unknown outcome: retry the same mutation rather than perform another business deduction. Scans, secondary indexes and cross-key transactions stay outside this round. The 10 KB cap is our replication and latency constraint, not a definition of KV; images can be stored through object references with a separate path.</p></div></div>
+<div class="bilingual"><div class="lang-zh"><p>Dynamo 2007 是高可用写、版本与应用合并的一条设计；Cassandra 使用时间戳 LWW，并提供可调一致性级别。这里采用的是“固定副本 quorum＋可覆盖 value 的 LWW＋LSM”的教学组合，不把两份实现拼成一个万能生产默认。后面专门画一次 Dynamo 风格 sloppy quorum 的替代策略，切换时明确换了成功条件。<a href="#ref-1">[1]</a><a href="#ref-2">[2]</a></p></div><div class="lang-en"><p>Dynamo 2007 uses highly available writes, versioning and application reconciliation; Cassandra uses timestamp LWW and tunable consistency levels. Our teaching combination is fixed-owner quorum, LWW for replaceable values and an LSM engine. The later Dynamo-style sloppy alternative explicitly changes the success condition. <a href="#ref-1">[1]</a><a href="#ref-2">[2]</a></p></div></div>
+<table><thead><tr><th><span class="lang-zh">教学假设</span><span class="lang-en">Teaching assumption</span></th><th><span class="lang-zh">取值与边界</span><span class="lang-en">Value and boundary</span></th><th><span class="lang-zh">它改变的决定</span><span class="lang-en">Design consequence</span></th></tr></thead><tbody><tr><td><span class="lang-zh">A1 · 范围</span><span class="lang-en">A1 · Scope</span></td><td><span class="lang-zh">单地域，副本跨 3 个机架；单 key 操作</span><span class="lang-en">One region, replicas across 3 racks; single-key operations</span></td><td><span class="lang-zh">先避开跨洲同步；机架并非独立地域</span><span class="lang-en">Exclude transoceanic sync; racks are not independent regions</span></td></tr>
+<tr><td><span class="lang-zh">A2 · 记录</span><span class="lang-en">A2 · Records</span></td><td><span class="lang-zh">一亿 key；平均 value 1 KB，上限 10 KB</span><span class="lang-en">100M keys; average value 1 KB, cap 10 KB</span></td><td><span class="lang-zh">十进制单位，原始估算只数 value</span><span class="lang-en">Decimal units; raw estimate counts values only</span></td></tr>
+<tr><td><span class="lang-zh">A3 · 流量</span><span class="lang-en">A3 · Traffic</span></td><td><span class="lang-zh">峰值写 10,000/s，读 50,000/s</span><span class="lang-en">Peak 10,000 writes/s, 50,000 reads/s</span></td><td><span class="lang-zh">两者独立预算；已有 key 被覆盖，不都新增</span><span class="lang-en">Separate budgets; writes include overwrites, not just new keys</span></td></tr>
+<tr><td><span class="lang-zh">A4 · 副本与确认</span><span class="lang-en">A4 · Replication and confirmation</span></td><td><span class="lang-zh">固定 N=3、W=2、R=2</span><span class="lang-en">Fixed N=3, W=2, R=2</span></td><td><span class="lang-zh">同一成员版本，正常路径不借临时副本</span><span class="lang-en">Same membership version; no fallback in normal operation</span></td></tr>
+<tr><td><span class="lang-zh">A5 · 延迟与耐久</span><span class="lang-en">A5 · Latency and durability</span></td><td><span class="lang-zh">ACK 为 WAL 同步并可读；4/7/40 ms</span><span class="lang-en">ACK after WAL sync and readable state; 4/7/40 ms</span></td><td><span class="lang-zh">三个值是假设响应时间；等第二快</span><span class="lang-en">Assumed response times; wait for the second-fastest</span></td></tr>
+<tr><td><span class="lang-zh">A6 · quorum 演示</span><span class="lang-en">A6 · Quorum example</span></td><td><span class="lang-zh">写已完成，无并发覆盖；版本顺序正确</span><span class="lang-en">Completed write, no concurrent overwrite, correct version order</span></td><td><span class="lang-zh">只在这些前提下推出读能选到该写</span><span class="lang-en">Only under these premises does reconciliation select that write</span></td></tr>
+<tr><td><span class="lang-zh">A7 · 空间与写放大</span><span class="lang-en">A7 · Space and write amplification</span></td><td><span class="lang-zh">SST 空间系数 2；SST 写放大 10</span><span class="lang-en">SST space factor 2; SST write amplification 10</span></td><td><span class="lang-zh">分别估空间和累计写入字节，不共用一个系数</span><span class="lang-en">Separate resident space from cumulative bytes written</span></td></tr>
+<tr><td><span class="lang-zh">A8 · 读容量与热点</span><span class="lang-en">A8 · Read capacity and hotspot</span></td><td><span class="lang-zh">10 台；每台预算 12,000 副本读/s；20% 读集中一个 key</span><span class="lang-en">10 machines, 12,000 replica reads/s each; one key gets 20%</span></td><td><span class="lang-zh">普通读均匀；热点读固定问其中两份</span><span class="lang-en">Ordinary reads uniform; hot reads target two fixed copies</span></td></tr>
+<tr><td><span class="lang-zh">A9 · 冲突时钟</span><span class="lang-en">A9 · Conflict clocks</span></td><td><span class="lang-zh">X 真实 1000 ms、戳 1200；Y 真实与戳均为 1100</span><span class="lang-en">X real 1000 ms, timestamp 1200; Y both 1100</span></td><td><span class="lang-zh">X 快 200 ms；后写 Y 仍会输</span><span class="lang-en">X is 200 ms ahead; later Y still loses</span></td></tr>
+<tr><td><span class="lang-zh">A10 · 故障修复</span><span class="lang-en">A10 · Failure repair</span></td><td><span class="lang-zh">教学 hint 保留 1 h；后台修复最长 2 天</span><span class="lang-en">Teaching hint retention 1 h; repair at most 2 days</span></td><td><span class="lang-zh">短暂故障用 hint；长故障要反熵与重建</span><span class="lang-en">Hints cover brief outages; longer ones need repair or rebuild</span></td></tr>
+<tr><td><span class="lang-zh">A11 · 删除</span><span class="lang-en">A11 · Deletion</span></td><td><span class="lang-zh">教学墓碑保留 7 天；允许离线最长 1 天</span><span class="lang-en">Teaching tombstone retention 7 days; maximum outage 1 day</span></td><td><span class="lang-zh">2+1=3&lt;7 留余量；回收还需安全条件</span><span class="lang-en">2+1=3&lt;7 leaves margin; purge still needs safety conditions</span></td></tr>
+<tr><td><span class="lang-zh">A12 · Bloom 演示</span><span class="lang-en">A12 · Bloom example</span></td><td><span class="lang-zh">10 个不含该 key 的候选文件，假阳性 1%</span><span class="lang-en">10 candidate files missing the key, 1% false positives</span></td><td><span class="lang-zh">仅算阴性点查；不把期望当 p99</span><span class="lang-en">Absent point lookups only; expectation is not p99</span></td></tr></tbody></table>
+<div class="bilingual"><div class="lang-zh"><p>以上全部是假设，不是某家公司的容量数据。机架间延迟、落盘时间、单台读预算和文件数量都需实测。图上选择的 4/7/40 ms 是三次响应的示例，不能据此给接口承诺 7 ms 的 p99。如果需要跨洲写确认，重新定义成员集合和延迟预算；如果不能丢并发更新，先改冲突语义，再谈提高 W。</p></div><div class="lang-en"><p>All figures are assumptions, not production data. Rack latency, persistence time, per-node read capacity and file counts need measurement. The 4/7/40 ms example cannot promise a 7 ms API p99. Cross-continent acknowledgement requires new membership and latency budgets; preserving concurrent updates requires new conflict semantics before a larger W.</p></div></div>
+</section>
+
+<section>
+<h2><span class="lang-zh">写路径：三份发送，两份确认</span><span class="lang-en">Write path: three sends, two acknowledgements</span></h2>
+<figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d1s1t d1s1d">
+          <title id="d1s1t">A coordinator receives one PUT</title>
+          <desc id="d1s1d">Client sends PUT k=v2 to Coordinator. The coordinator is a role, not a fixed primary.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <g class="is-new">
+            <rect x="120" y="18" width="824" height="366" rx="18" class="boundary"/>
+            <text x="136" y="38" class="tiny">WRITE · N=3, W=2 · one region</text>
+            <circle cx="44" cy="191" r="12" class="box"/><path d="M24 237 Q44 205 64 237" class="wire"/><text x="44" y="259" text-anchor="middle" class="label">Client</text>
+            <rect x="230" y="170" width="170" height="90" rx="12" class="box"/><text x="315" y="212" text-anchor="middle" class="label">Coordinator</text><text x="315" y="231" text-anchor="middle" class="sub">one request role</text>
+            <path d="M70 206 L220 206" class="wire"/><polygon points="230,206 220,211 220,201" class="head"/><text x="175" y="198" text-anchor="middle" class="tiny">PUT k=v2</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">先画一次请求的协调角色。Coordinator 负责定位副本、收响应和回客户端；它不是这个 key 的永久主库。N=3 是复制份数，W=2 是成功门槛。</span><span class="lang-en">Start with the coordinator of this request. It locates replicas, collects responses and replies to the client; it is not a permanent primary for this key. N=3 counts copies, W=2 the success threshold.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d1s2t d1s2d">
+          <title id="d1s2t">Fan out to three distinct physical replicas</title>
+          <desc id="d1s2d">Coordinator sends the same mutation in parallel to Replica A, Replica B and Replica C. There is no replica-to-replica relay.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="18" width="824" height="366" rx="18" class="boundary"/>
+          <text x="136" y="38" class="tiny">WRITE · N=3, W=2 · one region</text>
+          <circle cx="44" cy="191" r="12" class="box"/><path d="M24 237 Q44 205 64 237" class="wire"/><text x="44" y="259" text-anchor="middle" class="label">Client</text>
+          <rect x="230" y="170" width="170" height="90" rx="12" class="box"/><text x="315" y="212" text-anchor="middle" class="label">Coordinator</text><text x="315" y="231" text-anchor="middle" class="sub">one request role</text>
+          <path d="M70 206 L220 206" class="wire"/><polygon points="230,206 220,211 220,201" class="head"/><text x="175" y="198" text-anchor="middle" class="tiny">PUT k=v2</text>
+          <g class="is-new">
+            <path d="M690 65 V121 A70 12 0 0 0 830 121 V65" class="store"/><ellipse cx="760" cy="65" rx="70" ry="12" class="store"/><text x="760" y="103" text-anchor="middle" class="label">Replica A</text><text x="760" y="121" text-anchor="middle" class="sub">sync WAL + memory</text>
+            <path d="M690 185 V241 A70 12 0 0 0 830 241 V185" class="store"/><ellipse cx="760" cy="185" rx="70" ry="12" class="store"/><text x="760" y="223" text-anchor="middle" class="label">Replica B</text><text x="760" y="241" text-anchor="middle" class="sub">sync WAL + memory</text>
+            <path d="M690 285 V341 A70 12 0 0 0 830 341 V285" class="store"/><ellipse cx="760" cy="285" rx="70" ry="12" class="store"/><text x="760" y="323" text-anchor="middle" class="label">Replica C</text><text x="760" y="341" text-anchor="middle" class="sub">sync WAL + memory</text>
+            <path d="M305 170 L305 94 Q305 86 313 86 L680 86" class="wire"/><polygon points="690,86 680,91 680,81" class="head"/><text x="500" y="78" text-anchor="middle" class="tiny">PUT v2</text>
+            <path d="M400 206 L680 206" class="wire"/><polygon points="690,206 680,211 680,201" class="head"/><text x="540" y="198" text-anchor="middle" class="tiny">PUT v2</text>
+            <path d="M305 260 L305 298 Q305 306 313 306 L680 306" class="wire"/><polygon points="690,306 680,311 680,301" class="head"/><text x="500" y="298" text-anchor="middle" class="tiny">PUT v2</text>
+            <text x="136" y="365" class="tiny">10K PUT/s × 1 KB × 3 = 30 MB/s replica payload ingress</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">这一笔同时展开三个物理副本，不能画成 A→B→C 接力。10,000 次写/秒×1 KB×3=30 MB/s，是副本接收的 value 载荷总量；W 的大小不改变三份发送。</span><span class="lang-en">Expand all three physical replicas together, without an A→B→C relay. 10,000 writes/s × 1 KB × 3 = 30 MB/s of value payload entering replicas. Changing W does not change the three sends.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d1s3t d1s3d">
+          <title id="d1s3t">One durable acknowledgement is still below W</title>
+          <desc id="d1s3d">Replica A acknowledges its locally durable mutation to Coordinator after 4 ms. One acknowledgement does not meet W=2.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="18" width="824" height="366" rx="18" class="boundary"/>
+          <text x="136" y="38" class="tiny">WRITE · N=3, W=2 · one region</text>
+          <circle cx="44" cy="191" r="12" class="box"/><path d="M24 237 Q44 205 64 237" class="wire"/><text x="44" y="259" text-anchor="middle" class="label">Client</text>
+          <rect x="230" y="170" width="170" height="90" rx="12" class="box"/><text x="315" y="212" text-anchor="middle" class="label">Coordinator</text><text x="315" y="231" text-anchor="middle" class="sub">one request role</text>
+          <path d="M70 206 L220 206" class="wire"/><polygon points="230,206 220,211 220,201" class="head"/><text x="175" y="198" text-anchor="middle" class="tiny">PUT k=v2</text>
+          <path d="M690 65 V121 A70 12 0 0 0 830 121 V65" class="store"/><ellipse cx="760" cy="65" rx="70" ry="12" class="store"/><text x="760" y="103" text-anchor="middle" class="label">Replica A</text><text x="760" y="121" text-anchor="middle" class="sub">sync WAL + memory</text>
+          <path d="M690 185 V241 A70 12 0 0 0 830 241 V185" class="store"/><ellipse cx="760" cy="185" rx="70" ry="12" class="store"/><text x="760" y="223" text-anchor="middle" class="label">Replica B</text><text x="760" y="241" text-anchor="middle" class="sub">sync WAL + memory</text>
+          <path d="M690 285 V341 A70 12 0 0 0 830 341 V285" class="store"/><ellipse cx="760" cy="285" rx="70" ry="12" class="store"/><text x="760" y="323" text-anchor="middle" class="label">Replica C</text><text x="760" y="341" text-anchor="middle" class="sub">sync WAL + memory</text>
+          <path d="M305 170 L305 94 Q305 86 313 86 L680 86" class="wire"/><polygon points="690,86 680,91 680,81" class="head"/><text x="500" y="78" text-anchor="middle" class="tiny">PUT v2</text>
+          <path d="M400 206 L680 206" class="wire"/><polygon points="690,206 680,211 680,201" class="head"/><text x="540" y="198" text-anchor="middle" class="tiny">PUT v2</text>
+          <path d="M305 260 L305 298 Q305 306 313 306 L680 306" class="wire"/><polygon points="690,306 680,311 680,301" class="head"/><text x="500" y="298" text-anchor="middle" class="tiny">PUT v2</text>
+          <text x="136" y="365" class="tiny">10K PUT/s × 1 KB × 3 = 30 MB/s replica payload ingress</text>
+          <g class="is-new">
+            <path d="M690 104 L331 104 Q323 104 323 112 L323 160" class="wire reply"/><polygon points="323,170 318,160 328,160" class="head reply"/><text x="500" y="120" text-anchor="middle" class="tiny">ACK 4 ms</text>
+            <rect x="420" y="145" width="150" height="20" rx="10" class="badge"/><text x="495" y="159" text-anchor="middle" class="badge-text">at 4 ms: 1 / 2</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">A 在假设的 4 ms 回 ACK；只收到一份还不能成功。这里的 ACK 明确定义为 WAL 已同步到持久介质且内存状态可读，不能把仅写到操作系统缓存说成同样耐久。</span><span class="lang-en">A replies at the assumed 4 ms, still below W. In this design an ACK means a synced durable WAL and readable memory state, not merely a write into the OS buffer.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d1s4t d1s4d">
+          <title id="d1s4t">The second acknowledgement completes the client write</title>
+          <desc id="d1s4d">Replica B acknowledges to Coordinator after 7 ms. Coordinator now has W=2 acknowledgements and returns success to Client.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="18" width="824" height="366" rx="18" class="boundary"/>
+          <text x="136" y="38" class="tiny">WRITE · N=3, W=2 · one region</text>
+          <circle cx="44" cy="191" r="12" class="box"/><path d="M24 237 Q44 205 64 237" class="wire"/><text x="44" y="259" text-anchor="middle" class="label">Client</text>
+          <rect x="230" y="170" width="170" height="90" rx="12" class="box"/><text x="315" y="212" text-anchor="middle" class="label">Coordinator</text><text x="315" y="231" text-anchor="middle" class="sub">one request role</text>
+          <path d="M70 206 L220 206" class="wire"/><polygon points="230,206 220,211 220,201" class="head"/><text x="175" y="198" text-anchor="middle" class="tiny">PUT k=v2</text>
+          <path d="M690 65 V121 A70 12 0 0 0 830 121 V65" class="store"/><ellipse cx="760" cy="65" rx="70" ry="12" class="store"/><text x="760" y="103" text-anchor="middle" class="label">Replica A</text><text x="760" y="121" text-anchor="middle" class="sub">sync WAL + memory</text>
+          <path d="M690 185 V241 A70 12 0 0 0 830 241 V185" class="store"/><ellipse cx="760" cy="185" rx="70" ry="12" class="store"/><text x="760" y="223" text-anchor="middle" class="label">Replica B</text><text x="760" y="241" text-anchor="middle" class="sub">sync WAL + memory</text>
+          <path d="M690 285 V341 A70 12 0 0 0 830 341 V285" class="store"/><ellipse cx="760" cy="285" rx="70" ry="12" class="store"/><text x="760" y="323" text-anchor="middle" class="label">Replica C</text><text x="760" y="341" text-anchor="middle" class="sub">sync WAL + memory</text>
+          <path d="M305 170 L305 94 Q305 86 313 86 L680 86" class="wire"/><polygon points="690,86 680,91 680,81" class="head"/><text x="500" y="78" text-anchor="middle" class="tiny">PUT v2</text>
+          <path d="M400 206 L680 206" class="wire"/><polygon points="690,206 680,211 680,201" class="head"/><text x="540" y="198" text-anchor="middle" class="tiny">PUT v2</text>
+          <path d="M305 260 L305 298 Q305 306 313 306 L680 306" class="wire"/><polygon points="690,306 680,311 680,301" class="head"/><text x="500" y="298" text-anchor="middle" class="tiny">PUT v2</text>
+          <text x="136" y="365" class="tiny">10K PUT/s × 1 KB × 3 = 30 MB/s replica payload ingress</text>
+          <path d="M690 104 L331 104 Q323 104 323 112 L323 160" class="wire reply"/><polygon points="323,170 318,160 328,160" class="head reply"/><text x="500" y="120" text-anchor="middle" class="tiny">ACK 4 ms</text>
+          <rect x="420" y="145" width="150" height="20" rx="10" class="badge"/><text x="495" y="159" text-anchor="middle" class="badge-text">at 4 ms: 1 / 2</text>
+          <g class="is-new">
+            <path d="M690 224 L410 224" class="wire reply"/><polygon points="400,224 410,219 410,229" class="head reply"/><text x="540" y="245" text-anchor="middle" class="tiny">ACK 7 ms</text>
+            <path d="M230 224 L80 224" class="wire reply"/><polygon points="70,224 80,219 80,229" class="head reply"/><text x="175" y="246" text-anchor="middle" class="tiny">200 · W=2</text>
+            <rect x="600" y="145" width="154" height="20" rx="10" class="badge"/><text x="677" y="159" text-anchor="middle" class="badge-text">2 / 2 at 7 ms</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">B 在 7 ms 回到 Coordinator，凑齐两份后才逐跳回客户端。等待的是三份响应中第二快的一份，约 7 ms 加协调开销；不是把 4+7+40=51 ms 串行相加，也不是等最慢的 40 ms。</span><span class="lang-en">B returns to Coordinator at 7 ms, meeting W=2 before the client reply. Wait for the second-fastest of three, about 7 ms plus overhead, not 4+7+40=51 ms or the slowest 40 ms.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d1s5t d1s5d">
+          <title id="d1s5t">The third replica finishes after client success</title>
+          <desc id="d1s5d">Replica C acknowledges the same earlier fan-out to Coordinator at 40 ms. Client success was already sent after A and B; no extra client acknowledgement is needed.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="18" width="824" height="366" rx="18" class="boundary"/>
+          <text x="136" y="38" class="tiny">WRITE · N=3, W=2 · one region</text>
+          <circle cx="44" cy="191" r="12" class="box"/><path d="M24 237 Q44 205 64 237" class="wire"/><text x="44" y="259" text-anchor="middle" class="label">Client</text>
+          <rect x="230" y="170" width="170" height="90" rx="12" class="box"/><text x="315" y="212" text-anchor="middle" class="label">Coordinator</text><text x="315" y="231" text-anchor="middle" class="sub">one request role</text>
+          <path d="M70 206 L220 206" class="wire"/><polygon points="230,206 220,211 220,201" class="head"/><text x="175" y="198" text-anchor="middle" class="tiny">PUT k=v2</text>
+          <path d="M690 65 V121 A70 12 0 0 0 830 121 V65" class="store"/><ellipse cx="760" cy="65" rx="70" ry="12" class="store"/><text x="760" y="103" text-anchor="middle" class="label">Replica A</text><text x="760" y="121" text-anchor="middle" class="sub">sync WAL + memory</text>
+          <path d="M690 185 V241 A70 12 0 0 0 830 241 V185" class="store"/><ellipse cx="760" cy="185" rx="70" ry="12" class="store"/><text x="760" y="223" text-anchor="middle" class="label">Replica B</text><text x="760" y="241" text-anchor="middle" class="sub">sync WAL + memory</text>
+          <path d="M690 285 V341 A70 12 0 0 0 830 341 V285" class="store"/><ellipse cx="760" cy="285" rx="70" ry="12" class="store"/><text x="760" y="323" text-anchor="middle" class="label">Replica C</text><text x="760" y="341" text-anchor="middle" class="sub">sync WAL + memory</text>
+          <path d="M305 170 L305 94 Q305 86 313 86 L680 86" class="wire"/><polygon points="690,86 680,91 680,81" class="head"/><text x="500" y="78" text-anchor="middle" class="tiny">PUT v2</text>
+          <path d="M400 206 L680 206" class="wire"/><polygon points="690,206 680,211 680,201" class="head"/><text x="540" y="198" text-anchor="middle" class="tiny">PUT v2</text>
+          <path d="M305 260 L305 298 Q305 306 313 306 L680 306" class="wire"/><polygon points="690,306 680,311 680,301" class="head"/><text x="500" y="298" text-anchor="middle" class="tiny">PUT v2</text>
+          <text x="136" y="365" class="tiny">10K PUT/s × 1 KB × 3 = 30 MB/s replica payload ingress</text>
+          <path d="M690 104 L331 104 Q323 104 323 112 L323 160" class="wire reply"/><polygon points="323,170 318,160 328,160" class="head reply"/><text x="500" y="120" text-anchor="middle" class="tiny">ACK 4 ms</text>
+          <rect x="420" y="145" width="150" height="20" rx="10" class="badge"/><text x="495" y="159" text-anchor="middle" class="badge-text">at 4 ms: 1 / 2</text>
+          <path d="M690 224 L410 224" class="wire reply"/><polygon points="400,224 410,219 410,229" class="head reply"/><text x="540" y="245" text-anchor="middle" class="tiny">ACK 7 ms</text>
+          <path d="M230 224 L80 224" class="wire reply"/><polygon points="70,224 80,219 80,229" class="head reply"/><text x="175" y="246" text-anchor="middle" class="tiny">200 · W=2</text>
+          <rect x="600" y="145" width="154" height="20" rx="10" class="badge"/><text x="677" y="159" text-anchor="middle" class="badge-text">2 / 2 at 7 ms</text>
+          <g class="is-new">
+            <path d="M690 324 L331 324 Q323 324 323 316 L323 270" class="wire reply"/><polygon points="323,260 328,270 318,270" class="head reply"/><text x="500" y="343" text-anchor="middle" class="tiny">ACK 40 ms</text>
+            <text x="710" y="365" class="tiny">C is late, not omitted</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">最后补上 C 的晚到回程：它一直是这次写的目标，只是没有阻塞 7 ms 时的客户端确认。W=1 同样要发三份；故障后没写到的副本需要修复，不会因为客户端收到成功就自动追平。</span><span class="lang-en">Finish C’s late reply. It was always a target; it simply did not block the client at 7 ms. W=1 still sends three copies. A missed replica needs repair even after client success.</span></figcaption>
+      </div>
+    </figure>
+<h3><span class="lang-zh">正常路径：角色、放置、耐久分开说</span><span class="lang-en">Walkthrough: separate role, placement and durability</span></h3>
+<div class="bilingual"><div class="lang-zh"><p>Client 把一次 PUT 交给 Coordinator，后者按照 Ch05 的成员版本定位这个 key 的三个 owner。虚拟节点可能连续属于同一物理机，所以选副本时要去重，并尽量跨机架。Coordinator 只负责这次请求的聚合，可以由接入节点或客户端侧的路由角色承担；图把它单独画出来方便解释，不强迫新增一层独立服务。副本都是直接接收同一 mutation，既不经 A 转发给 B，也不经 B 转发给 C。</p></div><div class="lang-en"><p>Client gives a PUT to Coordinator, which resolves three owners using the membership version from Ch05. Consecutive virtual nodes can share a physical machine, so deduplicate and spread replicas across racks. Coordinator aggregates this request and can be a receiving node or routing role, without requiring a new service. All replicas receive the same mutation directly, never through an A→B→C relay.</p></div></div>
+<div class="bilingual"><div class="lang-zh"><p>W=2 是等多少份 ACK，不是发多少份请求。成功点只取收到第二份耐久 ACK 的时刻；本例先到 A、再到 B，C 仍在处理。返回以后 Coordinator 仍要尽力完成 C，失败则进入 hint 或后台修复。图上 C 的箭头是在最后一帧补画的，为了突出“晚到不等于没发送”；它在执行上与前两份并行发送，不能照动画顺序写成延后才发第三份。</p></div><div class="lang-en"><p>W=2 counts waited-for ACKs, not sends. Success occurs at the second durable ACK; A and B finish first while C continues. Complete C or repair a failure afterward. The animation draws C’s reply last to emphasize lateness, but all requests were sent in parallel; animation order does not postpone the third send.</p></div></div>
+<h3><span class="lang-zh">为什么这样选：容量落到真正的线和盘上</span><span class="lang-en">Why: charge capacity to actual links and storage</span></h3>
+<div class="bilingual"><div class="lang-zh"><p>一亿 key×1,000 B=100 GB value；乘三副本是 300 GB。教学再把 SST 空间系数设为 2，得到约 600 GB 活跃文件预算，未计 key、索引、WAL、备份和 compaction 临时重叠。若要求已规划占用最多到总容量的 80%，则 600÷0.8=750 GB，仍只是同一估算口径的总量下限。不能从“一亿”直接推出机器数，更不能用压缩后的容量再忘记乘副本。</p></div><div class="lang-en"><p>100M keys × 1,000 B = 100 GB of values; three copies give 300 GB. A teaching SST space factor of 2 gives 600 GB of active files, excluding keys, indexes, WAL, backups and temporary compaction overlap. Keeping that planned occupancy below 80% requires 600÷0.8=750 GB, still a scoped aggregate lower bound, not a machine count.</p></div></div>
+<div class="bilingual"><div class="lang-zh"><p>峰值写载荷是 10,000×1 KB=10 MB/s。发送到三份副本，副本总接收约 30 MB/s，也就是 240 Mb/s；W 改成 1 或 3 都不改变这笔。若 Coordinator 自身也存一份，额外跨节点 value 复制约为两份、20 MB/s；若 Coordinator 是独立代理，则三份都穿网络。协议、索引和修复另加。旧稿把 30 MB/s 统称“复制带宽”，容易混淆网络拓扑和集群载荷，图注现在明确计数边界。</p></div><div class="lang-en"><p>Peak write payload is 10,000 × 1 KB = 10 MB/s. Three replica destinations receive 30 MB/s total, or 240 Mb/s, whether W=1 or W=3. If Coordinator stores one copy, extra cross-node value copies are about 20 MB/s; an independent proxy sends all three over the network. Add protocol, indexing and repair separately rather than calling every topology “30 MB/s replication bandwidth.”</p></div></div>
+<h3><span class="lang-zh">故障窗口：超时与重试不是撤销</span><span class="lang-en">Failure window: timeout and retry do not undo a write</span></h3>
+<div class="bilingual"><div class="lang-zh"><p>A 已落盘，B 的 ACK 丢了，Coordinator 等不到 W 时客户端可能收到超时；B、C 之后仍可能完成。系统没有把这次写回滚，所以响应里需要区分成功、确定拒绝和结果未知。盲目生成一个新的 mutation_id 重试，会把重复业务动作变成另一笔合法更新。对覆盖值，重试同一内容、同一时间戳与同一 mutation 标识，才能把它视作同一 mutation；条件扣减仍需另一个串行化保证。</p></div><div class="lang-en"><p>A can persist while B’s ACK is lost; the client times out even though B and C may finish later. Nothing rolled back the mutation. Distinguish success, definite rejection and unknown outcome. Retrying with a new mutation_id creates another business action. For an overwrite, retain content, timestamp and identifier; conditional deductions still require serialization.</p></div></div>
+<div class="bilingual"><div class="lang-zh"><p>替代方案按契约选择。W=1 缩短等待，却放大“确认后仅存活一份”的丢失窗口；W=3 等三份，任何一份不可达都不能成功。三台落在同一宿主机或同一供电域，W=3 也挡不住共同故障。先问确认要抵御什么故障，再写副本放置和落盘规则。异步复制只能补传播路径，不能事后把已经丢掉的唯一耐久副本救回来。</p></div><div class="lang-en"><p>Choose W from the contract. W=1 reduces wait but enlarges the window with only one durable surviving copy; W=3 fails if any owner is unreachable. Three ACKs in one host or power domain do not resist correlated failure. Specify the failure, placement and persistence rule; asynchronous propagation cannot recover a lost unique durable copy.</p></div></div>
+</section>
+
+<section>
+<h2><span class="lang-zh">读路径：集合相交，还要正确解释版本</span><span class="lang-en">Read path: intersect sets, then interpret versions</span></h2>
+<figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d2s1t d2s1d">
+          <title id="d2s1t">Choose a read set inside the same replica universe</title>
+          <desc id="d2s1d">Client sends GET k to Coordinator. The fixed universe is A,B,C; the completed write set was B,C. This read chooses A,B. Replica C is deliberately off-board because it is not contacted.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <g class="is-new">
+            <rect x="120" y="18" width="824" height="366" rx="18" class="boundary"/>
+            <text x="136" y="38" class="tiny">READ · fixed universe {A,B,C} · W={B,C}, R={A,B}</text>
+            <circle cx="44" cy="191" r="12" class="box"/><path d="M24 237 Q44 205 64 237" class="wire"/><text x="44" y="259" text-anchor="middle" class="label">Client</text>
+            <rect x="230" y="170" width="170" height="90" rx="12" class="box"/><text x="315" y="212" text-anchor="middle" class="label">Coordinator</text><text x="315" y="231" text-anchor="middle" class="sub">one request role</text>
+            <path d="M70 206 L220 206" class="wire"/><polygon points="230,206 220,211 220,201" class="head"/><text x="175" y="198" text-anchor="middle" class="tiny">GET k</text>
+            <path d="M690 65 V121 A70 12 0 0 0 830 121 V65" class="store"/><ellipse cx="760" cy="65" rx="70" ry="12" class="store"/><text x="760" y="103" text-anchor="middle" class="label">Replica A</text><text x="760" y="121" text-anchor="middle" class="sub">v1 @ 100</text>
+            <path d="M690 185 V241 A70 12 0 0 0 830 241 V185" class="store"/><ellipse cx="760" cy="185" rx="70" ry="12" class="store"/><text x="760" y="223" text-anchor="middle" class="label">Replica B</text><text x="760" y="241" text-anchor="middle" class="sub">v2 @ 200</text>
+            <path d="M305 170 L305 94 Q305 86 313 86 L680 86" class="wire"/><polygon points="690,86 680,91 680,81" class="head"/><text x="500" y="78" text-anchor="middle" class="tiny">GET k</text>
+            <path d="M400 206 L680 206" class="wire"/><polygon points="690,206 680,211 680,201" class="head"/><text x="540" y="198" text-anchor="middle" class="tiny">GET k</text>
+            <text x="136" y="365" class="tiny">Assume: completed PUT, no concurrent update, correct version ordering</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">写集合取 {B,C}，读集合取 {A,B}，两者都属于同一个三副本全集。交集下限 W+R−N=2+2−3=1；C 不在这次读集合中，省略它的节点。</span><span class="lang-en">Use write set {B,C} and read set {A,B}, both inside the same three-replica universe. Their overlap is at least W+R−N=2+2−3=1. C is omitted because this read does not contact it.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d2s2t d2s2d">
+          <title id="d2s2t">One stale reply does not complete an R=2 read</title>
+          <desc id="d2s2d">Replica A returns v1 at timestamp 100 to Coordinator. Coordinator must still wait for the second response.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="18" width="824" height="366" rx="18" class="boundary"/>
+          <text x="136" y="38" class="tiny">READ · fixed universe {A,B,C} · W={B,C}, R={A,B}</text>
+          <circle cx="44" cy="191" r="12" class="box"/><path d="M24 237 Q44 205 64 237" class="wire"/><text x="44" y="259" text-anchor="middle" class="label">Client</text>
+          <rect x="230" y="170" width="170" height="90" rx="12" class="box"/><text x="315" y="212" text-anchor="middle" class="label">Coordinator</text><text x="315" y="231" text-anchor="middle" class="sub">one request role</text>
+          <path d="M70 206 L220 206" class="wire"/><polygon points="230,206 220,211 220,201" class="head"/><text x="175" y="198" text-anchor="middle" class="tiny">GET k</text>
+          <path d="M690 65 V121 A70 12 0 0 0 830 121 V65" class="store"/><ellipse cx="760" cy="65" rx="70" ry="12" class="store"/><text x="760" y="103" text-anchor="middle" class="label">Replica A</text><text x="760" y="121" text-anchor="middle" class="sub">v1 @ 100</text>
+          <path d="M690 185 V241 A70 12 0 0 0 830 241 V185" class="store"/><ellipse cx="760" cy="185" rx="70" ry="12" class="store"/><text x="760" y="223" text-anchor="middle" class="label">Replica B</text><text x="760" y="241" text-anchor="middle" class="sub">v2 @ 200</text>
+          <path d="M305 170 L305 94 Q305 86 313 86 L680 86" class="wire"/><polygon points="690,86 680,91 680,81" class="head"/><text x="500" y="78" text-anchor="middle" class="tiny">GET k</text>
+          <path d="M400 206 L680 206" class="wire"/><polygon points="690,206 680,211 680,201" class="head"/><text x="540" y="198" text-anchor="middle" class="tiny">GET k</text>
+          <text x="136" y="365" class="tiny">Assume: completed PUT, no concurrent update, correct version ordering</text>
+          <g class="is-new">
+            <path d="M690 104 L331 104 Q323 104 323 112 L323 160" class="wire reply"/><polygon points="323,170 318,160 328,160" class="head reply"/><text x="500" y="120" text-anchor="middle" class="tiny">v1 @ 100</text>
+            <rect x="420" y="315" width="152" height="20" rx="10" class="badge"/><text x="496" y="329" text-anchor="middle" class="badge-text">after A: 1 / 2</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">A 返回旧的 v1，Coordinator 仍需等第二份。R=2 的意义在于比较两份响应；如果第一份回来就返回，实际执行的是 R=1，图上的交集证明已经失效。</span><span class="lang-en">A returns stale v1, so Coordinator still waits. R=2 compares two responses. Returning the first would execute R=1 and invalidate the stated intersection argument.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d2s3t d2s3d">
+          <title id="d2s3t">The intersection replica supplies the completed write</title>
+          <desc id="d2s3d">Replica B returns v2 at timestamp 200 to Coordinator. B is in both sets. Under the stated assumptions Coordinator selects v2.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="18" width="824" height="366" rx="18" class="boundary"/>
+          <text x="136" y="38" class="tiny">READ · fixed universe {A,B,C} · W={B,C}, R={A,B}</text>
+          <circle cx="44" cy="191" r="12" class="box"/><path d="M24 237 Q44 205 64 237" class="wire"/><text x="44" y="259" text-anchor="middle" class="label">Client</text>
+          <rect x="230" y="170" width="170" height="90" rx="12" class="box"/><text x="315" y="212" text-anchor="middle" class="label">Coordinator</text><text x="315" y="231" text-anchor="middle" class="sub">one request role</text>
+          <path d="M70 206 L220 206" class="wire"/><polygon points="230,206 220,211 220,201" class="head"/><text x="175" y="198" text-anchor="middle" class="tiny">GET k</text>
+          <path d="M690 65 V121 A70 12 0 0 0 830 121 V65" class="store"/><ellipse cx="760" cy="65" rx="70" ry="12" class="store"/><text x="760" y="103" text-anchor="middle" class="label">Replica A</text><text x="760" y="121" text-anchor="middle" class="sub">v1 @ 100</text>
+          <path d="M690 185 V241 A70 12 0 0 0 830 241 V185" class="store"/><ellipse cx="760" cy="185" rx="70" ry="12" class="store"/><text x="760" y="223" text-anchor="middle" class="label">Replica B</text><text x="760" y="241" text-anchor="middle" class="sub">v2 @ 200</text>
+          <path d="M305 170 L305 94 Q305 86 313 86 L680 86" class="wire"/><polygon points="690,86 680,91 680,81" class="head"/><text x="500" y="78" text-anchor="middle" class="tiny">GET k</text>
+          <path d="M400 206 L680 206" class="wire"/><polygon points="690,206 680,211 680,201" class="head"/><text x="540" y="198" text-anchor="middle" class="tiny">GET k</text>
+          <text x="136" y="365" class="tiny">Assume: completed PUT, no concurrent update, correct version ordering</text>
+          <path d="M690 104 L331 104 Q323 104 323 112 L323 160" class="wire reply"/><polygon points="323,170 318,160 328,160" class="head reply"/><text x="500" y="120" text-anchor="middle" class="tiny">v1 @ 100</text>
+          <rect x="420" y="315" width="152" height="20" rx="10" class="badge"/><text x="496" y="329" text-anchor="middle" class="badge-text">after A: 1 / 2</text>
+          <g class="is-new">
+            <path d="M690 224 L410 224" class="wire reply"/><polygon points="400,224 410,219 410,229" class="head reply"/><text x="540" y="245" text-anchor="middle" class="tiny">v2 @ 200</text>
+            <rect x="600" y="315" width="182" height="20" rx="10" class="badge"/><text x="691" y="329" text-anchor="middle" class="badge-text">B: overlap + 2 / 2</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">B 位于交集，带回已完成写的 v2；200&gt;100，所以在版本顺序正确、没有并发覆盖的前提下选 v2。集合交集只证明接触到了写过的副本，如何解释冲突还要单独定义。</span><span class="lang-en">B supplies the completed v2. Since 200&gt;100, select it under correct ordering and no concurrent overwrite. Set overlap proves contact with a written replica; conflict interpretation remains a separate rule.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d2s4t d2s4d">
+          <title id="d2s4t">Return the reconciled value through the coordinator</title>
+          <desc id="d2s4d">Coordinator returns v2 to Client only after receiving and reconciling A and B. No replica replies directly to Client.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="18" width="824" height="366" rx="18" class="boundary"/>
+          <text x="136" y="38" class="tiny">READ · fixed universe {A,B,C} · W={B,C}, R={A,B}</text>
+          <circle cx="44" cy="191" r="12" class="box"/><path d="M24 237 Q44 205 64 237" class="wire"/><text x="44" y="259" text-anchor="middle" class="label">Client</text>
+          <rect x="230" y="170" width="170" height="90" rx="12" class="box"/><text x="315" y="212" text-anchor="middle" class="label">Coordinator</text><text x="315" y="231" text-anchor="middle" class="sub">one request role</text>
+          <path d="M70 206 L220 206" class="wire"/><polygon points="230,206 220,211 220,201" class="head"/><text x="175" y="198" text-anchor="middle" class="tiny">GET k</text>
+          <path d="M690 65 V121 A70 12 0 0 0 830 121 V65" class="store"/><ellipse cx="760" cy="65" rx="70" ry="12" class="store"/><text x="760" y="103" text-anchor="middle" class="label">Replica A</text><text x="760" y="121" text-anchor="middle" class="sub">v1 @ 100</text>
+          <path d="M690 185 V241 A70 12 0 0 0 830 241 V185" class="store"/><ellipse cx="760" cy="185" rx="70" ry="12" class="store"/><text x="760" y="223" text-anchor="middle" class="label">Replica B</text><text x="760" y="241" text-anchor="middle" class="sub">v2 @ 200</text>
+          <path d="M305 170 L305 94 Q305 86 313 86 L680 86" class="wire"/><polygon points="690,86 680,91 680,81" class="head"/><text x="500" y="78" text-anchor="middle" class="tiny">GET k</text>
+          <path d="M400 206 L680 206" class="wire"/><polygon points="690,206 680,211 680,201" class="head"/><text x="540" y="198" text-anchor="middle" class="tiny">GET k</text>
+          <text x="136" y="365" class="tiny">Assume: completed PUT, no concurrent update, correct version ordering</text>
+          <path d="M690 104 L331 104 Q323 104 323 112 L323 160" class="wire reply"/><polygon points="323,170 318,160 328,160" class="head reply"/><text x="500" y="120" text-anchor="middle" class="tiny">v1 @ 100</text>
+          <rect x="420" y="315" width="152" height="20" rx="10" class="badge"/><text x="496" y="329" text-anchor="middle" class="badge-text">after A: 1 / 2</text>
+          <path d="M690 224 L410 224" class="wire reply"/><polygon points="400,224 410,219 410,229" class="head reply"/><text x="540" y="245" text-anchor="middle" class="tiny">v2 @ 200</text>
+          <rect x="600" y="315" width="182" height="20" rx="10" class="badge"/><text x="691" y="329" text-anchor="middle" class="badge-text">B: overlap + 2 / 2</text>
+          <g class="is-new">
+            <path d="M230 224 L80 224" class="wire reply"/><polygon points="70,224 80,219 80,229" class="head reply"/><text x="175" y="246" text-anchor="middle" class="tiny">200 · v2</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">正常回程是 B→Coordinator→Client，A 的旧结果在 Coordinator 被比较掉。3/2/2 不是独立的线性一致协议：并发写、错误时钟、成员变化和超时仍需要各自的规则。</span><span class="lang-en">The result returns B→Coordinator→Client, after reconciliation with A. 3/2/2 alone is not a linearizability protocol: concurrency, clock errors, membership changes and timeouts need explicit rules.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d2s5t d2s5d">
+          <title id="d2s5t">Repair the stale copy without changing the read set</title>
+          <desc id="d2s5d">After returning v2, Coordinator sends an asynchronous read-repair mutation to Replica A. This example repairs after the client reply, not a claim about all Cassandra read-repair modes.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="18" width="824" height="366" rx="18" class="boundary"/>
+          <text x="136" y="38" class="tiny">READ · fixed universe {A,B,C} · W={B,C}, R={A,B}</text>
+          <circle cx="44" cy="191" r="12" class="box"/><path d="M24 237 Q44 205 64 237" class="wire"/><text x="44" y="259" text-anchor="middle" class="label">Client</text>
+          <rect x="230" y="170" width="170" height="90" rx="12" class="box"/><text x="315" y="212" text-anchor="middle" class="label">Coordinator</text><text x="315" y="231" text-anchor="middle" class="sub">one request role</text>
+          <path d="M70 206 L220 206" class="wire"/><polygon points="230,206 220,211 220,201" class="head"/><text x="175" y="198" text-anchor="middle" class="tiny">GET k</text>
+          <path d="M690 65 V121 A70 12 0 0 0 830 121 V65" class="store"/><ellipse cx="760" cy="65" rx="70" ry="12" class="store"/><text x="760" y="103" text-anchor="middle" class="label">Replica A</text><text x="760" y="121" text-anchor="middle" class="sub">v1 @ 100</text>
+          <path d="M690 185 V241 A70 12 0 0 0 830 241 V185" class="store"/><ellipse cx="760" cy="185" rx="70" ry="12" class="store"/><text x="760" y="223" text-anchor="middle" class="label">Replica B</text><text x="760" y="241" text-anchor="middle" class="sub">v2 @ 200</text>
+          <path d="M305 170 L305 94 Q305 86 313 86 L680 86" class="wire"/><polygon points="690,86 680,91 680,81" class="head"/><text x="500" y="78" text-anchor="middle" class="tiny">GET k</text>
+          <path d="M400 206 L680 206" class="wire"/><polygon points="690,206 680,211 680,201" class="head"/><text x="540" y="198" text-anchor="middle" class="tiny">GET k</text>
+          <text x="136" y="365" class="tiny">Assume: completed PUT, no concurrent update, correct version ordering</text>
+          <path d="M690 104 L331 104 Q323 104 323 112 L323 160" class="wire reply"/><polygon points="323,170 318,160 328,160" class="head reply"/><text x="500" y="120" text-anchor="middle" class="tiny">v1 @ 100</text>
+          <rect x="420" y="315" width="152" height="20" rx="10" class="badge"/><text x="496" y="329" text-anchor="middle" class="badge-text">after A: 1 / 2</text>
+          <path d="M690 224 L410 224" class="wire reply"/><polygon points="400,224 410,219 410,229" class="head reply"/><text x="540" y="245" text-anchor="middle" class="tiny">v2 @ 200</text>
+          <rect x="600" y="315" width="182" height="20" rx="10" class="badge"/><text x="691" y="329" text-anchor="middle" class="badge-text">B: overlap + 2 / 2</text>
+          <path d="M230 224 L80 224" class="wire reply"/><polygon points="70,224 80,219 80,229" class="head reply"/><text x="175" y="246" text-anchor="middle" class="tiny">200 · v2</text>
+          <g class="is-new">
+            <path d="M370 170 L370 158 Q370 150 378 150 L642 150 Q650 150 650 142 L650 124 Q650 116 658 116 L680 116" class="wire async"/><polygon points="690,116 680,121 680,111" class="head async"/>
+            <text x="510" y="142" text-anchor="middle" class="tiny">repair v2</text>
+            <text x="710" y="156" class="tiny">A: v1 → v2 after repair</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">最后增加读修复，把已经发现的差异写回 A。本图选择在返回后异步修复，因此客户端延迟不含这次修复等待；它只能修到这次读看到的副本，长期没人读的键仍需后台反熵。</span><span class="lang-en">Add read repair to A after the reply, so this example excludes repair wait from client latency. It only repairs observed copies; cold keys still need background anti-entropy.</span></figcaption>
+      </div>
+    </figure>
+<h3><span class="lang-zh">正常路径：把交集证明写完整</span><span class="lang-en">Walkthrough: complete the intersection proof</span></h3>
+<div class="bilingual"><div class="lang-zh"><p>全集 U={A,B,C}，最近一次已完成写被 B、C 确认。一次读取问 A、B，并收齐 R=2 份。若两个集合没有交集，就需要至少 W+R=4 个不同元素，但全集只有 3 个，因此交集至少为 W+R−N=1。图中的 B 同时属于两个集合，它带回 v2。不能因此把任意单份响应当成新值。</p></div><div class="lang-en"><p>Let U={A,B,C}; B and C confirmed the latest completed write. Read A and B and collect both. Disjoint sets would require W+R=4 distinct elements in a universe of 3, so overlap is at least W+R−N=1. B supplies v2. This does not make an arbitrary individual response fresh.</p></div></div>
+<div class="bilingual"><div class="lang-zh"><p>选 v2 还用了 A6：这次写已经完成、没有并发覆盖、版本顺序正确、成员全集一致且成功副本没有丢掉数据。少一条就要重新证明。交集解决“接触到谁”，冲突比较解决“保留哪份”。多个写可以各自过 quorum 并仍互相覆盖；普通 quorum 加 LWW 没有建立所有操作共享的实时顺序，也没有提供 compare-and-set。把这个证明称为完整的线性一致性协议，会漏掉下一组的时间戳反例。</p></div><div class="lang-en"><p>Selecting v2 also uses A6: completion, no concurrent overwrite, correct version order, unchanged membership and retained data. Overlap answers which copy is contacted; reconciliation answers which version wins. Multiple quorum writes may overwrite each other. Ordinary quorum plus LWW supplies neither a shared real-time order nor compare-and-set.</p></div></div>
+<table><thead><tr><th><span class="lang-zh">配置</span><span class="lang-en">Configuration</span></th><th><span class="lang-zh">固定副本下的等待</span><span class="lang-en">Wait within fixed owners</span></th><th><span class="lang-zh">失败与代价</span><span class="lang-en">Failure and cost</span></th></tr></thead><tbody><tr><td><span class="lang-zh">3/2/2</span><span class="lang-en">3/2/2</span></td><td><span class="lang-zh">读写各等两份；交集≥1</span><span class="lang-en">Two read and write replies each; overlap ≥1</span></td><td><span class="lang-zh">任意一台不可达仍可完成，两台不可达不行</span><span class="lang-en">One unavailable owner tolerated, two not</span></td></tr>
+<tr><td><span class="lang-zh">3/1/1</span><span class="lang-en">3/1/1</span></td><td><span class="lang-zh">写等一份，读等一份</span><span class="lang-en">One write ACK, one read reply</span></td><td><span class="lang-zh">集合可以错开；接受旧值和较弱耐久</span><span class="lang-en">Sets can miss; stale reads and weaker durability</span></td></tr>
+<tr><td><span class="lang-zh">3/3/1</span><span class="lang-en">3/3/1</span></td><td><span class="lang-zh">写等齐，读等一份</span><span class="lang-en">All writes, one read</span></td><td><span class="lang-zh">任一台不可达阻塞写；仍需冲突规则</span><span class="lang-en">Any unreachable owner blocks writes; reconcile conflicts</span></td></tr>
+<tr><td><span class="lang-zh">3/1/3</span><span class="lang-en">3/1/3</span></td><td><span class="lang-zh">写等一份，读等齐</span><span class="lang-en">One write ACK, all reads</span></td><td><span class="lang-zh">任一台不可达阻塞读；写后修复压力更大</span><span class="lang-en">Any unreachable owner blocks reads; more repair pressure</span></td></tr></tbody></table>
+<h3><span class="lang-zh">为什么这样选：读放大和热点要一起算</span><span class="lang-en">Why: account for read amplification and hotspots</span></h3>
+<div class="bilingual"><div class="lang-zh"><p>图采用两份完整 value 回给 Coordinator 的简化模型。读出口是 50,000×1 KB=50 MB/s，约 400 Mb/s；副本到 Coordinator 却是 50,000×2×1 KB=100 MB/s，约 800 Mb/s。不能只算客户端返回，也不能以为读写比 5:1 就只有五倍存储操作。产品可用摘要加一份完整结果降低正常带宽，摘要不一致再拉数据；图没有画摘要协议，所以这个 100 MB/s 是本图口径，不是 Cassandra 所有读请求的固定值。</p></div><div class="lang-en"><p>The simplified diagram returns two full values. Client egress is 50,000 × 1 KB = 50 MB/s, about 400 Mb/s; replicas send 50,000 × 2 × 1 KB = 100 MB/s, about 800 Mb/s, to Coordinator. A 5:1 client read/write ratio does not mean only five times the storage work. A digest plus one full value can reduce normal bytes, fetching data on mismatch. Our 100 MB/s belongs to the drawn model, not every Cassandra read.</p></div></div>
+<div class="bilingual"><div class="lang-zh"><p>A8 的十台机器在均匀分布下，每台平均 100,000÷10=10,000 次副本读/秒，低于 12,000 的计划预算。若一个共享 key 吃掉 20% 客户端读，它每秒有 10,000 次；剩余 40,000×2÷10=8,000 次普通副本读分到每台。热点固定读两台，这两台各约 8,000+10,000=18,000，超过预算 50%。即使三份均摊热点的两份读取，8,000+20,000÷3≈14,667 仍超预算。多加不拥有这个 key 的机器帮不上忙。</p></div><div class="lang-en"><p>With A8’s ten machines, uniform traffic averages 100,000÷10=10,000 replica reads/s each, below the 12,000 budget. A shared key receiving 20% of client reads gets 10,000/s. Ordinary traffic contributes 40,000×2÷10=8,000 per machine. Two fixed hot targets each get 18,000, 50% above budget. Even spreading two hot reads across three copies yields 8,000+20,000÷3≈14,667. Adding machines that do not own the key does not help.</p></div></div>
+<h3><span class="lang-zh">替代与故障：别让重试把热点继续放大</span><span class="lang-en">Alternatives and failures: retries can amplify a hotspot</span></h3>
+<div class="bilingual"><div class="lang-zh"><p>热点可缓存允许旧的可覆盖值，也可合并并发读取、拆分可聚合的计数或增加专用只读副本，但每一种都要说明失效和新鲜度。对余额直接拆成多个 key 不能自动恢复原子扣减。一次请求的超时重试还会把同一热点再问一轮，所以在 Coordinator 限制在途 RPC、设置总 deadline、控制重试次数；总超时到了就返回明确状态，而不是继续无上限占用副本线程。</p></div><div class="lang-en"><p>For suitable values, cache stale-tolerant state, coalesce reads, split aggregatable counters or add read-only copies, specifying freshness and invalidation. Splitting a balance does not restore atomic deductions. Retries multiply the same hotspot, so cap in-flight RPCs, use a total deadline and bound attempts rather than occupy replica threads indefinitely.</p></div></div>
+<div class="bilingual"><div class="lang-zh"><p>图在成功后异步修 A，是本章选定的读修复策略。修复必须保留 v2 的原版本，不能生成新的“修复时间戳”。读修复的覆盖取决于实际读到哪些副本与哪些 key，没人访问的冷键不会自动被它发现。成员版本改变后还要做范围交接和后台比较，不能拿旧的三副本全集证明新位置的数据可读。正常路径、迁移路径和修复路径应当各自有预算。</p></div><div class="lang-en"><p>Our example repairs A asynchronously after success, preserving v2’s original version. Read repair only covers observed copies and keys; cold keys are not discovered. Membership changes also need range handoff and background comparison. An old three-owner proof cannot prove data exists at new owners. Budget normal traffic, migration and repair separately.</p></div></div>
+</section>
+
+<section>
+<h2><span class="lang-zh">分区：严格 quorum 与 sloppy quorum 改了什么</span><span class="lang-en">Partition: what strict and sloppy quorum change</span></h2>
+<figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d3s1t d3s1d">
+          <title id="d3s1t">Only one normal replica is reachable</title>
+          <desc id="d3s1d">Client sends PUT to Coordinator, which receives one acknowledgement from Replica A. B and C are beyond the partition; their requests are attempted and cannot be delivered.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <g class="is-new">
+            <rect x="120" y="18" width="824" height="366" rx="18" class="boundary"/>
+            <text x="136" y="38" class="tiny">PARTITION · normal owners {A,B,C} · only A reachable</text>
+            <circle cx="44" cy="182" r="12" class="box"/><path d="M24 228 Q44 196 64 228" class="wire"/><text x="44" y="250" text-anchor="middle" class="label">Client</text>
+            <rect x="205" y="170" width="170" height="72" rx="12" class="box"/><text x="290" y="203" text-anchor="middle" class="label">Coordinator</text><text x="290" y="222" text-anchor="middle" class="sub">strict W=2 first</text>
+            <path d="M490 175 V227 A70 12 0 0 0 630 227 V175" class="store"/><ellipse cx="560" cy="175" rx="70" ry="12" class="store"/><text x="560" y="211" text-anchor="middle" class="label">Replica A</text><text x="560" y="229" text-anchor="middle" class="sub">reachable</text>
+            <path d="M730 65 V117 A70 12 0 0 0 870 117 V65" class="store"/><ellipse cx="800" cy="65" rx="70" ry="12" class="store"/><text x="800" y="101" text-anchor="middle" class="label">Replica B</text><text x="800" y="119" text-anchor="middle" class="sub">unreachable</text>
+            <path d="M730 275 V327 A70 12 0 0 0 870 327 V275" class="store"/><ellipse cx="800" cy="275" rx="70" ry="12" class="store"/><text x="800" y="311" text-anchor="middle" class="label">Replica C</text><text x="800" y="329" text-anchor="middle" class="sub">unreachable</text>
+            <path d="M660 56 V370" class="boundary"/><text x="680" y="60" class="tiny">partition</text>
+            <path d="M70 197 L195 197" class="wire"/><polygon points="205,197 195,202 195,192" class="head"/>
+            <text x="158" y="189" text-anchor="middle" class="tiny">PUT v3</text>
+            <path d="M375 197 L480 197" class="wire"/><polygon points="490,197 480,202 480,192" class="head"/>
+            <text x="430" y="189" text-anchor="middle" class="tiny">PUT</text>
+            <path d="M490 215 L385 215" class="wire reply"/><polygon points="375,215 385,210 385,220" class="head reply"/>
+            <text x="430" y="235" text-anchor="middle" class="tiny">1 ACK</text>
+            <path d="M270 170 L270 94 Q270 86 278 86 L720 86" class="wire muted"/><polygon points="730,86 720,91 720,81" class="head muted"/>
+            <text x="510" y="78" text-anchor="middle" class="tiny">attempt B</text>
+            <path d="M270 242 L270 252 Q270 260 278 260 L672 260 Q680 260 680 268 L680 288 Q680 296 688 296 L720 296" class="wire muted"/><polygon points="730,296 720,301 720,291" class="head muted"/>
+            <text x="490" y="253" text-anchor="middle" class="tiny">attempt C</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">先固定同一个故障：正常副本 {A,B,C} 里只剩 A 可达。拿到一份 ACK 不是多数；N=3、W=2 最多容忍一台不可达，这里有两台不可达。</span><span class="lang-en">Fix one failure: only A is reachable among normal owners {A,B,C}. One ACK is not a majority. N=3,W=2 tolerates at most one unavailable owner; here two are unavailable.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d3s2t d3s2d">
+          <title id="d3s2t">The failed RPCs return to the coordinator</title>
+          <desc id="d3s2d">Replica B and Replica C RPC timeouts are observed at Coordinator. Red paths terminate at Coordinator before any client failure is returned.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="18" width="824" height="366" rx="18" class="boundary"/>
+          <text x="136" y="38" class="tiny">PARTITION · normal owners {A,B,C} · only A reachable</text>
+          <circle cx="44" cy="182" r="12" class="box"/><path d="M24 228 Q44 196 64 228" class="wire"/><text x="44" y="250" text-anchor="middle" class="label">Client</text>
+          <rect x="205" y="170" width="170" height="72" rx="12" class="box"/><text x="290" y="203" text-anchor="middle" class="label">Coordinator</text><text x="290" y="222" text-anchor="middle" class="sub">strict W=2 first</text>
+          <path d="M490 175 V227 A70 12 0 0 0 630 227 V175" class="store"/><ellipse cx="560" cy="175" rx="70" ry="12" class="store"/><text x="560" y="211" text-anchor="middle" class="label">Replica A</text><text x="560" y="229" text-anchor="middle" class="sub">reachable</text>
+          <path d="M730 65 V117 A70 12 0 0 0 870 117 V65" class="store"/><ellipse cx="800" cy="65" rx="70" ry="12" class="store"/><text x="800" y="101" text-anchor="middle" class="label">Replica B</text><text x="800" y="119" text-anchor="middle" class="sub">unreachable</text>
+          <path d="M730 275 V327 A70 12 0 0 0 870 327 V275" class="store"/><ellipse cx="800" cy="275" rx="70" ry="12" class="store"/><text x="800" y="311" text-anchor="middle" class="label">Replica C</text><text x="800" y="329" text-anchor="middle" class="sub">unreachable</text>
+          <path d="M660 56 V370" class="boundary"/><text x="680" y="60" class="tiny">partition</text>
+          <path d="M70 197 L195 197" class="wire"/><polygon points="205,197 195,202 195,192" class="head"/>
+          <text x="158" y="189" text-anchor="middle" class="tiny">PUT v3</text>
+          <path d="M375 197 L480 197" class="wire"/><polygon points="490,197 480,202 480,192" class="head"/>
+          <text x="430" y="189" text-anchor="middle" class="tiny">PUT</text>
+          <path d="M490 215 L385 215" class="wire reply"/><polygon points="375,215 385,210 385,220" class="head reply"/>
+          <text x="430" y="235" text-anchor="middle" class="tiny">1 ACK</text>
+          <path d="M270 170 L270 94 Q270 86 278 86 L720 86" class="wire muted"/><polygon points="730,86 720,91 720,81" class="head muted"/>
+          <text x="510" y="78" text-anchor="middle" class="tiny">attempt B</text>
+          <path d="M270 242 L270 252 Q270 260 278 260 L672 260 Q680 260 680 268 L680 288 Q680 296 688 296 L720 296" class="wire muted"/><polygon points="730,296 720,301 720,291" class="head muted"/>
+          <text x="490" y="253" text-anchor="middle" class="tiny">attempt C</text>
+          <g class="is-new">
+            <path d="M730 104 L708 104 Q700 104 700 112 L700 137 Q700 145 692 145 L359.5 145 Q352 145 352 152.5 L352 160" class="wire fail"/><polygon points="352,170 347,160 357,160" class="head fail"/>
+            <text x="515" y="137" text-anchor="middle" class="tiny">B timeout</text>
+            <path d="M730 314 L708 314 Q700 314 700 322 L700 350 Q700 358 692 358 L238 358 Q230 358 230 350 L230 252" class="wire fail"/><polygon points="230,242 235,252 225,252" class="head fail"/>
+            <text x="710" y="357" class="tiny">C timeout</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">红线先终止在 Coordinator，表示两个副本 RPC 的超时由协调层收集。超时只是“未收到结果”，可能有请求已经落盘，不能等价成“确定没有写入”。</span><span class="lang-en">Red paths first terminate at Coordinator: it observes RPC timeouts. A timeout means no result arrived; some mutations may already have persisted, so it does not prove no write occurred.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d3s3t d3s3d">
+          <title id="d3s3t">Strict quorum cannot confirm on the minority side</title>
+          <desc id="d3s3d">Coordinator returns 503 to Client because only one of the fixed three owners acknowledged and W=2 is unmet.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="18" width="824" height="366" rx="18" class="boundary"/>
+          <text x="136" y="38" class="tiny">PARTITION · normal owners {A,B,C} · only A reachable</text>
+          <circle cx="44" cy="182" r="12" class="box"/><path d="M24 228 Q44 196 64 228" class="wire"/><text x="44" y="250" text-anchor="middle" class="label">Client</text>
+          <rect x="205" y="170" width="170" height="72" rx="12" class="box"/><text x="290" y="203" text-anchor="middle" class="label">Coordinator</text><text x="290" y="222" text-anchor="middle" class="sub">strict W=2 first</text>
+          <path d="M490 175 V227 A70 12 0 0 0 630 227 V175" class="store"/><ellipse cx="560" cy="175" rx="70" ry="12" class="store"/><text x="560" y="211" text-anchor="middle" class="label">Replica A</text><text x="560" y="229" text-anchor="middle" class="sub">reachable</text>
+          <path d="M730 65 V117 A70 12 0 0 0 870 117 V65" class="store"/><ellipse cx="800" cy="65" rx="70" ry="12" class="store"/><text x="800" y="101" text-anchor="middle" class="label">Replica B</text><text x="800" y="119" text-anchor="middle" class="sub">unreachable</text>
+          <path d="M730 275 V327 A70 12 0 0 0 870 327 V275" class="store"/><ellipse cx="800" cy="275" rx="70" ry="12" class="store"/><text x="800" y="311" text-anchor="middle" class="label">Replica C</text><text x="800" y="329" text-anchor="middle" class="sub">unreachable</text>
+          <path d="M660 56 V370" class="boundary"/><text x="680" y="60" class="tiny">partition</text>
+          <path d="M70 197 L195 197" class="wire"/><polygon points="205,197 195,202 195,192" class="head"/>
+          <text x="158" y="189" text-anchor="middle" class="tiny">PUT v3</text>
+          <path d="M375 197 L480 197" class="wire"/><polygon points="490,197 480,202 480,192" class="head"/>
+          <text x="430" y="189" text-anchor="middle" class="tiny">PUT</text>
+          <path d="M490 215 L385 215" class="wire reply"/><polygon points="375,215 385,210 385,220" class="head reply"/>
+          <text x="430" y="235" text-anchor="middle" class="tiny">1 ACK</text>
+          <path d="M270 170 L270 94 Q270 86 278 86 L720 86" class="wire muted"/><polygon points="730,86 720,91 720,81" class="head muted"/>
+          <text x="510" y="78" text-anchor="middle" class="tiny">attempt B</text>
+          <path d="M270 242 L270 252 Q270 260 278 260 L672 260 Q680 260 680 268 L680 288 Q680 296 688 296 L720 296" class="wire muted"/><polygon points="730,296 720,301 720,291" class="head muted"/>
+          <text x="490" y="253" text-anchor="middle" class="tiny">attempt C</text>
+          <path d="M730 104 L708 104 Q700 104 700 112 L700 137 Q700 145 692 145 L359.5 145 Q352 145 352 152.5 L352 160" class="wire fail"/><polygon points="352,170 347,160 357,160" class="head fail"/>
+          <text x="515" y="137" text-anchor="middle" class="tiny">B timeout</text>
+          <path d="M730 314 L708 314 Q700 314 700 322 L700 350 Q700 358 692 358 L238 358 Q230 358 230 350 L230 252" class="wire fail"/><polygon points="230,242 235,252 225,252" class="head fail"/>
+          <text x="710" y="357" class="tiny">C timeout</text>
+          <g class="is-new">
+            <path d="M205 215 L80 215" class="wire fail"/><polygon points="70,215 80,210 80,220" class="head fail"/><text x="136" y="285" class="tiny">strict: 503 · 1 &lt; 2</text>
+            <rect x="136" y="50" width="194" height="20" rx="10" class="badge"/><text x="233" y="64" text-anchor="middle" class="badge-text">strict: W=2 unmet</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">严格 quorum 把失败经 Coordinator 回客户端，少数侧不能成功。本章默认的 3/2/2 在这里牺牲可用性；称它“分区两侧都能写”会与这条红线直接矛盾。</span><span class="lang-en">Strict quorum propagates failure through Coordinator to Client. This minority cannot confirm. The default 3/2/2 sacrifices availability here; claiming both sides can write contradicts this path.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d3s4t d3s4d">
+          <title id="d3s4t">A different sloppy-quorum policy stores on a fallback</title>
+          <desc id="d3s4d">As an explicit alternative policy, Coordinator stores v3 on Fallback D and receives its acknowledgement. The earlier strict-quorum client failure and replica timeouts are muted as historical outcomes, not current successful paths.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="18" width="824" height="366" rx="18" class="boundary"/>
+          <text x="136" y="38" class="tiny">PARTITION · normal owners {A,B,C} · only A reachable</text>
+          <circle cx="44" cy="182" r="12" class="box"/><path d="M24 228 Q44 196 64 228" class="wire"/><text x="44" y="250" text-anchor="middle" class="label">Client</text>
+          <rect x="205" y="170" width="170" height="72" rx="12" class="box"/><text x="290" y="203" text-anchor="middle" class="label">Coordinator</text><text x="290" y="222" text-anchor="middle" class="sub">strict W=2 first</text>
+          <path d="M490 175 V227 A70 12 0 0 0 630 227 V175" class="store"/><ellipse cx="560" cy="175" rx="70" ry="12" class="store"/><text x="560" y="211" text-anchor="middle" class="label">Replica A</text><text x="560" y="229" text-anchor="middle" class="sub">reachable</text>
+          <path d="M730 65 V117 A70 12 0 0 0 870 117 V65" class="store"/><ellipse cx="800" cy="65" rx="70" ry="12" class="store"/><text x="800" y="101" text-anchor="middle" class="label">Replica B</text><text x="800" y="119" text-anchor="middle" class="sub">unreachable</text>
+          <path d="M730 275 V327 A70 12 0 0 0 870 327 V275" class="store"/><ellipse cx="800" cy="275" rx="70" ry="12" class="store"/><text x="800" y="311" text-anchor="middle" class="label">Replica C</text><text x="800" y="329" text-anchor="middle" class="sub">unreachable</text>
+          <path d="M660 56 V370" class="boundary"/><text x="680" y="60" class="tiny">partition</text>
+          <path d="M70 197 L195 197" class="wire"/><polygon points="205,197 195,202 195,192" class="head"/>
+          <text x="158" y="189" text-anchor="middle" class="tiny">PUT v3</text>
+          <path d="M375 197 L480 197" class="wire"/><polygon points="490,197 480,202 480,192" class="head"/>
+          <text x="430" y="189" text-anchor="middle" class="tiny">PUT</text>
+          <path d="M490 215 L385 215" class="wire reply"/><polygon points="375,215 385,210 385,220" class="head reply"/>
+          <text x="430" y="235" text-anchor="middle" class="tiny">1 ACK</text>
+          <path d="M270 170 L270 94 Q270 86 278 86 L720 86" class="wire muted"/><polygon points="730,86 720,91 720,81" class="head muted"/>
+          <text x="510" y="78" text-anchor="middle" class="tiny">attempt B</text>
+          <path d="M270 242 L270 252 Q270 260 278 260 L672 260 Q680 260 680 268 L680 288 Q680 296 688 296 L720 296" class="wire muted"/><polygon points="730,296 720,301 720,291" class="head muted"/>
+          <text x="490" y="253" text-anchor="middle" class="tiny">attempt C</text>
+          <path d="M730 104 L708 104 Q700 104 700 112 L700 137 Q700 145 692 145 L359.5 145 Q352 145 352 152.5 L352 160" class="wire fail muted"/><polygon points="352,170 347,160 357,160" class="head fail muted"/>
+          <text x="515" y="137" text-anchor="middle" class="tiny">B timeout</text>
+          <path d="M730 314 L708 314 Q700 314 700 322 L700 350 Q700 358 692 358 L238 358 Q230 358 230 350 L230 252" class="wire fail muted"/><polygon points="230,242 235,252 225,252" class="head fail muted"/>
+          <text x="710" y="357" class="tiny">C timeout</text>
+          <path d="M205 215 L80 215" class="wire fail muted"/><polygon points="70,215 80,210 80,220" class="head fail muted"/><text x="136" y="285" class="tiny">strict: 503 · 1 &lt; 2</text>
+          <rect x="136" y="50" width="194" height="20" rx="10" class="badge"/><text x="233" y="64" text-anchor="middle" class="badge-text">strict: W=2 unmet</text>
+          <g class="is-new">
+            <path d="M490 290 V342 A70 12 0 0 0 630 342 V290" class="store"/><ellipse cx="560" cy="290" rx="70" ry="12" class="store"/><text x="560" y="326" text-anchor="middle" class="label">Fallback D</text><text x="560" y="344" text-anchor="middle" class="sub">hint for B</text>
+            <path d="M350 242 L350 303 Q350 311 358 311 L480 311" class="wire async"/><polygon points="490,311 480,316 480,306" class="head async"/>
+            <text x="418" y="303" text-anchor="middle" class="tiny">store v3</text>
+            <path d="M490 329 L378 329 Q370 329 370 321 L370 252" class="wire reply"/><polygon points="370,242 375,252 365,252" class="head reply"/>
+            <text x="422" y="346" text-anchor="middle" class="tiny">stored</text>
+            <rect x="745" y="160" width="176" height="20" rx="10" class="badge"/><text x="833" y="174" text-anchor="middle" class="badge-text">sloppy: W={A,D}</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">这一帧切换成 Dynamo 风格的另一种策略，淡化此前的失败结果，保留故障位置。借用 D 临存可凑 {A,D} 两份；这不是 Cassandra QUORUM 中“hint 算一个正常副本 ACK”的规则。</span><span class="lang-en">Switch explicitly to a Dynamo-style alternative, muting historical failures while preserving the outage. A temporary D gives two copies {A,D}. This is not a Cassandra QUORUM rule that counts a hint as an owner ACK.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d3s5t d3s5d">
+          <title id="d3s5t">Availability is bought by changing the acknowledgement universe</title>
+          <desc id="d3s5d">Under the sloppy alternative Coordinator replies success to Client after A and D. A later read set B,C can be disjoint from write set A,D, so arithmetic W+R&gt;N for the original A,B,C universe is inapplicable.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="18" width="824" height="366" rx="18" class="boundary"/>
+          <text x="136" y="38" class="tiny">PARTITION · normal owners {A,B,C} · only A reachable</text>
+          <circle cx="44" cy="182" r="12" class="box"/><path d="M24 228 Q44 196 64 228" class="wire"/><text x="44" y="250" text-anchor="middle" class="label">Client</text>
+          <rect x="205" y="170" width="170" height="72" rx="12" class="box"/><text x="290" y="203" text-anchor="middle" class="label">Coordinator</text><text x="290" y="222" text-anchor="middle" class="sub">strict W=2 first</text>
+          <path d="M490 175 V227 A70 12 0 0 0 630 227 V175" class="store"/><ellipse cx="560" cy="175" rx="70" ry="12" class="store"/><text x="560" y="211" text-anchor="middle" class="label">Replica A</text><text x="560" y="229" text-anchor="middle" class="sub">reachable</text>
+          <path d="M730 65 V117 A70 12 0 0 0 870 117 V65" class="store"/><ellipse cx="800" cy="65" rx="70" ry="12" class="store"/><text x="800" y="101" text-anchor="middle" class="label">Replica B</text><text x="800" y="119" text-anchor="middle" class="sub">unreachable</text>
+          <path d="M730 275 V327 A70 12 0 0 0 870 327 V275" class="store"/><ellipse cx="800" cy="275" rx="70" ry="12" class="store"/><text x="800" y="311" text-anchor="middle" class="label">Replica C</text><text x="800" y="329" text-anchor="middle" class="sub">unreachable</text>
+          <path d="M660 56 V370" class="boundary"/><text x="680" y="60" class="tiny">partition</text>
+          <path d="M70 197 L195 197" class="wire"/><polygon points="205,197 195,202 195,192" class="head"/>
+          <text x="158" y="189" text-anchor="middle" class="tiny">PUT v3</text>
+          <path d="M375 197 L480 197" class="wire"/><polygon points="490,197 480,202 480,192" class="head"/>
+          <text x="430" y="189" text-anchor="middle" class="tiny">PUT</text>
+          <path d="M490 215 L385 215" class="wire reply"/><polygon points="375,215 385,210 385,220" class="head reply"/>
+          <text x="430" y="235" text-anchor="middle" class="tiny">1 ACK</text>
+          <path d="M270 170 L270 94 Q270 86 278 86 L720 86" class="wire muted"/><polygon points="730,86 720,91 720,81" class="head muted"/>
+          <text x="510" y="78" text-anchor="middle" class="tiny">attempt B</text>
+          <path d="M270 242 L270 252 Q270 260 278 260 L672 260 Q680 260 680 268 L680 288 Q680 296 688 296 L720 296" class="wire muted"/><polygon points="730,296 720,301 720,291" class="head muted"/>
+          <text x="490" y="253" text-anchor="middle" class="tiny">attempt C</text>
+          <path d="M730 104 L708 104 Q700 104 700 112 L700 137 Q700 145 692 145 L359.5 145 Q352 145 352 152.5 L352 160" class="wire fail muted"/><polygon points="352,170 347,160 357,160" class="head fail muted"/>
+          <text x="515" y="137" text-anchor="middle" class="tiny">B timeout</text>
+          <path d="M730 314 L708 314 Q700 314 700 322 L700 350 Q700 358 692 358 L238 358 Q230 358 230 350 L230 252" class="wire fail muted"/><polygon points="230,242 235,252 225,252" class="head fail muted"/>
+          <text x="710" y="357" class="tiny">C timeout</text>
+          <path d="M205 215 L80 215" class="wire fail muted"/><polygon points="70,215 80,210 80,220" class="head fail muted"/><text x="136" y="285" class="tiny">strict: 503 · 1 &lt; 2</text>
+          <rect x="136" y="50" width="194" height="20" rx="10" class="badge"/><text x="233" y="64" text-anchor="middle" class="badge-text">strict: W=2 unmet</text>
+          <path d="M490 290 V342 A70 12 0 0 0 630 342 V290" class="store"/><ellipse cx="560" cy="290" rx="70" ry="12" class="store"/><text x="560" y="326" text-anchor="middle" class="label">Fallback D</text><text x="560" y="344" text-anchor="middle" class="sub">hint for B</text>
+          <path d="M350 242 L350 303 Q350 311 358 311 L480 311" class="wire async"/><polygon points="490,311 480,316 480,306" class="head async"/>
+          <text x="418" y="303" text-anchor="middle" class="tiny">store v3</text>
+          <path d="M490 329 L378 329 Q370 329 370 321 L370 252" class="wire reply"/><polygon points="370,242 375,252 365,252" class="head reply"/>
+          <text x="422" y="346" text-anchor="middle" class="tiny">stored</text>
+          <rect x="745" y="160" width="176" height="20" rx="10" class="badge"/><text x="833" y="174" text-anchor="middle" class="badge-text">sloppy: W={A,D}</text>
+          <g class="is-new">
+            <path d="M205 215 L80 215" class="wire reply"/><polygon points="70,215 80,210 80,220" class="head reply"/>
+            <text x="136" y="310" class="tiny">sloppy: 200</text>
+            <text x="136" y="110" class="tiny">W={A,D}; R={B,C}; overlap=0</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">D 回到 Coordinator 后，这种替代策略可以成功，但代价已经变了：写 {A,D}、恢复后读 {B,C}，交集为空。数字仍写 2+2&gt;3，却用了不同全集，不能据此宣称最新读；D 必须交还并参与后续修复。</span><span class="lang-en">The alternative can now succeed, at a changed cost: write {A,D}, then read {B,C} after recovery, with no overlap. 2+2&gt;3 uses the wrong universe, so it cannot prove freshness. D must hand off and repair must follow.</span></figcaption>
+      </div>
+    </figure>
+<h3><span class="lang-zh">故障窗口：只剩 A 可达时，先承认失败</span><span class="lang-en">Failure window: admit failure when only A is reachable</span></h3>
+<div class="bilingual"><div class="lang-zh"><p>第一条路线维持正常 owner 集合 {A,B,C}。Coordinator 在 A 这一侧，能拿到一份耐久 ACK，B、C 不可达，1&lt;2，所以拒绝确认。这不是“节点数足够、稍后最终一致”就能掩盖的失败；协议明文要求两份正常副本。B、C 一侧如果拥有协调入口，则可在两份仍可达的前提下继续，但 A 一侧不能。可用性必须按这次操作、这个 key 和这个分区位置描述。</p></div><div class="lang-en"><p>The strict path keeps normal owners {A,B,C}. Coordinator on A’s side gets one durable ACK; B and C are unreachable, so 1&lt;2 and confirmation fails. The protocol requires two normal owners. The B/C side may continue if it has a coordinator and both copies remain reachable; A’s side cannot. State availability per operation, key and partition side.</p></div></div>
+<div class="bilingual"><div class="lang-zh"><p>图里的红线是 RPC 结果失败，不代表所有落盘都被取消。超时后的重试要遵守前面的 mutation 标识规则，还要让系统总 deadline 终止额外工作。Coordinator 自己挂掉也会让已经成功写入两份的请求失去响应；客户端不能因为没收到 200 就自动断言值还在旧版本。这个窗口应暴露为可查询或可安全重试的结果，而不是藏在“高可用”标签后面。</p></div><div class="lang-en"><p>Red paths mean failed RPC outcomes, not cancellation of every persisted mutation. Keep mutation identity across retries and terminate additional work at the total deadline. Coordinator can fail after two replicas persist and before replying. No 200 does not prove the old version remains; expose a queryable or safely retryable unknown outcome.</p></div></div>
+<h3><span class="lang-zh">替代：借用临时副本，交集证明也随之改变</span><span class="lang-en">Alternative: a fallback changes the overlap proof</span></h3>
+<div class="bilingual"><div class="lang-zh"><p>如果业务明确接受分区时接写，图再切换到 Dynamo 风格的 sloppy quorum：正常 owner 不够时从扩展候选里选可达机器 D，保存带目标副本信息的临时记录。这里假设 A、D 都可达且都耐久保存，才能凑两份后成功；不是任意严重故障都保证成功。D 只是临时承担 B 的数据，最终要交还，不能无限积压。Dynamo 论文 §4.6 描述这一机制。<a href="#ref-1">[1]</a></p></div><div class="lang-en"><p>If the business accepts writes during partitions, switch to a Dynamo-style sloppy policy: choose a reachable D from an extended list and store a temporary copy tagged for its intended owner. Success assumes both A and D can durably store; it is not guaranteed under arbitrary failure. D must eventually hand off. Dynamo §4.6 describes this mechanism. <a href="#ref-1">[1]</a></p></div></div>
+<div class="bilingual"><div class="lang-zh"><p>本例写集合 {A,D}，网络恢复后一次读可能取 {B,C}，两组没有共同元素。W=2、R=2、N=3 的算术看似没变，实际上 D 不在原全集里；相加超过三不能再证明相交。读取要允许旧、能返回冲突，或等待移交恢复原 owner 状态。这是继续接写付出的具体代价，不能一边借 D，一边承诺所有读仍满足正常 3/2/2 的新鲜度。</p></div><div class="lang-en"><p>Write set {A,D} and a later read set {B,C} are disjoint. W=2,R=2,N=3 appears unchanged, but D lies outside the original universe. The sum no longer proves overlap. Reads must accept staleness, expose conflicts or wait for handoff. Continued writes cannot retain the normal 3/2/2 freshness argument for free.</p></div></div>
+<div class="bilingual"><div class="lang-zh"><p>Cassandra 的 hint 记录漏发的 mutation，用来补齐指定副本；通常的 QUORUM 成功仍要正常副本数量满足条件。官方 hints 示例正是三副本里两份 ACK 后成功，第三份由协调节点留 hint。不能把“有 hints”推导成“必然实行 Dynamo sloppy quorum”。相同术语在不同系统里的角色要看成功条件，这也是图把临时 D 与本地 Hint log 分成两组来画的原因。<a href="#ref-3">[3]</a></p></div><div class="lang-en"><p>Cassandra hints retain a missed mutation for its intended owner; ordinary QUORUM success still requires enough owner acknowledgements. Its official example succeeds with two of three replica ACKs and retains a hint for the third. Hints do not imply Dynamo sloppy quorum. We therefore draw temporary D separately from the local Hint log. <a href="#ref-3">[3]</a></p></div></div>
+<h3><span class="lang-zh">为什么这样选：故障检测与成员权威分开</span><span class="lang-en">Why: separate failure suspicion from membership authority</span></h3>
+<div class="bilingual"><div class="lang-zh"><p>超时和 Gossip 只能提供节点可能不可达的线索，不能证明机器永久死亡。若每个观察者各自把慢节点踢出，再按自己的三个成员计算 quorum，就会出现彼此不相交的新全集。稳定成员版本、带版本的请求和受控范围交接是放置正确性的接口；本章不展开成员变更协议，但不能省略这个前提。需要不能丢的条件更新时，转向共识与串行化，而不是把 W 拉到 N 就宣称已经解决。</p></div><div class="lang-en"><p>Timeouts and Gossip indicate possible unreachability, not permanent death. Independently removing slow nodes can create disjoint replica universes that each claim quorum. Stable membership versions, versioned requests and controlled range handoff are placement interfaces. For lossless conditional updates, use consensus and serialization rather than declaring W=N sufficient.</p></div></div>
+</section>
+
+<section>
+<h2><span class="lang-zh">冲突：LWW 得到一个胜者，代价是丢掉其他更新</span><span class="lang-en">Conflicts: LWW selects one winner and discards other updates</span></h2>
+<figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d4s1t d4s1d">
+          <title id="d4s1t">One writer has a clock ahead by 200 ms</title>
+          <desc id="d4s1d">Write X at real time 1000 is stored as X with timestamp 1200 at Replica A. Arrows in this deck show value and causal-state flow, not request/reply pairs.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <g class="is-new">
+            <rect x="20" y="18" width="920" height="366" rx="18" class="boundary"/>
+            <text x="40" y="38" class="tiny">LWW · value / causal-state flow, not RPC traffic</text>
+            <text x="40" y="365" class="tiny">Assumption: X clock is +200 ms; Y clock is accurate; later real-time write can lose</text>
+            <rect x="100" y="85" width="210" height="70" rx="12" class="box"/><text x="205" y="117" text-anchor="middle" class="label">Write X</text><text x="205" y="136" text-anchor="middle" class="sub">real 1000; ts 1200</text>
+            <rect x="420" y="85" width="190" height="70" rx="12" class="box"/><text x="515" y="117" text-anchor="middle" class="label">Replica A</text><text x="515" y="136" text-anchor="middle" class="sub">X @ 1200</text>
+            <path d="M310 120 L410 120" class="wire"/><polygon points="420,120 410,125 410,115" class="head"/>
+            <text x="365" y="112" text-anchor="middle" class="tiny">store X</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">先明确时钟假设：X 在真实时间 1000 ms 写入，时钟快 200 ms，记录时间戳 1200。LWW 比较的是存入记录的排序字段，不会替我们校准真实时间。</span><span class="lang-en">Assume X writes at real time 1000 ms with a clock 200 ms ahead, storing timestamp 1200. LWW compares the recorded ordering field, without correcting physical time.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d4s2t d4s2d">
+          <title id="d4s2t">A later real-time update has a lower timestamp</title>
+          <desc id="d4s2d">Write Y follows X by 100 ms in real time, but its accurate clock stores timestamp 1100 at Replica B. The vertical arrow represents real-time precedence, not network communication.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="20" y="18" width="920" height="366" rx="18" class="boundary"/>
+          <text x="40" y="38" class="tiny">LWW · value / causal-state flow, not RPC traffic</text>
+          <text x="40" y="365" class="tiny">Assumption: X clock is +200 ms; Y clock is accurate; later real-time write can lose</text>
+          <rect x="100" y="85" width="210" height="70" rx="12" class="box"/><text x="205" y="117" text-anchor="middle" class="label">Write X</text><text x="205" y="136" text-anchor="middle" class="sub">real 1000; ts 1200</text>
+          <rect x="420" y="85" width="190" height="70" rx="12" class="box"/><text x="515" y="117" text-anchor="middle" class="label">Replica A</text><text x="515" y="136" text-anchor="middle" class="sub">X @ 1200</text>
+          <path d="M310 120 L410 120" class="wire"/><polygon points="420,120 410,125 410,115" class="head"/>
+          <text x="365" y="112" text-anchor="middle" class="tiny">store X</text>
+          <g class="is-new">
+            <rect x="100" y="235" width="210" height="70" rx="12" class="box"/><text x="205" y="267" text-anchor="middle" class="label">Write Y</text><text x="205" y="286" text-anchor="middle" class="sub">real 1100; ts 1100</text>
+            <rect x="420" y="235" width="190" height="70" rx="12" class="box"/><text x="515" y="267" text-anchor="middle" class="label">Replica B</text><text x="515" y="286" text-anchor="middle" class="sub">Y @ 1100</text>
+            <path d="M310 270 L410 270" class="wire"/><polygon points="420,270 410,275 410,265" class="head"/>
+            <text x="365" y="262" text-anchor="middle" class="tiny">store Y</text>
+            <path d="M205 155 L205 225" class="wire"/><polygon points="205,235 200,225 210,225" class="head"/>
+            <text x="220" y="200" class="tiny">X precedes Y</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">100 ms 之后写 Y，准确时钟给出 1100。即使应用按先 X 后 Y 的顺序操作，1200&gt;1100 仍会让较早的 X 排在后面；时间戳大不能直接翻译成“业务上最后一次写”。</span><span class="lang-en">Y occurs 100 ms later but receives timestamp 1100. Even if the application orders X before Y, 1200&gt;1100 orders X later. A larger timestamp does not necessarily mean the later business update.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d4s3t d4s3d">
+          <title id="d4s3t">Both states reach reconciliation</title>
+          <desc id="d4s3d">Stored states X at Replica A and Y at Replica B flow into Reconcile, which compares their timestamps. Neither acknowledgement counts nor quorum sizes change this ordering rule.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="20" y="18" width="920" height="366" rx="18" class="boundary"/>
+          <text x="40" y="38" class="tiny">LWW · value / causal-state flow, not RPC traffic</text>
+          <text x="40" y="365" class="tiny">Assumption: X clock is +200 ms; Y clock is accurate; later real-time write can lose</text>
+          <rect x="100" y="85" width="210" height="70" rx="12" class="box"/><text x="205" y="117" text-anchor="middle" class="label">Write X</text><text x="205" y="136" text-anchor="middle" class="sub">real 1000; ts 1200</text>
+          <rect x="420" y="85" width="190" height="70" rx="12" class="box"/><text x="515" y="117" text-anchor="middle" class="label">Replica A</text><text x="515" y="136" text-anchor="middle" class="sub">X @ 1200</text>
+          <path d="M310 120 L410 120" class="wire"/><polygon points="420,120 410,125 410,115" class="head"/>
+          <text x="365" y="112" text-anchor="middle" class="tiny">store X</text>
+          <rect x="100" y="235" width="210" height="70" rx="12" class="box"/><text x="205" y="267" text-anchor="middle" class="label">Write Y</text><text x="205" y="286" text-anchor="middle" class="sub">real 1100; ts 1100</text>
+          <rect x="420" y="235" width="190" height="70" rx="12" class="box"/><text x="515" y="267" text-anchor="middle" class="label">Replica B</text><text x="515" y="286" text-anchor="middle" class="sub">Y @ 1100</text>
+          <path d="M310 270 L410 270" class="wire"/><polygon points="420,270 410,275 410,265" class="head"/>
+          <text x="365" y="262" text-anchor="middle" class="tiny">store Y</text>
+          <path d="M205 155 L205 225" class="wire"/><polygon points="205,235 200,225 210,225" class="head"/>
+          <text x="220" y="200" class="tiny">X precedes Y</text>
+          <g class="is-new">
+            <rect x="740" y="160" width="180" height="80" rx="12" class="box"/><text x="830" y="197" text-anchor="middle" class="label">Reconcile</text><text x="830" y="216" text-anchor="middle" class="sub">max timestamp</text>
+            <path d="M610 120 L662 120 Q670 120 670 128 L670 172 Q670 180 678 180 L730 180" class="wire"/><polygon points="740,180 730,185 730,175" class="head"/>
+            <path d="M610 270 L682 270 Q690 270 690 262 L690 228 Q690 220 698 220 L730 220" class="wire"/><polygon points="740,220 730,225 730,215" class="head"/>
+            <text x="800" y="142" text-anchor="middle" class="tiny">1200 &gt; 1100</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">两份状态进入相同的比较规则：选较大时间戳，遇到同戳还要有确定性决胜规则。调整 W、R 只改变接触到哪些状态，不能修正这一次错误的时间顺序。</span><span class="lang-en">Reconcile selects the larger timestamp, with a deterministic tie-break for equal timestamps. W and R change which states are contacted, not this faulty time ordering.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d4s4t d4s4d">
+          <title id="d4s4t">LWW converges by discarding the later update</title>
+          <desc id="d4s4d">Reconcile outputs X because 1200 exceeds 1100. Y is discarded despite its later real-time occurrence. This is a state decision, not a direct replica-to-client reply.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="20" y="18" width="920" height="366" rx="18" class="boundary"/>
+          <text x="40" y="38" class="tiny">LWW · value / causal-state flow, not RPC traffic</text>
+          <text x="40" y="365" class="tiny">Assumption: X clock is +200 ms; Y clock is accurate; later real-time write can lose</text>
+          <rect x="100" y="85" width="210" height="70" rx="12" class="box"/><text x="205" y="117" text-anchor="middle" class="label">Write X</text><text x="205" y="136" text-anchor="middle" class="sub">real 1000; ts 1200</text>
+          <rect x="420" y="85" width="190" height="70" rx="12" class="box"/><text x="515" y="117" text-anchor="middle" class="label">Replica A</text><text x="515" y="136" text-anchor="middle" class="sub">X @ 1200</text>
+          <path d="M310 120 L410 120" class="wire"/><polygon points="420,120 410,125 410,115" class="head"/>
+          <text x="365" y="112" text-anchor="middle" class="tiny">store X</text>
+          <rect x="100" y="235" width="210" height="70" rx="12" class="box"/><text x="205" y="267" text-anchor="middle" class="label">Write Y</text><text x="205" y="286" text-anchor="middle" class="sub">real 1100; ts 1100</text>
+          <rect x="420" y="235" width="190" height="70" rx="12" class="box"/><text x="515" y="267" text-anchor="middle" class="label">Replica B</text><text x="515" y="286" text-anchor="middle" class="sub">Y @ 1100</text>
+          <path d="M310 270 L410 270" class="wire"/><polygon points="420,270 410,275 410,265" class="head"/>
+          <text x="365" y="262" text-anchor="middle" class="tiny">store Y</text>
+          <path d="M205 155 L205 225" class="wire"/><polygon points="205,235 200,225 210,225" class="head"/>
+          <text x="220" y="200" class="tiny">X precedes Y</text>
+          <rect x="740" y="160" width="180" height="80" rx="12" class="box"/><text x="830" y="197" text-anchor="middle" class="label">Reconcile</text><text x="830" y="216" text-anchor="middle" class="sub">max timestamp</text>
+          <path d="M610 120 L662 120 Q670 120 670 128 L670 172 Q670 180 678 180 L730 180" class="wire"/><polygon points="740,180 730,185 730,175" class="head"/>
+          <path d="M610 270 L682 270 Q690 270 690 262 L690 228 Q690 220 698 220 L730 220" class="wire"/><polygon points="740,220 730,225 730,215" class="head"/>
+          <text x="800" y="142" text-anchor="middle" class="tiny">1200 &gt; 1100</text>
+          <g class="is-new">
+            <rect x="740" y="310" width="180" height="50" rx="12" class="box"/><text x="830" y="341" text-anchor="middle" class="label">X wins</text>
+            <path d="M830 240 L830 300" class="wire"/><polygon points="830,310 825,300 835,300" class="head"/>
+            <text x="430" y="335" class="tiny">Y was later in real time, but is discarded</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">完整结果是 X 赢、Y 被丢弃。LWW 能让副本采用同一个胜者，却不保留所有业务更新。若需求是并发加购不能丢，改用语义合并或合适的 CRDT；若是条件更新，另加串行化协议。</span><span class="lang-en">The complete result is X wins and Y is discarded. LWW chooses one convergent winner rather than preserving every update. Mergeable cart additions need semantic merge or a suitable CRDT; conditional updates need serialization.</span></figcaption>
+      </div>
+    </figure>
+<h3><span class="lang-zh">正常规则：所有节点比较同一套排序字段</span><span class="lang-en">Normal rule: compare the same ordering fields everywhere</span></h3>
+<div class="bilingual"><div class="lang-zh"><p>本章用可覆盖的用户偏好值解释 LWW：mutation 带时间戳，比较较大者；教学实现还需给同戳定义确定性决胜字段，例如 mutation_id 的固定字节顺序。比较规则必须在读、写、修复和删除中一致。Cassandra 文档说明其 mutation 时间戳可来自客户端或 Coordinator，并按单元格执行 LWW；这里把整个 value 当一个决胜单元，是教学接口，不能把它误说成 Cassandra 多列更新总会作为整体胜出。<a href="#ref-2">[2]</a></p></div><div class="lang-en"><p>For replaceable preferences, mutations carry timestamps and larger ones win. Our implementation also needs a deterministic equal-timestamp tie-break, such as a fixed byte ordering of mutation_id, consistently used for writes, reads, repair and deletion. Cassandra documents client/coordinator timestamps and per-cell LWW. Our whole-value winner is a teaching interface, not a claim that a multi-column Cassandra write always wins as a whole. <a href="#ref-2">[2]</a></p></div></div>
+<div class="bilingual"><div class="lang-zh"><p>四帧图只画状态与真实时间先后，箭头不是 RPC，因而不添加伪造的回程。X 的真实时间 1000、写入戳 1200；Y 的真实时间 1100、写入戳 1100。真实先后差 100 ms，X 时钟却快 200 ms，故排序仍是 X&gt;Y。选择 X 会收敛到同一个结果，但业务上更晚的 Y 被覆盖。即使两次写都拿到了足够 ACK，排序规则也不会因为确认数量多就变正确。</p></div><div class="lang-en"><p>The four frames show state and real-time precedence, not RPCs. X has real time 1000 and timestamp 1200; Y has both 1100. Y occurs 100 ms later but X’s 200 ms clock lead makes X&gt;Y. Choosing X converges while discarding the later update. More ACKs do not correct the ordering rule.</p></div></div>
+<h3><span class="lang-zh">为什么这样选：收敛、因果和业务正确是三件事</span><span class="lang-en">Why: convergence, causality and business correctness differ</span></h3>
+<div class="bilingual"><div class="lang-zh"><p>物理时间戳容易生成，不需要集中分配全局版本，适合允许覆盖的状态。代价是并发里只保留一个胜者，并且错误时钟可能让后续一段时间内的写都输掉。时间同步、限制异常未来戳可以减小操作风险，但不会把 LWW 变成无损合并。每个节点自己的计数器也不自动构成可比较的全局版本；“时间戳或版本号都行”必须先交代版本从哪里来、顺序代表什么。</p></div><div class="lang-en"><p>Physical timestamps avoid a centralized global version allocator and suit overwrite-tolerant state. They select one winner and a future timestamp may defeat later writes for a while. Time synchronization and bounding future timestamps reduce risk without making LWW lossless. Independent node counters are not automatically global versions; explain where order comes from.</p></div></div>
+<div class="bilingual"><div class="lang-zh"><p>举一个能翻车的业务例子：两个客户端都读到计数 10，一个写 11，另一个也写 11。无论哪个时间戳更大，LWW 最终只是 11，需求里的两次加一已经丢了一次。购物车两个并发快照各新增不同商品，也可能只留下一个快照。可以按独立字段存储降低冲突范围，或对确实可交换、可合并的操作使用合适的 CRDT；涉及“不低于零”“只能卖一件”的约束，仍需协调，不能靠一个集合合并公式代替。</p></div><div class="lang-en"><p>Two clients read counter 10 and each writes 11. Either LWW winner leaves 11, losing one intended increment. Two cart snapshots adding different items can lose one snapshot. Separate independent fields or use a suitable CRDT for mergeable operations. Invariants such as nonnegative stock or selling a unique item still need coordination.</p></div></div>
+<h3><span class="lang-zh">替代：保留冲突意味着应用要承担合并</span><span class="lang-en">Alternative: retaining conflicts creates a merge obligation</span></h3>
+<div class="bilingual"><div class="lang-zh"><p>Dynamo 的向量版本用于辨别祖先与并发兄弟，并可把兄弟版本交给应用合并；它不是“落后年代才用的东西”。是否采用，取决于业务能不能定义有意义的合并、版本元数据和读写接口能否承担复杂度。LWW、因果版本、CRDT、条件更新各解不同约束，不能用“生产默认”代替选择。<a href="#ref-1">[1]</a></p></div><div class="lang-en"><p>Dynamo’s vector versions distinguish ancestors from concurrent siblings that applications may reconcile. The choice depends on meaningful merge semantics, metadata and interface complexity. LWW, causal versions, CRDTs and conditional updates address different contracts; a generic “production default” cannot choose among them. <a href="#ref-1">[1]</a></p></div></div>
+<details><summary><span class="lang-zh">深挖：两条向量怎么手算并发</span><span class="lang-en">Deep dive: calculate concurrency with two vectors</span></summary><div class="bilingual"><div class="lang-zh"><p>把省略的分量视作零。版本 [A:2,B:0] 与 [A:1,B:1] 不能按“总数都是 2”判相同：前者在 A 上较大，后者在 B 上较大，谁都不逐项支配谁，所以并发。若合并生成 [A:2,B:2]，它逐项不小于两者且至少一项更大，才可视为两者的后继。检测到并发不等于知道购物车如何合并，那个决定仍属于应用。</p></div><div class="lang-en"><p>Treat absent components as zero. [A:2,B:0] and [A:1,B:1] are not equal because both sums are 2: each is larger in one component and neither dominates, so they are concurrent. A merged [A:2,B:2] dominates both. Detecting concurrency does not decide cart merge semantics; the application still does.</p></div></div></details>
+</section>
+
+<section>
+<h2><span class="lang-zh">节点内 LSM：前台确认，后台还带宽与空间的账</span><span class="lang-en">Local LSM: foreground confirmation, background bandwidth and space</span></h2>
+<figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s1t d5s1d">
+          <title id="d5s1t">Zoom into one replica, not a new cluster</title>
+          <desc id="d5s1d">A mutation reaches the Engine handler inside Replica A. This deck zooms inside a replica and does not add another coordinator or replication topology.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <g class="is-new">
+            <rect x="120" y="18" width="824" height="366" rx="18" class="boundary"/>
+            <text x="136" y="38" class="tiny">REPLICA A · local write path, independent of cluster quorum</text>
+            <circle cx="44" cy="191" r="12" class="box"/><path d="M24 237 Q44 205 64 237" class="wire"/><text x="44" y="259" text-anchor="middle" class="label">Caller</text>
+            <rect x="175" y="180" width="150" height="80" rx="12" class="box"/><text x="250" y="217" text-anchor="middle" class="label">Engine</text><text x="250" y="236" text-anchor="middle" class="sub">Replica A handler</text>
+            <path d="M70 206 L165 206" class="wire"/><polygon points="175,206 165,211 165,201" class="head"/>
+            <text x="150" y="198" text-anchor="middle" class="tiny">PUT</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">把上一组的 Replica A 放大到节点内部；这里的调用方代表集群协调层。分布式 W=2 和节点内 WAL 是两种不同的保证，不能用“有三副本”替代本地耐久定义。</span><span class="lang-en">Zoom inside Replica A. The caller represents the cluster coordinator. Distributed W=2 and a local WAL are different guarantees; three copies do not replace a local durability definition.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s2t d5s2d">
+          <title id="d5s2t">Synchronize the write-ahead log before local confirmation</title>
+          <desc id="d5s2d">Engine appends to WAL and receives a sync completion back from WAL. No local acknowledgement is sent to the caller yet.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="18" width="824" height="366" rx="18" class="boundary"/>
+          <text x="136" y="38" class="tiny">REPLICA A · local write path, independent of cluster quorum</text>
+          <circle cx="44" cy="191" r="12" class="box"/><path d="M24 237 Q44 205 64 237" class="wire"/><text x="44" y="259" text-anchor="middle" class="label">Caller</text>
+          <rect x="175" y="180" width="150" height="80" rx="12" class="box"/><text x="250" y="217" text-anchor="middle" class="label">Engine</text><text x="250" y="236" text-anchor="middle" class="sub">Replica A handler</text>
+          <path d="M70 206 L165 206" class="wire"/><polygon points="175,206 165,211 165,201" class="head"/>
+          <text x="150" y="198" text-anchor="middle" class="tiny">PUT</text>
+          <g class="is-new">
+            <path d="M420 170 V226 A60 12 0 0 0 540 226 V170" class="store"/><ellipse cx="480" cy="170" rx="60" ry="12" class="store"/><text x="480" y="208" text-anchor="middle" class="label">WAL</text><text x="480" y="226" text-anchor="middle" class="sub">sync before ACK</text>
+            <path d="M325 201 L410 201" class="wire"/><polygon points="420,201 410,206 410,196" class="head"/>
+            <text x="370" y="193" text-anchor="middle" class="tiny">append</text>
+            <path d="M420 219 L335 219" class="wire reply"/><polygon points="325,219 335,214 335,224" class="head reply"/>
+            <text x="370" y="237" text-anchor="middle" class="tiny">synced</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">先追加 WAL，再等同步完成；此时还没对外 ACK。顺序日志可合并批次摊销同步成本，但延迟取决于真实设备和批次策略。本章选择同步耐久，不冒充 RocksDB 的默认设置。</span><span class="lang-en">Append WAL and wait for sync, without replying yet. Sequential logging can batch sync cost, while device and batching determine latency. This design chooses sync durability rather than claiming it is the RocksDB default.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s3t d5s3d">
+          <title id="d5s3t">Apply the durable mutation to readable memory, then acknowledge</title>
+          <desc id="d5s3d">After WAL sync, Engine applies the mutation to Memtable, gets the applied reply and returns a local acknowledgement to its caller.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="18" width="824" height="366" rx="18" class="boundary"/>
+          <text x="136" y="38" class="tiny">REPLICA A · local write path, independent of cluster quorum</text>
+          <circle cx="44" cy="191" r="12" class="box"/><path d="M24 237 Q44 205 64 237" class="wire"/><text x="44" y="259" text-anchor="middle" class="label">Caller</text>
+          <rect x="175" y="180" width="150" height="80" rx="12" class="box"/><text x="250" y="217" text-anchor="middle" class="label">Engine</text><text x="250" y="236" text-anchor="middle" class="sub">Replica A handler</text>
+          <path d="M70 206 L165 206" class="wire"/><polygon points="175,206 165,211 165,201" class="head"/>
+          <text x="150" y="198" text-anchor="middle" class="tiny">PUT</text>
+          <path d="M420 170 V226 A60 12 0 0 0 540 226 V170" class="store"/><ellipse cx="480" cy="170" rx="60" ry="12" class="store"/><text x="480" y="208" text-anchor="middle" class="label">WAL</text><text x="480" y="226" text-anchor="middle" class="sub">sync before ACK</text>
+          <path d="M325 201 L410 201" class="wire"/><polygon points="420,201 410,206 410,196" class="head"/>
+          <text x="370" y="193" text-anchor="middle" class="tiny">append</text>
+          <path d="M420 219 L335 219" class="wire reply"/><polygon points="325,219 335,214 335,224" class="head reply"/>
+          <text x="370" y="237" text-anchor="middle" class="tiny">synced</text>
+          <g class="is-new">
+            <rect x="725" y="165" width="160" height="80" rx="12" class="box"/><text x="805" y="202" text-anchor="middle" class="label">Memtable</text><text x="805" y="221" text-anchor="middle" class="sub">readable state</text>
+            <path d="M270 180 L270 94 Q270 86 278 86 L787 86 Q795 86 795 94 L795 155" class="wire"/><polygon points="795,165 790,155 800,155" class="head"/>
+            <text x="530" y="78" text-anchor="middle" class="tiny">after WAL: apply to memory</text>
+            <path d="M725 225 L658 225 Q650 225 650 217 L650 148 Q650 140 642 140 L298 140 Q290 140 290 148 L290 170" class="wire reply"/><polygon points="290,180 285,170 295,170" class="head reply"/>
+            <text x="480" y="132" text-anchor="middle" class="tiny">applied</text>
+            <path d="M175 224 L80 224" class="wire reply"/><polygon points="70,224 80,219 80,229" class="head reply"/>
+            <text x="150" y="246" text-anchor="middle" class="tiny">ACK</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">随后更新可读的 memtable，再沿 Memtable→Engine→调用方返回本地 ACK。客户端无需等到 SSTable flush；进程重启可重放 WAL，文件发布成功后才能安全回收相关日志。</span><span class="lang-en">Apply to readable Memtable, then return Memtable→Engine→caller. Acknowledgement does not wait for SSTable flush. Recovery replays WAL; retire relevant logs only after safe file publication.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s4t d5s4d">
+          <title id="d5s4t">Flush immutable memory to an SSTable in the background</title>
+          <desc id="d5s4d">Memtable flushes in the background to immutable SSTable 0. Flush is not on the acknowledged write critical path.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="18" width="824" height="366" rx="18" class="boundary"/>
+          <text x="136" y="38" class="tiny">REPLICA A · local write path, independent of cluster quorum</text>
+          <circle cx="44" cy="191" r="12" class="box"/><path d="M24 237 Q44 205 64 237" class="wire"/><text x="44" y="259" text-anchor="middle" class="label">Caller</text>
+          <rect x="175" y="180" width="150" height="80" rx="12" class="box"/><text x="250" y="217" text-anchor="middle" class="label">Engine</text><text x="250" y="236" text-anchor="middle" class="sub">Replica A handler</text>
+          <path d="M70 206 L165 206" class="wire"/><polygon points="175,206 165,211 165,201" class="head"/>
+          <text x="150" y="198" text-anchor="middle" class="tiny">PUT</text>
+          <path d="M420 170 V226 A60 12 0 0 0 540 226 V170" class="store"/><ellipse cx="480" cy="170" rx="60" ry="12" class="store"/><text x="480" y="208" text-anchor="middle" class="label">WAL</text><text x="480" y="226" text-anchor="middle" class="sub">sync before ACK</text>
+          <path d="M325 201 L410 201" class="wire"/><polygon points="420,201 410,206 410,196" class="head"/>
+          <text x="370" y="193" text-anchor="middle" class="tiny">append</text>
+          <path d="M420 219 L335 219" class="wire reply"/><polygon points="325,219 335,214 335,224" class="head reply"/>
+          <text x="370" y="237" text-anchor="middle" class="tiny">synced</text>
+          <rect x="725" y="165" width="160" height="80" rx="12" class="box"/><text x="805" y="202" text-anchor="middle" class="label">Memtable</text><text x="805" y="221" text-anchor="middle" class="sub">readable state</text>
+          <path d="M270 180 L270 94 Q270 86 278 86 L787 86 Q795 86 795 94 L795 155" class="wire"/><polygon points="795,165 790,155 800,155" class="head"/>
+          <text x="530" y="78" text-anchor="middle" class="tiny">after WAL: apply to memory</text>
+          <path d="M725 225 L658 225 Q650 225 650 217 L650 148 Q650 140 642 140 L298 140 Q290 140 290 148 L290 170" class="wire reply"/><polygon points="290,180 285,170 295,170" class="head reply"/>
+          <text x="480" y="132" text-anchor="middle" class="tiny">applied</text>
+          <path d="M175 224 L80 224" class="wire reply"/><polygon points="70,224 80,219 80,229" class="head reply"/>
+          <text x="150" y="246" text-anchor="middle" class="tiny">ACK</text>
+          <g class="is-new">
+            <path d="M565 292 V340 A60 12 0 0 0 685 340 V292" class="store"/><ellipse cx="625" cy="292" rx="60" ry="12" class="store"/><text x="625" y="326" text-anchor="middle" class="label">SSTable 0</text><text x="625" y="344" text-anchor="middle" class="sub">immutable</text>
+            <path d="M795 245 L795 304 Q795 312 787 312 L695 312" class="wire async"/><polygon points="685,312 695,307 695,317" class="head async"/>
+            <text x="806" y="280" class="tiny">flush</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">memtable 冻结后后台 flush 成不可变文件，新写用下一张内存表。本地 ACK 已经发出，因此 flush 不在刚才的确认关键路径上；它落后太久却会占满内存并反过来阻塞新写。</span><span class="lang-en">A frozen Memtable flushes into an immutable file while a new table accepts writes. Flush is outside the completed acknowledgement path, but a large backlog can fill memory and block new writes.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s5t d5s5d">
+          <title id="d5s5t">Compaction moves data to the next level</title>
+          <desc id="d5s5d">Background compaction rewrites SSTable 0 data into next-level SSTable 1. The files remain drawn to represent compaction input and output, not an in-place overwrite.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="18" width="824" height="366" rx="18" class="boundary"/>
+          <text x="136" y="38" class="tiny">REPLICA A · local write path, independent of cluster quorum</text>
+          <circle cx="44" cy="191" r="12" class="box"/><path d="M24 237 Q44 205 64 237" class="wire"/><text x="44" y="259" text-anchor="middle" class="label">Caller</text>
+          <rect x="175" y="180" width="150" height="80" rx="12" class="box"/><text x="250" y="217" text-anchor="middle" class="label">Engine</text><text x="250" y="236" text-anchor="middle" class="sub">Replica A handler</text>
+          <path d="M70 206 L165 206" class="wire"/><polygon points="175,206 165,211 165,201" class="head"/>
+          <text x="150" y="198" text-anchor="middle" class="tiny">PUT</text>
+          <path d="M420 170 V226 A60 12 0 0 0 540 226 V170" class="store"/><ellipse cx="480" cy="170" rx="60" ry="12" class="store"/><text x="480" y="208" text-anchor="middle" class="label">WAL</text><text x="480" y="226" text-anchor="middle" class="sub">sync before ACK</text>
+          <path d="M325 201 L410 201" class="wire"/><polygon points="420,201 410,206 410,196" class="head"/>
+          <text x="370" y="193" text-anchor="middle" class="tiny">append</text>
+          <path d="M420 219 L335 219" class="wire reply"/><polygon points="325,219 335,214 335,224" class="head reply"/>
+          <text x="370" y="237" text-anchor="middle" class="tiny">synced</text>
+          <rect x="725" y="165" width="160" height="80" rx="12" class="box"/><text x="805" y="202" text-anchor="middle" class="label">Memtable</text><text x="805" y="221" text-anchor="middle" class="sub">readable state</text>
+          <path d="M270 180 L270 94 Q270 86 278 86 L787 86 Q795 86 795 94 L795 155" class="wire"/><polygon points="795,165 790,155 800,155" class="head"/>
+          <text x="530" y="78" text-anchor="middle" class="tiny">after WAL: apply to memory</text>
+          <path d="M725 225 L658 225 Q650 225 650 217 L650 148 Q650 140 642 140 L298 140 Q290 140 290 148 L290 170" class="wire reply"/><polygon points="290,180 285,170 295,170" class="head reply"/>
+          <text x="480" y="132" text-anchor="middle" class="tiny">applied</text>
+          <path d="M175 224 L80 224" class="wire reply"/><polygon points="70,224 80,219 80,229" class="head reply"/>
+          <text x="150" y="246" text-anchor="middle" class="tiny">ACK</text>
+          <path d="M565 292 V340 A60 12 0 0 0 685 340 V292" class="store"/><ellipse cx="625" cy="292" rx="60" ry="12" class="store"/><text x="625" y="326" text-anchor="middle" class="label">SSTable 0</text><text x="625" y="344" text-anchor="middle" class="sub">immutable</text>
+          <path d="M795 245 L795 304 Q795 312 787 312 L695 312" class="wire async"/><polygon points="685,312 695,307 695,317" class="head async"/>
+          <text x="806" y="280" class="tiny">flush</text>
+          <g class="is-new">
+            <path d="M345 292 V340 A60 12 0 0 0 465 340 V292" class="store"/><ellipse cx="405" cy="292" rx="60" ry="12" class="store"/><text x="405" y="326" text-anchor="middle" class="label">SSTable 1</text><text x="405" y="344" text-anchor="middle" class="sub">next level</text>
+            <path d="M565 330 L475 330" class="wire async"/><polygon points="465,330 475,325 475,335" class="head async"/>
+            <text x="515" y="322" text-anchor="middle" class="tiny">compact</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">再加 compaction：读取旧文件并生成下一层新文件，降低需要探查的文件数量，付出重写带宽和临时空间。图保留输入、输出，表示生成过程；不是原地改写不可变 SSTable。</span><span class="lang-en">Compaction reads inputs and creates next-level output, reducing candidate files at the cost of rewrite bandwidth and temporary space. Both stay drawn as input and output, not an in-place overwrite.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s6t d5s6d">
+          <title id="d5s6t">Background work can throttle the foreground write path</title>
+          <desc id="d5s6d">Compaction or flush pressure propagates back to Engine as write throttling. Under the assumed 10x SST write amplification, 10 MB/s logical writes and three replicas produce 300 MB/s of SST output cluster-wide, excluding WAL and compaction reads.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="18" width="824" height="366" rx="18" class="boundary"/>
+          <text x="136" y="38" class="tiny">REPLICA A · local write path, independent of cluster quorum</text>
+          <circle cx="44" cy="191" r="12" class="box"/><path d="M24 237 Q44 205 64 237" class="wire"/><text x="44" y="259" text-anchor="middle" class="label">Caller</text>
+          <rect x="175" y="180" width="150" height="80" rx="12" class="box"/><text x="250" y="217" text-anchor="middle" class="label">Engine</text><text x="250" y="236" text-anchor="middle" class="sub">Replica A handler</text>
+          <path d="M70 206 L165 206" class="wire"/><polygon points="175,206 165,211 165,201" class="head"/>
+          <text x="150" y="198" text-anchor="middle" class="tiny">PUT</text>
+          <path d="M420 170 V226 A60 12 0 0 0 540 226 V170" class="store"/><ellipse cx="480" cy="170" rx="60" ry="12" class="store"/><text x="480" y="208" text-anchor="middle" class="label">WAL</text><text x="480" y="226" text-anchor="middle" class="sub">sync before ACK</text>
+          <path d="M325 201 L410 201" class="wire"/><polygon points="420,201 410,206 410,196" class="head"/>
+          <text x="370" y="193" text-anchor="middle" class="tiny">append</text>
+          <path d="M420 219 L335 219" class="wire reply"/><polygon points="325,219 335,214 335,224" class="head reply"/>
+          <text x="370" y="237" text-anchor="middle" class="tiny">synced</text>
+          <rect x="725" y="165" width="160" height="80" rx="12" class="box"/><text x="805" y="202" text-anchor="middle" class="label">Memtable</text><text x="805" y="221" text-anchor="middle" class="sub">readable state</text>
+          <path d="M270 180 L270 94 Q270 86 278 86 L787 86 Q795 86 795 94 L795 155" class="wire"/><polygon points="795,165 790,155 800,155" class="head"/>
+          <text x="530" y="78" text-anchor="middle" class="tiny">after WAL: apply to memory</text>
+          <path d="M725 225 L658 225 Q650 225 650 217 L650 148 Q650 140 642 140 L298 140 Q290 140 290 148 L290 170" class="wire reply"/><polygon points="290,180 285,170 295,170" class="head reply"/>
+          <text x="480" y="132" text-anchor="middle" class="tiny">applied</text>
+          <path d="M175 224 L80 224" class="wire reply"/><polygon points="70,224 80,219 80,229" class="head reply"/>
+          <text x="150" y="246" text-anchor="middle" class="tiny">ACK</text>
+          <path d="M565 292 V340 A60 12 0 0 0 685 340 V292" class="store"/><ellipse cx="625" cy="292" rx="60" ry="12" class="store"/><text x="625" y="326" text-anchor="middle" class="label">SSTable 0</text><text x="625" y="344" text-anchor="middle" class="sub">immutable</text>
+          <path d="M795 245 L795 304 Q795 312 787 312 L695 312" class="wire async"/><polygon points="685,312 695,307 695,317" class="head async"/>
+          <text x="806" y="280" class="tiny">flush</text>
+          <path d="M345 292 V340 A60 12 0 0 0 465 340 V292" class="store"/><ellipse cx="405" cy="292" rx="60" ry="12" class="store"/><text x="405" y="326" text-anchor="middle" class="label">SSTable 1</text><text x="405" y="344" text-anchor="middle" class="sub">next level</text>
+          <path d="M565 330 L475 330" class="wire async"/><polygon points="465,330 475,325 475,335" class="head async"/>
+          <text x="515" y="322" text-anchor="middle" class="tiny">compact</text>
+          <g class="is-new">
+            <path d="M565 312 L543 312 Q535 312 535 304 L535 278 Q535 270 527 270 L333 270 Q325 270 325 262 L325 252" class="wire fail"/><polygon points="325,242 330,252 320,252" class="head fail"/>
+            <text x="350" y="264" class="tiny">pressure: throttle</text>
+            <text x="136" y="60" class="tiny">10 MB/s logical writes × 3 replicas × 10 SST write amplification = 300 MB/s</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">最后把后台压力接回前台。教学按 SST 写放大 10 倍：10 MB/s×3×10=300 MB/s 全集群 SST 输出；还没算 WAL、compaction 读和协议。后台跟不上，红线停在 Engine，表现为限速与更长写延迟。</span><span class="lang-en">Connect background pressure to the foreground. Assume 10× SST write amplification: 10 MB/s × 3 × 10 = 300 MB/s of cluster SST output, before WAL, compaction reads and protocol bytes. Pressure causes throttling and longer write latency at Engine.</span></figcaption>
+      </div>
+    </figure>
+<h3><span class="lang-zh">正常路径：先解释本地 ACK，再解释 flush</span><span class="lang-en">Walkthrough: define local ACK before flush</span></h3>
+<div class="bilingual"><div class="lang-zh"><p>本章刻意选择 WAL 同步后 ACK 的耐久规则。写进操作系统缓存，只能抵御部分进程故障；机器掉电可能丢掉尚未同步的尾部。RocksDB Basic Operations 明确区分默认非同步写和 <code>sync=true</code>，后者等待持久存储。把默认 RocksDB、Cassandra 的某种 commit log 同步配置和本图自己的耐久假设混成一个规则，会让三副本确认的含义变模糊。<a href="#ref-4">[4]</a></p></div><div class="lang-en"><p>Our ACK rule requires WAL sync. OS buffering can survive some process failures but lose an unsynced suffix on machine power loss. RocksDB Basic Operations distinguishes default non-sync writes from <code>sync=true</code>, which waits for persistent storage. Do not conflate that default, Cassandra commit-log settings and our explicit durability assumption. <a href="#ref-4">[4]</a></p></div></div>
+<div class="bilingual"><div class="lang-zh"><p>WAL 之后应用到可读的 memtable，才对协调层回本地 ACK。内存表达到阈值后冻结，后台输出不可变 SSTable，新写进入下一张内存表。新文件安全发布后，才能回收已被持久文件覆盖的日志；崩溃恢复重放仍需的 WAL。RocksDB Overview 把 memtable、sstfile、logfile 列为三个基础结构，并解释 flush 与 compaction 的关系。图只画一次 flush 与下一层输出，层数不是固定只有两层。<a href="#ref-5">[5]</a></p></div><div class="lang-en"><p>Apply the mutation to readable Memtable after WAL, then send the local ACK. Freeze full tables, flush immutable SSTables and accept new writes in a new table. Retire covered logs after safe file publication; replay remaining WAL on recovery. RocksDB Overview describes Memtable, sstfile, logfile, flush and compaction. Our two files illustrate one flush and one next-level output, not a fixed two-level engine. <a href="#ref-5">[5]</a></p></div></div>
+<h3><span class="lang-zh">读路径：Bloom 只能排除某个候选文件</span><span class="lang-en">Read path: Bloom excludes an individual candidate file</span></h3>
+<div class="bilingual"><div class="lang-zh"><p>一次本地 GET 先查内存中的候选版本，再查可能含 key 的文件。对于本章按 mutation 戳比较的 value，不能因为内存里碰巧有一份就无条件提前结束：重放或时钟偏斜可能把旧戳写进新文件，墓碑也要参与比较。具体引擎可根据索引、序列与版本规则安全地缩小搜索；Cassandra 的按单元格 reconciliation 和 RocksDB 的序列号快照是不同语义。面试先说比较正确，再讨论优化到少读几个文件。</p></div><div class="lang-en"><p>A local GET checks memory candidates and relevant files. With our mutation-timestamp semantics, a memory hit cannot unconditionally terminate: replay or clock skew may put an older timestamp in newer storage, and tombstones participate. Engines can safely prune using indexes and their own version rules. Cassandra cell reconciliation and RocksDB sequence snapshots are different semantics; establish correctness before pruning.</p></div></div>
+<div class="bilingual"><div class="lang-zh"><p>普通 Bloom 对一个正确构建的文件索引，只会给“肯定不在”或“可能在”；前者跳过该文件，不代表全库不存在，后者还要查索引与数据。教学按 10 个阴性文件、每个 1% 假阳性，期望额外探查 10×0.01=0.1 个文件；若还假设误报独立，至少一次误报概率是 1−0.99¹⁰≈9.56%。这是阴性点查的期望，不是所有查询的 p99。官方表给约 9.9 bit/key 对应约 1% 误报；按 10 bit 口算：100,000,000×10÷8=125,000,000 B=125 MB，三份约 375 MB，未计多版本和开销。<a href="#ref-6">[6]</a></p></div><div class="lang-en"><p>A correctly built ordinary Bloom filter says definitely absent or possibly present in one file. Absence skips that file, not the database; a positive still needs lookup. For ten absent files at 1% false positives, expected extra probes are 10×0.01=0.1. With independent false positives, any false positive occurs with 1−0.99¹⁰≈9.56%, not a p99 bound. The official table gives about 9.9 bit/key for 1%; rounding to 10 gives 100,000,000×10÷8=125,000,000 B=125 MB per filter, or 375 MB for three copies, before versions and overhead. <a href="#ref-6">[6]</a></p></div></div>
+<h3><span class="lang-zh">为什么这样选：吞吐快，不等于写放大小</span><span class="lang-en">Why: high throughput does not mean low write amplification</span></h3>
+<div class="bilingual"><div class="lang-zh"><p>顺序日志和内存批次把随机改页的工作移出前台，但 SSTable 会在 compaction 中被读取、合并和重写。A7 把累计 SST 输出字节除以逻辑 value 写入字节定义为教学写放大 10：10 MB/s×3×10=300 MB/s 全集群 SST 输出，约 2.4 Gb/s 等价字节速率。它是磁盘输出口径，不是网络复制需求；如果 WAL 也写相同载荷，再加约 30 MB/s，compaction 的输入读取另算。不要把空间系数 2 当成写放大 2。</p></div><div class="lang-en"><p>Logging and memory batches move random-page work out of the foreground, but compaction reads, merges and rewrites SST data. A7 defines teaching SST write amplification as cumulative SST output divided by logical value bytes: 10 MB/s×3×10=300 MB/s cluster-wide, equivalent to 2.4 Gb/s of bytes, not network replication. Add about 30 MB/s if WAL writes the same payload, plus compaction reads. Space factor 2 is not write amplification 2.</p></div></div>
+<div class="bilingual"><div class="lang-zh"><p>长时间写入时，平均后台处理速率必须盖住输入。否则冻结 memtable 和 L0 文件越积越多，读需要查更多候选，内存与临时空间也上升，最后前台被限速或停写。给 compaction 留独立 I/O 和空间余量、控制并发与流入，比只把“峰值写入很快”写在答案里完整。写压力很小、点查延迟严的场景，可以比较 B+Tree；LSM 的选择是把成本在时间上搬到后台，不是把成本删除。</p></div><div class="lang-en"><p>Under sustained writes, background throughput must cover input. Otherwise immutable Memtables and L0 files accumulate, reads face more candidates and memory/temporary space rise until writes throttle or stall. Reserve I/O and space and control concurrency and inflow. Low-write, tight point-latency workloads may prefer a B+Tree; LSM moves cost to the background rather than deleting it.</p></div></div>
+</section>
+
+<section>
+<h2><span class="lang-zh">修复与删除：旧副本回来以后，不能让数据复活</span><span class="lang-en">Repair and deletion: returning replicas must not resurrect data</span></h2>
+<figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d6s1t d6s1d">
+          <title id="d6s1t">Delete is a replicated version, not physical absence</title>
+          <desc id="d6s1d">Client sends DEL at timestamp 300 to Coordinator, which sends it to A and B and receives their acknowledgements. C is offline with v2 at timestamp 200.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <g class="is-new">
+            <rect x="120" y="18" width="824" height="366" rx="18" class="boundary"/>
+            <text x="136" y="38" class="tiny">DELETE / REPAIR · fixed owners {A,B,C}, W=2</text>
+            <circle cx="44" cy="191" r="12" class="box"/><path d="M24 237 Q44 205 64 237" class="wire"/><text x="44" y="259" text-anchor="middle" class="label">Client</text>
+            <rect x="230" y="170" width="170" height="90" rx="12" class="box"/><text x="315" y="212" text-anchor="middle" class="label">Coordinator</text><text x="315" y="231" text-anchor="middle" class="sub">one request role</text>
+            <path d="M70 206 L220 206" class="wire"/><polygon points="230,206 220,211 220,201" class="head"/><text x="175" y="198" text-anchor="middle" class="tiny">DEL @ 300</text>
+            <path d="M690 65 V121 A70 12 0 0 0 830 121 V65" class="store"/><ellipse cx="760" cy="65" rx="70" ry="12" class="store"/><text x="760" y="103" text-anchor="middle" class="label">Replica A</text><text x="760" y="121" text-anchor="middle" class="sub">DEL @ 300</text>
+            <path d="M690 185 V241 A70 12 0 0 0 830 241 V185" class="store"/><ellipse cx="760" cy="185" rx="70" ry="12" class="store"/><text x="760" y="223" text-anchor="middle" class="label">Replica B</text><text x="760" y="241" text-anchor="middle" class="sub">DEL @ 300</text>
+            <path d="M690 285 V341 A70 12 0 0 0 830 341 V285" class="store"/><ellipse cx="760" cy="285" rx="70" ry="12" class="store"/><text x="760" y="323" text-anchor="middle" class="label">Replica C</text><text x="760" y="341" text-anchor="middle" class="sub">v2 @ 200; offline</text>
+            <path d="M305 170 L305 94 Q305 86 313 86 L680 86" class="wire"/><polygon points="690,86 680,91 680,81" class="head"/><text x="500" y="78" text-anchor="middle" class="tiny">DEL @ 300</text>
+            <path d="M690 104 L331 104 Q323 104 323 112 L323 160" class="wire reply"/><polygon points="323,170 318,160 328,160" class="head reply"/><text x="500" y="120" text-anchor="middle" class="tiny">ACK</text>
+            <path d="M400 206 L680 206" class="wire"/><polygon points="690,206 680,211 680,201" class="head"/><text x="540" y="198" text-anchor="middle" class="tiny">DEL @ 300</text>
+            <path d="M690 224 L410 224" class="wire reply"/><polygon points="400,224 410,219 410,229" class="head reply"/><text x="540" y="260" text-anchor="middle" class="tiny">ACK</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">删除也走复制写路径：A、B 保存 DEL@300，C 仍有 v2@200。若只在 A、B 抹掉文件，后续修复分不清“被删了”和“还没复制到”，旧值可能重新出现。</span><span class="lang-en">Deletion uses the replicated write path: A and B hold DEL@300 while C still has v2@200. Erasing files on A and B would lose the distinction between deleted and never replicated, allowing resurrection.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d6s2t d6s2d">
+          <title id="d6s2t">Two owner acknowledgements confirm despite one failed replica</title>
+          <desc id="d6s2d">C delivery fails back to Coordinator. A and B meet the fixed-owner W=2, so Coordinator returns success to Client. The C failure stops at Coordinator.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="18" width="824" height="366" rx="18" class="boundary"/>
+          <text x="136" y="38" class="tiny">DELETE / REPAIR · fixed owners {A,B,C}, W=2</text>
+          <circle cx="44" cy="191" r="12" class="box"/><path d="M24 237 Q44 205 64 237" class="wire"/><text x="44" y="259" text-anchor="middle" class="label">Client</text>
+          <rect x="230" y="170" width="170" height="90" rx="12" class="box"/><text x="315" y="212" text-anchor="middle" class="label">Coordinator</text><text x="315" y="231" text-anchor="middle" class="sub">one request role</text>
+          <path d="M70 206 L220 206" class="wire"/><polygon points="230,206 220,211 220,201" class="head"/><text x="175" y="198" text-anchor="middle" class="tiny">DEL @ 300</text>
+          <path d="M690 65 V121 A70 12 0 0 0 830 121 V65" class="store"/><ellipse cx="760" cy="65" rx="70" ry="12" class="store"/><text x="760" y="103" text-anchor="middle" class="label">Replica A</text><text x="760" y="121" text-anchor="middle" class="sub">DEL @ 300</text>
+          <path d="M690 185 V241 A70 12 0 0 0 830 241 V185" class="store"/><ellipse cx="760" cy="185" rx="70" ry="12" class="store"/><text x="760" y="223" text-anchor="middle" class="label">Replica B</text><text x="760" y="241" text-anchor="middle" class="sub">DEL @ 300</text>
+          <path d="M690 285 V341 A70 12 0 0 0 830 341 V285" class="store"/><ellipse cx="760" cy="285" rx="70" ry="12" class="store"/><text x="760" y="323" text-anchor="middle" class="label">Replica C</text><text x="760" y="341" text-anchor="middle" class="sub">v2 @ 200; offline</text>
+          <path d="M305 170 L305 94 Q305 86 313 86 L680 86" class="wire"/><polygon points="690,86 680,91 680,81" class="head"/><text x="500" y="78" text-anchor="middle" class="tiny">DEL @ 300</text>
+          <path d="M690 104 L331 104 Q323 104 323 112 L323 160" class="wire reply"/><polygon points="323,170 318,160 328,160" class="head reply"/><text x="500" y="120" text-anchor="middle" class="tiny">ACK</text>
+          <path d="M400 206 L680 206" class="wire"/><polygon points="690,206 680,211 680,201" class="head"/><text x="540" y="198" text-anchor="middle" class="tiny">DEL @ 300</text>
+          <path d="M690 224 L410 224" class="wire reply"/><polygon points="400,224 410,219 410,229" class="head reply"/><text x="540" y="260" text-anchor="middle" class="tiny">ACK</text>
+          <g class="is-new">
+            <path d="M400 236 L612 236 Q620 236 620 244 L620 286 Q620 294 628 294 L680 294" class="wire muted"/><polygon points="690,294 680,299 680,289" class="head muted"/>
+
+            <path d="M690 312 L608 312 Q600 312 600 304 L600 278 Q600 270 592 270 L438 270 Q430 270 430 262 L430 256 Q430 248 422 248 L410 248" class="wire fail"/><polygon points="400,248 410,243 410,253" class="head fail"/>
+            <path d="M230 224 L80 224" class="wire reply"/><polygon points="70,224 80,219 80,229" class="head reply"/><text x="175" y="246" text-anchor="middle" class="tiny">200 · A+B</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">A、B 已凑齐严格 W=2，C 的故障停在 Coordinator，客户端仍可成功。这和上一组“只剩一台正常副本”不同；正常副本 ACK 的数量决定行为，不能把两种故障混讲。</span><span class="lang-en">A and B satisfy strict W=2, so C’s failure is absorbed at Coordinator and the client succeeds. This differs from the earlier one-owner case; count actual owner acknowledgements.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d6s3t d6s3d">
+          <title id="d6s3t">A hint stores the missed mutation, without becoming an owner ACK</title>
+          <desc id="d6s3d">Coordinator records DEL for C in its durable Hint log and receives local storage completion. The hint is not counted as an additional owner acknowledgement.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="18" width="824" height="366" rx="18" class="boundary"/>
+          <text x="136" y="38" class="tiny">DELETE / REPAIR · fixed owners {A,B,C}, W=2</text>
+          <circle cx="44" cy="191" r="12" class="box"/><path d="M24 237 Q44 205 64 237" class="wire"/><text x="44" y="259" text-anchor="middle" class="label">Client</text>
+          <rect x="230" y="170" width="170" height="90" rx="12" class="box"/><text x="315" y="212" text-anchor="middle" class="label">Coordinator</text><text x="315" y="231" text-anchor="middle" class="sub">one request role</text>
+          <path d="M70 206 L220 206" class="wire"/><polygon points="230,206 220,211 220,201" class="head"/><text x="175" y="198" text-anchor="middle" class="tiny">DEL @ 300</text>
+          <path d="M690 65 V121 A70 12 0 0 0 830 121 V65" class="store"/><ellipse cx="760" cy="65" rx="70" ry="12" class="store"/><text x="760" y="103" text-anchor="middle" class="label">Replica A</text><text x="760" y="121" text-anchor="middle" class="sub">DEL @ 300</text>
+          <path d="M690 185 V241 A70 12 0 0 0 830 241 V185" class="store"/><ellipse cx="760" cy="185" rx="70" ry="12" class="store"/><text x="760" y="223" text-anchor="middle" class="label">Replica B</text><text x="760" y="241" text-anchor="middle" class="sub">DEL @ 300</text>
+          <path d="M690 285 V341 A70 12 0 0 0 830 341 V285" class="store"/><ellipse cx="760" cy="285" rx="70" ry="12" class="store"/><text x="760" y="323" text-anchor="middle" class="label">Replica C</text><text x="760" y="341" text-anchor="middle" class="sub">v2 @ 200; offline</text>
+          <path d="M305 170 L305 94 Q305 86 313 86 L680 86" class="wire"/><polygon points="690,86 680,91 680,81" class="head"/><text x="500" y="78" text-anchor="middle" class="tiny">DEL @ 300</text>
+          <path d="M690 104 L331 104 Q323 104 323 112 L323 160" class="wire reply"/><polygon points="323,170 318,160 328,160" class="head reply"/><text x="500" y="120" text-anchor="middle" class="tiny">ACK</text>
+          <path d="M400 206 L680 206" class="wire"/><polygon points="690,206 680,211 680,201" class="head"/><text x="540" y="198" text-anchor="middle" class="tiny">DEL @ 300</text>
+          <path d="M690 224 L410 224" class="wire reply"/><polygon points="400,224 410,219 410,229" class="head reply"/><text x="540" y="260" text-anchor="middle" class="tiny">ACK</text>
+          <path d="M400 236 L612 236 Q620 236 620 244 L620 286 Q620 294 628 294 L680 294" class="wire muted"/><polygon points="690,294 680,299 680,289" class="head muted"/>
+
+          <path d="M690 312 L608 312 Q600 312 600 304 L600 278 Q600 270 592 270 L438 270 Q430 270 430 262 L430 256 Q430 248 422 248 L410 248" class="wire fail"/><polygon points="400,248 410,243 410,253" class="head fail"/>
+          <path d="M230 224 L80 224" class="wire reply"/><polygon points="70,224 80,219 80,229" class="head reply"/><text x="175" y="246" text-anchor="middle" class="tiny">200 · A+B</text>
+          <g class="is-new">
+            <path d="M445 300 V346 A60 12 0 0 0 565 346 V300" class="store"/><ellipse cx="505" cy="300" rx="60" ry="12" class="store"/><text x="505" y="333" text-anchor="middle" class="label">Hint log</text><text x="505" y="351" text-anchor="middle" class="sub">DEL for C</text>
+            <path d="M360 260 L360 311 Q360 319 368 319 L435 319" class="wire async"/><polygon points="445,319 435,324 435,314" class="head async"/>
+            <text x="400" y="310" text-anchor="middle" class="tiny">record</text>
+            <path d="M445 337 L388 337 Q380 337 380 329 L380 270" class="wire reply"/><polygon points="380,260 385,270 375,270" class="head reply"/>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">补一个有容量与保留窗口的本地 Hint log，记住要给 C 的原始删除。它帮助短暂故障追平，不是严格 quorum 的第三个副本 ACK，也不能覆盖任意长的离线窗口。</span><span class="lang-en">Add a bounded, retained Hint log containing the original deletion for C. It helps short outages recover; it is neither a third owner ACK for strict quorum nor coverage for arbitrarily long downtime.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d6s4t d6s4d">
+          <title id="d6s4t">Replay preserves the original delete version when C returns</title>
+          <desc id="d6s4d">After C recovers, Coordinator loads original DEL at timestamp 300 over its Hint log link, replays it to C, and receives C acknowledgement at Coordinator. The earlier failed delivery is muted as historical.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="18" width="824" height="366" rx="18" class="boundary"/>
+          <text x="136" y="38" class="tiny">DELETE / REPAIR · fixed owners {A,B,C}, W=2</text>
+          <circle cx="44" cy="191" r="12" class="box"/><path d="M24 237 Q44 205 64 237" class="wire"/><text x="44" y="259" text-anchor="middle" class="label">Client</text>
+          <rect x="230" y="170" width="170" height="90" rx="12" class="box"/><text x="315" y="212" text-anchor="middle" class="label">Coordinator</text><text x="315" y="231" text-anchor="middle" class="sub">one request role</text>
+          <path d="M70 206 L220 206" class="wire"/><polygon points="230,206 220,211 220,201" class="head"/><text x="175" y="198" text-anchor="middle" class="tiny">DEL @ 300</text>
+          <path d="M690 65 V121 A70 12 0 0 0 830 121 V65" class="store"/><ellipse cx="760" cy="65" rx="70" ry="12" class="store"/><text x="760" y="103" text-anchor="middle" class="label">Replica A</text><text x="760" y="121" text-anchor="middle" class="sub">DEL @ 300</text>
+          <path d="M690 185 V241 A70 12 0 0 0 830 241 V185" class="store"/><ellipse cx="760" cy="185" rx="70" ry="12" class="store"/><text x="760" y="223" text-anchor="middle" class="label">Replica B</text><text x="760" y="241" text-anchor="middle" class="sub">DEL @ 300</text>
+          <path d="M690 285 V341 A70 12 0 0 0 830 341 V285" class="store"/><ellipse cx="760" cy="285" rx="70" ry="12" class="store"/><text x="760" y="323" text-anchor="middle" class="label">Replica C</text><text x="760" y="341" text-anchor="middle" class="sub">DEL @ 300; restored</text>
+          <path d="M305 170 L305 94 Q305 86 313 86 L680 86" class="wire"/><polygon points="690,86 680,91 680,81" class="head"/><text x="500" y="78" text-anchor="middle" class="tiny">DEL @ 300</text>
+          <path d="M690 104 L331 104 Q323 104 323 112 L323 160" class="wire reply"/><polygon points="323,170 318,160 328,160" class="head reply"/><text x="500" y="120" text-anchor="middle" class="tiny">ACK</text>
+          <path d="M400 206 L680 206" class="wire"/><polygon points="690,206 680,211 680,201" class="head"/><text x="540" y="198" text-anchor="middle" class="tiny">DEL @ 300</text>
+          <path d="M690 224 L410 224" class="wire reply"/><polygon points="400,224 410,219 410,229" class="head reply"/><text x="540" y="260" text-anchor="middle" class="tiny">ACK</text>
+          <path d="M400 236 L612 236 Q620 236 620 244 L620 286 Q620 294 628 294 L680 294" class="wire muted"/><polygon points="690,294 680,299 680,289" class="head muted"/>
+
+          <path d="M690 312 L608 312 Q600 312 600 304 L600 278 Q600 270 592 270 L438 270 Q430 270 430 262 L430 256 Q430 248 422 248 L410 248" class="wire fail muted"/><polygon points="400,248 410,243 410,253" class="head fail muted"/>
+          <path d="M230 224 L80 224" class="wire reply"/><polygon points="70,224 80,219 80,229" class="head reply"/><text x="175" y="246" text-anchor="middle" class="tiny">200 · A+B</text>
+          <path d="M445 300 V346 A60 12 0 0 0 565 346 V300" class="store"/><ellipse cx="505" cy="300" rx="60" ry="12" class="store"/><text x="505" y="333" text-anchor="middle" class="label">Hint log</text><text x="505" y="351" text-anchor="middle" class="sub">DEL for C</text>
+          <path d="M360 260 L360 311 Q360 319 368 319 L435 319" class="wire async"/><polygon points="445,319 435,324 435,314" class="head async"/>
+          <text x="400" y="310" text-anchor="middle" class="tiny">record</text>
+          <path d="M445 337 L388 337 Q380 337 380 329 L380 270" class="wire reply"/><polygon points="380,260 385,270 375,270" class="head reply"/>
+          <g class="is-new">
+            <path d="M400 236 L612 236 Q620 236 620 244 L620 286 Q620 294 628 294 L680 294" class="wire async"/><polygon points="690,294 680,299 680,289" class="head async"/>
+            <text x="632" y="270" class="tiny">replay DEL</text>
+            <path d="M690 312 L608 312 Q600 312 600 304 L600 278 Q600 270 592 270 L438 270 Q430 270 430 262 L430 256 Q430 248 422 248 L410 248" class="wire reply"/><polygon points="400,248 410,243 410,253" class="head reply"/>
+            <text x="395" y="286" class="tiny">load hint</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">C 恢复后，Coordinator 从 Hint log 加载原 DEL@300 再发给 C，节点状态改为已恢复的墓碑；回 ACK 后才能清掉已交付的 hint。这里必须保留原时间戳，重放不是一笔新写；否则旧 hint 会得到更高戳，反过来覆盖更新。</span><span class="lang-en">On recovery Coordinator loads the original DEL@300 from Hint log and sends it to C, updates C’s state to a restored tombstone, and delete the delivered hint after acknowledgement. Preserve its original timestamp: replay is not a new mutation, or an old hint could overwrite newer state.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d6s5t d6s5d">
+          <title id="d6s5t">Anti-entropy covers missed hints and cold ranges</title>
+          <desc id="d6s5d">Replica B asynchronously repairs differing ranges with Replica C and receives completion back from C. Retain tombstones until repair and safe local compaction conditions allow purge.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="18" width="824" height="366" rx="18" class="boundary"/>
+          <text x="136" y="38" class="tiny">DELETE / REPAIR · fixed owners {A,B,C}, W=2</text>
+          <circle cx="44" cy="191" r="12" class="box"/><path d="M24 237 Q44 205 64 237" class="wire"/><text x="44" y="259" text-anchor="middle" class="label">Client</text>
+          <rect x="230" y="170" width="170" height="90" rx="12" class="box"/><text x="315" y="212" text-anchor="middle" class="label">Coordinator</text><text x="315" y="231" text-anchor="middle" class="sub">one request role</text>
+          <path d="M70 206 L220 206" class="wire"/><polygon points="230,206 220,211 220,201" class="head"/><text x="175" y="198" text-anchor="middle" class="tiny">DEL @ 300</text>
+          <path d="M690 65 V121 A70 12 0 0 0 830 121 V65" class="store"/><ellipse cx="760" cy="65" rx="70" ry="12" class="store"/><text x="760" y="103" text-anchor="middle" class="label">Replica A</text><text x="760" y="121" text-anchor="middle" class="sub">DEL @ 300</text>
+          <path d="M690 185 V241 A70 12 0 0 0 830 241 V185" class="store"/><ellipse cx="760" cy="185" rx="70" ry="12" class="store"/><text x="760" y="223" text-anchor="middle" class="label">Replica B</text><text x="760" y="241" text-anchor="middle" class="sub">DEL @ 300</text>
+          <path d="M690 285 V341 A70 12 0 0 0 830 341 V285" class="store"/><ellipse cx="760" cy="285" rx="70" ry="12" class="store"/><text x="760" y="323" text-anchor="middle" class="label">Replica C</text><text x="760" y="341" text-anchor="middle" class="sub">DEL @ 300; restored</text>
+          <path d="M305 170 L305 94 Q305 86 313 86 L680 86" class="wire"/><polygon points="690,86 680,91 680,81" class="head"/><text x="500" y="78" text-anchor="middle" class="tiny">DEL @ 300</text>
+          <path d="M690 104 L331 104 Q323 104 323 112 L323 160" class="wire reply"/><polygon points="323,170 318,160 328,160" class="head reply"/><text x="500" y="120" text-anchor="middle" class="tiny">ACK</text>
+          <path d="M400 206 L680 206" class="wire"/><polygon points="690,206 680,211 680,201" class="head"/><text x="540" y="198" text-anchor="middle" class="tiny">DEL @ 300</text>
+          <path d="M690 224 L410 224" class="wire reply"/><polygon points="400,224 410,219 410,229" class="head reply"/><text x="540" y="260" text-anchor="middle" class="tiny">ACK</text>
+          <path d="M400 236 L612 236 Q620 236 620 244 L620 286 Q620 294 628 294 L680 294" class="wire muted"/><polygon points="690,294 680,299 680,289" class="head muted"/>
+
+          <path d="M690 312 L608 312 Q600 312 600 304 L600 278 Q600 270 592 270 L438 270 Q430 270 430 262 L430 256 Q430 248 422 248 L410 248" class="wire fail muted"/><polygon points="400,248 410,243 410,253" class="head fail muted"/>
+          <path d="M230 224 L80 224" class="wire reply"/><polygon points="70,224 80,219 80,229" class="head reply"/><text x="175" y="246" text-anchor="middle" class="tiny">200 · A+B</text>
+          <path d="M445 300 V346 A60 12 0 0 0 565 346 V300" class="store"/><ellipse cx="505" cy="300" rx="60" ry="12" class="store"/><text x="505" y="333" text-anchor="middle" class="label">Hint log</text><text x="505" y="351" text-anchor="middle" class="sub">DEL for C</text>
+          <path d="M360 260 L360 311 Q360 319 368 319 L435 319" class="wire async"/><polygon points="445,319 435,324 435,314" class="head async"/>
+          <text x="400" y="310" text-anchor="middle" class="tiny">record</text>
+          <path d="M445 337 L388 337 Q380 337 380 329 L380 270" class="wire reply"/><polygon points="380,260 385,270 375,270" class="head reply"/>
+          <path d="M400 236 L612 236 Q620 236 620 244 L620 286 Q620 294 628 294 L680 294" class="wire async"/><polygon points="690,294 680,299 680,289" class="head async"/>
+          <text x="632" y="270" class="tiny">replay DEL</text>
+          <path d="M690 312 L608 312 Q600 312 600 304 L600 278 Q600 270 592 270 L438 270 Q430 270 430 262 L430 256 Q430 248 422 248 L410 248" class="wire reply"/><polygon points="400,248 410,243 410,253" class="head reply"/>
+          <text x="395" y="286" class="tiny">load hint</text>
+          <g class="is-new">
+            <path d="M830 206 L862 206 Q870 206 870 214 L870 286 Q870 294 862 294 L840 294" class="wire async"/><polygon points="830,294 840,289 840,299" class="head async"/>
+            <path d="M830 312 L882 312 Q890 312 890 304 L890 232 Q890 224 882 224 L840 224" class="wire reply"/><polygon points="830,224 840,219 840,229" class="head reply"/>
+            <text x="690" y="158" class="tiny">anti-entropy: B repairs C</text>
+            <text x="680" y="366" class="tiny">retain tombstone until safe purge</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">完整图再加 B、C 之间的后台反熵，比较副本范围并同步差异，覆盖 hint 遗失和冷键。教学保留墓碑 7 天，修复加最长离线按 2+1=3 天预算；3&lt;7 只留出操作余量，清墓碑仍要检查相关旧文件与副本修复是否安全。</span><span class="lang-en">Add background anti-entropy between B and C for differences beyond hints and hot reads. Assume seven-day tombstone retention and a 2+1=3 day repair-plus-outage budget. 3&lt;7 provides margin, not permission to purge without safe file and replica-repair conditions.</span></figcaption>
+      </div>
+    </figure>
+<h3><span class="lang-zh">正常路径：短暂漏写留 hint，冷键另做反熵</span><span class="lang-en">Walkthrough: hints for missed delivery, anti-entropy for cold keys</span></h3>
+<div class="bilingual"><div class="lang-zh"><p>本图 A、B 已确认，C 不可达；这一种故障严格 quorum 可以继续。Coordinator 记录给 C 的原始 mutation，恢复时重放；确认对方应用成功后再释放已交付 hint。本章把 hint 保留暂定为 1 h，不能抄成产品默认。下载核对的 Cassandra 官方文档写默认 hint 窗口 3 h，超出窗口的差异需要读修复或后台反熵。两者都必须受带宽与存储预算约束。<a href="#ref-3">[3]</a></p></div><div class="lang-en"><p>A and B confirmed while C is unreachable, so strict quorum can continue here. Coordinator retains the original mutation for C, replays it after recovery and releases a delivered hint after application is acknowledged. Our 1 h retention is an assumption; Cassandra’s checked documentation lists a 3 h default hint window and requires read repair or anti-entropy beyond it. Bound both storage and delivery traffic. <a href="#ref-3">[3]</a></p></div></div>
+<div class="bilingual"><div class="lang-zh"><p>读修复只覆盖被读到的差异；hint 可能过期，保留它的机器也可能坏掉。后台反熵按范围比较副本状态，先定位差异再同步相关记录，不必每轮重传完整全集。Merkle tree 的根不同只说明某处有差异，要继续向子范围定位，不能“只发一个 hash 就把数据修好”。图的橙线表示 B、C 之间的后台范围同步，绿色回程表示完成反馈；细节展开留给 Ch41，主路径仍要给它留 I/O 余量。</p></div><div class="lang-en"><p>Read repair only covers observed differences; hints expire and their holder can fail. Background anti-entropy compares ranges, locates differences and synchronizes records. Different Merkle roots indicate a difference but require descending into subranges; a hash alone does not repair data. The orange B/C path represents background range synchronization, with a completion reply. Reserve I/O; details belong in Ch41.</p></div></div>
+<h3><span class="lang-zh">为什么要墓碑：缺失没有表达删除的历史</span><span class="lang-en">Why tombstones: absence does not record deletion</span></h3>
+<div class="bilingual"><div class="lang-zh"><p>A、B 都保存 DEL@300，而 C 保留 v2@200，修复按同一版本规则选择墓碑。若 A、B 只是物理抹掉 value，比较时它们只表现为“没有”，C 的旧值就可能重新复制回来。TTL 到期也应留下能传播的删除信息，而不是让一台节点悄悄抹掉本地记录。Cassandra tombstones 文档用三副本缺少删除标记的例子解释 zombie；删除正是一次携带时间戳的写。<a href="#ref-7">[7]</a></p></div><div class="lang-en"><p>A and B retain DEL@300 while C has v2@200, so the same version rule selects deletion during repair. Physical erasure on A/B leaves only absence and lets C’s old value return. TTL expiry also needs propagatable deletion information. Cassandra’s tombstone documentation illustrates zombie resurrection in a three-copy example; deletion is a timestamped mutation. <a href="#ref-7">[7]</a></p></div></div>
+<div class="bilingual"><div class="lang-zh"><p>A11 教学保留墓碑 7 天，后台修复最长 2 天，加上允许离线最长 1 天，是 3 天，3&lt;7 留出 4 天操作余量。这不是证明所有故障都能在 7 天内修完：机器离线更久、修复失败、临时副本遗漏都破坏假设。要监控范围修复是否成功，超过离线边界的副本需要隔离并重建，不能直接把它重新接入普通读写。删除的安全性因此连接到了成员交接与运维边界。</p></div><div class="lang-en"><p>A11 retains tombstones for seven days; a two-day repair bound plus one-day outage gives three days, leaving four days of margin. This does not prove recovery under longer outages, failed repair or forgotten fallbacks. Monitor successful range repair; isolate and rebuild replicas exceeding the outage boundary before normal service. Deletion safety depends on membership and operational limits.</p></div></div>
+<h3><span class="lang-zh">故障窗口：到了时间，也不等于能立刻清理</span><span class="lang-en">Failure window: elapsed time is not sufficient to purge</span></h3>
+<div class="bilingual"><div class="lang-zh"><p>文档的 <code>gc_grace_seconds</code> 默认是 864,000 s，864,000÷86,400=10 天；这是核对过的 Cassandra 默认，与本章教学 7 天不同。过期后仍由 compaction 决定何时清理，且要检查同 key 的旧数据是否在参与合并的文件中、是否满足修复安全条件。墓碑若先被丢掉，另一个旧 SSTable 或长离线副本就可能重新提供旧值。把 grace 配成很短，只是减少暂存字节，不能让这些条件自动成立。<a href="#ref-7">[7]</a></p></div><div class="lang-en"><p>The documented Cassandra <code>gc_grace_seconds</code> default is 864,000 s; 864,000÷86,400=10 days, distinct from our seven-day assumption. Expiry still requires compaction and checking older data coverage and repair safety. Premature tombstone removal can let an old SSTable or long-offline replica restore the value. A short grace reduces retained bytes without establishing these conditions. <a href="#ref-7">[7]</a></p></div></div>
+<div class="bilingual"><div class="lang-zh"><p>重放必须保留原时间戳和 mutation 身份。假设旧 hint 中是 PUT@200，键后来已被 DEL@300 删除；若重放时把 PUT 改为当前时间 400，就人为制造了 400&gt;300 的“新写”，删除会被覆盖。正常重放 PUT@200 应输给 DEL@300。图示重放的是原始 DEL@300，同样不能把它变成一个更晚的删除，否则还可能删掉 300 之后合法重建的值。修复是在传递事实，不是在创建新的业务动作。</p></div><div class="lang-en"><p>Replay must retain the original timestamp and mutation identity. An old PUT@200 hint replayed after DEL@300 must lose. Retimestamping it at 400 manufactures a new write and resurrects the value. Likewise replaying DEL@300 as a later delete can erase a legitimate later recreation. Repair transports prior facts, not new business actions.</p></div></div>
+</section>
+
+<section>
+<h2><span class="lang-zh">追问怎么接：让每个答案落回一个条件</span><span class="lang-en">Follow-ups: connect each answer to a condition</span></h2>
+<h3><span class="lang-zh">要立刻读到自己刚写的值，怎么改？</span><span class="lang-en">How do I immediately read my own write?</span></h3>
+<div class="bilingual"><div class="lang-zh"><p>先问“刚写的”指收到成功还是结果未知。固定全集、版本顺序正确且没有并发覆盖时，本章 3/2/2 可以读到已经完成的那次写；分区替代路径和错误时钟不在这个证明里。需要跨请求的读写会话契约，可以让成功响应携带版本并让读侧检查至少见到该版本，否则等待或返回失败。若要求条件更新和所有客户端的实时顺序，改用相应的协调协议，不能只调 R。</p></div><div class="lang-en"><p>Clarify whether the write succeeded or timed out. Under fixed membership, correct ordering and no concurrent overwrite, 3/2/2 can read the completed write. Sloppy fallback and clock errors are outside that proof. A session may carry a returned version and require reads to observe it or wait/fail. Conditional updates and global real-time order require coordination, not just a larger R.</p></div></div>
+<h3><span class="lang-zh">Redis Cluster 也是 KV，可以直接当这张图吗？</span><span class="lang-en">Can Redis Cluster replace this diagram?</span></h3>
+<div class="bilingual"><div class="lang-zh"><p>它有 16,384 个 hash slot，槽由 primary 负责，并异步复制到 replica；这是另一种复制与故障转移契约。官方规范写明已确认写仍有可能在复制尚未到副本、primary 故障后丢失。因此不把它笼统说成“严格 CP”或拿来证明本章的多写副本 quorum。系统都能存 key/value，不代表 Client→Coordinator→三个对等副本的路径能原封不动套上。<a href="#ref-8">[8]</a></p></div><div class="lang-en"><p>Redis Cluster has 16,384 hash slots served by primaries with asynchronous replicas, a different contract. Its specification allows acknowledged-write loss when a primary fails before replication completes. Avoid calling it strictly CP or using it to prove peer-replica quorum behavior. A shared key/value interface does not imply the same replication diagram. <a href="#ref-8">[8]</a></p></div></div>
+<h3><span class="lang-zh">复制放大、空间放大、写放大能只用一个倍数吗？</span><span class="lang-en">Can one factor represent replication, space and write amplification?</span></h3>
+<div class="bilingual"><div class="lang-zh"><p>不能。三副本把逻辑 value 数乘 3；SST 空间系数 2 描述同时保留的文件；SST 写放大 10 描述一段时间累计输出。100 GB×3×2≈600 GB 与 10 MB/s×3×10=300 MB/s 的单位不同。新增记录还要看留存与增长，不能用峰值 PUT 数直接乘一年，本章 PUT 中很多是覆盖已有 key。持续吞吐、存量与新增速度是三种预算。</p></div><div class="lang-en"><p>No. Three replicas multiply logical copies; SST space factor 2 describes resident files; SST write amplification 10 describes accumulated output. 100 GB×3×2≈600 GB and 10 MB/s×3×10=300 MB/s have different units. New-record growth and retention are separate; peak PUTs include overwrites, so multiplying them by a year does not estimate retained keys.</p></div></div>
+<h3><span class="lang-zh">确认两份，是不是再也不会丢？</span><span class="lang-en">Do two acknowledgements guarantee no later loss?</span></h3>
+<div class="bilingual"><div class="lang-zh"><p>只有在 ACK 真正耐久、故障域独立程度满足需求、剩余副本及时修复的边界内，才能说抵御指定故障。两台机架同时损坏、两份都只有未同步缓存、错误合并覆盖正确值，是不同问题。备份还要覆盖误删与长期灾难，并定期验证恢复；复制把同一个删除发到三份，不能替你保留删除前的历史。收尾时说明这些边界。</p></div><div class="lang-en"><p>Durable ACKs, suitable failure domains and timely repair resist specified failures. Two rack losses, unsynced buffers and incorrect reconciliation are distinct risks. Backups cover accidental deletion and long-term disaster and require restore verification; three replicated deletes do not preserve prior history. State these bounds when closing.</p></div></div>
+</section>
+
+<section>
+<h2><span class="lang-zh">十个常见翻车点</span><span class="lang-en">Ten common mistakes</span></h2>
+<table><thead><tr><th><span class="lang-zh">翻车说法</span><span class="lang-en">Weak answer</span></th><th><span class="lang-zh">缺掉的条件</span><span class="lang-en">Missing condition</span></th><th><span class="lang-zh">改成什么</span><span class="lang-en">Replacement</span></th></tr></thead><tbody><tr><td><span class="lang-zh">W=1 只写一台</span><span class="lang-en">W=1 sends to one machine</span></td><td><span class="lang-zh">把复制数和等待门槛混了</span><span class="lang-en">Confuses replication with waiting</span></td><td><span class="lang-zh">仍发 N 份，只等一份 ACK</span><span class="lang-en">Send N copies; wait for one ACK</span></td></tr>
+<tr><td><span class="lang-zh">副本按 A→B→C 复制</span><span class="lang-en">Replicas relay A→B→C</span></td><td><span class="lang-zh">本题是协调层并行发送</span><span class="lang-en">This design fans out at Coordinator</span></td><td><span class="lang-zh">三路发出，三路回 Coordinator</span><span class="lang-en">Three outgoing paths and replies to Coordinator</span></td></tr>
+<tr><td><span class="lang-zh">quorum 等最慢那台</span><span class="lang-en">Quorum waits for the slowest</span></td><td><span class="lang-zh">W=2,N=3 取第二快</span><span class="lang-en">W=2,N=3 uses the second-fastest</span></td><td><span class="lang-zh">4/7/40 ms 例子等约 7 ms 加开销</span><span class="lang-en">4/7/40 ms example waits about 7 ms plus overhead</span></td></tr>
+<tr><td><span class="lang-zh">2+2&gt;3 就是线性一致</span><span class="lang-en">2+2&gt;3 means linearizable</span></td><td><span class="lang-zh">缺成员、完成写、顺序与并发条件</span><span class="lang-en">Missing membership, completion, ordering and concurrency premises</span></td><td><span class="lang-zh">证明交集，再解释版本与操作契约</span><span class="lang-en">Prove overlap, then define versions and operation contract</span></td></tr>
+<tr><td><span class="lang-zh">3/2/2 分区两边都成功</span><span class="lang-en">3/2/2 succeeds on both partition sides</span></td><td><span class="lang-zh">少数侧只剩一份正常 ACK</span><span class="lang-en">Minority has one owner ACK</span></td><td><span class="lang-zh">严格失败；借 D 时另讲新鲜度代价</span><span class="lang-en">Strict fails; fallback D changes freshness</span></td></tr>
+<tr><td><span class="lang-zh">时间戳大的就是业务上后写的</span><span class="lang-en">Largest timestamp is the latest business write</span></td><td><span class="lang-zh">时钟可能偏斜</span><span class="lang-en">Clocks can skew</span></td><td><span class="lang-zh">X=1200&gt;Y=1100，后写 Y 仍输</span><span class="lang-en">X=1200&gt;Y=1100 despite later Y</span></td></tr>
+<tr><td><span class="lang-zh">写入 WAL 就耐久</span><span class="lang-en">Appending WAL is durable</span></td><td><span class="lang-zh">可能仅到操作系统缓存</span><span class="lang-en">May only reach the OS buffer</span></td><td><span class="lang-zh">明确是否 sync 后才 ACK</span><span class="lang-en">Define whether sync precedes ACK</span></td></tr>
+<tr><td><span class="lang-zh">Bloom 阴性说明库里没 key</span><span class="lang-en">Negative Bloom means key absent from DB</span></td><td><span class="lang-zh">过滤器只对应一个候选文件</span><span class="lang-en">Filter represents one candidate file</span></td><td><span class="lang-zh">跳过该文件，继续其他候选</span><span class="lang-en">Skip that file, check other candidates</span></td></tr>
+<tr><td><span class="lang-zh">后台会最终修好，所以不留预算</span><span class="lang-en">Background repair needs no budget</span></td><td><span class="lang-zh">hint 有限、冷键没人读、I/O 会饱和</span><span class="lang-en">Bounded hints, cold keys and finite I/O</span></td><td><span class="lang-zh">定期范围修复并限速，监控完成</span><span class="lang-en">Schedule bounded range repair and monitor completion</span></td></tr>
+<tr><td><span class="lang-zh">墓碑过期就能直接丢</span><span class="lang-en">Expired tombstones can simply be dropped</span></td><td><span class="lang-zh">旧文件或旧副本可能未覆盖</span><span class="lang-en">Old files or replicas may retain data</span></td><td><span class="lang-zh">先满足修复与 compaction 的安全条件</span><span class="lang-en">Require safe repair and compaction conditions</span></td></tr></tbody></table>
+</section>
+
+<section>
+<h2><span class="lang-zh">收尾：把复制、可用性、冲突、耐久接成一条路径</span><span class="lang-en">Close: connect replication, availability, conflicts and durability</span></h2>
+<div class="bilingual"><div class="lang-zh"><p>最后口述这张白板：放置取三个不同物理 owner，Coordinator 并行发送，等两份同步耐久的本地 ACK。读取两份，在固定全集和版本假设下找到交集，再按明确规则比较；热点要按副本读量计算。严格 3/2/2 少数分区失败，sloppy 临时借 D 时承认旧读与修复成本。LWW 让可覆盖值选一个胜者，不保证保留全部更新。每个副本用 WAL 与可读 memtable 确认，flush、compaction 和反熵用后台预算。删除携带版本并保留墓碑，旧副本恢复后先修复再接入。</p></div><div class="lang-en"><p>Walk the board: three distinct owners, parallel coordinator fan-out and two synced durable local ACKs. Read two copies, prove overlap under fixed membership and version assumptions, then reconcile; budget hotspots in replica reads. Strict 3/2/2 fails on the minority; sloppy D buys availability with stale-read and repair costs. LWW selects one overwrite winner. WAL plus readable Memtable confirms locally; budget flush, compaction and anti-entropy. Version deletions, retain tombstones and repair returning replicas before service.</p></div></div>
+<p class="cite"><span class="lang-zh">接着读：</span><span class="lang-en">Continue with:</span> <a class="chip" href="ch05.html">Ch05</a><a class="chip" href="../index.html"><span class="lang-zh">Ch07 · 唯一 ID（课程地图）</span><span class="lang-en">Ch07 · unique IDs (course map)</span></a><a class="chip" href="../index.html"><span class="lang-zh">Ch36 / Ch37 / Ch41 · 机制词典</span><span class="lang-en">Ch36 / Ch37 / Ch41 · foundations</span></a></p>
+</section>
+
+<section>
+<h2><span class="lang-zh">引用：外部机制与教学数字分开</span><span class="lang-en">References: separate mechanisms from teaching numbers</span></h2>
+<ol class="references"><li id="ref-1">[1] Giuseppe DeCandia et al., <a href="https://www.allthingsdistributed.com/files/amazon-dynamo-sosp2007.pdf">Dynamo: Amazon’s Highly Available Key-value Store</a>. <span class="lang-zh">SOSP 2007</span><span class="lang-en">SOSP 2007</span>. <span class="lang-zh">核对 §4 的版本、sloppy quorum、临时交还与反熵；本章规模不取自论文。</span><span class="lang-en">Checked §4 for versioning, sloppy quorum, handoff and anti-entropy; chapter scale is not taken from the paper.</span></li>
+<li id="ref-2">[2] Apache Cassandra, <a href="https://cassandra.apache.org/doc/latest/cassandra/architecture/dynamo.html">Dynamo architecture</a>. <span class="lang-zh">官方文档，2026-10-03 核对</span><span class="lang-en">Official documentation, 2026-10-03 checked</span>. <span class="lang-zh">核对时间戳来源、按单元格 LWW 与可调一致性；3/2/2 是本章选择。</span><span class="lang-en">Checked timestamp sources, per-cell LWW and tunable consistency; 3/2/2 is our choice.</span></li>
+<li id="ref-3">[3] Apache Cassandra, <a href="https://cassandra.apache.org/doc/latest/cassandra/managing/operating/hints.html">Hints</a>. <span class="lang-zh">官方文档，2026-10-03 核对</span><span class="lang-en">Official documentation, 2026-10-03 checked</span>. <span class="lang-zh">核对三副本等待两份 ACK 的示例与默认 3 h hint 窗口；教学值为 1 h。</span><span class="lang-en">Checked the two-ACK/three-replica example and default 3 h hint window; teaching retention is 1 h.</span></li>
+<li id="ref-4">[4] RocksDB project, <a href="https://github.com/facebook/rocksdb/wiki/Basic-Operations">Basic Operations</a>. <span class="lang-zh">官方 Wiki，2026-10-03 核对</span><span class="lang-en">Official wiki, 2026-10-03 checked</span>. <span class="lang-zh">核对非同步写与 sync=true 的耐久差别；本图明示选同步后 ACK。</span><span class="lang-en">Checked non-sync versus sync=true durability; our diagram explicitly requires sync before ACK.</span></li>
+<li id="ref-5">[5] RocksDB project, <a href="https://github.com/facebook/rocksdb/wiki/RocksDB-Overview">RocksDB Overview</a>. <span class="lang-zh">2023；2026-10-03 核对</span><span class="lang-en">2023; 2026-10-03 checked</span>. <span class="lang-zh">核对三种基础结构、flush、compaction 与 WAL 恢复；放大 2、10 都是教学假设。</span><span class="lang-en">Checked structures, flush, compaction and WAL recovery; amplification factors 2 and 10 are assumptions.</span></li>
+<li id="ref-6">[6] RocksDB project, <a href="https://github.com/facebook/rocksdb/wiki/RocksDB-Bloom-Filter">RocksDB Bloom Filter</a>. <span class="lang-zh">官方 Wiki，2026-10-03 核对</span><span class="lang-en">Official wiki, 2026-10-03 checked</span>. <span class="lang-zh">核对约 9.9 bit/key 对应约 1% 假阳性；125 MB 是本章按 10 bit 自行计算。</span><span class="lang-en">Checked about 9.9 bit/key at 1% false positives; 125 MB is our rounded 10-bit calculation.</span></li>
+<li id="ref-7">[7] Apache Cassandra, <a href="https://cassandra.apache.org/doc/latest/cassandra/managing/operating/compaction/tombstones.html">Tombstones</a>. <span class="lang-zh">官方文档，2026-10-03 核对</span><span class="lang-en">Official documentation, 2026-10-03 checked</span>. <span class="lang-zh">核对 zombie、compaction 回收条件与默认 864,000 s=10 天；教学保留 7 天。</span><span class="lang-en">Checked zombies, compaction purge conditions and default 864,000 s=10 days; teaching retention is 7 days.</span></li>
+<li id="ref-8">[8] Redis project, <a href="https://redis.io/docs/latest/operate/oss_and_stack/reference/cluster-spec/">Redis cluster specification</a>. <span class="lang-zh">官方文档，2026-10-03 核对</span><span class="lang-en">Official documentation, 2026-10-03 checked</span>. <span class="lang-zh">核对 16,384 slot、异步复制与已确认写的丢失窗口；不据此概括为严格 CP。</span><span class="lang-en">Checked 16,384 slots, async replication and acknowledged-write loss; no strict-CP claim is derived.</span></li></ol>
+</section>
+
+<section>
+<h2><span class="lang-zh">闪卡</span><span class="lang-en">Flashcards</span></h2>
+<p class="cite"><span class="lang-zh">点一下翻面。先走图上的路径，再说出算式与失败条件。</span><span class="lang-en">Click to flip. Walk the path, then state the calculation and failure conditions.</span></p>
+<div class="cards-grid"><button type="button" class="flip"><span class="q"><span class="lang-zh">30 秒开场怎么连起来？</span><span class="lang-en">How does the 30-second opening connect?</span></span><span class="a"><span class="lang-zh">固定三副本，协调层并行发、等两份耐久 ACK；读两份比较。严格少数侧失败，LWW 有丢更新代价，LSM 后台有预算，删除用墓碑。</span><span class="lang-en">Three fixed owners, parallel fan-out and two durable ACKs; read and reconcile two. Strict minority fails; LWW discards updates; budget LSM background work; tombstone deletions.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">W=1 会少复制两份吗？</span><span class="lang-en">Does W=1 remove two copies?</span></span><span class="a"><span class="lang-zh">不会。N 是发送副本数，W 是等待门槛；第三份漏写要修复。</span><span class="lang-en">No. N counts destinations, W the wait threshold. Repair missed deliveries.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">4、7、40 ms，W=2 等哪一个？</span><span class="lang-en">4, 7, 40 ms: what does W=2 wait for?</span></span><span class="a"><span class="lang-zh">第二快的 7 ms 加协调开销；不是等 40，也不是相加 51。是假设示例，非 p99。</span><span class="lang-en">The second-fastest 7 ms plus overhead, not 40 or a sum of 51. Assumed example, not p99.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">交集下限怎么算？</span><span class="lang-en">What is the minimum overlap?</span></span><span class="a"><span class="lang-zh">固定全集 N=3，W=2,R=2，至少 W+R−N=1；版本与并发条件另说。</span><span class="lang-en">Fixed N=3, W=2,R=2 gives at least W+R−N=1; ordering and concurrency need separate premises.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">为什么 sloppy 不能套旧证明？</span><span class="lang-en">Why does sloppy quorum break the old proof?</span></span><span class="a"><span class="lang-zh">写 {A,D}，读 {B,C} 可以不相交；D 不在原全集 {A,B,C} 里。</span><span class="lang-en">Write {A,D} and read {B,C} can be disjoint; D is outside original {A,B,C}.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">LWW 时钟反例是什么？</span><span class="lang-en">What is the LWW clock counterexample?</span></span><span class="a"><span class="lang-zh">X 真实 1000、戳 1200，Y 真实与戳 1100。后写 Y 因戳较小被丢。</span><span class="lang-en">X real 1000, timestamp 1200; Y both 1100. Later Y loses to the larger timestamp.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">两次读 10 再写 11，结果呢？</span><span class="lang-en">Two clients read 10 and write 11: result?</span></span><span class="a"><span class="lang-zh">LWW 只保留 11，不会自动成为 12；两次增量意图丢一次。</span><span class="lang-en">LWW retains 11, not automatically 12; one intended increment is lost.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">本地 ACK 在哪里？</span><span class="lang-en">Where is the local ACK point?</span></span><span class="a"><span class="lang-zh">本图先 WAL sync，再应用到可读 memtable，然后 ACK；无需等 flush。</span><span class="lang-en">Here: WAL sync, readable Memtable application, then ACK; do not wait for flush.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">300 MB/s 是哪条预算？</span><span class="lang-en">What does 300 MB/s measure?</span></span><span class="a"><span class="lang-zh">10 MB/s 逻辑写×3 副本×10 SST 写放大；是集群 SST 输出，不是网络复制。</span><span class="lang-en">10 MB/s logical ×3 copies ×10 SST amplification: cluster SST output, not network replication.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">Bloom 阴性能直接返回不存在吗？</span><span class="lang-en">Does negative Bloom mean DB absence?</span></span><span class="a"><span class="lang-zh">只能跳过该文件。其他内存表、候选文件和墓碑仍要按规则处理。</span><span class="lang-en">Skip that file only; process other memory, files and tombstones under the version rules.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">旧 hint 重放为什么不能换戳？</span><span class="lang-en">Why preserve a replayed hint timestamp?</span></span><span class="a"><span class="lang-zh">PUT@200 若换成 400，会赢过 DEL@300 并复活旧值。重放要保留原 mutation。</span><span class="lang-en">Retimestamping PUT@200 to 400 defeats DEL@300 and resurrects old data. Preserve the mutation.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">7 天墓碑、2 天修复、1 天离线够吗？</span><span class="lang-en">Seven-day tombstones, two-day repair, one-day outage: safe?</span></span><span class="a"><span class="lang-zh">2+1=3&lt;7 只留出 4 天余量；还需修复成功和旧文件覆盖条件，超长离线要隔离重建。</span><span class="lang-en">2+1=3&lt;7 leaves four days of margin only; require successful repair and old-file coverage; isolate and rebuild long-offline replicas.</span></span></button></div>
+</section><p><button type="button" class="read-toggle"><span class="when-off"><span class="lang-zh">我已学完本章</span><span class="lang-en">Mark this chapter done</span></span><span class="when-on"><span class="lang-zh">已学完本章</span><span class="lang-en">Completed</span></span></button></p>
+<p class="cite"><span class="lang-zh">进度存在这台浏览器里。</span><span class="lang-en">Saved in this browser only.</span></p>
+</article></main>
+<script src="../assets/js/nav.js"></script>
+<script src="../assets/js/lang.js"></script>
+<script src="../assets/js/slides.js"></script>
+<script src="../assets/js/progress.js"></script>
+</body></html>
