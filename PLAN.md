@@ -11,16 +11,16 @@
 | 计划 | 内容 | 状态 | 触发语 |
 |---|---|---|---|
 | 1 | 静态壳 + 样板 Ch01、Ch09 | **已完成 · 2026-09-27** | 「开始计划 1」 |
-| 2 | 五路重构 Ch01–Ch45 | **章节全部完成 · 2026-10-08 · Ch01–Ch45 已按 [`OPUS_REFACTOR.md`](./OPUS_REFACTOR.md) 完成；本轮改动尚未提交部署** | 「开始重构」/「重构下一波」/「复审 chNN」 |
-| 3 | 推 GitHub 并开 Pages | **已推送 · 2026-09-28** · https://socoo123.github.io/system_design_web/ | 「提交并部署」 |
+| 2 | 五路重构 Ch01–Ch45 | **章节全部完成并推送 GitHub · 2026-10-08 · Ch01–Ch45 已按 [`OPUS_REFACTOR.md`](./OPUS_REFACTOR.md) 完成，含逻辑审阅修复；内容提交 `197250d`** | 「开始重构」/「重构下一波」/「复审 chNN」 |
+| 3 | 推 GitHub 并开 Pages | **GitHub 已更新 · 2026-10-08** · Pages 既有地址 https://socoo123.github.io/system_design_web/ （本次线上发布结果未核验） | 「提交并部署」 |
 
 国庆（10/1–10/7）只读主线 M1–M5。要在 10/1 能开读，计划 2 需在 9/30 前至少把 Ch01–Ch35 部署出去。用户说「赶国庆」时，车道连续写完剩余章。
 
 ### 逻辑审阅修复 · 2026-10-08
 
-用户明确授权按 `LOGIC_REVIEW_2026-10-08.md` 分批修复，单代理执行。本轮是定点修复，不重新推进已完成章节的重构车道；不提交、推送或部署。
+用户明确授权按 `LOGIC_REVIEW_2026-10-08.md` 分批修复，单代理执行。本轮是定点修复，不重新推进已完成章节的重构车道；修复验收阶段未提交、推送或部署，后续 GitHub 提交授权与结果见下。
 
-2026-10-08 后续用户授权「都提交到 github」：将所有已完成章节、首页、审阅报告、逻辑修复与检查脚本一并提交到 `main` 并推送 `origin`；推送验证完成后更新本文件的当前提交状态。
+2026-10-08 后续用户授权「都提交到 github」：所有已完成章节、首页、审阅报告、逻辑修复与检查脚本共 32 个文件已提交到 `main` 并推送 `origin`。内容提交：[`197250d`](https://github.com/socoo123/system_design_web/commit/197250da931dcbfc69b24ecd3c2125bf4cd83ad7)，已核对 GitHub 远端 `main` 包含该提交。下文各章历史记录中的「未提交」指各自交付当时状态，相关成果现已全部纳入该提交。本次未另行核验 Pages 发布结果。
 
 | 批次 | 范围 | 状态 |
 |---|---|---|
@@ -191,7 +191,7 @@ tools/check.mjs
 
 ## 3. 计划 3 · 提交并部署
 
-仓库：<https://github.com/socoo123/system_design_web>。据 §0，Pages 已于 2026-09-28 推送上线，地址为 <https://socoo123.github.io/system_design_web/>；本轮 Ch01–Ch45 及逻辑审阅修复仍未提交部署。此处对齐既有记录，本轮未另行核验 GitHub 配置。
+仓库：<https://github.com/socoo123/system_design_web>。据既有记录，Pages 已于 2026-09-28 初次上线，地址为 <https://socoo123.github.io/system_design_web/>；2026-10-08 已将本轮完成章节及逻辑审阅修复通过 `197250d` 提交推送到 GitHub。当前 Pages 配置及本次线上发布结果未另行核验，GitHub 推送结果见 §0。
 
 用户说「提交并部署」之后：
 
