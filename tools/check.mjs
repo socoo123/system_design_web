@@ -74,8 +74,47 @@ const ranges = Object.fromEntries(chapterFiles.map((name) => {
   return [`chapters/${name}`, deckRange(num)];
 }));
 if (!fs.existsSync(path.join(root, "favicon.ico"))) fail("missing favicon.ico");
+
+// Equal language-node counts miss cross-language nesting. Parse tag ancestry
+// without adding a dependency; ignore raw-text elements and HTML comments.
+const voidTags = new Set("area base br col embed hr img input link meta param source track wbr".split(" "));
+function checkLanguageAndChips(html, rel) {
+  const source = html.replace(/<!--[\s\S]*?-->|<(script|style)\b[^>]*>[\s\S]*?<\/\1>/gi, "");
+  const stack = [];
+  for (const match of source.matchAll(/<\/?([a-z][\w:-]*)\b[^>]*>/gi)) {
+    const token = match[0];
+    const tag = match[1].toLowerCase();
+    if (token.startsWith("</")) {
+      let i = stack.length - 1;
+      while (i >= 0 && stack[i].tag !== tag) i--;
+      if (i < 0) continue;
+      const node = stack[i];
+      if (node.classes.includes("chip")) {
+        const label = source.slice(node.start, match.index).replace(/<[^>]+>/g, " ");
+        const pending = /待重构|待上线|待复审|\bpending\b|\bplanned\b/i.test(label)
+          || node.classes.includes("soon") || /aria-disabled\s*=\s*["']true["']/i.test(node.token);
+        if (pending) {
+          for (const target of new Set([...label.matchAll(/Ch(\d{2})\b/gi)].map((m) => `ch${m[1]}.html`))) {
+            if (fs.existsSync(path.join(root, "chapters", target))) fail(`${rel} disables existing chapter ${target}`);
+          }
+        }
+      }
+      stack.length = i;
+      continue;
+    }
+    const classes = (token.match(/\bclass\s*=\s*["']([^"']*)["']/i)?.[1] || "").split(/\s+/);
+    const language = classes.includes("lang-zh") ? "zh" : classes.includes("lang-en") ? "en" : null;
+    if (classes.includes("lang-zh") && classes.includes("lang-en")) fail(`${rel} has one node with both language classes`);
+    if (language && stack.some((node) => node.language && node.language !== language)) {
+      fail(`${rel} nests lang-${language} inside the other language`);
+    }
+    if (!voidTags.has(tag) && !token.endsWith("/>")) stack.push({ tag, classes, language, token, start: match.index });
+  }
+}
+
 for (const [rel, [lo, hi]] of Object.entries(ranges)) {
   const html = read(rel);
+  checkLanguageAndChips(html, rel);
   if (!html.includes('class="chapter"')) fail(`${rel} missing article.chapter`);
   if (!html.includes("lang-zh") || !html.includes("lang-en")) fail(`${rel} missing both languages`);
   if (!html.includes("read-toggle") || !html.includes('class="flip"')) fail(`${rel} missing flashcards or read toggle`);

@@ -1,0 +1,955 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="parchment" data-locale="zh">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ch36 · Trade-off：CAP / PACELC / SLO</title>
+  <link rel="icon" href="../favicon.ico" sizes="48x48">
+  <link rel="stylesheet" href="../assets/css/style.css">
+  <script src="../assets/js/boot.js"></script>
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="../index.html"><span class="brand-logo">SD</span><span class="lang-zh">系统设计面试</span><span class="lang-en">System Design Interview</span></a>
+  <span class="spacer"></span>
+  <a class="map-link" href="../index.html"><span class="lang-zh">课程地图</span><span class="lang-en">Map</span></a>
+  <div class="seg" role="group" aria-label="language">
+    <button type="button" data-locale-set="zh">中文</button>
+    <button type="button" data-locale-set="both"><span class="lang-zh">对照</span><span class="lang-en">Both</span></button>
+    <button type="button" data-locale-set="en">EN</button>
+  </div>
+  <div class="seg" role="group" aria-label="theme">
+    <button type="button" data-theme-set="parchment"><span class="lang-zh">护眼</span><span class="lang-en">Paper</span></button>
+    <button type="button" data-theme-set="dracula"><span class="lang-zh">深色</span><span class="lang-en">Dark</span></button>
+  </div>
+</header>
+<main class="wrap">
+<article class="chapter" id="ch36" data-ch="ch36">
+<header><div class="ch-kicker"><span class="lang-zh">CHAPTER 36 · 基础深读</span> <span class="lang-en">CHAPTER 36 · foundations</span></div><h1><span class="lang-zh">Trade-off：CAP / PACELC / SLO</span> <span class="lang-en">Trade-offs: CAP / PACELC / SLO</span></h1><p class="ch-meta-line"><span class="lang-zh">约 45 分钟 · 前置：Ch02、Ch03、Ch06 · 7 组图，把选择写成操作契约</span> <span class="lang-en">~45 min · after Ch02, Ch03, Ch06 · 7 decks turn trade-offs into operation contracts</span></p></header>
+<section>
+<h2><span class="lang-zh">这一章结束你能做什么</span> <span class="lang-en">What you can do after this chapter</span></h2>
+<div class="bilingual"><div class="lang-zh"><p>从一次已完成写和一次后来读，解释分区时为什么不能同时保证线性一致与每个活节点都可用；再画出多数派提交和分叉合并各自的代价。</p><p>用日常复制的确认门槛说明 PACELC，分开写持久、读新鲜与故障切换；把用户旅程变成 SLI、错误预算和有反馈的发布决策。</p></div><div class="lang-en"><p>Explain the partition trade-off using a completed write followed by a later read, then draw majority commit and divergent-version reconciliation.</p><p>Use replication acknowledgment barriers to explain PACELC, distinguishing write durability, read freshness and failover; connect a user journey to SLI, budget and release feedback.</p></div></div>
+</section>
+<section>
+<h2><span class="lang-zh">先把操作、窗口与 assumption 钉住</span> <span class="lang-en">Fix operations, windows and assumptions</span></h2>
+<div class="bilingual"><div class="lang-zh"><p>我先问这一次操作需要什么承诺。写已经成功之后，另一端必须读到它吗？断网时允许哪一边拒绝，哪些数据可以短暂旧？平时的复制等待占多少延迟，超时后是否能重试？最后再规定用户怎样算成功，按有效事件算 SLO 与预算。CAP 管分区下无法同时兑现的保证，PACELC 补上日常复制的延迟代价，SLO 把选择变成可测的用户结果。</p><p>这是 M6 的基础章，用寄存器、购物车与结账旅程串起取舍。不同组是独立场景，Replica A/B 始终叫副本；系统品牌不能代替读、写和恢复规则。</p><p>所有 A 编号都是教学 assumption，引用只支持外部定义与机制。读本章要同时回答约束、决策、代价与失败行为，先固定分母和窗口，再报几个 9。</p></div><div class="lang-en"><p>Start with the operation contract: must a later remote read see a completed write, which side may refuse during a split, and which data may be stale? Then specify normal replication waits, timeout recovery and user success. CAP bounds partition guarantees, PACELC adds everyday replication latency, and SLO measures the result.</p><p>This M6 foundation uses a register, cart and checkout. Replica A/B retain their names across independent scenarios; product names cannot replace read/write/recovery rules.</p><p>A-numbers are teaching assumptions; sources establish external definitions/mechanisms. State constraints, decisions, costs and failures, with the denominator/window before nines.</p></div></div><table><thead><tr><th><span class="lang-zh">假设</span> <span class="lang-en">Assumption</span></th><th><span class="lang-zh">取值与边界</span> <span class="lang-en">Value and scope</span></th><th><span class="lang-zh">它改的决定</span> <span class="lang-en">Design consequence</span></th></tr></thead><tbody><tr><td><span class="lang-zh">A1 · 寄存器反例</span> <span class="lang-en">A1 · register</span></td><td><span class="lang-zh">初值 x=0；A 完成 x=1 后 B 才读；无中间写</span> <span class="lang-en">Initially x=0; B reads after A completes x=1; no intervening write</span></td><td><span class="lang-zh">固定实时先后，不用并发写解释旧读</span> <span class="lang-en">Fix real-time order; concurrency cannot excuse this stale read</span></td></tr><tr><td><span class="lang-zh">A2 · 两个独立三副本例子</span> <span class="lang-en">A2 · distinct three-copy examples</span></td><td><span class="lang-zh">共识 N=3、多数派 2；另一个固定 quorum 例 W=2、R=2</span> <span class="lang-en">Consensus N=3, majority 2; separate fixed quorum W=2, R=2</span></td><td><span class="lang-zh">成员稳定；日志共识与普通重叠不能混用</span> <span class="lang-en">Stable members; consensus and simple overlap are different protocols</span></td></tr><tr><td><span class="lang-zh">A3 · 购物车</span> <span class="lang-en">A3 · cart</span></td><td><span class="lang-zh">仅并发加入 apple 与 bread，选集合并集</span> <span class="lang-en">Concurrent add-only apple/bread, merged by union</span></td><td><span class="lang-zh">有删除或减量时重设合并规则</span> <span class="lang-en">Redefine merging for removes/decrements</span></td></tr><tr><td><span class="lang-zh">A4 · 日常延迟模型</span> <span class="lang-en">A4 · latency model</span></td><td><span class="lang-zh">接入/API 合计 2 ms；两端持久各 1 ms；并行；RTT 4 或 80 ms</span> <span class="lang-en">2 ms overhead, 1 ms durability at each end, parallel work, RTT 4/80 ms</span></td><td><span class="lang-zh">只算一轮复制，无排队与额外协调轮次</span> <span class="lang-en">One replication round; no queuing or extra coordination rounds</span></td></tr><tr><td><span class="lang-zh">A5 · 延迟目标</span> <span class="lang-en">A5 · target</span></td><td><span class="lang-zh">写条件预算 20 ms</span> <span class="lang-en">Conditional write target 20 ms</span></td><td><span class="lang-zh">7 ms 可放进，83 ms 放不进；p99 另测</span> <span class="lang-en">7 ms fits and 83 ms does not; measure p99 separately</span></td></tr><tr><td><span class="lang-zh">A6 · 结账 SLI</span> <span class="lang-en">A6 · checkout SLI</span></td><td><span class="lang-zh">一秒内给正确、持久的终态决策；按 checkout_id 记一件事</span> <span class="lang-en">Correct durable terminal decision within 1 s; one event per checkout_id</span></td><td><span class="lang-zh">超时、UNKNOWN 和 202 未完成算 bad；合法拒付按决策契约算 good</span> <span class="lang-en">Late/UNKNOWN/pending 202 are bad; valid decline is good for decision availability</span></td></tr><tr><td><span class="lang-zh">A7 · Feed 降级</span> <span class="lang-en">A7 · feed degradation</span></td><td><span class="lang-zh">展示允许已验证权限下 ≤30 s 旧值</span> <span class="lang-en">Display may serve ≤30 s old data under validated permissions</span></td><td><span class="lang-zh">超过年龄就失败；权限与账本没有这份豁免</span> <span class="lang-en">Over-age data fails; permissions/ledger have no exemption</span></td></tr><tr><td><span class="lang-zh">A8 · 窗口和主目标</span> <span class="lang-en">A8 · window/target</span></td><td><span class="lang-zh">滚动 30 天，SLO 99.9%；99.99%/99.999% 只作比较</span> <span class="lang-en">Rolling 30 days, SLO 99.9%; 99.99%/99.999% are comparisons</span></td><td><span class="lang-zh">真实余额同时更新 eligible 与 bad</span> <span class="lang-en">Recompute both eligible and bad in real windows</span></td></tr><tr><td><span class="lang-zh">A9 · 固定快照</span> <span class="lang-en">A9 · fixed snapshot</span></td><td><span class="lang-zh">一千万 eligible，已发生 6,000 bad</span> <span class="lang-en">Ten million eligible, 6,000 bad observed</span></td><td><span class="lang-zh">允许 10,000，剩 4,000；与稳态例不混分母</span> <span class="lang-en">Allow 10,000, retain 4,000; separate from steady traffic</span></td></tr><tr><td><span class="lang-zh">A10 · 稳态预算例</span> <span class="lang-en">A10 · steady-budget scenario</span></td><td><span class="lang-zh">持续 1,000/s；20 分钟里 10% 失败，另比较全失败</span> <span class="lang-en">Constant 1,000/s; 10% bad for 20 min, compare complete failure</span></td><td><span class="lang-zh">请求与时间换算只在均匀流量等条件下成立</span> <span class="lang-en">Time/event equivalence needs uniform eligible traffic and related assumptions</span></td></tr><tr><td><span class="lang-zh">A11 · 依赖例</span> <span class="lang-en">A11 · dependencies</span></td><td><span class="lang-zh">两个依赖各 99.9%，独立且串行都必须成功；并联另假设可及时切换</span> <span class="lang-en">Two independent 99.9% dependencies; series requires both, parallel assumes timely failover</span></td><td><span class="lang-zh">共同电源、网络和切流失败另计</span> <span class="lang-en">Count shared power/network and routing failure separately</span></td></tr><tr><td><span class="lang-zh">A12 · 发布政策</span> <span class="lang-en">A12 · release policy</span></td><td><span class="lang-zh">预算耗尽冻结功能，审查后仍可安全/紧急修复；burn 预测假设流量稳定</span> <span class="lang-en">Exhaustion freezes features; reviewed urgent/safety repair remains; burn forecasts assume stable rate</span></td><td><span class="lang-zh">修复、健康度与窗口余额复评后恢复；双窗口参数按原文起点</span> <span class="lang-en">Review repair/health/balance before reopening; source alert parameters are starting points</span></td></tr></tbody></table>
+</section>
+<section>
+<h2><span class="lang-zh">CAP：从一笔写后的旧读看见矛盾</span> <span class="lang-en">CAP: a stale read after a completed write</span></h2>
+<figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d1s1t d1s1d">
+          <title id="d1s1t">Two replicas start from the same register</title>
+          <desc id="d1s1d">Replica A and Replica B initially hold x=0. A asynchronously sends replication to B and B returns an acknowledgment to A. Client operations have not yet been added.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <g class="is-new">
+            <rect x="2" y="24" width="956" height="360" rx="18" class="boundary"/><text x="20" y="46" class="tiny">CAP COUNTEREXAMPLE · one register, two live replicas</text>
+            <rect x="240" y="130" width="155" height="70" rx="12" class="box"/><text x="317.5" y="162" text-anchor="middle" class="label">Replica A</text><text x="317.5" y="181" text-anchor="middle" class="sub">initial x = 0</text>
+            <rect x="640" y="130" width="155" height="70" rx="12" class="box"/><text x="717.5" y="162" text-anchor="middle" class="label">Replica B</text><text x="717.5" y="181" text-anchor="middle" class="sub">initial x = 0</text>
+            <path d="M395 150 L630 150" class="wire async"/><polygon points="640,150 630,155 630,145" class="head async"/><text x="515" y="140" text-anchor="middle" class="tiny">replicate</text>
+            <path d="M640 176 L405 176" class="wire reply"/><polygon points="395,176 405,171 405,181" class="head reply"/>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">先画同一个寄存器的两份副本，初值 x=0。CAP 的前提是副本间的消息无法送达。</span><span class="lang-en">Start with two copies of one register, both x=0. CAP concerns unavailable inter-replica messages.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d1s2t d1s2d">
+          <title id="d1s2t">A partition removes inter-replica communication</title>
+          <desc id="d1s2d">The replication and acknowledgment lanes are muted. A red failure lane from A to B denotes undeliverable messages. Both replicas remain alive; this is not a crash of B.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="2" y="24" width="956" height="360" rx="18" class="boundary"/><text x="20" y="46" class="tiny">CAP COUNTEREXAMPLE · one register, two live replicas</text>
+          <rect x="240" y="130" width="155" height="70" rx="12" class="box"/><text x="317.5" y="162" text-anchor="middle" class="label">Replica A</text><text x="317.5" y="181" text-anchor="middle" class="sub">initial x = 0</text>
+          <rect x="640" y="130" width="155" height="70" rx="12" class="box"/><text x="717.5" y="162" text-anchor="middle" class="label">Replica B</text><text x="717.5" y="181" text-anchor="middle" class="sub">initial x = 0</text>
+          <path d="M395 150 L630 150" class="wire async muted"/><polygon points="640,150 630,155 630,145" class="head async muted"/><text x="515" y="140" text-anchor="middle" class="tiny">replicate</text>
+          <path d="M640 176 L405 176" class="wire reply muted"/><polygon points="395,176 405,171 405,181" class="head reply muted"/>
+          <g class="is-new">
+            <path d="M395 150 L630 150" class="wire fail"/><polygon points="640,150 630,155 630,145" class="head fail"/><text x="515" y="220" text-anchor="middle" class="tiny">PARTITION: both nodes remain alive</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">第二笔切断 A、B 的消息，两个进程都活着。慢网络与真正分区在有限等待内可能无法区分；超时只是本次操作的决策点，不是证明对端已死亡。</span><span class="lang-en">Cut communication while both processes stay alive. A finite timeout may not distinguish slowness from a partition; it is an operation decision, not proof of death.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d1s3t d1s3d">
+          <title id="d1s3t">A write completes before the later read begins</title>
+          <desc id="d1s3d">Writer sends write x=1 to Replica A. A records the new value and returns OK to Writer. A badge records that A has completed x=1 while B still has x=0.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="2" y="24" width="956" height="360" rx="18" class="boundary"/><text x="20" y="46" class="tiny">CAP COUNTEREXAMPLE · one register, two live replicas</text>
+          <rect x="240" y="130" width="155" height="70" rx="12" class="box"/><text x="317.5" y="162" text-anchor="middle" class="label">Replica A</text><text x="317.5" y="181" text-anchor="middle" class="sub">initial x = 0</text>
+          <rect x="640" y="130" width="155" height="70" rx="12" class="box"/><text x="717.5" y="162" text-anchor="middle" class="label">Replica B</text><text x="717.5" y="181" text-anchor="middle" class="sub">initial x = 0</text>
+          <path d="M395 150 L630 150" class="wire async muted"/><polygon points="640,150 630,155 630,145" class="head async muted"/><text x="515" y="140" text-anchor="middle" class="tiny">replicate</text>
+          <path d="M640 176 L405 176" class="wire reply muted"/><polygon points="395,176 405,171 405,181" class="head reply muted"/>
+          <path d="M395 150 L630 150" class="wire fail"/><polygon points="640,150 630,155 630,145" class="head fail"/><text x="515" y="220" text-anchor="middle" class="tiny">PARTITION: both nodes remain alive</text>
+          <g class="is-new">
+            <circle cx="44" cy="136" r="12" class="box"/><path d="M24 182 Q44 150 64 182" class="wire"/><text x="44" y="204" text-anchor="middle" class="label">Writer</text>
+            <path d="M70 151 L230 151" class="wire"/><polygon points="240,151 230,156 230,146" class="head"/><text x="155" y="140" text-anchor="middle" class="tiny">1. write x=1</text>
+            <path d="M240 169 L80 169" class="wire reply"/><polygon points="70,169 80,164 80,174" class="head reply"/><text x="155" y="192" text-anchor="middle" class="tiny">2. OK</text>
+            <rect x="252" y="244" width="130" height="20" rx="10" class="badge"/><text x="317" y="258" text-anchor="middle" class="badge-text">A now: x = 1</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">第三笔让 A 完成写 x=1，再给 Writer 成功。这里故意测试“两边继续本地服务”的主张；时间顺序钉死为写已返回之后，另一端才开始读。</span><span class="lang-en">Let A complete x=1 and acknowledge Writer, testing the claim that both sides continue local service. The next read starts strictly after this completed write.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d1s4t d1s4d">
+          <title id="d1s4t">Returning the old value violates real-time order</title>
+          <desc id="d1s4d">Reader invokes Replica B after the A write has completed. B returns its local x=0 to Reader. That response violates a linearizable register because no intervening write exists.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="2" y="24" width="956" height="360" rx="18" class="boundary"/><text x="20" y="46" class="tiny">CAP COUNTEREXAMPLE · one register, two live replicas</text>
+          <rect x="240" y="130" width="155" height="70" rx="12" class="box"/><text x="317.5" y="162" text-anchor="middle" class="label">Replica A</text><text x="317.5" y="181" text-anchor="middle" class="sub">initial x = 0</text>
+          <rect x="640" y="130" width="155" height="70" rx="12" class="box"/><text x="717.5" y="162" text-anchor="middle" class="label">Replica B</text><text x="717.5" y="181" text-anchor="middle" class="sub">initial x = 0</text>
+          <path d="M395 150 L630 150" class="wire async muted"/><polygon points="640,150 630,155 630,145" class="head async muted"/><text x="515" y="140" text-anchor="middle" class="tiny">replicate</text>
+          <path d="M640 176 L405 176" class="wire reply muted"/><polygon points="395,176 405,171 405,181" class="head reply muted"/>
+          <path d="M395 150 L630 150" class="wire fail"/><polygon points="640,150 630,155 630,145" class="head fail"/><text x="515" y="220" text-anchor="middle" class="tiny">PARTITION: both nodes remain alive</text>
+          <circle cx="44" cy="136" r="12" class="box"/><path d="M24 182 Q44 150 64 182" class="wire"/><text x="44" y="204" text-anchor="middle" class="label">Writer</text>
+          <path d="M70 151 L230 151" class="wire"/><polygon points="240,151 230,156 230,146" class="head"/><text x="155" y="140" text-anchor="middle" class="tiny">1. write x=1</text>
+          <path d="M240 169 L80 169" class="wire reply"/><polygon points="70,169 80,164 80,174" class="head reply"/><text x="155" y="192" text-anchor="middle" class="tiny">2. OK</text>
+          <rect x="252" y="244" width="130" height="20" rx="10" class="badge"/><text x="317" y="258" text-anchor="middle" class="badge-text">A now: x = 1</text>
+          <g class="is-new">
+            <circle cx="916" cy="136" r="12" class="box"/><path d="M896 182 Q916 150 936 182" class="wire"/><text x="916" y="204" text-anchor="middle" class="label">Reader</text>
+            <path d="M890 151 L805 151" class="wire"/><polygon points="795,151 805,146 805,156" class="head"/><text x="843" y="139" text-anchor="middle" class="tiny">3. read</text>
+            <path d="M795 169 L880 169" class="wire reply"/><polygon points="890,169 880,174 880,164" class="head reply"/><text x="843" y="195" text-anchor="middle" class="tiny">4. x=0</text>
+            <text x="280" y="316" class="tiny">write OK precedes read invocation; no intervening write</text>
+            <text x="280" y="342" class="clock">reject: x=0 is not a linearizable read</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">再画 B 的本地读与回程。没有中间写，完成写之后的读仍返回 x=0，就无法放进遵守实时先后的单一顺序；最终追平也修不掉这次历史。</span><span class="lang-en">Add B’s local read and reply. With no intervening write, x=0 after completed x=1 cannot fit a real-time-respecting single history; later convergence cannot repair it.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d1s5t d1s5d">
+          <title id="d1s5t">Refusing the read preserves safety but sacrifices availability</title>
+          <desc id="d1s5d">The stale reply is muted as a rejected alternative. Replica B instead returns unavailable to Reader through a separate red lane. This preserves the register safety condition while giving up CAP availability for the read.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="2" y="24" width="956" height="360" rx="18" class="boundary"/><text x="20" y="46" class="tiny">CAP COUNTEREXAMPLE · one register, two live replicas</text>
+          <rect x="240" y="130" width="155" height="70" rx="12" class="box"/><text x="317.5" y="162" text-anchor="middle" class="label">Replica A</text><text x="317.5" y="181" text-anchor="middle" class="sub">initial x = 0</text>
+          <rect x="640" y="130" width="155" height="70" rx="12" class="box"/><text x="717.5" y="162" text-anchor="middle" class="label">Replica B</text><text x="717.5" y="181" text-anchor="middle" class="sub">initial x = 0</text>
+          <path d="M395 150 L630 150" class="wire async muted"/><polygon points="640,150 630,155 630,145" class="head async muted"/><text x="515" y="140" text-anchor="middle" class="tiny">replicate</text>
+          <path d="M640 176 L405 176" class="wire reply muted"/><polygon points="395,176 405,171 405,181" class="head reply muted"/>
+          <path d="M395 150 L630 150" class="wire fail"/><polygon points="640,150 630,155 630,145" class="head fail"/><text x="515" y="220" text-anchor="middle" class="tiny">PARTITION: both nodes remain alive</text>
+          <circle cx="44" cy="136" r="12" class="box"/><path d="M24 182 Q44 150 64 182" class="wire"/><text x="44" y="204" text-anchor="middle" class="label">Writer</text>
+          <path d="M70 151 L230 151" class="wire"/><polygon points="240,151 230,156 230,146" class="head"/><text x="155" y="140" text-anchor="middle" class="tiny">1. write x=1</text>
+          <path d="M240 169 L80 169" class="wire reply"/><polygon points="70,169 80,164 80,174" class="head reply"/><text x="155" y="192" text-anchor="middle" class="tiny">2. OK</text>
+          <rect x="252" y="244" width="130" height="20" rx="10" class="badge"/><text x="317" y="258" text-anchor="middle" class="badge-text">A now: x = 1</text>
+          <circle cx="916" cy="136" r="12" class="box"/><path d="M896 182 Q916 150 936 182" class="wire"/><text x="916" y="204" text-anchor="middle" class="label">Reader</text>
+          <path d="M890 151 L805 151" class="wire"/><polygon points="795,151 805,146 805,156" class="head"/><text x="843" y="139" text-anchor="middle" class="tiny">3. read</text>
+          <path d="M795 169 L880 169" class="wire reply muted"/><polygon points="890,169 880,174 880,164" class="head reply muted"/><text x="843" y="195" text-anchor="middle" class="tiny">4. x=0</text>
+          <text x="280" y="316" class="tiny">write OK precedes read invocation; no intervening write</text>
+          <text x="280" y="342" class="clock">reject: x=0 is not a linearizable read</text>
+          <g class="is-new">
+            <path d="M795 183 L807 183 Q815 183 815 191 L815 260 Q815 268 823 268 L867 268 Q875 268 875 260 L875 171.5 Q875 169 877.5 169 L880 169" class="wire fail"/><polygon points="890,169 880,174 880,164" class="head fail"/><text x="838" y="294" text-anchor="middle" class="tiny">or: unavailable</text>
+            <text x="34" y="368" class="tiny">CAP A: an operation completes; 503 / waiting forever does not satisfy it.</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">最后补上另一条决策：B 拒绝或等待。错误响应能让工程客户端及时结束等待，却不满足定理中“每个非失败节点上的操作都完成”的 A；正确性保住，可用性让出。</span><span class="lang-en">Add refusal/waiting as the alternative. A fast error helps a client stop waiting but does not satisfy CAP A, which requires completion at every non-failed node.</span></figcaption>
+      </div>
+    </figure>
+<h3><span class="lang-zh">先固定历史，才有一致性的判断</span> <span class="lang-en">Define the history before judging consistency</span></h3><div class="bilingual"><div class="lang-zh"><p>图先从两个相同的 x=0 开始，复制通道断开以后，A 对 write(x=1) 返回成功。我们再让另一位读者在 B 调 read。若没有其它写，线性一致要求把每个操作放在调用到返回之间的某一点，并按一个寄存器的顺序执行；现实中已经结束的写，必须排在后来才开始的读前面。B 的 x=0 无法满足这个顺序。读者与写者是否同一人都不影响这个要求。Gilbert 与 Lynch 的 atomic consistency 用的就是这个语义。[1]</p><p>B 的难处是没有足够信息。它看到的本地状态，既可能对应“A 没写”，也可能对应“A 写了但消息丢失”。只看 B 的内存、时间戳或 CPU 都无法判断。它若保证总能给出寄存器值，就存在给错值的执行；若等待远端证明，分区持续多久就可能等多久。</p></div><div class="lang-en"><p>The history begins at x=0. During the split A acknowledges x=1, then a different reader calls B. Linearizability places each operation between invocation and response in one legal register order, preserving real-time precedence. With no other write, B’s x=0 cannot fit that order, irrespective of reader identity. Gilbert/Lynch call this atomic consistency. [1]</p><p>B cannot distinguish no remote write from a completed remote write whose messages never arrived. Local memory, timestamps and CPU do not reveal the missing fact. Returning a value can be wrong; waiting for proof can last as long as the split.</p></div></div><h3><span class="lang-zh">A 是完成操作，P 是允许发生的通信故障</span> <span class="lang-en">A means operation completion; P describes possible communication failure</span></h3><div class="bilingual"><div class="lang-zh"><p>定理里的 A 要求非失败节点收到的每个请求最终完成，没有承诺一秒或一百毫秒期限。工程里的 503 能及时解开客户端等待，却不是成功完成读写寄存器操作；把所有请求迅速拒绝，不能证明实现了 CAP 可用性。反过来，一个理论上最终返回、却拖了十分钟的系统，也可能完全不满足产品 SLO。后面两组图会把数学中的活性和用户的期限分开。</p><p>P 描述模型允许副本之间丢失消息。系统可以选择单节点、不承诺跨节点共享状态，或者明确排除某种故障，但不能在保留共享副本并要求面对分区的同时，把“不要 P”当作第三种修复方法。无分区时可以正常同时实现一致与服务能力；“只在分区时选择”是工程提示，也不能读成协议能立即准确检测分区。Brewer 强调应按操作细分，并设计检测、分区期限制与恢复。[2]</p></div><div class="lang-en"><p>CAP A requires eventual operation completion at a non-failed node, without a one-second latency bound. Fast 503 is operationally useful but does not complete the register operation. Conversely, an eventual ten-minute result can fail the product SLO. Separate theoretical liveness from user deadlines.</p><p>P allows lost inter-replica messages in the model. A single-node or deliberately restricted-failure design can state its narrower contract, but shared replicas that must handle partitions cannot repair them by simply “dropping P.” Healthy operation can offer both properties; the engineering prompt to decide during a split does not imply instant accurate partition detection. Brewer discusses per-operation choices and recovery. [2]</p></div></div><h3><span class="lang-zh">这个证明没有替你实现数据库</span> <span class="lang-en">The proof does not implement your database</span></h3><div class="bilingual"><div class="lang-zh"><p>线性一致并不等于“最终副本一样”，也不是 ACID 四个字母里的 C。它约束读写历史；事务隔离约束一组操作如何相互影响，多个键的库存和账本仍需事务与业务不变量。只在钱包余额读上保证最新，也挡不住两笔扣款分别检查同一个余额再各自提交。面试时先指出定理讨论的对象，再交给 Ch18/Ch24 的状态机、唯一身份和事务边界。</p><p>一个常见跳步是把超时当失败，再在别处生成新请求。CAP 没告诉你远端是否已经提交，甚至选择保一致的协议也会丢回包。可靠的恢复把原业务键带回来查询；未经确认的操作记为 UNKNOWN。这样既不会冒称成功，也不因一次超时造出第二份副作用。</p></div><div class="lang-en"><p>Linearizability is neither eventual agreement nor ACID’s C. It constrains histories, while isolation governs interacting transaction operations; multi-key inventory/ledger rules still need transactions and invariants. Fresh wallet reads alone cannot prevent two independent check-then-debit transactions. Identify the theorem’s object before applying Ch18/Ch24 mechanisms.</p><p>Timeout does not prove remote noncommit, even under a consistent protocol. Recovery queries the original business key and preserves UNKNOWN until resolved, avoiding both false success and a second effect.</p></div></div>
+</section>
+<section>
+<h2><span class="lang-zh">保一致：多数派继续，少数派明确拒绝</span> <span class="lang-en">Preserve consistency: serve the majority, refuse the minority</span></h2>
+<figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d2s1t d2s1d">
+          <title id="d2s1t">A write is not successful until the consensus commit</title>
+          <desc id="d2s1d">Client sends write key k7 through API to Replica A. Replica A is the leader in term 7. No success response has been drawn before the replication protocol.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <g class="is-new">
+            <rect x="2" y="24" width="956" height="360" rx="18" class="boundary"/><text x="20" y="46" class="tiny">CONSENSUS · majority {A,B}; minority {C} cannot commit</text>
+            <circle cx="44" cy="151" r="12" class="box"/><path d="M24 197 Q44 165 64 197" class="wire"/><text x="44" y="219" text-anchor="middle" class="label">Client</text>
+            <rect x="150" y="140" width="120" height="70" rx="12" class="box"/><text x="210" y="172" text-anchor="middle" class="label">API</text><text x="210" y="191" text-anchor="middle" class="sub">same write key</text>
+            <path d="M380 135 V200 A75 12 0 0 0 530 200 V135" class="store"/><ellipse cx="455" cy="135" rx="75" ry="12" class="store"/><text x="455" y="177.5" text-anchor="middle" class="label">Replica A</text><text x="455" y="195.5" text-anchor="middle" class="sub">leader, term 7</text>
+            <path d="M70 166 L140 166" class="wire"/><polygon points="150,166 140,171 140,161" class="head"/><text x="108" y="154" text-anchor="middle" class="tiny">write</text>
+            <path d="M270 166 L370 166" class="wire"/><polygon points="380,166 370,171 370,161" class="head"/><text x="320" y="152" text-anchor="middle" class="tiny">key k7</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">先画 Client → API → Replica A。写入 leader 本地日志还不是提交；客户端超时也不能直接推出失败，必须保留相同业务键查询结果。</span><span class="lang-en">Start Client → API → Replica A. A local leader log is not commit; a timeout requires checking the same business key rather than assuming failure.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d2s2t d2s2d">
+          <title id="d2s2t">The leader obtains a durable follower acknowledgment</title>
+          <desc id="d2s2d">Replica A sends its current-term log entry to Replica B. B durably records it and acknowledges A. A and B form two of three voting members.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="2" y="24" width="956" height="360" rx="18" class="boundary"/><text x="20" y="46" class="tiny">CONSENSUS · majority {A,B}; minority {C} cannot commit</text>
+          <circle cx="44" cy="151" r="12" class="box"/><path d="M24 197 Q44 165 64 197" class="wire"/><text x="44" y="219" text-anchor="middle" class="label">Client</text>
+          <rect x="150" y="140" width="120" height="70" rx="12" class="box"/><text x="210" y="172" text-anchor="middle" class="label">API</text><text x="210" y="191" text-anchor="middle" class="sub">same write key</text>
+          <path d="M380 135 V200 A75 12 0 0 0 530 200 V135" class="store"/><ellipse cx="455" cy="135" rx="75" ry="12" class="store"/><text x="455" y="177.5" text-anchor="middle" class="label">Replica A</text><text x="455" y="195.5" text-anchor="middle" class="sub">leader, term 7</text>
+          <path d="M70 166 L140 166" class="wire"/><polygon points="150,166 140,171 140,161" class="head"/><text x="108" y="154" text-anchor="middle" class="tiny">write</text>
+          <path d="M270 166 L370 166" class="wire"/><polygon points="380,166 370,171 370,161" class="head"/><text x="320" y="152" text-anchor="middle" class="tiny">key k7</text>
+          <g class="is-new">
+            <path d="M685 90 V150 A75 12 0 0 0 835 150 V90" class="store"/><ellipse cx="760" cy="90" rx="75" ry="12" class="store"/><text x="760" y="130" text-anchor="middle" class="label">Replica B</text><text x="760" y="148" text-anchor="middle" class="sub">follower</text>
+            <path d="M530 156 L587 156 Q595 156 595 148 L595 124 Q595 116 603 116 L675 116" class="wire"/><polygon points="685,116 675,121 675,111" class="head"/><text x="630" y="102" text-anchor="middle" class="tiny">log entry</text>
+            <path d="M685 138 L633 138 Q625 138 625 146 L625 179 Q625 187 617 187 L540 187" class="wire reply"/><polygon points="530,187 540,182 540,192" class="head reply"/><text x="590" y="214" text-anchor="middle" class="tiny">durable ACK</text>
+            <text x="340" y="80" class="tiny">assumption: N=3; majority = floor(3/2)+1 = 2</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">加 B 的日志和持久 ACK：三票里的两票构成多数派。共识还要有任期、日志顺序与提交规则；这张图讲一笔当前任期写，不能只凭“两个 ACK”宣布实现了 Raft。</span><span class="lang-en">Add B’s durable ACK: two of three votes form a majority. Terms, log order and commit rules remain required; this depicts one current-term write, not all of Raft.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d2s3t d2s3d">
+          <title id="d2s3t">Only the leader returns the committed result</title>
+          <desc id="d2s3d">After current-term majority commit and application, Replica A returns commit OK to API, and API returns to Client. The diagram adds an isolated C and a failed replication path; B never replies directly to Client.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="2" y="24" width="956" height="360" rx="18" class="boundary"/><text x="20" y="46" class="tiny">CONSENSUS · majority {A,B}; minority {C} cannot commit</text>
+          <circle cx="44" cy="151" r="12" class="box"/><path d="M24 197 Q44 165 64 197" class="wire"/><text x="44" y="219" text-anchor="middle" class="label">Client</text>
+          <rect x="150" y="140" width="120" height="70" rx="12" class="box"/><text x="210" y="172" text-anchor="middle" class="label">API</text><text x="210" y="191" text-anchor="middle" class="sub">same write key</text>
+          <path d="M380 135 V200 A75 12 0 0 0 530 200 V135" class="store"/><ellipse cx="455" cy="135" rx="75" ry="12" class="store"/><text x="455" y="177.5" text-anchor="middle" class="label">Replica A</text><text x="455" y="195.5" text-anchor="middle" class="sub">leader, term 7</text>
+          <path d="M70 166 L140 166" class="wire"/><polygon points="150,166 140,171 140,161" class="head"/><text x="108" y="154" text-anchor="middle" class="tiny">write</text>
+          <path d="M270 166 L370 166" class="wire"/><polygon points="380,166 370,171 370,161" class="head"/><text x="320" y="152" text-anchor="middle" class="tiny">key k7</text>
+          <path d="M685 90 V150 A75 12 0 0 0 835 150 V90" class="store"/><ellipse cx="760" cy="90" rx="75" ry="12" class="store"/><text x="760" y="130" text-anchor="middle" class="label">Replica B</text><text x="760" y="148" text-anchor="middle" class="sub">follower</text>
+          <path d="M530 156 L587 156 Q595 156 595 148 L595 124 Q595 116 603 116 L675 116" class="wire"/><polygon points="685,116 675,121 675,111" class="head"/><text x="630" y="102" text-anchor="middle" class="tiny">log entry</text>
+          <path d="M685 138 L633 138 Q625 138 625 146 L625 179 Q625 187 617 187 L540 187" class="wire reply"/><polygon points="530,187 540,182 540,192" class="head reply"/><text x="590" y="214" text-anchor="middle" class="tiny">durable ACK</text>
+          <text x="340" y="80" class="tiny">assumption: N=3; majority = floor(3/2)+1 = 2</text>
+          <g class="is-new">
+            <path d="M380 190 L280 190" class="wire reply"/><polygon points="270,190 280,185 280,195" class="head reply"/><text x="320" y="219" text-anchor="middle" class="tiny">commit OK</text>
+            <path d="M150 184 L80 184" class="wire reply"/><polygon points="70,184 80,179 80,189" class="head reply"/>
+            <path d="M685 280 V335 A75 12 0 0 0 835 335 V280" class="store"/><ellipse cx="760" cy="280" rx="75" ry="12" class="store"/><text x="760" y="317.5" text-anchor="middle" class="label">Replica C</text><text x="760" y="335.5" text-anchor="middle" class="sub">isolated</text>
+            <path d="M455 212 L455 228 Q455 236 463 236 L897 236 Q905 236 905 244 L905 302 Q905 310 897 310 L845 310" class="wire fail"/><polygon points="835,310 845,305 845,315" class="head fail"/><text x="810" y="264" class="tiny">no messages</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">确认只从 A 经 API 逐跳回 Client。C 被隔离不妨碍 A、B 提交，保一致的系统仍可在多数派继续服务；CP 并不等于“一断网全站停机”。</span><span class="lang-en">The result returns A → API → Client. Isolated C does not stop majority A/B commit; preserving consistency need not stop the entire site.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d2s4t d2s4d">
+          <title id="d2s4t">The isolated member refuses unsafe operations</title>
+          <desc id="d2s4d">Minority API sends a write or strong read to Replica C. C returns unavailable to Minority API because it has no majority and no valid proof for that strong read. Old local reads would need a weaker contract.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="2" y="24" width="956" height="360" rx="18" class="boundary"/><text x="20" y="46" class="tiny">CONSENSUS · majority {A,B}; minority {C} cannot commit</text>
+          <circle cx="44" cy="151" r="12" class="box"/><path d="M24 197 Q44 165 64 197" class="wire"/><text x="44" y="219" text-anchor="middle" class="label">Client</text>
+          <rect x="150" y="140" width="120" height="70" rx="12" class="box"/><text x="210" y="172" text-anchor="middle" class="label">API</text><text x="210" y="191" text-anchor="middle" class="sub">same write key</text>
+          <path d="M380 135 V200 A75 12 0 0 0 530 200 V135" class="store"/><ellipse cx="455" cy="135" rx="75" ry="12" class="store"/><text x="455" y="177.5" text-anchor="middle" class="label">Replica A</text><text x="455" y="195.5" text-anchor="middle" class="sub">leader, term 7</text>
+          <path d="M70 166 L140 166" class="wire"/><polygon points="150,166 140,171 140,161" class="head"/><text x="108" y="154" text-anchor="middle" class="tiny">write</text>
+          <path d="M270 166 L370 166" class="wire"/><polygon points="380,166 370,171 370,161" class="head"/><text x="320" y="152" text-anchor="middle" class="tiny">key k7</text>
+          <path d="M685 90 V150 A75 12 0 0 0 835 150 V90" class="store"/><ellipse cx="760" cy="90" rx="75" ry="12" class="store"/><text x="760" y="130" text-anchor="middle" class="label">Replica B</text><text x="760" y="148" text-anchor="middle" class="sub">follower</text>
+          <path d="M530 156 L587 156 Q595 156 595 148 L595 124 Q595 116 603 116 L675 116" class="wire"/><polygon points="685,116 675,121 675,111" class="head"/><text x="630" y="102" text-anchor="middle" class="tiny">log entry</text>
+          <path d="M685 138 L633 138 Q625 138 625 146 L625 179 Q625 187 617 187 L540 187" class="wire reply"/><polygon points="530,187 540,182 540,192" class="head reply"/><text x="590" y="214" text-anchor="middle" class="tiny">durable ACK</text>
+          <text x="340" y="80" class="tiny">assumption: N=3; majority = floor(3/2)+1 = 2</text>
+          <path d="M380 190 L280 190" class="wire reply"/><polygon points="270,190 280,185 280,195" class="head reply"/><text x="320" y="219" text-anchor="middle" class="tiny">commit OK</text>
+          <path d="M150 184 L80 184" class="wire reply"/><polygon points="70,184 80,179 80,189" class="head reply"/>
+          <path d="M685 280 V335 A75 12 0 0 0 835 335 V280" class="store"/><ellipse cx="760" cy="280" rx="75" ry="12" class="store"/><text x="760" y="317.5" text-anchor="middle" class="label">Replica C</text><text x="760" y="335.5" text-anchor="middle" class="sub">isolated</text>
+          <path d="M455 212 L455 228 Q455 236 463 236 L897 236 Q905 236 905 244 L905 302 Q905 310 897 310 L845 310" class="wire fail"/><polygon points="835,310 845,305 845,315" class="head fail"/><text x="810" y="264" class="tiny">no messages</text>
+          <g class="is-new">
+            <rect x="365" y="280" width="150" height="65" rx="12" class="box"/><text x="440" y="309.5" text-anchor="middle" class="label">Minority API</text><text x="440" y="328.5" text-anchor="middle" class="sub">no quorum</text>
+            <path d="M515 302 L675 302" class="wire"/><polygon points="685,302 675,307 675,297" class="head"/><text x="603" y="281" text-anchor="middle" class="tiny">write / strong read</text>
+            <path d="M685 324 L525 324" class="wire fail"/><polygon points="515,324 525,319 525,329" class="head fail"/><text x="600" y="350" text-anchor="middle" class="tiny">unavailable</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">补少数派入口和拒绝回程。C 不能发新写或无证明的强读；若允许 serializable 本地旧读，必须单独声明弱语义，不能算进线性一致的承诺。</span><span class="lang-en">Add minority refusal. C cannot serve new writes or an unproven strong read; optional stale local reads need an explicitly weaker contract.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d2s5t d2s5d">
+          <title id="d2s5t">Recovery resolves uncertain writes rather than blindly replaying them</title>
+          <desc id="d2s5d">Majority commits still return A to API to Client. The minority refuses. On recovery, clients query key k7 in the committed log; term checks reject stale leaders and business deduplication prevents a second effect.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="2" y="24" width="956" height="360" rx="18" class="boundary"/><text x="20" y="46" class="tiny">CONSENSUS · majority {A,B}; minority {C} cannot commit</text>
+          <circle cx="44" cy="151" r="12" class="box"/><path d="M24 197 Q44 165 64 197" class="wire"/><text x="44" y="219" text-anchor="middle" class="label">Client</text>
+          <rect x="150" y="140" width="120" height="70" rx="12" class="box"/><text x="210" y="172" text-anchor="middle" class="label">API</text><text x="210" y="191" text-anchor="middle" class="sub">same write key</text>
+          <path d="M380 135 V200 A75 12 0 0 0 530 200 V135" class="store"/><ellipse cx="455" cy="135" rx="75" ry="12" class="store"/><text x="455" y="177.5" text-anchor="middle" class="label">Replica A</text><text x="455" y="195.5" text-anchor="middle" class="sub">leader, term 7</text>
+          <path d="M70 166 L140 166" class="wire"/><polygon points="150,166 140,171 140,161" class="head"/><text x="108" y="154" text-anchor="middle" class="tiny">write</text>
+          <path d="M270 166 L370 166" class="wire"/><polygon points="380,166 370,171 370,161" class="head"/><text x="320" y="152" text-anchor="middle" class="tiny">key k7</text>
+          <path d="M685 90 V150 A75 12 0 0 0 835 150 V90" class="store"/><ellipse cx="760" cy="90" rx="75" ry="12" class="store"/><text x="760" y="130" text-anchor="middle" class="label">Replica B</text><text x="760" y="148" text-anchor="middle" class="sub">follower</text>
+          <path d="M530 156 L587 156 Q595 156 595 148 L595 124 Q595 116 603 116 L675 116" class="wire"/><polygon points="685,116 675,121 675,111" class="head"/><text x="630" y="102" text-anchor="middle" class="tiny">log entry</text>
+          <path d="M685 138 L633 138 Q625 138 625 146 L625 179 Q625 187 617 187 L540 187" class="wire reply"/><polygon points="530,187 540,182 540,192" class="head reply"/><text x="590" y="214" text-anchor="middle" class="tiny">durable ACK</text>
+          <text x="340" y="80" class="tiny">assumption: N=3; majority = floor(3/2)+1 = 2</text>
+          <path d="M380 190 L280 190" class="wire reply"/><polygon points="270,190 280,185 280,195" class="head reply"/><text x="320" y="219" text-anchor="middle" class="tiny">commit OK</text>
+          <path d="M150 184 L80 184" class="wire reply"/><polygon points="70,184 80,179 80,189" class="head reply"/>
+          <path d="M685 280 V335 A75 12 0 0 0 835 335 V280" class="store"/><ellipse cx="760" cy="280" rx="75" ry="12" class="store"/><text x="760" y="317.5" text-anchor="middle" class="label">Replica C</text><text x="760" y="335.5" text-anchor="middle" class="sub">isolated</text>
+          <path d="M455 212 L455 228 Q455 236 463 236 L897 236 Q905 236 905 244 L905 302 Q905 310 897 310 L845 310" class="wire fail"/><polygon points="835,310 845,305 845,315" class="head fail"/><text x="810" y="264" class="tiny">no messages</text>
+          <rect x="365" y="280" width="150" height="65" rx="12" class="box"/><text x="440" y="309.5" text-anchor="middle" class="label">Minority API</text><text x="440" y="328.5" text-anchor="middle" class="sub">no quorum</text>
+          <path d="M515 302 L675 302" class="wire"/><polygon points="685,302 675,307 675,297" class="head"/><text x="603" y="281" text-anchor="middle" class="tiny">write / strong read</text>
+          <path d="M685 324 L525 324" class="wire fail"/><polygon points="515,324 525,319 525,329" class="head fail"/><text x="600" y="350" text-anchor="middle" class="tiny">unavailable</text>
+          <g class="is-new">
+            <text x="34" y="249" class="tiny">Recovery: term check + committed log + business-key lookup</text>
+            <text x="34" y="368" class="tiny">A timeout may hide a commit; no quorum ≠ no prior business effect.</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">完整图加恢复约束：旧 leader 被新任期挡住，未知写先查 k7。共识保提交历史，业务唯一键保一次扣款；网络恢复不会自动消掉已执行但丢回包的副作用。</span><span class="lang-en">Complete recovery with term rejection and k7 lookup. Consensus protects commit history; a business key protects one charge. Reconnection cannot erase a lost-result effect.</span></figcaption>
+      </div>
+    </figure>
+<h3><span class="lang-zh">正常路径：多数派提交，确认逐跳回来</span> <span class="lang-en">Normal path: majority commit and full acknowledgment return</span></h3><div class="bilingual"><div class="lang-zh"><p>三成员组的多数派为 floor(3/2)+1=2。图里 A 为当前任期 leader，它把日志发给 B，B 持久记录并返回 ACK；按共识提交规则完成并应用这笔当前任期记录以后，A 才经 API 回复 Client。这个顺序把“本地收到了”与“外部可以依赖成功”分开。C 的通信被隔离，A/B 仍有两票，正常的多数派操作可以继续。复制从 A 发出，B 不直接给客户端成功。</p><p>这不是通用的 W=2 写协议。Raft 的任期、日志匹配、选举限制和当前任期提交条件一起保护历史。[5] 如果省掉这些规则，两份互相不同的记录也可以分别拿到两个 ACK。图展开一次当前任期提交，完整日志与选举规则由共识实现保证。</p></div><div class="lang-en"><p>A three-member majority is floor(3/2)+1=2. Current-term leader A sends a log entry to B, receives durable ACK, commits/applies under the protocol, then returns A → API → Client. Isolated C does not remove majority A/B service; B never directly acknowledges the client.</p><p>This is not a generic W=2 protocol. Raft terms, log matching, election restrictions and current-term commit rules jointly protect history. [5] Two arbitrary ACKs are insufficient. The picture relies on a consensus contract for the full election/log rules.</p></div></div><h3><span class="lang-zh">少数派拒绝的范围要说准确</span> <span class="lang-en">Specify which minority operations are refused</span></h3><div class="bilingual"><div class="lang-zh"><p>C 一侧即使进程和磁盘都健康，也无法凑齐多数派，不能确认新写。强读同样需要验证当前领导权与可见提交点；单纯看本地行不是证明。etcd 3.6 默认提供线性一致的相关操作，而请求改为 serializable 可以减少共识读的代价，同时允许读到相对 quorum 的旧数据。[6] 讨论 etcd 时仍要指明 API 与一致性模式。</p><p>如果多数派也凑不齐，整个该组暂停进展。拒绝是保安全的工程选择，不是在承诺所有节点都有业务成功。读一个与共享写无关的常量可以不受影响，读另一份允许旧值的展示数据也能另立契约；不需要把账户、购物车和整站页面绑在一个开关上。故障域按 shard 或组变化时，只限制受影响的那一部分，并把被拒绝的用户旅程记入自己的 SLI。</p></div><div class="lang-en"><p>A healthy isolated C cannot confirm new writes without majority. Strong reads also require leadership and commit visibility proof. etcd 3.6 distinguishes default linearized operations from explicitly serializable reads that may be stale relative to quorum. [6] State etcd’s actual API/mode.</p><p>Loss of every majority halts progress for that group. Refusal protects safety while sacrificing successful operations there. Constants, separate weak display data and other shards can retain separate contracts; count refused affected journeys in their SLI.</p></div></div><h3><span class="lang-zh">恢复时，提交历史和业务结果分别确认</span> <span class="lang-en">Recovery checks both history and business results</span></h3><div class="bilingual"><div class="lang-zh"><p>网络恢复后，C 从合法 leader 追日志，旧任期的 A 即便从长暂停中醒来，也不能继续以过期身份推进共识状态。但客户端的 k7 可能已经提交，只是 OK 没到达。重试先查询 k7 的持久结果；若业务库与共识元数据是不同事务域，还要在业务库里把幂等键与效果原子写入，不能假设选主协议顺手提供了一次扣款。</p><p>“CP 恢复后不需要对账”因此过于绝对。共识防止已提交日志形成两个相互冲突的历史，却不证明通知、支付渠道和用户回包都完成。未提交日志、未知回执、外部服务的状态仍需核查。代价是分区期部分拒绝，收益是不用让业务处理任意两份已提交账本；不要为了隐藏拒绝，在少数派擅自本地确认。</p></div><div class="lang-en"><p>On healing, C follows the valid leader and stale terms cannot advance consensus. But k7 may already have committed despite a lost OK. Query its durable result; if business state uses another transaction domain, atomically deduplicate key/effect there. Election does not provide exactly-once charging.</p><p>Consensus prevents conflicting committed histories, not incomplete notifications, channel actions or user responses. Recovery still reconciles unknown receipts and external effects. Accept minority refusal rather than locally acknowledging an unsafe ledger write.</p></div></div>
+</section>
+<section>
+<h2><span class="lang-zh">保服务：分叉可接纳，合并必须有业务规则</span> <span class="lang-en">Preserve service: admit divergence with a real merge rule</span></h2>
+<figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d3s1t d3s1d">
+          <title id="d3s1t">Local writes can succeed on both sides of a partition</title>
+          <desc id="d3s1d">Writer A sends add apple to Replica A and receives local OK. Replica A cannot communicate with Replica B, represented by a failed inter-replica lane. This is an explicitly weak shopping-cart contract.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <g class="is-new">
+            <rect x="2" y="24" width="956" height="360" rx="18" class="boundary"/><text x="20" y="46" class="tiny">AVAILABLE CART · local success, explicit concurrent versions</text>
+            <rect x="30" y="130" width="110" height="70" rx="12" class="box"/><text x="85" y="162" text-anchor="middle" class="label">Writer A</text><text x="85" y="181" text-anchor="middle" class="sub">add apple</text>
+            <rect x="190" y="130" width="160" height="70" rx="12" class="box"/><text x="270" y="162" text-anchor="middle" class="label">Replica A</text><text x="270" y="181" text-anchor="middle" class="sub">cart version a</text>
+            <rect x="610" y="130" width="160" height="70" rx="12" class="box"/><text x="690" y="162" text-anchor="middle" class="label">Replica B</text><text x="690" y="181" text-anchor="middle" class="sub">cart version b</text>
+            <path d="M140 151 L180 151" class="wire"/><polygon points="190,151 180,156 180,146" class="head"/>
+            <path d="M190 176 L150 176" class="wire reply"/><polygon points="140,176 150,171 150,181" class="head reply"/>
+            <path d="M350 150 L600 150" class="wire fail"/><polygon points="610,150 600,155 600,145" class="head fail"/><text x="480" y="131" text-anchor="middle" class="tiny">partition</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">先画允许本地成功的购物车契约。A 加 apple 即返回，副本间当前不通；它承诺保存本地版本，不承诺所有端点马上看到同一份列表。</span><span class="lang-en">Begin with a locally successful cart contract. A accepts apple despite blocked communication; it preserves a local version, not immediate agreement across endpoints.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d3s2t d3s2d">
+          <title id="d3s2t">Concurrent local success creates two valid versions</title>
+          <desc id="d3s2d">Writer B independently adds bread to Replica B and receives local OK. Versions a and b are concurrent; acknowledgment by both sides does not establish a common real-time order.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="2" y="24" width="956" height="360" rx="18" class="boundary"/><text x="20" y="46" class="tiny">AVAILABLE CART · local success, explicit concurrent versions</text>
+          <rect x="30" y="130" width="110" height="70" rx="12" class="box"/><text x="85" y="162" text-anchor="middle" class="label">Writer A</text><text x="85" y="181" text-anchor="middle" class="sub">add apple</text>
+          <rect x="190" y="130" width="160" height="70" rx="12" class="box"/><text x="270" y="162" text-anchor="middle" class="label">Replica A</text><text x="270" y="181" text-anchor="middle" class="sub">cart version a</text>
+          <rect x="610" y="130" width="160" height="70" rx="12" class="box"/><text x="690" y="162" text-anchor="middle" class="label">Replica B</text><text x="690" y="181" text-anchor="middle" class="sub">cart version b</text>
+          <path d="M140 151 L180 151" class="wire"/><polygon points="190,151 180,156 180,146" class="head"/>
+          <path d="M190 176 L150 176" class="wire reply"/><polygon points="140,176 150,171 150,181" class="head reply"/>
+          <path d="M350 150 L600 150" class="wire fail"/><polygon points="610,150 600,155 600,145" class="head fail"/><text x="480" y="131" text-anchor="middle" class="tiny">partition</text>
+          <g class="is-new">
+            <rect x="820" y="130" width="110" height="70" rx="12" class="box"/><text x="875" y="162" text-anchor="middle" class="label">Writer B</text><text x="875" y="181" text-anchor="middle" class="sub">add bread</text>
+            <path d="M820 151 L780 151" class="wire"/><polygon points="770,151 780,146 780,156" class="head"/>
+            <path d="M770 176 L810 176" class="wire reply"/><polygon points="820,176 810,181 810,171" class="head reply"/>
+            <text x="185" y="243" class="tiny">A: {apple}</text>
+            <text x="715" y="243" class="tiny">B: {bread}</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">再加 B 的 bread 与独立回程。两个成功并不等于产生一个总序；冲突处理要理解“同时加入不同商品”，不能按最后到达的字符串覆盖整份购物车。</span><span class="lang-en">Add B’s independent bread write/reply. Two successes do not create a total order; whole-cart last-arrival replacement could discard a valid item.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d3s3t d3s3d">
+          <title id="d3s3t">Recovery gathers concurrent versions into a domain merge</title>
+          <desc id="d3s3d">After communication is restored, Replica A and Replica B asynchronously supply versions to Merge. Merge is an application conflict-resolution step, not a quorum voting service.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="2" y="24" width="956" height="360" rx="18" class="boundary"/><text x="20" y="46" class="tiny">AVAILABLE CART · local success, explicit concurrent versions</text>
+          <rect x="30" y="130" width="110" height="70" rx="12" class="box"/><text x="85" y="162" text-anchor="middle" class="label">Writer A</text><text x="85" y="181" text-anchor="middle" class="sub">add apple</text>
+          <rect x="190" y="130" width="160" height="70" rx="12" class="box"/><text x="270" y="162" text-anchor="middle" class="label">Replica A</text><text x="270" y="181" text-anchor="middle" class="sub">cart version a</text>
+          <rect x="610" y="130" width="160" height="70" rx="12" class="box"/><text x="690" y="162" text-anchor="middle" class="label">Replica B</text><text x="690" y="181" text-anchor="middle" class="sub">cart version b</text>
+          <path d="M140 151 L180 151" class="wire"/><polygon points="190,151 180,156 180,146" class="head"/>
+          <path d="M190 176 L150 176" class="wire reply"/><polygon points="140,176 150,171 150,181" class="head reply"/>
+          <path d="M350 150 L600 150" class="wire fail muted"/><polygon points="610,150 600,155 600,145" class="head fail muted"/><text x="480" y="131" text-anchor="middle" class="tiny">partition</text>
+          <rect x="820" y="130" width="110" height="70" rx="12" class="box"/><text x="875" y="162" text-anchor="middle" class="label">Writer B</text><text x="875" y="181" text-anchor="middle" class="sub">add bread</text>
+          <path d="M820 151 L780 151" class="wire"/><polygon points="770,151 780,146 780,156" class="head"/>
+          <path d="M770 176 L810 176" class="wire reply"/><polygon points="820,176 810,181 810,171" class="head reply"/>
+          <text x="185" y="243" class="tiny">A: {apple}</text>
+          <text x="715" y="243" class="tiny">B: {bread}</text>
+          <g class="is-new">
+            <rect x="410" y="285" width="150" height="65" rx="12" class="box"/><text x="485" y="314.5" text-anchor="middle" class="label">Merge</text><text x="485" y="333.5" text-anchor="middle" class="sub">domain rule</text>
+            <path d="M270 200 L270 303 Q270 311 278 311 L400 311" class="wire async"/><polygon points="410,311 400,316 400,306" class="head async"/><text x="285" y="293" class="tiny">version a</text>
+            <path d="M690 200 L690 303 Q690 311 682 311 L570 311" class="wire async"/><polygon points="560,311 570,306 570,316" class="head async"/><text x="595" y="293" class="tiny">version b</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">恢复后汇集两份版本。Merge 是应用合并步骤，图为本次并发加入选集合并集；如果操作含删除或数量减少，单纯 union 会复活商品，必须换规则。</span><span class="lang-en">On recovery, gather both versions. Merge is application reconciliation; union works for this add-only example, while remove/decrement needs a different rule.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d3s4t d3s4d">
+          <title id="d3s4t">Convergence requires the merged result to return to replicas</title>
+          <desc id="d3s4d">Merge sends the reconciled cart back to Replica A and Replica B asynchronously. Both reach {apple,bread} for this add-only example. Eventual agreement does not retroactively make earlier operations linearizable.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="2" y="24" width="956" height="360" rx="18" class="boundary"/><text x="20" y="46" class="tiny">AVAILABLE CART · local success, explicit concurrent versions</text>
+          <rect x="30" y="130" width="110" height="70" rx="12" class="box"/><text x="85" y="162" text-anchor="middle" class="label">Writer A</text><text x="85" y="181" text-anchor="middle" class="sub">add apple</text>
+          <rect x="190" y="130" width="160" height="70" rx="12" class="box"/><text x="270" y="162" text-anchor="middle" class="label">Replica A</text><text x="270" y="181" text-anchor="middle" class="sub">cart version a</text>
+          <rect x="610" y="130" width="160" height="70" rx="12" class="box"/><text x="690" y="162" text-anchor="middle" class="label">Replica B</text><text x="690" y="181" text-anchor="middle" class="sub">cart version b</text>
+          <path d="M140 151 L180 151" class="wire"/><polygon points="190,151 180,156 180,146" class="head"/>
+          <path d="M190 176 L150 176" class="wire reply"/><polygon points="140,176 150,171 150,181" class="head reply"/>
+          <path d="M350 150 L600 150" class="wire fail muted"/><polygon points="610,150 600,155 600,145" class="head fail muted"/><text x="480" y="131" text-anchor="middle" class="tiny">partition</text>
+          <rect x="820" y="130" width="110" height="70" rx="12" class="box"/><text x="875" y="162" text-anchor="middle" class="label">Writer B</text><text x="875" y="181" text-anchor="middle" class="sub">add bread</text>
+          <path d="M820 151 L780 151" class="wire"/><polygon points="770,151 780,146 780,156" class="head"/>
+          <path d="M770 176 L810 176" class="wire reply"/><polygon points="820,176 810,181 810,171" class="head reply"/>
+          <text x="185" y="243" class="tiny">A: {apple}</text>
+          <text x="715" y="243" class="tiny">B: {bread}</text>
+          <rect x="410" y="285" width="150" height="65" rx="12" class="box"/><text x="485" y="314.5" text-anchor="middle" class="label">Merge</text><text x="485" y="333.5" text-anchor="middle" class="sub">domain rule</text>
+          <path d="M270 200 L270 303 Q270 311 278 311 L400 311" class="wire async"/><polygon points="410,311 400,316 400,306" class="head async"/><text x="285" y="293" class="tiny">version a</text>
+          <path d="M690 200 L690 303 Q690 311 682 311 L570 311" class="wire async"/><polygon points="560,311 570,306 570,316" class="head async"/><text x="595" y="293" class="tiny">version b</text>
+          <g class="is-new">
+            <path d="M410 334 L373 334 Q365 334 365 326 L365 231 Q365 223 357 223 L306.5 223 Q300 223 300 216.5 L300 210" class="wire async"/><polygon points="300,200 305,210 295,210" class="head async"/>
+            <path d="M560 334 L582 334 Q590 334 590 326 L590 231 Q590 223 598 223 L653.5 223 Q660 223 660 216.5 L660 210" class="wire async"/><polygon points="660,200 665,210 655,210" class="head async"/>
+            <text x="480" y="269" text-anchor="middle" class="tiny">add-only union → {apple,bread}</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">补合并结果写回 A、B，闭合恢复流程。追平以通信恢复、重试和冲突规则为前提；“最终一致”没有自动给出五秒内追平，更不能把之前的分叉改称线性一致。</span><span class="lang-en">Return the merge to A/B. Convergence assumes restored communication, retries and a resolution rule; eventual consistency gives no automatic five-second bound or retroactive linearizability.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d3s5t d3s5d">
+          <title id="d3s5t">Quorum intersection and operational availability are distinct</title>
+          <desc id="d3s5d">The recovered add-only cart graph remains. Text records the separate fixed-set example: N=3, W=2, R=2 has intersection at least one, yet a 2+1 partition leaves the singleton unable to meet either quorum. Sloppy replacement sets and concurrent writes require further reasoning.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="2" y="24" width="956" height="360" rx="18" class="boundary"/><text x="20" y="46" class="tiny">AVAILABLE CART · local success, explicit concurrent versions</text>
+          <rect x="30" y="130" width="110" height="70" rx="12" class="box"/><text x="85" y="162" text-anchor="middle" class="label">Writer A</text><text x="85" y="181" text-anchor="middle" class="sub">add apple</text>
+          <rect x="190" y="130" width="160" height="70" rx="12" class="box"/><text x="270" y="162" text-anchor="middle" class="label">Replica A</text><text x="270" y="181" text-anchor="middle" class="sub">cart version a</text>
+          <rect x="610" y="130" width="160" height="70" rx="12" class="box"/><text x="690" y="162" text-anchor="middle" class="label">Replica B</text><text x="690" y="181" text-anchor="middle" class="sub">cart version b</text>
+          <path d="M140 151 L180 151" class="wire"/><polygon points="190,151 180,156 180,146" class="head"/>
+          <path d="M190 176 L150 176" class="wire reply"/><polygon points="140,176 150,171 150,181" class="head reply"/>
+          <path d="M350 150 L600 150" class="wire fail muted"/><polygon points="610,150 600,155 600,145" class="head fail muted"/><text x="480" y="131" text-anchor="middle" class="tiny">partition</text>
+          <rect x="820" y="130" width="110" height="70" rx="12" class="box"/><text x="875" y="162" text-anchor="middle" class="label">Writer B</text><text x="875" y="181" text-anchor="middle" class="sub">add bread</text>
+          <path d="M820 151 L780 151" class="wire"/><polygon points="770,151 780,146 780,156" class="head"/>
+          <path d="M770 176 L810 176" class="wire reply"/><polygon points="820,176 810,181 810,171" class="head reply"/>
+          <text x="185" y="243" class="tiny">A: {apple}</text>
+          <text x="715" y="243" class="tiny">B: {bread}</text>
+          <rect x="410" y="285" width="150" height="65" rx="12" class="box"/><text x="485" y="314.5" text-anchor="middle" class="label">Merge</text><text x="485" y="333.5" text-anchor="middle" class="sub">domain rule</text>
+          <path d="M270 200 L270 303 Q270 311 278 311 L400 311" class="wire async"/><polygon points="410,311 400,316 400,306" class="head async"/><text x="285" y="293" class="tiny">version a</text>
+          <path d="M690 200 L690 303 Q690 311 682 311 L570 311" class="wire async"/><polygon points="560,311 570,306 570,316" class="head async"/><text x="595" y="293" class="tiny">version b</text>
+          <path d="M410 334 L373 334 Q365 334 365 326 L365 231 Q365 223 357 223 L306.5 223 Q300 223 300 216.5 L300 210" class="wire async"/><polygon points="300,200 305,210 295,210" class="head async"/>
+          <path d="M560 334 L582 334 Q590 334 590 326 L590 231 Q590 223 598 223 L653.5 223 Q660 223 660 216.5 L660 210" class="wire async"/><polygon points="660,200 665,210 655,210" class="head async"/>
+          <text x="480" y="269" text-anchor="middle" class="tiny">add-only union → {apple,bread}</text>
+          <g class="is-new">
+            <text x="34" y="83" class="tiny">Fixed set: N=3, W=2, R=2 → |write ∩ read| ≥ 1</text>
+            <text x="34" y="368" class="tiny">2+1 partition: singleton cannot meet W=2 or R=2; overlap alone is not linearizability.</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">最后把 quorum 边界写在完整图旁：2+2−3=1 仅证明固定集合有交点；2+1 分区时，单节点一侧凑不齐 W=2/R=2，所以“掉一台还工作”不等于 CAP 的每个活节点都可用。</span><span class="lang-en">Add the quorum boundary: 2+2−3=1 proves fixed-set overlap only. In a 2+1 split the singleton cannot meet W=2/R=2, so surviving one failure does not imply CAP A.</span></figcaption>
+      </div>
+    </figure>
+<h3><span class="lang-zh">可用的承诺必须包含冲突处理</span> <span class="lang-en">An available contract includes conflict handling</span></h3><div class="bilingual"><div class="lang-zh"><p>购物车例把语义放宽：每边可以持久保存本地版本并确认加入，通信恢复后应用再合并。A 加 apple、B 加 bread 都成功，恢复时只做本例的集合并集，写回双方为 {apple,bread}。这条链必须有结果写回，否则只是发现冲突、没有修复副本。Dynamo 论文把版本与应用协助的冲突处理作为高可用设计的一部分，并使用 hinted handoff 等机制处理临时不可达。[4]</p><p>合并的风险随操作改变。仅加入时 union 不丢商品；若另一边已经删除 apple，简单 union 会把它复活。数量加减需要辨认操作身份，删除需要因果信息或相应的集合规则。选 last-write-wins 则要承认某个并发版本可能被舍弃，物理时钟不能证明业务意图。最终一致只说满足前提后的收敛，没有默认的恢复期限；本章不把五秒写成来自论文的保证。</p></div><div class="lang-en"><p>The cart weakens semantics: each side durably accepts a local version, then the application reconciles after healing. Add-only union yields {apple,bread} and writes back to both copies. Dynamo includes versioning, application-assisted reconciliation and temporary-failure handling. [4]</p><p>Union can resurrect a removed item; decrements/removes need operation identity and causal rules. Last-write-wins can discard concurrent intent, and physical timestamps do not prove that intent. Eventual convergence has assumptions and no automatic five-second deadline.</p></div></div><h3><span class="lang-zh">W+R>N 证明交点，不证明整套语义</span> <span class="lang-en">W+R>N proves overlap, not the complete contract</span></h3><div class="bilingual"><div class="lang-zh"><p>另看固定三成员集合。W=2、R=2 时，任意写集合与读集合的交点至少是 W+R−N=2+2−3=1。若一笔写已在固定 W 中完成、成员没变、读拿到各副本版本且能正确挑出新值，这个交点能帮助看见那笔写。它没有规定并发写的总序、暂存写能否被读见、读修复是否必须在返回前完成，也没有覆盖迁移和选主。缺少这些条件，不能从一个不等式跳到线性一致。</p><p>“所有 quorum 系统都做不到线性一致”同样不成立。有协议把多数派读、写回与版本规则组合成原子寄存器。这里反对的是仅凭集合相交就宣称性质，而不是否定 quorum 这个工具。共识日志和普通版本 KV 都用投票集合，但完整语义取决于协议；面试时把版本排序、读屏障和失败行为写出来，比增加一个 C 标签有效。</p></div><div class="lang-en"><p>For fixed N=3, W=2, R=2, minimum intersection is W+R−N=1. With a completed write, stable members and correct version selection, overlap helps see that write. It does not define concurrent order, tentative-write visibility, return-time repair or membership transitions.</p><p>Conversely, quorum protocols can implement linearizable registers when they include suitable version/read-writeback rules. The mistake is inferring the full property from overlap alone, not using quorums. State ordering, read barriers and failures.</p></div></div><h3><span class="lang-zh">一台坏了能工作，不等于每个活节点都能工作</span> <span class="lang-en">Surviving one failure is not availability at every live node</span></h3><div class="bilingual"><div class="lang-zh"><p>三节点失去一台，另两台能凑 W=2，所以从幸存多数派访问仍成功。但 2+1 分区时，单节点一边无法达到 W=2 或 R=2，接到请求就要拒绝或等；定理中的 A 要求那一边的非失败节点也完成。说“少一台仍可用”是故障容忍能力，说“所有分区都可用”是更强且不同的保证。两句话必须分开。</p><p>Dynamo 的 sloppy quorum 在不可达时可能使用偏好列表外的临时节点；这时虽然各自收到两个 ACK，读、写集合却不一定在原来的三份里相交。[4] 调高 W/R 通常提高等待代价与可见性条件，不能保证任意分区仍可写。Cassandra 等产品还可按请求、地域和配置改变规则，本章不声称一个跨版本“默认 N/W/R”。AP/CP 与 PACELC 标签用于解释具体配置下的代价，不用作产品出生证。</p></div><div class="lang-en"><p>With one member down, two survivors may meet W=2. In a 2+1 split the singleton cannot meet W=2 or R=2; CAP A also covers that live node. Failure tolerance from reachable survivors is a different claim.</p><p>Dynamo’s sloppy quorum can use temporary nodes outside the preferred set, so nominal ACK counts need not intersect in the original N. [4] Higher W/R increases waits and constraints but cannot make every partition writable. Product request/region/configuration choices vary; this chapter asserts no universal default N/W/R.</p></div></div>
+</section>
+<section>
+<h2><span class="lang-zh">PACELC：没有分区时，复制确认仍在改延迟</span> <span class="lang-en">PACELC: replication barriers cost latency even without a split</span></h2>
+<figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d4s1t d4s1d">
+          <title id="d4s1t">A local durable write has a small critical path</title>
+          <desc id="d4s1d">Client writes through API to Replica A. A returns local durable success through API to Client. The teaching baseline is one millisecond local persistence and two milliseconds combined API/client overhead.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <g class="is-new">
+            <rect x="2" y="24" width="956" height="360" rx="18" class="boundary"/><text x="20" y="46" class="tiny">PACELC ELSE · same replication path, different acknowledgment rule</text>
+            <circle cx="44" cy="151" r="12" class="box"/><path d="M24 197 Q44 165 64 197" class="wire"/><text x="44" y="219" text-anchor="middle" class="label">Client</text>
+            <rect x="140" y="140" width="120" height="70" rx="12" class="box"/><text x="200" y="172" text-anchor="middle" class="label">API</text><text x="200" y="191" text-anchor="middle" class="sub">write / read</text>
+            <path d="M375 135 V200 A75 12 0 0 0 525 200 V135" class="store"/><ellipse cx="450" cy="135" rx="75" ry="12" class="store"/><text x="450" y="177.5" text-anchor="middle" class="label">Replica A</text><text x="450" y="195.5" text-anchor="middle" class="sub">write authority</text>
+            <path d="M70 166 L130 166" class="wire"/><polygon points="140,166 130,171 130,161" class="head"/>
+            <path d="M260 166 L365 166" class="wire"/><polygon points="375,166 365,171 365,161" class="head"/><text x="315" y="153" text-anchor="middle" class="tiny">write</text>
+            <path d="M375 190 L270 190" class="wire reply"/><polygon points="260,190 270,185 270,195" class="head reply"/>
+            <path d="M140 184 L80 184" class="wire reply"/><polygon points="70,184 80,179 80,189" class="head reply"/>
+            <text x="34" y="72" class="tiny">assumption: overhead 2 ms + local durable write 1 ms = 3 ms</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">先画本地持久成功的闭环。教学模型只计 API/接入合计 2 ms 与本地持久 1 ms，得到 3 ms；这是条件算术，不是某数据库 p99 的测量。</span><span class="lang-en">Start with local durability and the full return path. Assumed overhead 2 ms plus persistence 1 ms gives 3 ms, a conditional calculation rather than a measured p99.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d4s2t d4s2d">
+          <title id="d4s2t">Early success leaves a remote visibility gap</title>
+          <desc id="d4s2d">Replica A asynchronously replicates to Replica B after local acknowledgment; B acknowledges A. This remote acknowledgment is not a precondition of the currently drawn client success.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="2" y="24" width="956" height="360" rx="18" class="boundary"/><text x="20" y="46" class="tiny">PACELC ELSE · same replication path, different acknowledgment rule</text>
+          <circle cx="44" cy="151" r="12" class="box"/><path d="M24 197 Q44 165 64 197" class="wire"/><text x="44" y="219" text-anchor="middle" class="label">Client</text>
+          <rect x="140" y="140" width="120" height="70" rx="12" class="box"/><text x="200" y="172" text-anchor="middle" class="label">API</text><text x="200" y="191" text-anchor="middle" class="sub">write / read</text>
+          <path d="M375 135 V200 A75 12 0 0 0 525 200 V135" class="store"/><ellipse cx="450" cy="135" rx="75" ry="12" class="store"/><text x="450" y="177.5" text-anchor="middle" class="label">Replica A</text><text x="450" y="195.5" text-anchor="middle" class="sub">write authority</text>
+          <path d="M70 166 L130 166" class="wire"/><polygon points="140,166 130,171 130,161" class="head"/>
+          <path d="M260 166 L365 166" class="wire"/><polygon points="375,166 365,171 365,161" class="head"/><text x="315" y="153" text-anchor="middle" class="tiny">write</text>
+          <path d="M375 190 L270 190" class="wire reply"/><polygon points="260,190 270,185 270,195" class="head reply"/>
+          <path d="M140 184 L80 184" class="wire reply"/><polygon points="70,184 80,179 80,189" class="head reply"/>
+          <text x="34" y="72" class="tiny">assumption: overhead 2 ms + local durable write 1 ms = 3 ms</text>
+          <g class="is-new">
+            <path d="M705 135 V200 A75 12 0 0 0 855 200 V135" class="store"/><ellipse cx="780" cy="135" rx="75" ry="12" class="store"/><text x="780" y="177.5" text-anchor="middle" class="label">Replica B</text><text x="780" y="195.5" text-anchor="middle" class="sub">remote copy</text>
+            <path d="M525 166 L695 166" class="wire async"/><polygon points="705,166 695,171 695,161" class="head async"/><text x="615" y="151" text-anchor="middle" class="tiny">one parallel hop</text>
+            <path d="M705 190 L535 190" class="wire reply"/><polygon points="525,190 535,185 535,195" class="head reply"/><text x="615" y="216" text-anchor="middle" class="tiny">durable ACK</text>
+            <text x="34" y="256" class="tiny">EL contract: remote replication is outside the success barrier.</text>
+            <text x="34" y="280" class="tiny">An acknowledged local write may be absent from B.</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">加远端复制，早确认不等 B。代价是 B 可能尚无这笔写；若 A 在追平前永久丢失，故障切流还可能丢已确认写，单机持久并不代表跨地域零 RPO。</span><span class="lang-en">Add remote replication outside the acknowledgment barrier. B may lack the write; losing A before catch-up may lose acknowledged data during failover.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d4s3t d4s3d">
+          <title id="d4s3t">A synchronous barrier includes the remote round trip</title>
+          <desc id="d4s3d">The same physical graph is used for a stricter alternative: success now waits for B durability. With parallel local/remote persistence, overhead two plus max(local one, RTT plus remote one) is seven milliseconds for RTT four, or eighty-three for RTT eighty.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="2" y="24" width="956" height="360" rx="18" class="boundary"/><text x="20" y="46" class="tiny">PACELC ELSE · same replication path, different acknowledgment rule</text>
+          <circle cx="44" cy="151" r="12" class="box"/><path d="M24 197 Q44 165 64 197" class="wire"/><text x="44" y="219" text-anchor="middle" class="label">Client</text>
+          <rect x="140" y="140" width="120" height="70" rx="12" class="box"/><text x="200" y="172" text-anchor="middle" class="label">API</text><text x="200" y="191" text-anchor="middle" class="sub">write / read</text>
+          <path d="M375 135 V200 A75 12 0 0 0 525 200 V135" class="store"/><ellipse cx="450" cy="135" rx="75" ry="12" class="store"/><text x="450" y="177.5" text-anchor="middle" class="label">Replica A</text><text x="450" y="195.5" text-anchor="middle" class="sub">write authority</text>
+          <path d="M70 166 L130 166" class="wire"/><polygon points="140,166 130,171 130,161" class="head"/>
+          <path d="M260 166 L365 166" class="wire"/><polygon points="375,166 365,171 365,161" class="head"/><text x="315" y="153" text-anchor="middle" class="tiny">write</text>
+          <path d="M375 190 L270 190" class="wire reply"/><polygon points="260,190 270,185 270,195" class="head reply"/>
+          <path d="M140 184 L80 184" class="wire reply"/><polygon points="70,184 80,179 80,189" class="head reply"/>
+          <text x="34" y="72" class="tiny">assumption: overhead 2 ms + local durable write 1 ms = 3 ms</text>
+          <path d="M705 135 V200 A75 12 0 0 0 855 200 V135" class="store"/><ellipse cx="780" cy="135" rx="75" ry="12" class="store"/><text x="780" y="177.5" text-anchor="middle" class="label">Replica B</text><text x="780" y="195.5" text-anchor="middle" class="sub">remote copy</text>
+          <path d="M525 166 L695 166" class="wire async"/><polygon points="705,166 695,171 695,161" class="head async"/><text x="615" y="151" text-anchor="middle" class="tiny">one parallel hop</text>
+          <path d="M705 190 L535 190" class="wire reply"/><polygon points="525,190 535,185 535,195" class="head reply"/><text x="615" y="216" text-anchor="middle" class="tiny">durable ACK</text>
+          <text x="34" y="256" class="tiny">EL contract: remote replication is outside the success barrier.</text>
+          <text x="34" y="280" class="tiny">An acknowledged local write may be absent from B.</text>
+          <g class="is-new">
+            <text x="340" y="94" class="tiny">EC alternative: success waits for B durability</text>
+            <text x="340" y="114" class="clock">2 + max(1, RTT + 1): RTT 4 → 7 ms; RTT 80 → 83 ms</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">第三笔只改确认门槛：同步等 B。假设本地与远端并行，2+max(1,4+1)=7 ms；RTT 变 80 ms 后是 83 ms。若过程串行或协议多轮，就要重算，不能把这数说成通用上限。</span><span class="lang-en">Change the success barrier to B durability. Assuming parallel work, 2+max(1,4+1)=7 ms; RTT 80 gives 83 ms. Serial work or extra rounds requires a new calculation.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d4s4t d4s4d">
+          <title id="d4s4t">Replica acknowledgment does not define the read contract</title>
+          <desc id="d4s4d">Local read requests Replica B at or after a commit token v. B returns a caught-up result or a wait/route decision to Local read. Replica ACK alone does not prove linearizability without ordering, read validation and failover rules.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="2" y="24" width="956" height="360" rx="18" class="boundary"/><text x="20" y="46" class="tiny">PACELC ELSE · same replication path, different acknowledgment rule</text>
+          <circle cx="44" cy="151" r="12" class="box"/><path d="M24 197 Q44 165 64 197" class="wire"/><text x="44" y="219" text-anchor="middle" class="label">Client</text>
+          <rect x="140" y="140" width="120" height="70" rx="12" class="box"/><text x="200" y="172" text-anchor="middle" class="label">API</text><text x="200" y="191" text-anchor="middle" class="sub">write / read</text>
+          <path d="M375 135 V200 A75 12 0 0 0 525 200 V135" class="store"/><ellipse cx="450" cy="135" rx="75" ry="12" class="store"/><text x="450" y="177.5" text-anchor="middle" class="label">Replica A</text><text x="450" y="195.5" text-anchor="middle" class="sub">write authority</text>
+          <path d="M70 166 L130 166" class="wire"/><polygon points="140,166 130,171 130,161" class="head"/>
+          <path d="M260 166 L365 166" class="wire"/><polygon points="375,166 365,171 365,161" class="head"/><text x="315" y="153" text-anchor="middle" class="tiny">write</text>
+          <path d="M375 190 L270 190" class="wire reply"/><polygon points="260,190 270,185 270,195" class="head reply"/>
+          <path d="M140 184 L80 184" class="wire reply"/><polygon points="70,184 80,179 80,189" class="head reply"/>
+          <text x="34" y="72" class="tiny">assumption: overhead 2 ms + local durable write 1 ms = 3 ms</text>
+          <path d="M705 135 V200 A75 12 0 0 0 855 200 V135" class="store"/><ellipse cx="780" cy="135" rx="75" ry="12" class="store"/><text x="780" y="177.5" text-anchor="middle" class="label">Replica B</text><text x="780" y="195.5" text-anchor="middle" class="sub">remote copy</text>
+          <path d="M525 166 L695 166" class="wire async"/><polygon points="705,166 695,171 695,161" class="head async"/><text x="615" y="151" text-anchor="middle" class="tiny">one parallel hop</text>
+          <path d="M705 190 L535 190" class="wire reply"/><polygon points="525,190 535,185 535,195" class="head reply"/><text x="615" y="216" text-anchor="middle" class="tiny">durable ACK</text>
+          <text x="34" y="256" class="tiny">EL contract: remote replication is outside the success barrier.</text>
+          <text x="34" y="280" class="tiny">An acknowledged local write may be absent from B.</text>
+          <text x="340" y="94" class="tiny">EC alternative: success waits for B durability</text>
+          <text x="340" y="114" class="clock">2 + max(1, RTT + 1): RTT 4 → 7 ms; RTT 80 → 83 ms</text>
+          <g class="is-new">
+            <rect x="620" y="285" width="150" height="65" rx="12" class="box"/><text x="695" y="314.5" text-anchor="middle" class="label">Local read</text><text x="695" y="333.5" text-anchor="middle" class="sub">needs commit v</text>
+            <path d="M695 285 L695 260 Q695 252 703 252 L772 252 Q780 252 780 244 L780 222" class="wire"/><polygon points="780,212 785,222 775,222" class="head"/><text x="803" y="250" class="tiny">read ≥ v</text>
+            <path d="M855 190 L877 190 Q885 190 885 198 L885 317 Q885 325 877 325 L780 325" class="wire reply"/><polygon points="770,325 780,320 780,330" class="head reply"/><text x="835" y="345" text-anchor="middle" class="tiny">wait / route</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">加读的版本门槛。写确认后随机打任何旧副本仍会读旧；携带 commit v 可等待追平或转权威读，但它首先提供会话内读己之写，完整线性一致还要证明排序与领导权。</span><span class="lang-en">Add the read token barrier. Reading an arbitrary lagging replica remains stale; commit v can wait/route for read-your-writes, while linearizability also needs ordering and leadership proof.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d4s5t d4s5d">
+          <title id="d4s5t">Latency and loss tolerance determine the concrete contract</title>
+          <desc id="d4s5d">The complete graph contrasts early and synchronous acknowledgment and includes a version-constrained read. A twenty-millisecond teaching target fits seven but not eighty-three; place a local quorum or relax the remote visibility contract rather than claim light-speed-free consistency.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="2" y="24" width="956" height="360" rx="18" class="boundary"/><text x="20" y="46" class="tiny">PACELC ELSE · same replication path, different acknowledgment rule</text>
+          <circle cx="44" cy="151" r="12" class="box"/><path d="M24 197 Q44 165 64 197" class="wire"/><text x="44" y="219" text-anchor="middle" class="label">Client</text>
+          <rect x="140" y="140" width="120" height="70" rx="12" class="box"/><text x="200" y="172" text-anchor="middle" class="label">API</text><text x="200" y="191" text-anchor="middle" class="sub">write / read</text>
+          <path d="M375 135 V200 A75 12 0 0 0 525 200 V135" class="store"/><ellipse cx="450" cy="135" rx="75" ry="12" class="store"/><text x="450" y="177.5" text-anchor="middle" class="label">Replica A</text><text x="450" y="195.5" text-anchor="middle" class="sub">write authority</text>
+          <path d="M70 166 L130 166" class="wire"/><polygon points="140,166 130,171 130,161" class="head"/>
+          <path d="M260 166 L365 166" class="wire"/><polygon points="375,166 365,171 365,161" class="head"/><text x="315" y="153" text-anchor="middle" class="tiny">write</text>
+          <path d="M375 190 L270 190" class="wire reply"/><polygon points="260,190 270,185 270,195" class="head reply"/>
+          <path d="M140 184 L80 184" class="wire reply"/><polygon points="70,184 80,179 80,189" class="head reply"/>
+          <text x="34" y="72" class="tiny">assumption: overhead 2 ms + local durable write 1 ms = 3 ms</text>
+          <path d="M705 135 V200 A75 12 0 0 0 855 200 V135" class="store"/><ellipse cx="780" cy="135" rx="75" ry="12" class="store"/><text x="780" y="177.5" text-anchor="middle" class="label">Replica B</text><text x="780" y="195.5" text-anchor="middle" class="sub">remote copy</text>
+          <path d="M525 166 L695 166" class="wire async"/><polygon points="705,166 695,171 695,161" class="head async"/><text x="615" y="151" text-anchor="middle" class="tiny">one parallel hop</text>
+          <path d="M705 190 L535 190" class="wire reply"/><polygon points="525,190 535,185 535,195" class="head reply"/><text x="615" y="216" text-anchor="middle" class="tiny">durable ACK</text>
+          <text x="34" y="256" class="tiny">EL contract: remote replication is outside the success barrier.</text>
+          <text x="34" y="280" class="tiny">An acknowledged local write may be absent from B.</text>
+          <text x="340" y="94" class="tiny">EC alternative: success waits for B durability</text>
+          <text x="340" y="114" class="clock">2 + max(1, RTT + 1): RTT 4 → 7 ms; RTT 80 → 83 ms</text>
+          <rect x="620" y="285" width="150" height="65" rx="12" class="box"/><text x="695" y="314.5" text-anchor="middle" class="label">Local read</text><text x="695" y="333.5" text-anchor="middle" class="sub">needs commit v</text>
+          <path d="M695 285 L695 260 Q695 252 703 252 L772 252 Q780 252 780 244 L780 222" class="wire"/><polygon points="780,212 785,222 775,222" class="head"/><text x="803" y="250" class="tiny">read ≥ v</text>
+          <path d="M855 190 L877 190 Q885 190 885 198 L885 317 Q885 325 877 325 L780 325" class="wire reply"/><polygon points="770,325 780,320 780,330" class="head reply"/><text x="835" y="345" text-anchor="middle" class="tiny">wait / route</text>
+          <g class="is-new">
+            <text x="34" y="368" class="tiny">assumption: target 20 ms; 7 fits, 83 does not. Choose placement or weaken visibility.</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">完整图把 20 ms 的目标接回选型：7 ms 的条件路径可行，83 ms 已超预算。可以把写归属与多数派放近用户，或给远端展示弱读；延迟与容灾损失要分别验收。</span><span class="lang-en">Connect the graph to the assumed 20 ms target: 7 fits and 83 does not. Move authority/quorum near users or permit weaker remote display reads; validate latency and loss separately.</span></figcaption>
+      </div>
+    </figure>
+<h3><span class="lang-zh">平时也在付钱：哪一个 ACK 卡住成功</span> <span class="lang-en">Normal operation still pays: which ACK gates success</span></h3><div class="bilingual"><div class="lang-zh"><p>PACELC 的 P 分支问分区时的可用与一致，Else 分支问平时复制带来的延迟与一致性代价。Abadi 在 2012 年提出这套框架，强调正常运行时的取舍会持续影响系统。[3] 这里把它落成确认门槛，不背四格数据库名单。本地持久就回，用户可较快拿到成功；等必要远端副本持久再回，承诺更强，成功路径也被远端拖住。</p><p>A4 的简化模型里，接入/API 往返合计 2 ms，本地持久 1 ms，所以早确认约 3 ms。若本地和复制并行，远端需要一轮 RTT 加自身 1 ms 持久，同步模型为 2+max(1,RTT+1)。RTT=4 ms 时是 7 ms；RTT=80 ms 时是 83 ms。串行则改为 2+1+RTT+1，分别为 8 与 84 ms。我们选并行模型画图，因此图注与正文只用 7/83，不把不同调度方式混成同一个数字。</p></div><div class="lang-en"><p>PACELC asks A/C during partitions and L/C during ordinary replication. Abadi’s 2012 framework foregrounds that recurring cost. [3] Make the acknowledgment barrier concrete: local durability allows early response; required remote durability extends the critical path.</p><p>A4 assumes 2 ms overhead and 1 ms local persistence, so early response is 3 ms. Parallel replication gives 2+max(1,RTT+1): 7 ms for RTT=4, 83 for RTT=80. Serial work gives 2+1+RTT+1, or 8/84. The diagram consistently uses the parallel model.</p></div></div><h3><span class="lang-zh">持久、可见和强读是三份不同的承诺</span> <span class="lang-en">Durability, visibility and strong reads are distinct promises</span></h3><div class="bilingual"><div class="lang-zh"><p>等到 B 持久不能单独证明读新鲜。B 可能还没有应用日志，另一个 B 类副本可能更慢，客户端还可能被路由到一个旧 leader。因此同步复制要说清等待的是接收、落盘还是可查询；读要验证提交点和领导权。图中的 commit v 是会话令牌：后续读先要求所在副本应用到 v，达不到就等待或转权威端。这个办法针对读己之写；如果别的用户还有后续写，完整线性一致还需遵守那些历史。</p><p>早确认的另一笔成本是容灾。A 本地持久以后立即成功，B 尚未追平时 A 永久丢失，切到 B 会丢掉已经确认的尾部写。可以改本地域多数派确认以抗单机故障，却依然有整个地域丢失的风险。零跨地域 RPO 要重新设计持久屏障，RTO 则是恢复服务时间，两者也不是同一个数。缓存命中无法补出根本不存在于幸存副本里的写。</p></div><div class="lang-en"><p>B durability alone does not prove searchable freshness or current leadership. Specify receive/persist/apply barriers and strong-read validation. Commit token v can wait/route until application reaches v for read-your-writes; other users’ histories still require a stronger protocol for full linearizability.</p><p>Early local ACK can lose acknowledged tail writes if A is permanently lost before B catches up. A local majority protects against machine loss but not necessarily regional loss. Cross-region zero RPO requires a new durability barrier; RTO is service recovery time, a separate measure.</p></div></div><h3><span class="lang-zh">数字只改放置与契约，不冒充 p99</span> <span class="lang-en">Use the arithmetic to change placement and contracts</span></h3><div class="bilingual"><div class="lang-zh"><p>20 ms 的教学目标里，7 ms 尚有 13 ms 条件余量，83 ms 已超 63 ms，不能靠加 App 机器解决远端关键路径。可把写归属与所需多数派留在靠近写者的地域，远端展示走明确弱读；若业务必须全球实时线性一致，就接受协调延迟并修改目标。动态换地域也要安全交接领导权，不能两边都因为“就近”成为可写主。</p><p>这些毫秒是预算模型，不能相加两个依赖的 p99 就声称算出整条路径 p99；尾部会受相关抖动、排队、额外协议轮次影响。对无分区时的 Else 做说明，也不允许故障时偷偷把同步写降成异步成功。若要降级，事先把可丢数据范围、用户状态和恢复行为写进契约；账本通常选择拒绝而不是改变成功的含义。</p></div><div class="lang-en"><p>Under the 20 ms target, 7 leaves conditional room of 13 ms, while 83 exceeds it by 63. More App instances cannot remove remote coordination. Place write authority/quorum near writers or permit weak remote displays; global real-time ordering may require a slower target and safe authority transfer.</p><p>These are budget calculations, not composed p99 measurements. Correlated jitter, queues and extra rounds matter. Failure must not silently turn synchronous success into asynchronous success; any weaker contract needs explicit loss scope and recovery semantics.</p></div></div>
+</section>
+<section>
+<h2><span class="lang-zh">SLI / SLO / SLA：把成功钉在用户边界</span> <span class="lang-en">SLI / SLO / SLA: define success at the user boundary</span></h2>
+<figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s1t d5s1d">
+          <title id="d5s1t">Measure the user journey at its visible boundary</title>
+          <desc id="d5s1d">Client calls Edge, which calls API. API replies through Edge to Client. The user-visible deadline is one second for the teaching checkout journey; fast transport alone is not yet the success definition.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <g class="is-new">
+            <rect x="2" y="24" width="956" height="360" rx="18" class="boundary"/><text x="20" y="46" class="tiny">SLI · user-visible result, not a process health check</text>
+            <circle cx="44" cy="151" r="12" class="box"/><path d="M24 197 Q44 165 64 197" class="wire"/><text x="44" y="219" text-anchor="middle" class="label">Client</text>
+            <rect x="145" y="140" width="120" height="70" rx="12" class="box"/><text x="205" y="172" text-anchor="middle" class="label">Edge</text><text x="205" y="191" text-anchor="middle" class="sub">deadline</text>
+            <rect x="355" y="140" width="135" height="70" rx="12" class="box"/><text x="422.5" y="172" text-anchor="middle" class="label">API</text><text x="422.5" y="191" text-anchor="middle" class="sub">journey contract</text>
+            <path d="M70 166 L135 166" class="wire"/><polygon points="145,166 135,171 135,161" class="head"/>
+            <path d="M265 166 L345 166" class="wire"/><polygon points="355,166 345,171 345,161" class="head"/>
+            <path d="M355 188 L275 188" class="wire reply"/><polygon points="265,188 275,183 275,193" class="head reply"/>
+            <path d="M145 184 L80 184" class="wire reply"/><polygon points="70,184 80,179 80,189" class="head reply"/>
+            <text x="34" y="86" class="tiny">assumption: checkout confirmation deadline = 1 s</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">先画用户边界。一个实例健康不代表结账成功，Edge 拿到 200 也不代表正确入账；先规定一秒内给正确且持久的结果，再决定哪些事件算 good。</span><span class="lang-en">Start at the user boundary. Process health and HTTP 200 do not prove checkout success; define a correct durable outcome within one second before counting good events.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s2t d5s2d">
+          <title id="d5s2t">A durable business result precedes a success response</title>
+          <desc id="d5s2d">API invokes Ledger. Ledger durably records the business outcome and returns to API, then the result travels API to Edge to Client. Ledger does not return directly to Client.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="2" y="24" width="956" height="360" rx="18" class="boundary"/><text x="20" y="46" class="tiny">SLI · user-visible result, not a process health check</text>
+          <circle cx="44" cy="151" r="12" class="box"/><path d="M24 197 Q44 165 64 197" class="wire"/><text x="44" y="219" text-anchor="middle" class="label">Client</text>
+          <rect x="145" y="140" width="120" height="70" rx="12" class="box"/><text x="205" y="172" text-anchor="middle" class="label">Edge</text><text x="205" y="191" text-anchor="middle" class="sub">deadline</text>
+          <rect x="355" y="140" width="135" height="70" rx="12" class="box"/><text x="422.5" y="172" text-anchor="middle" class="label">API</text><text x="422.5" y="191" text-anchor="middle" class="sub">journey contract</text>
+          <path d="M70 166 L135 166" class="wire"/><polygon points="145,166 135,171 135,161" class="head"/>
+          <path d="M265 166 L345 166" class="wire"/><polygon points="355,166 345,171 345,161" class="head"/>
+          <path d="M355 188 L275 188" class="wire reply"/><polygon points="265,188 275,183 275,193" class="head reply"/>
+          <path d="M145 184 L80 184" class="wire reply"/><polygon points="70,184 80,179 80,189" class="head reply"/>
+          <text x="34" y="86" class="tiny">assumption: checkout confirmation deadline = 1 s</text>
+          <g class="is-new">
+            <path d="M610 130 V195 A85 12 0 0 0 780 195 V130" class="store"/><ellipse cx="695" cy="130" rx="85" ry="12" class="store"/><text x="695" y="172.5" text-anchor="middle" class="label">Ledger</text><text x="695" y="190.5" text-anchor="middle" class="sub">durable result</text>
+            <path d="M490 166 L600 166" class="wire"/><polygon points="610,166 600,171 600,161" class="head"/>
+            <path d="M610 188 L500 188" class="wire reply"/><polygon points="490,188 500,183 500,193" class="head reply"/>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">加入账本与逐跳回程。写已提交却回包丢失，业务仍可能成功，但本次用户旅程未知或超时；服务可用性与事后正确性要分开记录，重试保持同一 checkout_id。</span><span class="lang-en">Add Ledger and hop-by-hop replies. A lost post-commit response may leave the user journey bad while business settlement succeeded; preserve the checkout_id on retries.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s3t d5s3d">
+          <title id="d5s3t">Eligible and good events feed separate counters</title>
+          <desc id="d5s3d">Edge emits one logical journey outcome to SLI counter. Eligibility is established before knowing whether a request succeeded; good requires the agreed result and deadline. Retries are deduplicated by checkout_id for this teaching SLI.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="2" y="24" width="956" height="360" rx="18" class="boundary"/><text x="20" y="46" class="tiny">SLI · user-visible result, not a process health check</text>
+          <circle cx="44" cy="151" r="12" class="box"/><path d="M24 197 Q44 165 64 197" class="wire"/><text x="44" y="219" text-anchor="middle" class="label">Client</text>
+          <rect x="145" y="140" width="120" height="70" rx="12" class="box"/><text x="205" y="172" text-anchor="middle" class="label">Edge</text><text x="205" y="191" text-anchor="middle" class="sub">deadline</text>
+          <rect x="355" y="140" width="135" height="70" rx="12" class="box"/><text x="422.5" y="172" text-anchor="middle" class="label">API</text><text x="422.5" y="191" text-anchor="middle" class="sub">journey contract</text>
+          <path d="M70 166 L135 166" class="wire"/><polygon points="145,166 135,171 135,161" class="head"/>
+          <path d="M265 166 L345 166" class="wire"/><polygon points="355,166 345,171 345,161" class="head"/>
+          <path d="M355 188 L275 188" class="wire reply"/><polygon points="265,188 275,183 275,193" class="head reply"/>
+          <path d="M145 184 L80 184" class="wire reply"/><polygon points="70,184 80,179 80,189" class="head reply"/>
+          <text x="34" y="86" class="tiny">assumption: checkout confirmation deadline = 1 s</text>
+          <path d="M610 130 V195 A85 12 0 0 0 780 195 V130" class="store"/><ellipse cx="695" cy="130" rx="85" ry="12" class="store"/><text x="695" y="172.5" text-anchor="middle" class="label">Ledger</text><text x="695" y="190.5" text-anchor="middle" class="sub">durable result</text>
+          <path d="M490 166 L600 166" class="wire"/><polygon points="610,166 600,171 600,161" class="head"/>
+          <path d="M610 188 L500 188" class="wire reply"/><polygon points="490,188 500,183 500,193" class="head reply"/>
+          <g class="is-new">
+            <rect x="315" y="290" width="160" height="65" rx="12" class="box"/><text x="395" y="319.5" text-anchor="middle" class="label">SLI counter</text><text x="395" y="338.5" text-anchor="middle" class="sub">eligible / good</text>
+            <path d="M205 210 L205 316 Q205 324 213 324 L305 324" class="wire async"/><polygon points="315,324 305,329 305,319" class="head async"/><text x="220" y="307" class="tiny">edge outcome</text>
+            <text x="540" y="290" class="tiny">assumption: one logical checkout, one outcome</text><text x="540" y="314" class="tiny">good = confirmed correctly within 1 s</text><text x="540" y="338" class="tiny">Unknown / 503 / late = bad; decline follows contract</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">加两个计数器：eligible 在看到结果前按契约确定，good 还需满足结果与期限。本例以 checkout_id 去重重试；若换成请求级 SLI，分母与告警都要一起换。</span><span class="lang-en">Add eligible/good counters. Eligibility is determined before outcome; good additionally satisfies result/deadline. This logical SLI deduplicates checkout_id retries.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s4t d5s4d">
+          <title id="d5s4t">A dependency failure returns through every caller</title>
+          <desc id="d5s4d">An alternative red failure path returns Ledger to API to Edge to Client. Failure outcomes still reach SLI counter through Edge. No traffic or missing telemetry is not evidence of full success.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="2" y="24" width="956" height="360" rx="18" class="boundary"/><text x="20" y="46" class="tiny">SLI · user-visible result, not a process health check</text>
+          <circle cx="44" cy="151" r="12" class="box"/><path d="M24 197 Q44 165 64 197" class="wire"/><text x="44" y="219" text-anchor="middle" class="label">Client</text>
+          <rect x="145" y="140" width="120" height="70" rx="12" class="box"/><text x="205" y="172" text-anchor="middle" class="label">Edge</text><text x="205" y="191" text-anchor="middle" class="sub">deadline</text>
+          <rect x="355" y="140" width="135" height="70" rx="12" class="box"/><text x="422.5" y="172" text-anchor="middle" class="label">API</text><text x="422.5" y="191" text-anchor="middle" class="sub">journey contract</text>
+          <path d="M70 166 L135 166" class="wire"/><polygon points="145,166 135,171 135,161" class="head"/>
+          <path d="M265 166 L345 166" class="wire"/><polygon points="355,166 345,171 345,161" class="head"/>
+          <path d="M355 188 L275 188" class="wire reply"/><polygon points="265,188 275,183 275,193" class="head reply"/>
+          <path d="M145 184 L80 184" class="wire reply"/><polygon points="70,184 80,179 80,189" class="head reply"/>
+          <text x="34" y="86" class="tiny">assumption: checkout confirmation deadline = 1 s</text>
+          <path d="M610 130 V195 A85 12 0 0 0 780 195 V130" class="store"/><ellipse cx="695" cy="130" rx="85" ry="12" class="store"/><text x="695" y="172.5" text-anchor="middle" class="label">Ledger</text><text x="695" y="190.5" text-anchor="middle" class="sub">durable result</text>
+          <path d="M490 166 L600 166" class="wire"/><polygon points="610,166 600,171 600,161" class="head"/>
+          <path d="M610 188 L500 188" class="wire reply"/><polygon points="490,188 500,183 500,193" class="head reply"/>
+          <rect x="315" y="290" width="160" height="65" rx="12" class="box"/><text x="395" y="319.5" text-anchor="middle" class="label">SLI counter</text><text x="395" y="338.5" text-anchor="middle" class="sub">eligible / good</text>
+          <path d="M205 210 L205 316 Q205 324 213 324 L305 324" class="wire async"/><polygon points="315,324 305,329 305,319" class="head async"/><text x="220" y="307" class="tiny">edge outcome</text>
+          <text x="540" y="290" class="tiny">assumption: one logical checkout, one outcome</text><text x="540" y="314" class="tiny">good = confirmed correctly within 1 s</text><text x="540" y="338" class="tiny">Unknown / 503 / late = bad; decline follows contract</text>
+          <g class="is-new">
+            <path d="M610 194 L563 194 Q555 194 555 202 L555 225 Q555 233 547 233 L498 233 Q490 233 490 225 L490 205" class="wire fail"/><polygon points="490,195 495,205 485,205" class="head fail"/><path d="M355 196 L275 196" class="wire fail"/><polygon points="265,196 275,191 275,201" class="head fail"/><path d="M145 196 L111 196 Q105 196 105 190 L105 190 Q105 184 99 184 L80 184" class="wire fail"/><polygon points="70,184 80,179 80,189" class="head fail"/>
+            <text x="315" y="263" class="tiny">Fail closed for unconfirmed debit; do not rename UNKNOWN to success.</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">补故障回程，账本错误经 API、Edge 到 Client。拒绝未知扣款保护正确性，但仍消耗可用性预算；既不能把 503 移出分母，也不能把 UNKNOWN 改名为成功来保报表。</span><span class="lang-en">Add the full failure return. Refusing an unconfirmed debit protects correctness but spends availability budget; neither exclude 503 nor relabel UNKNOWN as success.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s5t d5s5d">
+          <title id="d5s5t">Degradation is good only if the declared journey permits it</title>
+          <desc id="d5s5d">The full checkout graph remains. A valid terminal decline may satisfy a decision-availability contract, while 202 pending does not satisfy completed checkout. A stale feed may count as good under a separate age-bounded contract; none of these choices changes the ledger safety invariant.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="2" y="24" width="956" height="360" rx="18" class="boundary"/><text x="20" y="46" class="tiny">SLI · user-visible result, not a process health check</text>
+          <circle cx="44" cy="151" r="12" class="box"/><path d="M24 197 Q44 165 64 197" class="wire"/><text x="44" y="219" text-anchor="middle" class="label">Client</text>
+          <rect x="145" y="140" width="120" height="70" rx="12" class="box"/><text x="205" y="172" text-anchor="middle" class="label">Edge</text><text x="205" y="191" text-anchor="middle" class="sub">deadline</text>
+          <rect x="355" y="140" width="135" height="70" rx="12" class="box"/><text x="422.5" y="172" text-anchor="middle" class="label">API</text><text x="422.5" y="191" text-anchor="middle" class="sub">journey contract</text>
+          <path d="M70 166 L135 166" class="wire"/><polygon points="145,166 135,171 135,161" class="head"/>
+          <path d="M265 166 L345 166" class="wire"/><polygon points="355,166 345,171 345,161" class="head"/>
+          <path d="M355 188 L275 188" class="wire reply"/><polygon points="265,188 275,183 275,193" class="head reply"/>
+          <path d="M145 184 L80 184" class="wire reply"/><polygon points="70,184 80,179 80,189" class="head reply"/>
+          <text x="34" y="86" class="tiny">assumption: checkout confirmation deadline = 1 s</text>
+          <path d="M610 130 V195 A85 12 0 0 0 780 195 V130" class="store"/><ellipse cx="695" cy="130" rx="85" ry="12" class="store"/><text x="695" y="172.5" text-anchor="middle" class="label">Ledger</text><text x="695" y="190.5" text-anchor="middle" class="sub">durable result</text>
+          <path d="M490 166 L600 166" class="wire"/><polygon points="610,166 600,171 600,161" class="head"/>
+          <path d="M610 188 L500 188" class="wire reply"/><polygon points="490,188 500,183 500,193" class="head reply"/>
+          <rect x="315" y="290" width="160" height="65" rx="12" class="box"/><text x="395" y="319.5" text-anchor="middle" class="label">SLI counter</text><text x="395" y="338.5" text-anchor="middle" class="sub">eligible / good</text>
+          <path d="M205 210 L205 316 Q205 324 213 324 L305 324" class="wire async"/><polygon points="315,324 305,329 305,319" class="head async"/><text x="220" y="307" class="tiny">edge outcome</text>
+          <text x="540" y="290" class="tiny">assumption: one logical checkout, one outcome</text><text x="540" y="314" class="tiny">good = confirmed correctly within 1 s</text><text x="540" y="338" class="tiny">Unknown / 503 / late = bad; decline follows contract</text>
+          <path d="M610 194 L563 194 Q555 194 555 202 L555 225 Q555 233 547 233 L498 233 Q490 233 490 225 L490 205" class="wire fail"/><polygon points="490,195 495,205 485,205" class="head fail"/><path d="M355 196 L275 196" class="wire fail"/><polygon points="265,196 275,191 275,201" class="head fail"/><path d="M145 196 L111 196 Q105 196 105 190 L105 190 Q105 184 99 184 L80 184" class="wire fail"/><polygon points="70,184 80,179 80,189" class="head fail"/>
+          <text x="315" y="263" class="tiny">Fail closed for unconfirmed debit; do not rename UNKNOWN to success.</text>
+          <g class="is-new">
+            <text x="34" y="368" class="tiny">Checkout: 202 pending ≠ done. Feed: stale may be good only within its declared age bound.</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">最后划清降级边界。合法拒付可满足“得到有效决策”，但不等于“支付成功”；202 待处理不能冒充完成。Feed 在约定年龄内给旧值可算 good，余额和扣款不能借这条规则放松。</span><span class="lang-en">Complete degradation semantics. A valid decline may satisfy decision availability but not payment success; 202 pending is not completion. An age-bounded stale feed uses a separate contract.</span></figcaption>
+      </div>
+    </figure>
+<h3><span class="lang-zh">先测用户完成什么，再设目标</span> <span class="lang-en">Measure the user outcome before setting its target</span></h3><div class="bilingual"><div class="lang-zh"><p>SLI 是测量定义，SLO 是这份定义上的目标，SLA 是带约定后果的对外服务协议；SLA 并不是某条运行链上的下一个技术组件。[7] 对内目标常留余量以避免对外违约，但“必须更紧一档”不是数学关系；两者可能在窗口、排除项、赔付规则上本就不同，必须读具体契约。</p><p>A6 选择一秒内得到正确且持久的结账终态决策，按 checkout_id 计一件有效旅程。eligible 的范围在知道成败之前确定，格式合法、已进入支持范围的请求都计入，过载拒绝不能事后被移除。good 是 eligible 的子集，还要满足结果和期限。正常拒付可算“决策接口可用”，却不能算“支付完成率”；如果产品要衡量支付成功，另设业务指标，不能要求服务把用户余额不足也改成成功。</p></div><div class="lang-en"><p>SLI defines measurement, SLO its target, and SLA an external agreement with consequences. [7]  Internal targets often leave margin, but no theorem requires one tighter “nine”; contracts can differ in windows, exclusions and remedies.</p><p>A6 counts one eligible checkout_id journey and requires a correct durable terminal decision within one second. Determine eligibility before knowing outcome, including supported overload refusals. Good is a subset meeting the result/deadline. Valid decline can satisfy decision availability but not payment completion; use a separate business conversion measure.</p></div></div><h3><span class="lang-zh">UNKNOWN、重试和丢测量都要有归属</span> <span class="lang-en">Assign UNKNOWN, retries and missing telemetry</span></h3><div class="bilingual"><div class="lang-zh"><p>Client → Edge → API → Ledger 正常逐跳，Ledger 确认后才给成功。若已入账但返回包丢了，正确性记录可以是已入账，用户侧旅程却超过期限或 UNKNOWN；两种账不能互相擦掉。本例以相同 checkout_id 合并重试，在最终判定时留下原始开始时间，不能每次重试重置一秒时钟。请求级成功率也可以另记，但总请求数包含重试，不能和旅程级 good 混除。[8]</p><p>API 若直接回复 202，只证明请求被接纳，不证明已完成结账。业务可以改成异步完成旅程，持久记录接单，再量另一个完成期限；这是显式换 SLI。没有流量时分母为零，仪表盘应显示无数据；测量丢失时还要告警数据质量，不能把缺失样本补成成功。Edge 看不到客户端断线后的最终感受，所以重要旅程可加客户端观测，并明确覆盖率，不能把服务端代理当全知视角。</p></div><div class="lang-en"><p>Normal replies follow Ledger → API → Edge → Client. A committed ledger entry with a lost reply can be correct business state but a bad user journey. Deduplicate checkout_id retries while retaining the original deadline start. Request-level success may be measured separately with its own retry-inclusive denominator. [8]</p><p>202 proves acceptance, not completed checkout; an async completion SLI needs a distinct durable admission and deadline. Zero traffic is no data, missing telemetry is a quality issue, and server-side Edge observations have client-visibility limits. Add client measurement with explicit coverage where needed.</p></div></div><h3><span class="lang-zh">降级保住哪条 SLO，也要写出删掉的能力</span> <span class="lang-en">State which SLO degradation preserves and what it removes</span></h3><div class="bilingual"><div class="lang-zh"><p>A7 的 Feed 在权限已验证、内容年龄不超过 30 秒时允许旧值；用户仍能阅读，代价是新帖稍晚出现。超过年龄给失败，不能任意续旧证明。撤销权限没有同样的豁免，账本的未知扣款也没有；“系统可降级”必须落到某条数据与操作上。图里的红线把账本失败一跳一跳传回，意味着这一条完成旅程消耗预算，即使拒绝是正确的选择。</p><p>为了报高可用，把缓存余额当真实余额继续扣款，是用错误结果掩盖拒绝。正确性约束通常要用唯一键、余额不变量与核账单独守住，不把“可以允许一万次错误请求”解释成“可以容忍一万次重复扣款”。目标应按用户损失、使用模式与可承受成本选，支付不天然固定四个 9，内部工具也不天然三个 9；五个 9 是否值得，需要明确目标和工程证据。</p></div><div class="lang-en"><p>A7 allows Feed display up to 30 seconds old under validated permissions, trading new-post visibility for reading. Over-age values fail; revoked permissions and unknown debits have no exemption. The red ledger return counts a bad completed journey even when refusal protects safety.</p><p>Using cached balance for unsafe debits cannot improve true availability. Unique keys, balance invariants and reconciliation separately protect correctness; an allowed bad-request budget is not permission for repeated charges. Choose targets from user loss/cost/evidence, without assigning fixed nines to product categories.</p></div></div>
+</section>
+<section>
+<h2><span class="lang-zh">Error budget：事件余额、时间口径与依赖</span> <span class="lang-en">Error budget: event balance, time denominator and dependencies</span></h2>
+<figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d6s1t d6s1d">
+          <title id="d6s1t">A request budget uses a request denominator</title>
+          <desc id="d6s1d">Eligible events feed Budget ledger for a thirty-day window. With ten million eligible events and SLO 99.9%, the permitted bad count is ten thousand. No downtime-minute equivalence has been asserted.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <g class="is-new">
+            <rect x="2" y="24" width="956" height="360" rx="18" class="boundary"/><text x="20" y="46" class="tiny">ERROR BUDGET · event counts and time counts use different denominators</text>
+            <rect x="30" y="140" width="150" height="70" rx="12" class="box"/><text x="105" y="172" text-anchor="middle" class="label">Eligible events</text><text x="105" y="191" text-anchor="middle" class="sub">30-day window</text>
+            <rect x="270" y="140" width="165" height="70" rx="12" class="box"/><text x="352.5" y="172" text-anchor="middle" class="label">Budget ledger</text><text x="352.5" y="191" text-anchor="middle" class="sub">allowed − bad</text>
+            <path d="M180 166 L260 166" class="wire"/><polygon points="270,166 260,171 260,161" class="head"/><text x="222" y="153" text-anchor="middle" class="tiny">count</text>
+            <text x="34" y="88" class="tiny">assumption: 10,000,000 × (1 − 0.999) = 10,000 bad events</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">第一笔按事件算：一千万有效旅程、99.9% 目标，允许一万次 bad。1−SLO 是比例；乘上这条 SLI 的分母才得到可花的次数，不先写“可停机 43 分钟”。</span><span class="lang-en">Start with events: ten million eligible journeys at 99.9% allow ten thousand bad. Multiply 1−SLO by this SLI denominator; do not first claim forty-three downtime minutes.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d6s2t d6s2d">
+          <title id="d6s2t">Remaining budget is an arithmetic balance</title>
+          <desc id="d6s2d">Budget ledger passes remaining balance to Release gate. If six thousand bad events have occurred with the fixed teaching denominator, ten thousand minus six thousand leaves four thousand, or forty percent of the original budget.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="2" y="24" width="956" height="360" rx="18" class="boundary"/><text x="20" y="46" class="tiny">ERROR BUDGET · event counts and time counts use different denominators</text>
+          <rect x="30" y="140" width="150" height="70" rx="12" class="box"/><text x="105" y="172" text-anchor="middle" class="label">Eligible events</text><text x="105" y="191" text-anchor="middle" class="sub">30-day window</text>
+          <rect x="270" y="140" width="165" height="70" rx="12" class="box"/><text x="352.5" y="172" text-anchor="middle" class="label">Budget ledger</text><text x="352.5" y="191" text-anchor="middle" class="sub">allowed − bad</text>
+          <path d="M180 166 L260 166" class="wire"/><polygon points="270,166 260,171 260,161" class="head"/><text x="222" y="153" text-anchor="middle" class="tiny">count</text>
+          <text x="34" y="88" class="tiny">assumption: 10,000,000 × (1 − 0.999) = 10,000 bad events</text>
+          <g class="is-new">
+            <rect x="555" y="140" width="150" height="70" rx="12" class="box"/><text x="630" y="172" text-anchor="middle" class="label">Release gate</text><text x="630" y="191" text-anchor="middle" class="sub">remaining budget</text>
+            <path d="M435 166 L545 166" class="wire"/><polygon points="555,166 545,171 545,161" class="head"/><text x="493" y="153" text-anchor="middle" class="tiny">remaining</text>
+            <text x="34" y="255" class="clock">10,000 − 6,000 = 4,000 remaining = 40%</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">加发布门读取余额：10,000−6,000=4,000，剩 40%。真实滚动窗口的总数也会变化，预算是当下窗口重新算的余额，不是一月一号发下去就永远不变的票据。</span><span class="lang-en">Add the gate’s balance input: 10,000−6,000=4,000, or 40%. A real rolling window changes both denominator and bad count, so recompute the balance.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d6s3t d6s3d">
+          <title id="d6s3t">Traffic shape changes how quickly an outage spends budget</title>
+          <desc id="d6s3d">The same event-budget graph is annotated with a separate uniform-traffic scenario: one thousand events per second, ten percent bad, for twenty minutes produces one hundred twenty thousand bad events, compared with a full thirty-day budget of two million five hundred ninety-two thousand.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="2" y="24" width="956" height="360" rx="18" class="boundary"/><text x="20" y="46" class="tiny">ERROR BUDGET · event counts and time counts use different denominators</text>
+          <rect x="30" y="140" width="150" height="70" rx="12" class="box"/><text x="105" y="172" text-anchor="middle" class="label">Eligible events</text><text x="105" y="191" text-anchor="middle" class="sub">30-day window</text>
+          <rect x="270" y="140" width="165" height="70" rx="12" class="box"/><text x="352.5" y="172" text-anchor="middle" class="label">Budget ledger</text><text x="352.5" y="191" text-anchor="middle" class="sub">allowed − bad</text>
+          <path d="M180 166 L260 166" class="wire"/><polygon points="270,166 260,171 260,161" class="head"/><text x="222" y="153" text-anchor="middle" class="tiny">count</text>
+          <text x="34" y="88" class="tiny">assumption: 10,000,000 × (1 − 0.999) = 10,000 bad events</text>
+          <rect x="555" y="140" width="150" height="70" rx="12" class="box"/><text x="630" y="172" text-anchor="middle" class="label">Release gate</text><text x="630" y="191" text-anchor="middle" class="sub">remaining budget</text>
+          <path d="M435 166 L545 166" class="wire"/><polygon points="555,166 545,171 545,161" class="head"/><text x="493" y="153" text-anchor="middle" class="tiny">remaining</text>
+          <text x="34" y="255" class="clock">10,000 − 6,000 = 4,000 remaining = 40%</text>
+          <g class="is-new">
+            <text x="34" y="287" class="tiny">Separate steady-traffic example: 1,000/s × 10% × 1,200 s = 120,000 bad</text>
+            <text x="34" y="312" class="tiny">30 d allowed = 2,592,000 bad → 120,000 / 2,592,000 = 4.63%</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">第三笔另算稳态例：1,000/s、10% 失败、20 分钟，烧 120,000 次；30 天全窗口允许 2,592,000 次，约花 4.63%。这不能与前面的“一千万总事件”分母混算。</span><span class="lang-en">Use a separate steady scenario: 1,000/s at 10% bad for 20 minutes spends 120,000; the full-window allowance 2,592,000 makes that 4.63%. Do not mix the ten-million denominator.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d6s4t d6s4d">
+          <title id="d6s4t">Time-based availability has its own denominator</title>
+          <desc id="d6s4d">The graph remains an event-budget ledger. A separate time-based SLI is explicitly calculated: thirty days has forty-three thousand two hundred minutes; 99.9% permits 43.2 minutes, 99.99% 4.32 minutes, and 99.999% 25.92 seconds. Only uniform eligible traffic can make these equivalent to request failures.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="2" y="24" width="956" height="360" rx="18" class="boundary"/><text x="20" y="46" class="tiny">ERROR BUDGET · event counts and time counts use different denominators</text>
+          <rect x="30" y="140" width="150" height="70" rx="12" class="box"/><text x="105" y="172" text-anchor="middle" class="label">Eligible events</text><text x="105" y="191" text-anchor="middle" class="sub">30-day window</text>
+          <rect x="270" y="140" width="165" height="70" rx="12" class="box"/><text x="352.5" y="172" text-anchor="middle" class="label">Budget ledger</text><text x="352.5" y="191" text-anchor="middle" class="sub">allowed − bad</text>
+          <path d="M180 166 L260 166" class="wire"/><polygon points="270,166 260,171 260,161" class="head"/><text x="222" y="153" text-anchor="middle" class="tiny">count</text>
+          <text x="34" y="88" class="tiny">assumption: 10,000,000 × (1 − 0.999) = 10,000 bad events</text>
+          <rect x="555" y="140" width="150" height="70" rx="12" class="box"/><text x="630" y="172" text-anchor="middle" class="label">Release gate</text><text x="630" y="191" text-anchor="middle" class="sub">remaining budget</text>
+          <path d="M435 166 L545 166" class="wire"/><polygon points="555,166 545,171 545,161" class="head"/><text x="493" y="153" text-anchor="middle" class="tiny">remaining</text>
+          <text x="34" y="255" class="clock">10,000 − 6,000 = 4,000 remaining = 40%</text>
+          <text x="34" y="287" class="tiny">Separate steady-traffic example: 1,000/s × 10% × 1,200 s = 120,000 bad</text>
+          <text x="34" y="312" class="tiny">30 d allowed = 2,592,000 bad → 120,000 / 2,592,000 = 4.63%</text>
+          <g class="is-new">
+            <text x="34" y="342" class="tiny">Time SLI only: 43,200 × 0.001 = 43.2 min; 4.32 min; 25.92 s</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">再加独立时间口径：30×24×60=43,200 分钟，三档预算为 43.2 分钟、4.32 分钟和 25.92 秒。只有均匀流量等条件下，时间比例才可换成请求比例；大促停一秒与凌晨停一秒不同。</span><span class="lang-en">Add the separate time SLI: 43,200 minutes yields 43.2 minutes, 4.32 minutes and 25.92 seconds. Only conditions such as uniform traffic justify a request-time equivalence.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d6s5t d6s5d">
+          <title id="d6s5t">The release gate consumes a policy, not a mathematical theorem</title>
+          <desc id="d6s5d">Release gate routes positive balance to Canary and exhaustion to Repair mode. These are documented team policy transitions, not logical consequences of the SLO formula. Safety and urgent reliability repairs may still proceed with review.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="2" y="24" width="956" height="360" rx="18" class="boundary"/><text x="20" y="46" class="tiny">ERROR BUDGET · event counts and time counts use different denominators</text>
+          <rect x="30" y="140" width="150" height="70" rx="12" class="box"/><text x="105" y="172" text-anchor="middle" class="label">Eligible events</text><text x="105" y="191" text-anchor="middle" class="sub">30-day window</text>
+          <rect x="270" y="140" width="165" height="70" rx="12" class="box"/><text x="352.5" y="172" text-anchor="middle" class="label">Budget ledger</text><text x="352.5" y="191" text-anchor="middle" class="sub">allowed − bad</text>
+          <path d="M180 166 L260 166" class="wire"/><polygon points="270,166 260,171 260,161" class="head"/><text x="222" y="153" text-anchor="middle" class="tiny">count</text>
+          <text x="34" y="88" class="tiny">assumption: 10,000,000 × (1 − 0.999) = 10,000 bad events</text>
+          <rect x="555" y="140" width="150" height="70" rx="12" class="box"/><text x="630" y="172" text-anchor="middle" class="label">Release gate</text><text x="630" y="191" text-anchor="middle" class="sub">remaining budget</text>
+          <path d="M435 166 L545 166" class="wire"/><polygon points="555,166 545,171 545,161" class="head"/><text x="493" y="153" text-anchor="middle" class="tiny">remaining</text>
+          <text x="34" y="255" class="clock">10,000 − 6,000 = 4,000 remaining = 40%</text>
+          <text x="34" y="287" class="tiny">Separate steady-traffic example: 1,000/s × 10% × 1,200 s = 120,000 bad</text>
+          <text x="34" y="312" class="tiny">30 d allowed = 2,592,000 bad → 120,000 / 2,592,000 = 4.63%</text>
+          <text x="34" y="342" class="tiny">Time SLI only: 43,200 × 0.001 = 43.2 min; 4.32 min; 25.92 s</text>
+          <g class="is-new">
+            <rect x="785" y="90" width="145" height="65" rx="12" class="box ok"/><text x="857.5" y="119.5" text-anchor="middle" class="label">Canary</text><text x="857.5" y="138.5" text-anchor="middle" class="sub">bounded rollout</text>
+            <rect x="785" y="280" width="145" height="65" rx="12" class="box bad"/><text x="857.5" y="309.5" text-anchor="middle" class="label">Repair mode</text><text x="857.5" y="328.5" text-anchor="middle" class="sub">feature freeze</text>
+            <path d="M705 158 L736 158 Q744 158 744 150 L744 130 Q744 122 752 122 L775 122" class="wire"/><polygon points="785,122 775,127 775,117" class="head"/><text x="743" y="102" text-anchor="middle" class="tiny">positive</text>
+            <path d="M705 190 L737 190 Q745 190 745 198 L745 304 Q745 312 753 312 L775 312" class="wire fail"/><polygon points="785,312 775,317 775,307" class="head fail"/><text x="805" y="260" text-anchor="middle" class="tiny">exhausted</text>
+            <text x="34" y="368" class="tiny">Policy assumption: freeze features on exhaustion; keep reviewed safety / reliability repair.</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">完整图补预算到动作：余额健康时仍受灰度门控制，耗尽进入稳定性修复。冻结功能是本章选定的团队政策；安全与紧急修复保留审查通道，不是所有改动一刀切。</span><span class="lang-en">Complete policy transitions: positive balance still uses canary gates; exhaustion enters reliability work. Feature freeze is this chapter’s policy, with reviewed urgent repairs retained.</span></figcaption>
+      </div>
+    </figure>
+<h3><span class="lang-zh">比例乘分母，才得到能花的预算</span> <span class="lang-en">A ratio needs its denominator to become a budget</span></h3><div class="bilingual"><div class="lang-zh"><p>令 E 为窗口有效事件，B 为 bad，目标 S。SLI=(E−B)/E，允许 bad=E×(1−S)，剩余=E×(1−S)−B。A9 的 E=10,000,000、S=0.999，允许 10,000；已有 6,000，所以剩 4,000，为原允许量的 40%。当前达成率是 (10,000,000−6,000)/10,000,000=99.94%，仍高于 99.9%。报“预算剩 99.94%”混淆了达成率和余额比例。</p><p>滚动 30 天会同时移出旧 bad 和旧 eligible，并加入新流量。某个事故离窗，余额可能变好；一大段好流量离窗，也可能让余额变差。它不是必须等下个月一号重新发放的固定配额。发布门每次读当前窗口；多维 SLO 还要分别算可用、延迟或新鲜度，不能把每项的余额简单相加。[8]</p></div><div class="lang-en"><p>Let E be eligible events, B bad, S target. SLI=(E−B)/E, allowance=E(1−S), remaining=E(1−S)−B. A9 allows 10,000 and retains 4,000, or 40%; achieved SLI is 99.94%, a different percentage.</p><p>Rolling windows remove both old bad and old eligible while adding new traffic. Balance can improve or worsen without a calendar reset. Production gates read the current window. Keep availability, latency and freshness budgets separate. [8]</p></div></div><h3><span class="lang-zh">43.2 分钟是时间口径，不是万能换算</span> <span class="lang-en">43.2 minutes belongs to a time-based denominator</span></h3><div class="bilingual"><div class="lang-zh"><p>独立的时间 SLI 以 30×24×60=43,200 分钟为分母，99.9% 允许 43,200×0.001=43.2 分钟，99.99% 为 4.32 分钟，99.999% 为 0.432 分钟=25.92 秒。请求 SLI 的同三档在一千万事件中分别允许 10,000、1,000、100 次 bad。这些是两种口径的对照，不是看到 43 分钟就能随时停服 43 分钟的许可证。</p><p>A10 另设全窗口持续 1,000 次/秒，总 E=1,000×30×24×3,600=2,592,000,000，预算为 2,592,000。20 分钟、10% 失败产生 1,000×1,200×0.1=120,000，花 120,000÷2,592,000≈4.63%。若同样时段全失败，是 1,200,000，花约 46.30%。若只把事故时流量提高十倍而其余时间不变，分母也增加：E=2,602,800,000，允许 2,602,800；全失败 12,000,000，约花 461.04%，已经大幅超支。不能换了峰值仍沿用旧分母。</p></div><div class="lang-en"><p>For a separate time SLI, 30×24×60=43,200 minutes. Allowances are 43.2 minutes at 99.9%, 4.32 at 99.99%, and 25.92 seconds at 99.999%. Ten million request events instead allow 10,000/1,000/100 bad. These compare denominators; they are not permission to stop at any arbitrary time.</p><p>A10 steady 1,000/s gives E=2,592,000,000 and allowance 2,592,000. At 10% bad for 1,200 s, 120,000 bad spends 4.63%; full failure spends 1,200,000 or 46.30%. Increasing only incident traffic tenfold also changes E to 2,602,800,000 and allowance to 2,602,800; 12,000,000 bad spends 461.04%. Recompute the denominator.</p></div></div><h3><span class="lang-zh">依赖不能靠乘法凭空变成很多个 9</span> <span class="lang-en">Dependencies cannot gain nines by optimistic multiplication</span></h3><div class="bilingual"><div class="lang-zh"><p>A11 假设独立、且两个依赖都必须成功，串行路径为 0.999×0.999=0.998001，即 99.8001%；坏率为 0.1999%，对 99.9% 目标几乎是两倍预算。并联且任一能及时接管时，纸面成功率为 1−0.001×0.001=0.999999，即 99.9999%。这两笔改变图的理由不同：串行需要减少关键依赖或提高各依赖，冗余则要额外画健康检查、容量和安全切流。</p><p>并联结果依赖独立故障。同一 AZ 电源、配置错误、发布和入口网络可能同时影响两份，切流也可能超出用户期限。把这些共同原因遗漏再宣称六个 9，只是把最重要的失败从模型中删掉。更稳妥的替代是把非核心推荐、通知等移出完成路径，同时明确超时降级；付款渠道若是完成所需则仍在路径上，不能因为外包就从 SLO 账单里拿掉。</p></div><div class="lang-en"><p>A11 independent mandatory series dependencies yield 0.999²=0.998001, or 99.8001%; bad rate 0.1999% nearly doubles a 99.9% allowance. Independent timely parallel failover yields 1−0.001²=99.9999%. Series improvements and redundancy require different design changes.</p><p>Shared power, config, releases, networks and slow failover invalidate optimistic independence. Model those causes/capacity and remove optional recommendations/notifications from critical completion where possible. A required outsourced payment channel still belongs in the user SLO.</p></div></div>
+</section>
+<section>
+<h2><span class="lang-zh">从 burn 到发布门：把稳定性决策闭成环</span> <span class="lang-en">From burn to release gate: close the reliability loop</span></h2>
+<figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d7s1t d7s1d">
+          <title id="d7s1t">A healthy budget admits a bounded canary</title>
+          <desc id="d7s1d">Release gate allows a bounded Canary, which sends traffic to User path. These arrows depict release-control flow, not synchronous RPC replies.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <g class="is-new">
+            <rect x="2" y="24" width="956" height="360" rx="18" class="boundary"/><text x="20" y="46" class="tiny">RELEASE CONTROL · close the loop with user-visible burn</text>
+            <rect x="30" y="175" width="130" height="70" rx="12" class="box"/><text x="95" y="207" text-anchor="middle" class="label">Release gate</text><text x="95" y="226" text-anchor="middle" class="sub">budget + policy</text>
+            <rect x="245" y="175" width="130" height="70" rx="12" class="box"/><text x="310" y="207" text-anchor="middle" class="label">Canary</text><text x="310" y="226" text-anchor="middle" class="sub">version v8</text>
+            <rect x="470" y="175" width="130" height="70" rx="12" class="box"/><text x="535" y="207" text-anchor="middle" class="label">User path</text><text x="535" y="226" text-anchor="middle" class="sub">eligible / good</text>
+            <path d="M160 201 L235 201" class="wire"/><polygon points="245,201 235,206 235,196" class="head"/><text x="202" y="188" text-anchor="middle" class="tiny">allow</text>
+            <path d="M375 201 L460 201" class="wire"/><polygon points="470,201 460,206 460,196" class="head"/><text x="420" y="188" text-anchor="middle" class="tiny">traffic</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">先画有限灰度，预算门只允许当前一档放量。这里的箭头是发布控制，不是 RPC 回程；余额还有余量也不意味着能直接把新版本切到全部用户。</span><span class="lang-en">Start a bounded canary, admitting only the current expansion step. Arrows are release control, not RPC replies; remaining budget does not permit immediate full rollout.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d7s2t d7s2d">
+          <title id="d7s2t">Burn rate normalizes current failures by the allowed rate</title>
+          <desc id="d7s2d">User path emits eligible/good outcomes asynchronously to Burn monitor. For a 99.9% SLO, one-percent bad divided by 0.1-percent allowance is burn ten; under stable denominator rate, a full thirty-day budget would last three days.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="2" y="24" width="956" height="360" rx="18" class="boundary"/><text x="20" y="46" class="tiny">RELEASE CONTROL · close the loop with user-visible burn</text>
+          <rect x="30" y="175" width="130" height="70" rx="12" class="box"/><text x="95" y="207" text-anchor="middle" class="label">Release gate</text><text x="95" y="226" text-anchor="middle" class="sub">budget + policy</text>
+          <rect x="245" y="175" width="130" height="70" rx="12" class="box"/><text x="310" y="207" text-anchor="middle" class="label">Canary</text><text x="310" y="226" text-anchor="middle" class="sub">version v8</text>
+          <rect x="470" y="175" width="130" height="70" rx="12" class="box"/><text x="535" y="207" text-anchor="middle" class="label">User path</text><text x="535" y="226" text-anchor="middle" class="sub">eligible / good</text>
+          <path d="M160 201 L235 201" class="wire"/><polygon points="245,201 235,206 235,196" class="head"/><text x="202" y="188" text-anchor="middle" class="tiny">allow</text>
+          <path d="M375 201 L460 201" class="wire"/><polygon points="470,201 460,206 460,196" class="head"/><text x="420" y="188" text-anchor="middle" class="tiny">traffic</text>
+          <g class="is-new">
+            <rect x="700" y="175" width="165" height="70" rx="12" class="box"/><text x="782.5" y="207" text-anchor="middle" class="label">Burn monitor</text><text x="782.5" y="226" text-anchor="middle" class="sub">long AND short</text>
+            <path d="M600 201 L690 201" class="wire async"/><polygon points="700,201 690,206 690,196" class="head async"/><text x="650" y="186" text-anchor="middle" class="tiny">outcomes</text>
+            <text x="34" y="80" class="tiny">99.9% SLO: burn = bad rate / 0.001; 1% bad → 10×</text>
+            <text x="34" y="106" class="tiny">steady-rate estimate: full 30 d budget / 10 = 3 d</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">加 burn rate：1%÷0.1%=10 倍，恒定流量下完整 30 天预算约三天烧完。若只剩 40%，同样速率约 1.2 天；这是条件预测，不能忽略窗口变化。</span><span class="lang-en">Add burn: 1%/0.1%=10×. Stable traffic spends a full 30-day budget in three days; 40% remaining predicts about 1.2 days, subject to window changes.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d7s3t d7s3d">
+          <title id="d7s3t">Two windows distinguish sustained burn from recovery</title>
+          <desc id="d7s3d">Burn monitor uses a long-window and short-window conjunction per alert pair. SRE Workbook starting points are 14.4 times over one hour and five minutes, or six times over six hours and thirty minutes. The same graph remains.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="2" y="24" width="956" height="360" rx="18" class="boundary"/><text x="20" y="46" class="tiny">RELEASE CONTROL · close the loop with user-visible burn</text>
+          <rect x="30" y="175" width="130" height="70" rx="12" class="box"/><text x="95" y="207" text-anchor="middle" class="label">Release gate</text><text x="95" y="226" text-anchor="middle" class="sub">budget + policy</text>
+          <rect x="245" y="175" width="130" height="70" rx="12" class="box"/><text x="310" y="207" text-anchor="middle" class="label">Canary</text><text x="310" y="226" text-anchor="middle" class="sub">version v8</text>
+          <rect x="470" y="175" width="130" height="70" rx="12" class="box"/><text x="535" y="207" text-anchor="middle" class="label">User path</text><text x="535" y="226" text-anchor="middle" class="sub">eligible / good</text>
+          <path d="M160 201 L235 201" class="wire"/><polygon points="245,201 235,206 235,196" class="head"/><text x="202" y="188" text-anchor="middle" class="tiny">allow</text>
+          <path d="M375 201 L460 201" class="wire"/><polygon points="470,201 460,206 460,196" class="head"/><text x="420" y="188" text-anchor="middle" class="tiny">traffic</text>
+          <rect x="700" y="175" width="165" height="70" rx="12" class="box"/><text x="782.5" y="207" text-anchor="middle" class="label">Burn monitor</text><text x="782.5" y="226" text-anchor="middle" class="sub">long AND short</text>
+          <path d="M600 201 L690 201" class="wire async"/><polygon points="700,201 690,206 690,196" class="head async"/><text x="650" y="186" text-anchor="middle" class="tiny">outcomes</text>
+          <text x="34" y="80" class="tiny">99.9% SLO: burn = bad rate / 0.001; 1% bad → 10×</text>
+          <text x="34" y="106" class="tiny">steady-rate estimate: full 30 d budget / 10 = 3 d</text>
+          <g class="is-new">
+            <text x="34" y="130" class="tiny">Page: (1 h AND 5 min) &gt; 14.4× OR (6 h AND 30 min) &gt; 6×</text>
+            <text x="34" y="151" class="tiny">14.4 × 1 / 720 = 2%; 6 × 6 / 720 = 5% of full budget</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">第三笔加双窗口：一小时与五分钟同时超 14.4 倍，或六小时与三十分钟同时超 6 倍。长窗对应已烧掉的量，短窗确认现在还在烧；两个窗用 AND，两档告警才用 OR。</span><span class="lang-en">Add pairs: one hour AND five minutes above 14.4×, or six hours AND thirty minutes above 6×. Long windows track spend; short windows confirm current burn.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d7s4t d7s4d">
+          <title id="d7s4t">A page blocks expansion before the monthly budget is gone</title>
+          <desc id="d7s4d">Burn monitor pages HOLD / rollback. HOLD sends a stop-expansion control to Release gate. The alert can fire while monthly remaining budget is still positive; no need to wait until complete exhaustion.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="2" y="24" width="956" height="360" rx="18" class="boundary"/><text x="20" y="46" class="tiny">RELEASE CONTROL · close the loop with user-visible burn</text>
+          <rect x="30" y="175" width="130" height="70" rx="12" class="box"/><text x="95" y="207" text-anchor="middle" class="label">Release gate</text><text x="95" y="226" text-anchor="middle" class="sub">budget + policy</text>
+          <rect x="245" y="175" width="130" height="70" rx="12" class="box"/><text x="310" y="207" text-anchor="middle" class="label">Canary</text><text x="310" y="226" text-anchor="middle" class="sub">version v8</text>
+          <rect x="470" y="175" width="130" height="70" rx="12" class="box"/><text x="535" y="207" text-anchor="middle" class="label">User path</text><text x="535" y="226" text-anchor="middle" class="sub">eligible / good</text>
+          <path d="M160 201 L235 201" class="wire"/><polygon points="245,201 235,206 235,196" class="head"/><text x="202" y="188" text-anchor="middle" class="tiny">allow</text>
+          <path d="M375 201 L460 201" class="wire"/><polygon points="470,201 460,206 460,196" class="head"/><text x="420" y="188" text-anchor="middle" class="tiny">traffic</text>
+          <rect x="700" y="175" width="165" height="70" rx="12" class="box"/><text x="782.5" y="207" text-anchor="middle" class="label">Burn monitor</text><text x="782.5" y="226" text-anchor="middle" class="sub">long AND short</text>
+          <path d="M600 201 L690 201" class="wire async"/><polygon points="700,201 690,206 690,196" class="head async"/><text x="650" y="186" text-anchor="middle" class="tiny">outcomes</text>
+          <text x="34" y="80" class="tiny">99.9% SLO: burn = bad rate / 0.001; 1% bad → 10×</text>
+          <text x="34" y="106" class="tiny">steady-rate estimate: full 30 d budget / 10 = 3 d</text>
+          <text x="34" y="130" class="tiny">Page: (1 h AND 5 min) &gt; 14.4× OR (6 h AND 30 min) &gt; 6×</text>
+          <text x="34" y="151" class="tiny">14.4 × 1 / 720 = 2%; 6 × 6 / 720 = 5% of full budget</text>
+          <g class="is-new">
+            <rect x="690" y="290" width="165" height="65" rx="12" class="box bad"/><text x="772.5" y="319.5" text-anchor="middle" class="label">HOLD / rollback</text><text x="772.5" y="338.5" text-anchor="middle" class="sub">known stable v7</text>
+            <path d="M780 245 L780 280" class="wire fail"/><polygon points="780,290 775,280 785,280" class="head fail"/><text x="803" y="276" class="tiny">page</text>
+            <path d="M690 323 L438 323 Q430 323 430 315 L430 273 Q430 265 422 265 L101 265 Q96 265 96 260 L96 255" class="wire fail"/><polygon points="96,245 101,255 91,255" class="head fail"/><text x="487" y="310" text-anchor="middle" class="tiny">stop expansion</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">补告警闭环：Burn monitor → HOLD → Release gate，先停继续扩张。错误预算尚未为负也能拦发布；“耗尽才行动”会错过快速故障的止损窗口。</span><span class="lang-en">Close alert control: Burn monitor → HOLD → Release gate. Stop expansion even with positive monthly balance; waiting for exhaustion misses the fast-failure window.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d7s5t d7s5d">
+          <title id="d7s5t">Rollback must be safe for the current data and external effects</title>
+          <desc id="d7s5d">HOLD may route Canary to known stable version v7 only after rollback checks. Existing state, schemas and external effects are not erased by switching code. When reversal is unsafe, use forward repair or disable the affected feature.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="2" y="24" width="956" height="360" rx="18" class="boundary"/><text x="20" y="46" class="tiny">RELEASE CONTROL · close the loop with user-visible burn</text>
+          <rect x="30" y="175" width="130" height="70" rx="12" class="box"/><text x="95" y="207" text-anchor="middle" class="label">Release gate</text><text x="95" y="226" text-anchor="middle" class="sub">budget + policy</text>
+          <rect x="245" y="175" width="130" height="70" rx="12" class="box"/><text x="310" y="207" text-anchor="middle" class="label">Canary</text><text x="310" y="226" text-anchor="middle" class="sub">version v8</text>
+          <rect x="470" y="175" width="130" height="70" rx="12" class="box"/><text x="535" y="207" text-anchor="middle" class="label">User path</text><text x="535" y="226" text-anchor="middle" class="sub">eligible / good</text>
+          <path d="M160 201 L235 201" class="wire"/><polygon points="245,201 235,206 235,196" class="head"/><text x="202" y="188" text-anchor="middle" class="tiny">allow</text>
+          <path d="M375 201 L460 201" class="wire"/><polygon points="470,201 460,206 460,196" class="head"/><text x="420" y="188" text-anchor="middle" class="tiny">traffic</text>
+          <rect x="700" y="175" width="165" height="70" rx="12" class="box"/><text x="782.5" y="207" text-anchor="middle" class="label">Burn monitor</text><text x="782.5" y="226" text-anchor="middle" class="sub">long AND short</text>
+          <path d="M600 201 L690 201" class="wire async"/><polygon points="700,201 690,206 690,196" class="head async"/><text x="650" y="186" text-anchor="middle" class="tiny">outcomes</text>
+          <text x="34" y="80" class="tiny">99.9% SLO: burn = bad rate / 0.001; 1% bad → 10×</text>
+          <text x="34" y="106" class="tiny">steady-rate estimate: full 30 d budget / 10 = 3 d</text>
+          <text x="34" y="130" class="tiny">Page: (1 h AND 5 min) &gt; 14.4× OR (6 h AND 30 min) &gt; 6×</text>
+          <text x="34" y="151" class="tiny">14.4 × 1 / 720 = 2%; 6 × 6 / 720 = 5% of full budget</text>
+          <rect x="690" y="290" width="165" height="65" rx="12" class="box bad"/><text x="772.5" y="319.5" text-anchor="middle" class="label">HOLD / rollback</text><text x="772.5" y="338.5" text-anchor="middle" class="sub">known stable v7</text>
+          <path d="M780 245 L780 280" class="wire fail"/><polygon points="780,290 775,280 785,280" class="head fail"/><text x="803" y="276" class="tiny">page</text>
+          <path d="M690 323 L438 323 Q430 323 430 315 L430 273 Q430 265 422 265 L101 265 Q96 265 96 260 L96 255" class="wire fail"/><polygon points="96,245 101,255 91,255" class="head fail"/><text x="487" y="310" text-anchor="middle" class="tiny">stop expansion</text>
+          <g class="is-new">
+            <path d="M855 310 L907 310 Q915 310 915 302 L915 168 Q915 160 907 160 L312.5 160 Q310 160 310 162.5 L310 165" class="wire fail"/><polygon points="310,175 305,165 315,165" class="head fail"/><text x="650" y="104" text-anchor="middle" class="tiny">v7: check rollback safety</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">加回退前置检查。代码退到 v7 不会撤销 v8 已写的数据、迁移或外部扣款；不兼容时用前向修复或关功能，不能为了压 burn 制造第二次事故。</span><span class="lang-en">Add rollback safety. v7 cannot undo v8 data, migrations or charges; incompatibility calls for forward repair or disabling the feature rather than a second incident.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d7s6t d7s6d">
+          <title id="d7s6t">Repair and reviewed budget recovery complete the feedback loop</title>
+          <desc id="d7s6d">HOLD sends incident work to Repair; Repair returns reviewed evidence to Release gate. The gate reevaluates current SLO balance, rollout health and policy before a new canary. A rollback does not refund bad events already observed.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="2" y="24" width="956" height="360" rx="18" class="boundary"/><text x="20" y="46" class="tiny">RELEASE CONTROL · close the loop with user-visible burn</text>
+          <rect x="30" y="175" width="130" height="70" rx="12" class="box"/><text x="95" y="207" text-anchor="middle" class="label">Release gate</text><text x="95" y="226" text-anchor="middle" class="sub">budget + policy</text>
+          <rect x="245" y="175" width="130" height="70" rx="12" class="box"/><text x="310" y="207" text-anchor="middle" class="label">Canary</text><text x="310" y="226" text-anchor="middle" class="sub">version v8</text>
+          <rect x="470" y="175" width="130" height="70" rx="12" class="box"/><text x="535" y="207" text-anchor="middle" class="label">User path</text><text x="535" y="226" text-anchor="middle" class="sub">eligible / good</text>
+          <path d="M160 201 L235 201" class="wire"/><polygon points="245,201 235,206 235,196" class="head"/><text x="202" y="188" text-anchor="middle" class="tiny">allow</text>
+          <path d="M375 201 L460 201" class="wire"/><polygon points="470,201 460,206 460,196" class="head"/><text x="420" y="188" text-anchor="middle" class="tiny">traffic</text>
+          <rect x="700" y="175" width="165" height="70" rx="12" class="box"/><text x="782.5" y="207" text-anchor="middle" class="label">Burn monitor</text><text x="782.5" y="226" text-anchor="middle" class="sub">long AND short</text>
+          <path d="M600 201 L690 201" class="wire async"/><polygon points="700,201 690,206 690,196" class="head async"/><text x="650" y="186" text-anchor="middle" class="tiny">outcomes</text>
+          <text x="34" y="80" class="tiny">99.9% SLO: burn = bad rate / 0.001; 1% bad → 10×</text>
+          <text x="34" y="106" class="tiny">steady-rate estimate: full 30 d budget / 10 = 3 d</text>
+          <text x="34" y="130" class="tiny">Page: (1 h AND 5 min) &gt; 14.4× OR (6 h AND 30 min) &gt; 6×</text>
+          <text x="34" y="151" class="tiny">14.4 × 1 / 720 = 2%; 6 × 6 / 720 = 5% of full budget</text>
+          <rect x="690" y="290" width="165" height="65" rx="12" class="box bad"/><text x="772.5" y="319.5" text-anchor="middle" class="label">HOLD / rollback</text><text x="772.5" y="338.5" text-anchor="middle" class="sub">known stable v7</text>
+          <path d="M780 245 L780 280" class="wire fail"/><polygon points="780,290 775,280 785,280" class="head fail"/><text x="803" y="276" class="tiny">page</text>
+          <path d="M690 323 L438 323 Q430 323 430 315 L430 273 Q430 265 422 265 L101 265 Q96 265 96 260 L96 255" class="wire fail"/><polygon points="96,245 101,255 91,255" class="head fail"/><text x="487" y="310" text-anchor="middle" class="tiny">stop expansion</text>
+          <path d="M855 310 L907 310 Q915 310 915 302 L915 168 Q915 160 907 160 L312.5 160 Q310 160 310 162.5 L310 165" class="wire fail"/><polygon points="310,175 305,165 315,165" class="head fail"/><text x="650" y="104" text-anchor="middle" class="tiny">v7: check rollback safety</text>
+          <g class="is-new">
+            <rect x="245" y="290" width="130" height="65" rx="12" class="box"/><text x="310" y="319.5" text-anchor="middle" class="label">Repair</text><text x="310" y="338.5" text-anchor="middle" class="sub">reviewed changes</text>
+            <path d="M690 343 L385 343" class="wire async"/><polygon points="375,343 385,338 385,348" class="head async"/><text x="480" y="338" text-anchor="middle" class="tiny">reliability work</text>
+            <path d="M245 322 L208 322 Q200 322 200 314 L200 288 Q200 280 192 280 L68 280 Q60 280 60 272 L60 255" class="wire async"/><polygon points="60,245 65,255 55,255" class="head async"/>
+            <text x="34" y="368" class="tiny">Reopen after repair + current-window review; rollback does not refund observed bad events.</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">完整图加修复与复评回环。坏事件仍留在滚动窗口，回退不退还预算；恢复发布要同时看修复证据、当前健康度与政策，不能等一个固定日期自动开闸。</span><span class="lang-en">Complete repair/review feedback. Bad events remain in the rolling window; rollback refunds nothing. Reopen based on repair evidence, current health and policy.</span></figcaption>
+      </div>
+    </figure>
+<h3><span class="lang-zh">Burn rate 说的是当前烧钱速度</span> <span class="lang-en">Burn rate measures current spending speed</span></h3><div class="bilingual"><div class="lang-zh"><p>burn rate=观测 bad 比例÷允许 bad 比例。99.9% 的允许比例是 0.001，当前 1%=0.01，所以 burn=10。若有效流量稳定且从完整预算开始，30÷10=3 天烧完；只剩 40% 时，30×0.4÷10=1.2 天。真实流量和滚动窗口变动会影响预测，因此发布门还需看实际 bad 次数与余额。burn 为零只是当前窗口没测到 bad，不证明不存在潜伏的业务错误。</p><p>SRE Workbook 给出的起点包括：一小时和五分钟窗口都超过 14.4 倍，或六小时和三十分钟窗口都超过 6 倍时 page。[9] 30 天=720 小时，14.4×1÷720=2%，6×6÷720=5%。这是稳定事件速率下烧掉完整预算的比例，不是“消耗剩余余额的百分比”。本例 99.9% 对应坏率阈值为 1.44% 与 0.6%，与 SLO 本身的 0.1% 不是同一个数。</p></div><div class="lang-en"><p>Burn=observed bad fraction/allowed fraction. At 99.9%, 1%/0.1%=10. Stable traffic spends a full budget in 30/10=3 days, or 1.2 days with 40% remaining. Window/traffic changes require actual counts and balance too.</p><p>Workbook starting points page when 1 h AND 5 min both exceed 14.4×, or 6 h AND 30 min both exceed 6×. [9] With 720 hours, 14.4×1/720=2% and 6×6/720=5% of the full budget under stable rate. Bad-rate thresholds here are 1.44% and 0.6%, not the allowed 0.1%.</p></div></div><h3><span class="lang-zh">双窗口避免旧事故拖住告警</span> <span class="lang-en">Two windows avoid alerts held by a recovered incident</span></h3><div class="bilingual"><div class="lang-zh"><p>长窗口把一次尖刺平滑成持续消耗，短窗口要求近期仍在烧。只用长窗口，故障恢复后可能继续叫很久；只用短窗口，一次偶发失败会触发很多噪音。每对窗口用 AND，两档严重程度用 OR。它是建议起点，不能在很低流量的工具上无条件照搬。</p><p>低流量时，一个失败就可能跳过比率阈值，零请求则根本无比率。应结合事件量、合成探测、期限与值班策略，分别处理无数据和业务错误，调整窗口也要回算预算消耗。全月余额还健康，新版灰度却持续高 burn，立即暂停放量；全月余额已耗尽但当前恢复，也应按政策修复与复评，不能用短窗变绿抹掉旧损失。</p></div><div class="lang-en"><p>Long windows capture meaningful spend; short windows confirm ongoing burn and reset sooner after recovery. Use AND within each pair and OR between severity pairs. These are starting points, not universal low-traffic thresholds.</p><p>Low event counts can make one failure dominate, and zero traffic has no ratio. Combine event volume, synthetic checks and on-call needs, then recompute spending for changed windows. Pause a burning canary despite healthy monthly balance; current recovery does not erase previously exhausted budget.</p></div></div><h3><span class="lang-zh">预算政策必须把修复与重新发布接回去</span> <span class="lang-en">A budget policy closes the repair and release loop</span></h3><div class="bilingual"><div class="lang-zh"><p>公开的 Example Error Budget Policy 使用四周窗口，并列出预算耗尽后的发布限制与例外。[10] 本章 A12 改用滚动 30 天：冻结功能放量，继续经审查的安全和紧急可靠性修复。窗口与动作是团队约定，SLO 的算式本身不会自动推出“必须冻发版”。保留责任人、计算口径与分歧处理，才让 gate 真的能执行。图里的 Repair 回到门，意味着修复证据、当前窗口和灰度健康度都要重新审。</p><p>回退前先检查数据和外部效果。v8 可能写了 v7 不认识的新 schema，也可能已产生不可逆扣款；代码切回不撤销这些事实。能安全回退才回 v7，否则关闭受影响功能或做前向修复。已经计入的 bad 不因回退退款，后续窗口自然移动与真实成功才能改变余额。“SLO 一破就自动 rollback”漏掉安全前提，也把用户目标误写成了固定发布算法。</p><p>面试收尾按图回答：完成后读到什么，分区时谁拒绝，平时等哪些 ACK，失败后如何查结果。再按用户旅程算预算、监测 burn、控制放量；成功的含义不能在故障时偷偷改变。</p></div><div class="lang-en"><p>The public example policy uses four weeks and documents restrictions/exceptions. [10] A12 instead uses rolling 30 days: freeze feature expansion while permitting reviewed urgent/safety reliability fixes. These are team policy choices, not consequences dictated by the formula; define owners, measurement and dispute handling, then review repairs/current balance/health before reopening.</p><p>Check rollback data/effect compatibility. v8 schemas or charges remain after a code switch. Roll back safely or disable/forward-fix; observed bad events are not refunded. “Automatically roll back whenever SLO fails” omits these conditions.</p><p>Close with later-read semantics, partition refusal, normal ACK barriers and recovery; then define journeys, budget, burn and rollout. Never silently redefine success during failure.</p></div></div>
+</section>
+<section>
+<h2><span class="lang-zh">会翻车的说法：把缺的前提补回来</span> <span class="lang-en">Failure traps: restore the missing assumptions</span></h2>
+<table><thead><tr><th><span class="lang-zh">错误说法</span> <span class="lang-en">Claim</span></th><th><span class="lang-zh">为什么不成立</span> <span class="lang-en">Why it fails</span></th><th><span class="lang-zh">落到哪一笔</span> <span class="lang-en">Concrete correction</span></th></tr></thead><tbody><tr><td><span class="lang-zh">503 很快，所以满足 CAP A</span> <span class="lang-en">Fast 503 satisfies CAP A</span></td><td><span class="lang-zh">及时失败不等于完成寄存器操作</span> <span class="lang-en">Fast refusal does not complete the register operation</span></td><td><span class="lang-zh">按操作说明拒绝范围，另量产品期限</span> <span class="lang-en">Specify refusal by operation; measure product deadlines separately</span></td></tr><tr><td><span class="lang-zh">CP 一断网全站都停</span> <span class="lang-en">CP stops the whole site on any split</span></td><td><span class="lang-zh">A/B 多数派仍能提交，C 被拒绝</span> <span class="lang-en">Majority A/B can commit while C refuses</span></td><td><span class="lang-zh">按成员、组与读模式讨论</span> <span class="lang-en">Discuss members/groups/read modes</span></td></tr><tr><td><span class="lang-zh">W+R>N 就是线性一致</span> <span class="lang-en">W+R>N proves linearizability</span></td><td><span class="lang-zh">只证明固定集合交点，不证明顺序或恢复</span> <span class="lang-en">Only fixed-set overlap, not ordering/recovery</span></td><td><span class="lang-zh">检查并发版本、读屏障、成员变化</span> <span class="lang-en">Check version order, read barriers and membership</span></td></tr><tr><td><span class="lang-zh">同步 ACK 之后任意副本都新</span> <span class="lang-en">Any replica is fresh after synchronous ACK</span></td><td><span class="lang-zh">持久、应用、可查询和领导权不同</span> <span class="lang-en">Durability, application, searchability and leadership differ</span></td><td><span class="lang-zh">标 commit v 和强读验证</span> <span class="lang-en">Specify commit v and strong-read validation</span></td></tr><tr><td><span class="lang-zh">购物车用 union 就永远能合并</span> <span class="lang-en">Union always solves cart conflicts</span></td><td><span class="lang-zh">删除会被复活，减量会丢意图</span> <span class="lang-en">Removes may resurrect and decrements lose intent</span></td><td><span class="lang-zh">规则随操作改变，明确可能舍弃的更新</span> <span class="lang-en">Choose operation-specific merge rules and disclose loss</span></td></tr><tr><td><span class="lang-zh">99.9% 想停 43 分钟就停</span> <span class="lang-en">99.9% permits any 43-minute outage</span></td><td><span class="lang-zh">时间与事件不同，峰值还会改分母</span> <span class="lang-en">Time/event denominators differ; peaks change the denominator</span></td><td><span class="lang-zh">先写 SLI，再算 bad 次数或时间</span> <span class="lang-en">Define SLI before counting bad events/time</span></td></tr><tr><td><span class="lang-zh">未知扣款不记失败，就保住可用</span> <span class="lang-en">Exclude unknown charges to retain availability</span></td><td><span class="lang-zh">掩盖用户旅程失败，且可能重复扣款</span> <span class="lang-en">Hides journey failure and may repeat charges</span></td><td><span class="lang-zh">UNKNOWN 纳入契约，原键核账</span> <span class="lang-en">Keep UNKNOWN in the contract; reconcile original key</span></td></tr><tr><td><span class="lang-zh">回退后预算自动归零</span> <span class="lang-en">Rollback resets budget</span></td><td><span class="lang-zh">旧 bad 仍在窗口，数据也不自动撤销</span> <span class="lang-en">Bad events remain; data/effects are not undone</span></td><td><span class="lang-zh">检查回退安全，修复后复评窗口</span> <span class="lang-en">Check rollback safety and review the repaired current window</span></td></tr></tbody></table>
+</section>
+<section>
+<h2><span class="lang-zh">带回设计题：按数据和操作选</span> <span class="lang-en">Take it back to design problems</span></h2>
+<div class="bilingual"><div class="lang-zh"><p>Ch06：问固定 quorum 还是 sloppy quorum、并发写怎么排序、分区的一边凑不够票会怎样。Ch08：锁的强读与 leader 安全之外，受保护资源还要检查 fencing，不能把“拿到锁”当成远端副作用只发生一次。Ch11：把 Feed 新鲜度与账户权限分开，旧展示可降级，权限不能按同一旧值继续授权。Ch18/Ch24：订单与钱的幂等身份、事务与未知回执恢复，不能被一个 CP 标签替代。</p><p>Ch02 写归属、复制和容灾损失，Ch03 写依赖独立性。Ch29/Ch35 按用户结果量 good，发布接预算门与兼容性检查。Ch37 再讨论存储模型与引擎。</p></div><div class="lang-en"><p>Ch06: fixed versus sloppy quorum, concurrent ordering and insufficient votes. Ch08: safe locks still need resource-enforced fencing for effects. Ch11: separate feed freshness from account authorization. Ch18/Ch24: idempotent identity, transactions and unknown-receipt recovery cannot be replaced by a CP label.</p><p>Ch02 needs ownership/replication/loss contracts; Ch03 needs dependency assumptions. Ch29/Ch35 measure user outcomes and gate safe releases. Ch37 then chooses storage models/engines.</p></div></div>
+</section>
+<section>
+<h2><span class="lang-zh">引用与延伸</span> <span class="lang-en">References and follow-ups</span></h2>
+<div class="bilingual"><div class="lang-zh"><p>以上十份一手原文均下载核验；只有告警参数与公开定义直接来自原文，其余教学数字在页内重算。本文没有做数据库吞吐、网络 p99 或真实结账实验。</p></div><div class="lang-en"><p>All ten primary sources were downloaded and checked. Definitions/alert parameters come from sources; teaching numbers are calculated on this page. No database, network-p99 or live-checkout benchmark was performed.</p></div></div><ol class="references"><li id="ref-1">[1] Seth Gilbert and Nancy Lynch, <a href="https://groups.csail.mit.edu/tds/papers/Gilbert/Brewer6.pdf"><em>Brewer’s Conjecture and the Feasibility of Consistent, Available, Partition-Tolerant Web Services</em></a>, 2002. <span class="lang-zh">原始证明、atomic consistency 与非失败节点的可用性定义；x=0/1 是本章反例。</span> <span class="lang-en">Original proof and atomic/availability definitions; x=0/1 is this chapter’s example.</span></li>
+<li id="ref-2">[2] Eric Brewer, <a href="https://www.infoq.com/articles/cap-twelve-years-later-how-the-rules-have-changed/"><em>CAP Twelve Years Later: How the “Rules” Have Changed</em></a>, 2012; IEEE article republished by InfoQ. <span class="lang-zh">按操作管理分区与恢复；不引用其中产品分组作为当前默认配置。</span> <span class="lang-en">Operation-specific partition/recovery reasoning; no current product-default claim.</span></li>
+<li id="ref-3">[3] Daniel J. Abadi, <a href="https://www.cs.umd.edu/~abadi/papers/abadi-pacelc.pdf"><em>Consistency Tradeoffs in Modern Distributed Database System Design</em></a>, 2012. <span class="lang-zh">PACELC 的 P 与 Else；7/83 ms 是 A4 推导，不是论文性能数据。</span> <span class="lang-en">PACELC P/Else; 7/83 ms are A4 calculations, not paper measurements.</span></li>
+<li id="ref-4">[4] Giuseppe DeCandia et al., Amazon, <a href="https://www.allthingsdistributed.com/files/amazon-dynamo-sosp2007.pdf"><em>Dynamo: Amazon’s Highly Available Key-value Store</em></a>, 2007. <span class="lang-zh">版本冲突、应用合并与 sloppy quorum；并集只用于本章 add-only 例子。</span> <span class="lang-en">Version conflicts, application reconciliation and sloppy quorum; union is our add-only example.</span></li>
+<li id="ref-5">[5] Diego Ongaro and John Ousterhout, <a href="https://raft.github.io/raft.pdf"><em>In Search of an Understandable Consensus Algorithm (Extended Version)</em></a>, 2014. <span class="lang-zh">多数派、任期和当前任期提交规则；图只展开一笔提交。</span> <span class="lang-en">Majorities, terms and current-term commit rules; the diagram expands one commit.</span></li>
+<li id="ref-6">[6] etcd, <a href="https://etcd.io/docs/v3.6/learning/api_guarantees/"><em>etcd 3.6 — API guarantees</em></a>, version 3.6; accessed 2026-10-07. <span class="lang-zh">默认线性一致相关操作与 serializable 旧读的区别，不泛称所有 API 强读。</span> <span class="lang-en">Default linearized operations versus stale serializable reads; no blanket guarantee for every API.</span></li>
+<li id="ref-7">[7] Google SRE, <a href="https://sre.google/sre-book/service-level-objectives/"><em>Service Level Objectives</em></a>, 2016. <span class="lang-zh">SLI、SLO、SLA 定义；一秒、30 天与目标 99.9% 都是 A6/A8。</span> <span class="lang-en">SLI/SLO/SLA definitions; one second, 30 days and 99.9% are A6/A8.</span></li>
+<li id="ref-8">[8] Google SRE Workbook, <a href="https://sre.google/workbook/implementing-slos/"><em>Implementing SLOs</em></a>, 2018. <span class="lang-zh">good/total 事件比率与可执行政策；千万事件及事故流量为本章假设。</span> <span class="lang-en">Good/total ratios and actionable policy; event/incident counts are our assumptions.</span></li>
+<li id="ref-9">[9] Google SRE Workbook, <a href="https://sre.google/workbook/alerting-on-slos/"><em>Alerting on SLOs</em></a>, 2018. <span class="lang-zh">核过 14.4 倍一小时/五分钟、6 倍六小时/三十分钟及 2%/5% 参数；需按流量适配。</span> <span class="lang-en">Verified 14.4× 1h/5m, 6× 6h/30m and 2%/5% starting points; adapt to traffic.</span></li>
+<li id="ref-10">[10] Google SRE Workbook, <a href="https://sre.google/workbook/error-budget-policy/"><em>Example Error Budget Policy</em></a>, 2018. <span class="lang-zh">原文用四周、99.9% 和一百万请求允许一千错误；本章改用 30 天并明确政策假设。</span> <span class="lang-en">Source uses four weeks and 1,000 bad per million at 99.9%; this chapter explicitly uses 30 days.</span></li>
+</ol><p class="cite"><span class="lang-zh">站内延伸：</span> <span class="lang-en">Course follow-ups:</span> <a class="chip" href="ch02.html">Ch02</a> <a class="chip" href="ch03.html">Ch03</a> <a class="chip" href="ch06.html">Ch06</a> <a class="chip" href="ch08.html">Ch08</a> <a class="chip" href="ch11.html">Ch11</a> <a class="chip" href="ch18.html">Ch18</a> <a class="chip" href="ch24.html">Ch24</a> <a class="chip" href="ch29.html">Ch29</a> <a class="chip" href="ch37.html">Ch37</a> <a class="chip" href="ch41.html"><span class="lang-zh">Ch41</span><span class="lang-en">Ch41</span></a></p>
+</section>
+<section>
+<h2><span class="lang-zh">闪卡</span> <span class="lang-en">Flashcards</span></h2>
+<p class="cite"><span class="lang-zh">点一下翻面；先讲操作和分母，再报标签或几个 9。</span> <span class="lang-en">Click to flip; state the operation and denominator before labels or nines.</span></p><div class="cards-grid"><button type="button" class="flip"><span class="q"><span class="lang-zh">CAP 的 C 具体是什么？</span> <span class="lang-en">What is CAP C?</span></span><span class="a"><span class="lang-zh">遵守实时先后的原子读写历史；不是最终一样，也不是 ACID C。</span> <span class="lang-en">An atomic read/write history respecting real time, not eventual agreement or ACID C.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">快速 503 满足 CAP A 吗？</span> <span class="lang-en">Does fast 503 satisfy CAP A?</span></span><span class="a"><span class="lang-zh">不能完成寄存器操作；它只让客户端及时知道不能服务。</span> <span class="lang-en">No; refusal does not complete the register operation, though it informs the client promptly.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">CP 分区时全站都停吗？</span> <span class="lang-en">Does a CP split halt the entire site?</span></span><span class="a"><span class="lang-zh">三成员的 A/B 两票仍能提交；隔离 C 的新写与无证明强读拒绝。</span> <span class="lang-en">Two of three A/B can commit; isolated C refuses new writes and unproven strong reads.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">写超时能换一个业务键重试吗？</span> <span class="lang-en">May a timeout retry use a new business key?</span></span><span class="a"><span class="lang-zh">先查原键，可能已提交但丢回包；新键可能重复副作用。</span> <span class="lang-en">Query the original key: a lost reply may hide commit, and a new key can repeat effects.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">W=2、R=2、N=3 证明了什么？</span> <span class="lang-en">What does W=2/R=2/N=3 prove?</span></span><span class="a"><span class="lang-zh">固定集合交点至少 1；没证明排序、成员变化或少数派可用。</span> <span class="lang-en">Fixed-set overlap ≥1, not ordering, membership safety or minority availability.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">购物车为什么不总用 union？</span> <span class="lang-en">Why not always union carts?</span></span><span class="a"><span class="lang-zh">只加入可合并；删除会复活，数量变化要另定因果规则。</span> <span class="lang-en">Add-only merges work; removes may resurrect and quantity changes need causal rules.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">并行同步复制的条件延迟？</span> <span class="lang-en">Conditional parallel replication latency?</span></span><span class="a"><span class="lang-zh">2+max(1,RTT+1)，RTT 4/80 ms 对应 7/83 ms；不是 p99 实测。</span> <span class="lang-en">2+max(1,RTT+1): 4/80 ms RTT gives 7/83 ms, not measured p99.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">202 待处理算完成结账吗？</span> <span class="lang-en">Does 202 pending complete checkout?</span></span><span class="a"><span class="lang-zh">不算；若改异步旅程，另立持久接单与完成期限的 SLI。</span> <span class="lang-en">No; an async journey needs separate durable admission and completion-deadline SLI.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">一千万事件、99.9%、6,000 bad 剩多少？</span> <span class="lang-en">10M events, 99.9%, 6,000 bad: balance?</span></span><span class="a"><span class="lang-zh">允许 10,000，剩 4,000=40%；达成率另为 99.94%。</span> <span class="lang-en">Allow 10,000, retain 4,000=40%; achieved SLI is separately 99.94%.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">43.2 分钟适用于什么？</span> <span class="lang-en">When does 43.2 minutes apply?</span></span><span class="a"><span class="lang-zh">30 天时间 SLI；请求预算要按事件，峰值不能直接换分钟。</span> <span class="lang-en">A 30-day time SLI; request budgets use events and cannot ignore traffic peaks.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">99.9% 下 1% 错误的 burn？</span> <span class="lang-en">Burn at 1% bad for 99.9% SLO?</span></span><span class="a"><span class="lang-zh">10 倍；稳态完整预算三天，剩 40% 约 1.2 天。</span> <span class="lang-en">10×; stable-rate full budget lasts three days, 40% about 1.2 days.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">双窗口怎样组合，回退退预算吗？</span> <span class="lang-en">How combine windows; does rollback refund budget?</span></span><span class="a"><span class="lang-zh">每对 AND、两档 OR；坏事件仍在窗口，回退先验兼容，修复后复评。</span> <span class="lang-en">AND within pairs, OR across pairs; bad remains, check rollback compatibility and review repairs.</span></span></button>
+</div>
+</section>
+  <p><button type="button" class="read-toggle"><span class="when-off"><span class="lang-zh">我已学完本章</span><span class="lang-en">Mark this chapter done</span></span><span class="when-on"><span class="lang-zh">已学完本章</span><span class="lang-en">Completed</span></span></button></p>
+  <p class="cite"><span class="lang-zh">进度存在这台浏览器里。</span><span class="lang-en">Saved in this browser only.</span></p>
+</article>
+</main>
+<script src="../assets/js/nav.js"></script>
+<script src="../assets/js/lang.js"></script>
+<script src="../assets/js/slides.js"></script>
+<script src="../assets/js/progress.js"></script>
+</body>
+</html>

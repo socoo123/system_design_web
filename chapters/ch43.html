@@ -1,0 +1,1073 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="parchment" data-locale="zh">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ch43 · 超大规模数据</title>
+  <link rel="icon" href="../favicon.ico" sizes="48x48">
+  <link rel="stylesheet" href="../assets/css/style.css">
+  <script src="../assets/js/boot.js"></script>
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="../index.html"><span class="brand-logo">SD</span><span class="lang-zh">系统设计面试</span><span class="lang-en">System Design Interview</span></a>
+  <span class="spacer"></span>
+  <a class="map-link" href="../index.html"><span class="lang-zh">课程地图</span><span class="lang-en">Map</span></a>
+  <div class="seg" role="group" aria-label="language">
+    <button type="button" data-locale-set="zh">中文</button>
+    <button type="button" data-locale-set="both"><span class="lang-zh">对照</span><span class="lang-en">Both</span></button>
+    <button type="button" data-locale-set="en">EN</button>
+  </div>
+  <div class="seg" role="group" aria-label="theme">
+    <button type="button" data-theme-set="parchment"><span class="lang-zh">护眼</span><span class="lang-en">Paper</span></button>
+    <button type="button" data-theme-set="dracula"><span class="lang-zh">深色</span><span class="lang-en">Dark</span></button>
+  </div>
+</header>
+<main class="wrap">
+<article class="chapter" id="ch43" data-ch="ch43">
+  <header>
+    <div class="ch-kicker"><span class="lang-zh">CHAPTER 43 · 基础深读</span><span class="lang-en">CHAPTER 43 · foundation</span></div>
+    <h1><span class="lang-zh">超大规模数据</span><span class="lang-en">Hyperscale data</span></h1>
+    <p class="ch-meta-line"><span class="lang-zh">约 50 分钟 · 前置：Ch02、Ch03、Ch22、Ch37 · 7 组 / 37 帧演进图</span><span class="lang-en">~50 min · after Ch02, Ch03, Ch22, Ch37 · 7 decks / 37 evolving frames</span></p>
+  </header>
+
+<section><h2><span class="lang-zh">这一章结束你能做什么</span><span class="lang-en">What you can do after this chapter</span></h2><div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p><p>按访问目标把在线点查、近期分析和历史回放放回正确路径，算出保留容量；说明温层可以和冷层共用对象介质，热视图只是派生结果。</p><p>沿一次分析查询说明时间剪枝、列裁剪、压缩和局部聚合各省什么；区分分区规格演进与历史文件重写。</p><p>画出不可变文件、元数据树与 Catalog 的原子发布，再解释并发合并、旧快照、未知提交和回放切流的失败窗口。</p></div><div class="lang-en"><p class="col-kicker">English</p><p>Place online point reads, recent analytics and historical replay on the appropriate paths and size retention; warm and cold may share object media, and serving views are derived.</p><p>Explain what time pruning, projection, compression and local aggregation save, and distinguish partition-spec evolution from rewriting historical files.</p><p>Draw immutable files, metadata and atomic catalog publication, then explain concurrent rewrites, old snapshots, unknown commits and replay cutover.</p></div></div></section>
+
+<section><h2><span class="lang-zh">30 秒开场：先说访问合同，再谈规模</span><span class="lang-en">Opening: access contracts before scale</span></h2><div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p><p>我先问哪些数据必须点查、哪些只做聚合、允许等多久，以及写入后多快出现在报表。热路径用索引和 KV 视图，分析读对象上的列式文件；时间谓词先剪文件，再只读取过滤和聚合需要的列。新分区规格可以与旧规格共存，想改历史物理布局仍要重写。表格式把文件组织成一致快照，写者先落不可变对象，再条件发布 Catalog 指针；合并保留旧快照引用，回放写隔离视图，验证后切流。每个选择都带容量与恢复条件。</p><p>本章沿用 <a class="chip" href="ch02.html">Ch02</a> 的逐笔演进和 <a class="chip" href="ch03.html">Ch03</a> 的算术。教学对象是一张行为事件表：有 event_id、tenant_id、event_time、country、price 与 payload。在线接口按 ID 查事件，报表按租户和时间求和，审计回放历史。它们可以共享持久输入，但不该共享同一个查询延迟承诺。宽列与分析列存的区别仍回 <a class="chip" href="ch37.html">Ch37</a>，对象 GET/PUT 的底层机制回 <a class="chip" href="ch22.html">Ch22</a>。</p><p>规模要先落成四个量：每天新增字节、保留天数、一次查询要碰多少文件和列、峰值查询并发。数据总量很大不意味着每个请求都扫全量。设计时先固定一次查询范围，再算候选字节与执行槽位；否则“再加一台大数据机器”无法说明瓶颈是网络、CPU、文件打开还是结果 shuffle。所有后续吞吐、压缩和目标都是 assumption，公开文献只核对机制与它自己的实验。</p></div><div class="lang-en"><p class="col-kicker">English</p><p>Ask which data needs point lookup versus aggregation, tolerated latency and reporting freshness. Use indexed serving views for hot reads and columnar objects for analytics. Prune time files, then read filter and aggregate fields. Specs can coexist, while historical layout changes require rewrites. Publish immutable data through conditional catalog updates, preserve old snapshot references, and replay into an isolated verified view.</p><p>The teaching workload is an event table with event_id, tenant_id, event_time, country, price and payload. ID reads, tenant/time reports and historical audits may share durable input but have different latency contracts. Ch37 covers wide-column versus analytical columnar storage; Ch22 covers object GET/PUT.</p><p>Fix daily bytes, retention, files/fields per query and peak concurrency. Large total data does not mean every query scans everything. Size one query range before execution slots and identify bandwidth, CPU, file-open or shuffle limits. All workload numbers below are assumptions; references support mechanisms or their own experiments.</p></div></div></section>
+
+<section><h2><span class="lang-zh">假设表：每个数都要推动一个决定</span><span class="lang-en">Assumptions: each number changes a decision</span><table><thead><tr><th><span class="lang-zh">编号</span><span class="lang-en">ID</span></th><th><span class="lang-zh">本章 assumption</span><span class="lang-en">Teaching assumption</span></th><th><span class="lang-zh">后果</span><span class="lang-en">Consequence</span></th></tr></thead><tbody><tr><td><span class="lang-zh">A1 · 输入与单位</span><span class="lang-en">A1 · input/units</span></td><td><span class="lang-zh">稳定每天 10 亿事件，每条原始 1 KB；十进制 B、MB、GB、TB</span><span class="lang-en">Steady 1B events/day, 1 KB raw each; decimal units</span></td><td><span class="lang-zh">1 TB/天，365 天原始 365 TB；不另乘全天峰值</span><span class="lang-en">1 TB/day, 365 TB raw/year; no extra peak multiplier</span></td></tr><tr><td><span class="lang-zh">A2 · 访问与保留</span><span class="lang-en">A2 · access/retention</span></td><td><span class="lang-zh">热视图 1 天，温分析 30 天，持久事件 365 天；点读目标 20 ms，报表目标 30 s</span><span class="lang-en">1 day hot, 30 days warm, 365 days retained; 20 ms point/30 s report targets</span></td><td><span class="lang-zh">目标需压测；冷热恢复时间另按实际存储合同</span><span class="lang-en">Benchmark targets; archive restore has its own contract</span></td></tr><tr><td><span class="lang-zh">A3 · 表与查询</span><span class="lang-en">A3 · table/query</span></td><td><span class="lang-zh">20 个等宽字段；30 天中查 1 天，读时间、国家、金额 3 列</span><span class="lang-en">20 equal-size fields; select 1 of 30 days and 3 fields</span></td><td><span class="lang-zh">时间、剪列两个因子分开；谓词字段不能漏算</span><span class="lang-en">Separate time/projection factors; include predicate fields</span></td></tr><tr><td><span class="lang-zh">A4 · 压缩与成本</span><span class="lang-en">A4 · compression/cost</span></td><td><span class="lang-zh">所选列 4:1；示例热 100、对象 10 成本单位/TB·月</span><span class="lang-en">Selected fields 4:1; illustrative hot 100/object 10 units per TB-month</span></td><td><span class="lang-zh">非厂商报价；不假设 KV 和全部列也压成 4:1</span><span class="lang-en">Not vendor prices; no implied KV/all-field ratio</span></td></tr><tr><td><span class="lang-zh">A5 · 扫描能力</span><span class="lang-en">A5 · scan budget</span></td><td><span class="lang-zh">有效每 Worker 250 MB/s；8 台，最多 2 条同类查询均分，非实测</span><span class="lang-en">Effective 250 MB/s/worker; 8 workers, at most 2 equally sharing queries</span></td><td><span class="lang-zh">37.5 GB 数据扫描下界 18.75 s；两并发 37.5 s</span><span class="lang-en">18.75 s scan lower bound; 37.5 s with two queries</span></td></tr><tr><td><span class="lang-zh">A6 · 分区演进</span><span class="lang-en">A6 · partition specs</span></td><td><span class="lang-zh">spec 1 按天，spec 2 按小时；均匀一天 24 小时</span><span class="lang-en">Spec 1 daily, spec 2 hourly; uniform 24-hour day</span></td><td><span class="lang-zh">一小时约 41.7 GB；旧日文件不会自动细分</span><span class="lang-en">About 41.7 GB/hour; old daily files are unchanged</span></td></tr><tr><td><span class="lang-zh">A7 · 文件维护场景</span><span class="lang-en">A7 · file maintenance</span></td><td><span class="lang-zh">独立场景：100 writers，每分钟每 writer 1 文件；压缩后平均 4 MB，合并 128 个</span><span class="lang-en">Separate scenario: 100 writers, one file each/minute; mean 4 MB encoded, rewrite 128</span></td><td><span class="lang-zh">144,000 文件/天；压缩后输出 576 GB/天，与 A1 不相加</span><span class="lang-en">144,000 files/day; 576 GB/day encoded output, separate from A1</span></td></tr><tr><td><span class="lang-zh">A8 · 打开文件</span><span class="lang-en">A8 · opens</span></td><td><span class="lang-zh">每次 open 的教学串行成本 10 ms；实际可并行但要限额</span><span class="lang-en">Teaching serial open cost 10 ms; real parallelism is bounded</span></td><td><span class="lang-zh">128 次=1.28 s；512 MB 候选不是格式默认值</span><span class="lang-en">128 opens=1.28 s; 512 MB candidate is not a format default</span></td></tr><tr><td><span class="lang-zh">A9 · 写入身份</span><span class="lang-en">A9 · commit identity</span></td><td><span class="lang-zh">不可变对象键；可信 Catalog 条件更新；batch b17，基线 s40</span><span class="lang-en">Immutable keys, trusted conditional Catalog; batch b17/base s40</span></td><td><span class="lang-zh">提交身份可恢复；UNKNOWN 先查询，冲突重新验证</span><span class="lang-en">Recoverable identity; query UNKNOWN and revalidate conflicts</span></td></tr><tr><td><span class="lang-zh">A10 · 快照与 GC</span><span class="lang-en">A10 · snapshots/GC</span></td><td><span class="lang-zh">受保护查询最长 30 min，超过取消；保留快照/分支/写者另有合同</span><span class="lang-en">Protected queries at most 30 min then cancel; snapshots/branches/writers separately protected</span></td><td><span class="lang-zh">30 min 不是统一删除 TTL；先确认引用与存活</span><span class="lang-en">30 min is not a universal deletion TTL; check references/liveness</span></td></tr><tr><td><span class="lang-zh">A11 · 回放</span><span class="lang-en">A11 · replay</span></td><td><span class="lang-zh">积压 1 TB，回放 100 MB/s，持续新增 20 MB/s</span><span class="lang-en">1 TB backlog, replay 100 MB/s, continuous input 20 MB/s</span></td><td><span class="lang-zh">按净 80 MB/s 追赶；与 A1 属于不同峰值/积压场景</span><span class="lang-en">Drain at net 80 MB/s; separate backlog/peak scenario from A1</span></td></tr><tr><td><span class="lang-zh">A12 · 语义边界</span><span class="lang-en">A12 · semantics</span></td><td><span class="lang-zh">事件有稳定 ID；输入位点按分区；回放保留范围 [S,H]</span><span class="lang-en">Stable event IDs, partition-specific offsets, retained replay range [S,H]</span></td><td><span class="lang-zh">下游确认后推进位点；迟到与删除不能靠时间线自动消失</span><span class="lang-en">Checkpoint after sink commit; handle late events/deletes explicitly</span></td></tr></tbody></table><div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p><p>每天输入是 10<sup>9</sup>×10<sup>3</sup>=10<sup>12</sup> B=1 TB，平均写率约 10<sup>9</sup>÷86,400≈11,574/s。保留 365 天得到 365 TB 原始事件。这是逻辑原始量，不是对象账单：列编码、索引、旧快照、失败输出、副本和提供商内部冗余都还没算。峰值只决定吞吐，日总量已经固定时不能再乘一次峰值系数。</p><p>A11 是额外的恢复场景，20 MB/s 是持续新增速率，不等于 A1 的全年平均。估算可以给不同故障窗口不同负载，但要把边界写出来。A7 是独立文件维护场景，每天 100×1,440×4 MB=576 GB 是压缩后的输出，用来算文件数与重写成本。它与 A1 原始输入的字节口径不同，不能直接相加、相减，也不能用所选三列的 4:1 压缩率推整个事件的输出量。</p></div><div class="lang-en"><p class="col-kicker">English</p><p>10^9×10^3=10^12 B=1 TB/day; mean rate is about 11,574/s. A year retains 365 TB raw. Physical billing includes encoding, indexes, old snapshots, failed output and redundancy. Peak affects throughput and must not multiply a fixed daily total again.</p><p>A11 is a separate recovery scenario; 20 MB/s is not A1’s annual mean. A7 is a separate maintenance scenario: 100×1,440×4 MB=576 GB/day of encoded output sizes file counts and rewrite costs. Do not add or subtract it from A1 raw input or apply the selected three fields’ 4:1 ratio to whole events.</p></div></div></section>
+<section><h2><span class="lang-zh">1 · 分层：沿访问路径算保留成本</span><span class="lang-en">1 · Tier by access and size retention</span></h2><figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d1s1t d1s1d">
+          <title id="d1s1t">Begin with the query contract</title>
+          <desc id="d1s1d">Client sends an authorized request to Query; Query returns its result to Client.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <g class="is-new">
+            <rect x="90" y="18" width="854" height="366" rx="18" class="boundary"/><text x="106" y="38" class="tiny">TIERS · access contract, not a mandatory media pipeline</text>
+            <circle cx="44" cy="186" r="12" class="box"/><path d="M24 232 Q44 200 64 232" class="wire"/><text x="44" y="254" text-anchor="middle" class="label">Client</text>
+            <rect x="210" y="166" width="150" height="84" rx="12" class="box"/><text x="285" y="205" text-anchor="middle" class="label">Query</text><text x="285" y="224" text-anchor="middle" class="sub">authorized plan</text>
+            <path d="M70 201 L200 201" class="wire"/><polygon points="210,201 200,206 200,196" class="head"/>
+            <path d="M210 219 L80 219" class="wire reply"/><polygon points="70,219 80,214 80,224" class="head reply"/>
+            <text x="140" y="192" text-anchor="middle" class="tiny">request</text>
+            <text x="140" y="236" text-anchor="middle" class="tiny">result</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">先问点查还是分析、可等多久、要多新。分层由访问合同决定，不能从数据年龄直接推导一条搬运流水线。</span><span class="lang-en">Ask point lookup versus analytics, latency and freshness. Access contracts determine tiers.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d1s2t d1s2d">
+          <title id="d1s2t">Keep point lookups in a serving view</title>
+          <desc id="d1s2d">Query reads Hot KV by key and receives the row, then returns to Client.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="90" y="18" width="854" height="366" rx="18" class="boundary"/><text x="106" y="38" class="tiny">TIERS · access contract, not a mandatory media pipeline</text>
+          <circle cx="44" cy="186" r="12" class="box"/><path d="M24 232 Q44 200 64 232" class="wire"/><text x="44" y="254" text-anchor="middle" class="label">Client</text>
+          <rect x="210" y="166" width="150" height="84" rx="12" class="box"/><text x="285" y="205" text-anchor="middle" class="label">Query</text><text x="285" y="224" text-anchor="middle" class="sub">authorized plan</text>
+          <path d="M70 201 L200 201" class="wire"/><polygon points="210,201 200,206 200,196" class="head"/>
+          <path d="M210 219 L80 219" class="wire reply"/><polygon points="70,219 80,214 80,224" class="head reply"/>
+          <text x="140" y="192" text-anchor="middle" class="tiny">request</text>
+          <text x="140" y="236" text-anchor="middle" class="tiny">result</text>
+          <g class="is-new">
+            <path d="M740 80 V145 A70 12 0 0 0 880 145 V80" class="store"/><ellipse cx="810" cy="80" rx="70" ry="12" class="store"/><text x="810" y="122.5" text-anchor="middle" class="label">Hot KV</text><text x="810" y="140.5" text-anchor="middle" class="sub">point lookup</text>
+            <path d="M360 184 L442 184 Q450 184 450 176 L450 113 Q450 105 458 105 L730 105" class="wire"/><polygon points="740,105 730,110 730,100" class="head"/>
+            <path d="M740 129 L478 129 Q470 129 470 137 L470 192 Q470 200 462 200 L370 200" class="wire reply"/><polygon points="360,200 370,195 370,205" class="head reply"/>
+            <text x="610" y="95" text-anchor="middle" class="tiny">key / tenant</text>
+            <text x="610" y="147" text-anchor="middle" class="tiny">row / not found</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">热 KV 服务毫秒级点查目标，持久输入另存；旧爆款重新升温是访问变化，事件时间不会跟着变。</span><span class="lang-en">Hot KV serves the point-read target; durable input is separate. Warming old data does not change event time.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d1s3t d1s3d">
+          <title id="d1s3t">Add analytic workers over object files</title>
+          <desc id="d1s3d">Query sends snapshot-bound tasks to Scan Worker, which reads Object Files and returns partial results to Query, then Client.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="90" y="18" width="854" height="366" rx="18" class="boundary"/><text x="106" y="38" class="tiny">TIERS · access contract, not a mandatory media pipeline</text>
+          <circle cx="44" cy="186" r="12" class="box"/><path d="M24 232 Q44 200 64 232" class="wire"/><text x="44" y="254" text-anchor="middle" class="label">Client</text>
+          <rect x="210" y="166" width="150" height="84" rx="12" class="box"/><text x="285" y="205" text-anchor="middle" class="label">Query</text><text x="285" y="224" text-anchor="middle" class="sub">authorized plan</text>
+          <path d="M70 201 L200 201" class="wire"/><polygon points="210,201 200,206 200,196" class="head"/>
+          <path d="M210 219 L80 219" class="wire reply"/><polygon points="70,219 80,214 80,224" class="head reply"/>
+          <text x="140" y="192" text-anchor="middle" class="tiny">request</text>
+          <text x="140" y="236" text-anchor="middle" class="tiny">result</text>
+          <path d="M740 80 V145 A70 12 0 0 0 880 145 V80" class="store"/><ellipse cx="810" cy="80" rx="70" ry="12" class="store"/><text x="810" y="122.5" text-anchor="middle" class="label">Hot KV</text><text x="810" y="140.5" text-anchor="middle" class="sub">point lookup</text>
+          <path d="M360 184 L442 184 Q450 184 450 176 L450 113 Q450 105 458 105 L730 105" class="wire"/><polygon points="740,105 730,110 730,100" class="head"/>
+          <path d="M740 129 L478 129 Q470 129 470 137 L470 192 Q470 200 462 200 L370 200" class="wire reply"/><polygon points="360,200 370,195 370,205" class="head reply"/>
+          <text x="610" y="95" text-anchor="middle" class="tiny">key / tenant</text>
+          <text x="610" y="147" text-anchor="middle" class="tiny">row / not found</text>
+          <g class="is-new">
+            <rect x="550" y="270" width="150" height="74" rx="12" class="box"/><text x="625" y="304" text-anchor="middle" class="label">Scan Worker</text><text x="625" y="323" text-anchor="middle" class="sub">project + aggregate</text>
+            <path d="M740 270 V335 A70 12 0 0 0 880 335 V270" class="store"/><ellipse cx="810" cy="270" rx="70" ry="12" class="store"/><text x="810" y="312.5" text-anchor="middle" class="label">Object Files</text><text x="810" y="330.5" text-anchor="middle" class="sub">warm / cold columnar</text>
+            <path d="M290 250 L290 287 Q290 295 298 295 L540 295" class="wire"/><polygon points="550,295 540,300 540,290" class="head"/>
+            <path d="M550 319 L278 319 Q270 319 270 311 L270 260" class="wire reply"/><polygon points="270,250 275,260 265,260" class="head reply"/>
+            <text x="410" y="286" text-anchor="middle" class="tiny">snapshot + tasks</text>
+            <text x="410" y="338" text-anchor="middle" class="tiny">partial result</text>
+            <path d="M700 295 L730 295" class="wire"/><polygon points="740,295 730,300 730,290" class="head"/>
+            <path d="M740 319 L710 319" class="wire reply"/><polygon points="700,319 710,314 710,324" class="head reply"/>
+            <text x="735" y="259" text-anchor="middle" class="tiny">GET ranges</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">温分析也能直接读对象上的列式文件。Object Files→Scan Worker→Query→Client 逐跳返回，表格式不搬运结果字节。</span><span class="lang-en">Warm analytics can read columnar objects. Results return Files→Worker→Query→Client.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d1s4t d1s4d">
+          <title id="d1s4t">Size retained data before choosing media</title>
+          <desc id="d1s4d">The two closed read paths remain fixed; retention assumptions explain tier budgets.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="90" y="18" width="854" height="366" rx="18" class="boundary"/><text x="106" y="38" class="tiny">TIERS · access contract, not a mandatory media pipeline</text>
+          <circle cx="44" cy="186" r="12" class="box"/><path d="M24 232 Q44 200 64 232" class="wire"/><text x="44" y="254" text-anchor="middle" class="label">Client</text>
+          <rect x="210" y="166" width="150" height="84" rx="12" class="box"/><text x="285" y="205" text-anchor="middle" class="label">Query</text><text x="285" y="224" text-anchor="middle" class="sub">authorized plan</text>
+          <path d="M70 201 L200 201" class="wire"/><polygon points="210,201 200,206 200,196" class="head"/>
+          <path d="M210 219 L80 219" class="wire reply"/><polygon points="70,219 80,214 80,224" class="head reply"/>
+          <text x="140" y="192" text-anchor="middle" class="tiny">request</text>
+          <text x="140" y="236" text-anchor="middle" class="tiny">result</text>
+          <path d="M740 80 V145 A70 12 0 0 0 880 145 V80" class="store"/><ellipse cx="810" cy="80" rx="70" ry="12" class="store"/><text x="810" y="122.5" text-anchor="middle" class="label">Hot KV</text><text x="810" y="140.5" text-anchor="middle" class="sub">point lookup</text>
+          <path d="M360 184 L442 184 Q450 184 450 176 L450 113 Q450 105 458 105 L730 105" class="wire"/><polygon points="740,105 730,110 730,100" class="head"/>
+          <path d="M740 129 L478 129 Q470 129 470 137 L470 192 Q470 200 462 200 L370 200" class="wire reply"/><polygon points="360,200 370,195 370,205" class="head reply"/>
+          <text x="610" y="95" text-anchor="middle" class="tiny">key / tenant</text>
+          <text x="610" y="147" text-anchor="middle" class="tiny">row / not found</text>
+          <rect x="550" y="270" width="150" height="74" rx="12" class="box"/><text x="625" y="304" text-anchor="middle" class="label">Scan Worker</text><text x="625" y="323" text-anchor="middle" class="sub">project + aggregate</text>
+          <path d="M740 270 V335 A70 12 0 0 0 880 335 V270" class="store"/><ellipse cx="810" cy="270" rx="70" ry="12" class="store"/><text x="810" y="312.5" text-anchor="middle" class="label">Object Files</text><text x="810" y="330.5" text-anchor="middle" class="sub">warm / cold columnar</text>
+          <path d="M290 250 L290 287 Q290 295 298 295 L540 295" class="wire"/><polygon points="550,295 540,300 540,290" class="head"/>
+          <path d="M550 319 L278 319 Q270 319 270 311 L270 260" class="wire reply"/><polygon points="270,250 275,260 265,260" class="head reply"/>
+          <text x="410" y="286" text-anchor="middle" class="tiny">snapshot + tasks</text>
+          <text x="410" y="338" text-anchor="middle" class="tiny">partial result</text>
+          <path d="M700 295 L730 295" class="wire"/><polygon points="740,295 730,300 730,290" class="head"/>
+          <path d="M740 319 L710 319" class="wire reply"/><polygon points="700,319 710,314 710,324" class="head reply"/>
+          <text x="735" y="259" text-anchor="middle" class="tiny">GET ranges</text>
+          <g class="is-new">
+            <text x="120" y="78" class="clock">1 TB/day x 365 = 365 TB raw</text>
+            <text x="120" y="101" class="tiny">Hot KV is a derived serving view; durable input is separate</text>
+            <rect x="115" y="355" width="372" height="20" rx="10" class="badge"/><text x="301" y="369" text-anchor="middle" class="badge-text">1 day hot; 30 day warm; 365 day retained</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">A1 每天 1 TB 原始数据，全年 365 TB；1 天热视图与 30 天温窗口单独规划，不能把全部保留期乘成热容量。</span><span class="lang-en">A1 gives 365 TB raw/year; size the one-day serving view and 30-day warm window separately.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d1s5t d1s5d">
+          <title id="d1s5t">Treat archive access as a job</title>
+          <desc id="d1s5d">The complete topology contains point and analytical reads; Query exposes restore-pending rather than silently omitting cold files.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="90" y="18" width="854" height="366" rx="18" class="boundary"/><text x="106" y="38" class="tiny">TIERS · access contract, not a mandatory media pipeline</text>
+          <circle cx="44" cy="186" r="12" class="box"/><path d="M24 232 Q44 200 64 232" class="wire"/><text x="44" y="254" text-anchor="middle" class="label">Client</text>
+          <rect x="210" y="166" width="150" height="84" rx="12" class="box"/><text x="285" y="205" text-anchor="middle" class="label">Query</text><text x="285" y="224" text-anchor="middle" class="sub">authorized plan</text>
+          <path d="M70 201 L200 201" class="wire"/><polygon points="210,201 200,206 200,196" class="head"/>
+          <path d="M210 219 L80 219" class="wire reply"/><polygon points="70,219 80,214 80,224" class="head reply"/>
+          <text x="140" y="192" text-anchor="middle" class="tiny">request</text>
+          <text x="140" y="236" text-anchor="middle" class="tiny">result</text>
+          <path d="M740 80 V145 A70 12 0 0 0 880 145 V80" class="store"/><ellipse cx="810" cy="80" rx="70" ry="12" class="store"/><text x="810" y="122.5" text-anchor="middle" class="label">Hot KV</text><text x="810" y="140.5" text-anchor="middle" class="sub">point lookup</text>
+          <path d="M360 184 L442 184 Q450 184 450 176 L450 113 Q450 105 458 105 L730 105" class="wire"/><polygon points="740,105 730,110 730,100" class="head"/>
+          <path d="M740 129 L478 129 Q470 129 470 137 L470 192 Q470 200 462 200 L370 200" class="wire reply"/><polygon points="360,200 370,195 370,205" class="head reply"/>
+          <text x="610" y="95" text-anchor="middle" class="tiny">key / tenant</text>
+          <text x="610" y="147" text-anchor="middle" class="tiny">row / not found</text>
+          <rect x="550" y="270" width="150" height="74" rx="12" class="box"/><text x="625" y="304" text-anchor="middle" class="label">Scan Worker</text><text x="625" y="323" text-anchor="middle" class="sub">project + aggregate</text>
+          <path d="M740 270 V335 A70 12 0 0 0 880 335 V270" class="store"/><ellipse cx="810" cy="270" rx="70" ry="12" class="store"/><text x="810" y="312.5" text-anchor="middle" class="label">Object Files</text><text x="810" y="330.5" text-anchor="middle" class="sub">warm / cold columnar</text>
+          <path d="M290 250 L290 287 Q290 295 298 295 L540 295" class="wire"/><polygon points="550,295 540,300 540,290" class="head"/>
+          <path d="M550 319 L278 319 Q270 319 270 311 L270 260" class="wire reply"/><polygon points="270,250 275,260 265,260" class="head reply"/>
+          <text x="410" y="286" text-anchor="middle" class="tiny">snapshot + tasks</text>
+          <text x="410" y="338" text-anchor="middle" class="tiny">partial result</text>
+          <path d="M700 295 L730 295" class="wire"/><polygon points="740,295 730,300 730,290" class="head"/>
+          <path d="M740 319 L710 319" class="wire reply"/><polygon points="700,319 710,314 710,324" class="head reply"/>
+          <text x="735" y="259" text-anchor="middle" class="tiny">GET ranges</text>
+          <text x="120" y="78" class="clock">1 TB/day x 365 = 365 TB raw</text>
+          <text x="120" y="101" class="tiny">Hot KV is a derived serving view; durable input is separate</text>
+          <rect x="115" y="355" width="372" height="20" rx="10" class="badge"/><text x="301" y="369" text-anchor="middle" class="badge-text">1 day hot; 30 day warm; 365 day retained</text>
+          <g class="is-new">
+            <rect x="500" y="355" width="416" height="20" rx="10" class="badge"/><text x="708" y="369" text-anchor="middle" class="badge-text">archive restore: pending job, not silent partial sum</text>
+            <text x="540" y="225" class="tiny">Replays can warm old data without changing event time</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">归档需要恢复时返回 pending job 并限制并发，不能少算冷分区再报成功；秒级还是小时级由实际存储合同决定。</span><span class="lang-en">When archive restore is required, return a bounded pending job rather than omit files; the storage contract sets latency.</span></figcaption>
+      </div>
+    </figure><div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p><p>正常点读走 Client→Query→Hot KV→Query→Client，键必须包含租户与事件身份，鉴权在查数前完成。Hot KV 是面向点查的索引视图，重建依据是持久事件，而不是这份热视图本身。报表走 Query→Scan Worker→Object Files，再逐跳返回局部结果。两条路径解决不同访问目标；分析扫描不应该穿过在线 KV，再把每条事件吐出来做 SUM。</p><p>温、冷描述访问频率与时效，列存描述文件布局，对象描述保存字节的介质。这三个轴可以组合：近期 Parquet 放在对象上，配活跃扫描 Worker 和缓存就能是温层。冷数据也可以保留同一格式，只减少常驻算力或换访问合同。湖仓论文讨论低成本存储上开放文件与管理能力的结合 <a href="#ref-8">[8]</a>，不是要求每次温变冷都跨三种产品搬一份全量。</p><p>成本先只比较原始容量等价：全热 365×100=36,500 单位/月；若一日热等价 1 TB，其余 364 TB 放对象，1×100+364×10=3,740，约少 89.8%。这只是 A4 的简化成本推导，不是实际报价，也没让温窗口再加一份 30 TB。热视图的索引、临时重建副本、存储请求、跨区流量和 Worker 计算费都应另列；压缩会改变物理 TB，不能悄悄把逻辑 TB 当账单 TB。</p><p>“旧数据搬到冷层后删热数据”必须有交接证明。先完成持久输出、核对事件范围与数量，再发布可查询位置，最后等旧读者结束才回收。按事件时间划边界会遇到迟到：今天到达的事件可能属于昨天。若跨热视图与历史表联合查询，就要固定输入位点向量和查询边界，或按 event_id/version 消重；拿墙钟切成两半直接 UNION，会漏数或重数。本章图把两类接口分开，不承诺未经协调的跨库原子快照。</p><p>故障时先保合同。热视图坏了可以重建，但不能让全部毫秒点查退到扫全湖；限量回源或明确不可用。冷对象若需要恢复，提交带身份的查询任务，返回 RESTORE_PENDING，按租户限并发并给出可取消状态。对象服务也存在低延迟访问形式 <a href="#ref-10">[10]</a>，所以“对象永远慢”“冷层都秒级”都过于绝对。冷热重分配看频率、恢复成本和延迟目标；旧爆款可以重新缓存，存储年龄不会被改写。</p></div><div class="lang-en"><p class="col-kicker">English</p><p>Point reads follow Client→Query→Hot KV and return through Query; authorize tenant/event keys first. Hot KV is rebuildable from durable events. Reports use Query→Worker→Files with partial results returning hop by hop. Bulk analytics should not enumerate the online KV.</p><p>Temperature, file layout and byte-storage medium are different axes. Recent Parquet objects with active workers/cache are warm; cold data can keep that format with less resident compute or a different access contract. Lakehouse discusses managed open files over low-cost storage [8], not mandatory full copies across three products.</p><p>At illustrative raw-equivalent A4 rates, all-hot is 365×100=36,500 units/month; one hot TB plus 364 object TB is 100+3,640=3,740, about 89.8% lower. This excludes indexes, temporary copies, requests, networking and compute. The warm window is not another mandatory 30 TB copy; compression changes billed bytes.</p><p>Tier handoff needs durable output, range/count validation, location publication and old-reader completion before cleanup. Late arrivals can belong to yesterday. A combined hot/history query needs fixed input progress and a query boundary or event/version deduplication; a wall-clock UNION can miss or duplicate events. The diagram separates interfaces and promises no uncoordinated cross-store atomic snapshot.</p><p>Protect contracts on failure: rebuilding Hot KV does not justify sending all point traffic into lake scans. Bound fallback or fail explicitly. Restore-dependent queries become identified, cancellable RESTORE_PENDING jobs with tenant limits. Object services include low-latency modes [10], so medium alone does not determine latency. Old popular data can be cached without changing its event time.</p></div></div></section>
+
+<section><h2><span class="lang-zh">2 · 列存：先剪文件，再剪列，再算 CPU</span><span class="lang-en">2 · Columnar scans: files, columns and CPU</span></h2><figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d2s1t d2s1d">
+          <title id="d2s1t">Close the analytic scan path</title>
+          <desc id="d2s1d">Client calls Query, Query schedules Scan Worker, Worker gets Parquet byte ranges from Object Files, and replies return through Worker and Query.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <g class="is-new">
+            <rect x="90" y="18" width="854" height="366" rx="18" class="boundary"/><text x="106" y="38" class="tiny">COLUMNAR · snapshot/file list supplied by the planner</text>
+            <circle cx="44" cy="186" r="12" class="box"/><path d="M24 232 Q44 200 64 232" class="wire"/><text x="44" y="254" text-anchor="middle" class="label">Client</text>
+            <rect x="180" y="174" width="140" height="72" rx="12" class="box"/><text x="250" y="207" text-anchor="middle" class="label">Query</text><text x="250" y="226" text-anchor="middle" class="sub">SUM + time filter</text>
+            <rect x="440" y="155" width="170" height="112" rx="12" class="box"/><text x="525" y="208" text-anchor="middle" class="label">Scan Worker</text><text x="525" y="227" text-anchor="middle" class="sub">decode + local sum</text>
+            <path d="M740 145 V235 A70 12 0 0 0 880 235 V145" class="store"/><ellipse cx="810" cy="145" rx="70" ry="12" class="store"/><text x="810" y="200" text-anchor="middle" class="label">Object Files</text><text x="810" y="218" text-anchor="middle" class="sub">Parquet pages</text>
+            <path d="M70 201 L170 201" class="wire"/><polygon points="180,201 170,206 170,196" class="head"/>
+            <path d="M180 219 L80 219" class="wire reply"/><polygon points="70,219 80,214 80,224" class="head reply"/>
+            <path d="M320 195 L430 195" class="wire"/><polygon points="440,195 430,200 430,190" class="head"/>
+            <path d="M440 219 L330 219" class="wire reply"/><polygon points="320,219 330,214 330,224" class="head reply"/>
+            <path d="M610 180 L730 180" class="wire"/><polygon points="740,180 730,185 730,175" class="head"/>
+            <path d="M740 204 L620 204" class="wire reply"/><polygon points="610,204 620,199 620,209" class="head reply"/>
+            <text x="379" y="185" text-anchor="middle" class="tiny">scan tasks</text>
+            <text x="675" y="169" text-anchor="middle" class="tiny">GET ranges</text>
+            <text x="675" y="224" text-anchor="middle" class="tiny">pages</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">先闭合一次 SUM 查询。元数据规划在另一组画；这组只跟踪数据范围读取和局部聚合，不把每个算子画成微服务。</span><span class="lang-en">Close one SUM path. Metadata planning is separate; scan operators are not separate services.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d2s2t d2s2d">
+          <title id="d2s2t">Prune nonmatching time files</title>
+          <desc id="d2s2d">The planner supplies a time-pruned list to Scan Worker, which reads only matching Object Files.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="90" y="18" width="854" height="366" rx="18" class="boundary"/><text x="106" y="38" class="tiny">COLUMNAR · snapshot/file list supplied by the planner</text>
+          <circle cx="44" cy="186" r="12" class="box"/><path d="M24 232 Q44 200 64 232" class="wire"/><text x="44" y="254" text-anchor="middle" class="label">Client</text>
+          <rect x="180" y="174" width="140" height="72" rx="12" class="box"/><text x="250" y="207" text-anchor="middle" class="label">Query</text><text x="250" y="226" text-anchor="middle" class="sub">SUM + time filter</text>
+          <rect x="440" y="155" width="170" height="112" rx="12" class="box"/><text x="525" y="208" text-anchor="middle" class="label">Scan Worker</text><text x="525" y="227" text-anchor="middle" class="sub">decode + local sum</text>
+          <path d="M740 145 V235 A70 12 0 0 0 880 235 V145" class="store"/><ellipse cx="810" cy="145" rx="70" ry="12" class="store"/><text x="810" y="200" text-anchor="middle" class="label">Object Files</text><text x="810" y="218" text-anchor="middle" class="sub">Parquet pages</text>
+          <path d="M70 201 L170 201" class="wire"/><polygon points="180,201 170,206 170,196" class="head"/>
+          <path d="M180 219 L80 219" class="wire reply"/><polygon points="70,219 80,214 80,224" class="head reply"/>
+          <path d="M320 195 L430 195" class="wire"/><polygon points="440,195 430,200 430,190" class="head"/>
+          <path d="M440 219 L330 219" class="wire reply"/><polygon points="320,219 330,214 330,224" class="head reply"/>
+          <path d="M610 180 L730 180" class="wire"/><polygon points="740,180 730,185 730,175" class="head"/>
+          <path d="M740 204 L620 204" class="wire reply"/><polygon points="610,204 620,199 620,209" class="head reply"/>
+          <text x="379" y="185" text-anchor="middle" class="tiny">scan tasks</text>
+          <text x="675" y="169" text-anchor="middle" class="tiny">GET ranges</text>
+          <text x="675" y="224" text-anchor="middle" class="tiny">pages</text>
+          <g class="is-new">
+            <rect x="116" y="78" width="336" height="20" rx="10" class="badge"/><text x="284" y="92" text-anchor="middle" class="badge-text">Time pruning: 30 TB -&gt; 1 TB raw</text>
+            <text x="118" y="109" class="tiny">No matching file =&gt; no data GET</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">A3 均匀 30 天查询一天，把候选原始字节从 30 TB 收到 1 TB；不匹配的文件不用做数据 GET。</span><span class="lang-en">Under uniform A3, selecting one of 30 days cuts candidate raw bytes from 30 TB to 1 TB.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d2s3t d2s3d">
+          <title id="d2s3t">Read filter fields as well as the aggregate</title>
+          <desc id="d2s3d">Worker reads only event_time, country and price pages from Object Files; Query merges the result.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="90" y="18" width="854" height="366" rx="18" class="boundary"/><text x="106" y="38" class="tiny">COLUMNAR · snapshot/file list supplied by the planner</text>
+          <circle cx="44" cy="186" r="12" class="box"/><path d="M24 232 Q44 200 64 232" class="wire"/><text x="44" y="254" text-anchor="middle" class="label">Client</text>
+          <rect x="180" y="174" width="140" height="72" rx="12" class="box"/><text x="250" y="207" text-anchor="middle" class="label">Query</text><text x="250" y="226" text-anchor="middle" class="sub">SUM + time filter</text>
+          <rect x="440" y="155" width="170" height="112" rx="12" class="box"/><text x="525" y="208" text-anchor="middle" class="label">Scan Worker</text><text x="525" y="227" text-anchor="middle" class="sub">decode + local sum</text>
+          <path d="M740 145 V235 A70 12 0 0 0 880 235 V145" class="store"/><ellipse cx="810" cy="145" rx="70" ry="12" class="store"/><text x="810" y="200" text-anchor="middle" class="label">Object Files</text><text x="810" y="218" text-anchor="middle" class="sub">Parquet pages</text>
+          <path d="M70 201 L170 201" class="wire"/><polygon points="180,201 170,206 170,196" class="head"/>
+          <path d="M180 219 L80 219" class="wire reply"/><polygon points="70,219 80,214 80,224" class="head reply"/>
+          <path d="M320 195 L430 195" class="wire"/><polygon points="440,195 430,200 430,190" class="head"/>
+          <path d="M440 219 L330 219" class="wire reply"/><polygon points="320,219 330,214 330,224" class="head reply"/>
+          <path d="M610 180 L730 180" class="wire"/><polygon points="740,180 730,185 730,175" class="head"/>
+          <path d="M740 204 L620 204" class="wire reply"/><polygon points="610,204 620,199 620,209" class="head reply"/>
+          <text x="379" y="185" text-anchor="middle" class="tiny">scan tasks</text>
+          <text x="675" y="169" text-anchor="middle" class="tiny">GET ranges</text>
+          <text x="675" y="224" text-anchor="middle" class="tiny">pages</text>
+          <rect x="116" y="78" width="336" height="20" rx="10" class="badge"/><text x="284" y="92" text-anchor="middle" class="badge-text">Time pruning: 30 TB -&gt; 1 TB raw</text>
+          <text x="118" y="109" class="tiny">No matching file =&gt; no data GET</text>
+          <g class="is-new">
+            <rect x="466" y="78" width="360" height="20" rx="10" class="badge"/><text x="646" y="92" text-anchor="middle" class="badge-text">Projection: 3 of 20 equal-size fields</text>
+            <text x="467" y="108" class="tiny">time + country + price; payload omitted</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">谓词也要读列。20 个等宽字段里读取时间、国家、金额三列是 3/20，不能只按 SUM 的一列算。</span><span class="lang-en">Filter fields count: time, country and price are 3/20 equal-size fields, not only the SUM column.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d2s4t d2s4d">
+          <title id="d2s4t">Apply measured compression assumptions</title>
+          <desc id="d2s4d">Compressed selected pages return to Worker, which decodes, filters and aggregates before returning to Query.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="90" y="18" width="854" height="366" rx="18" class="boundary"/><text x="106" y="38" class="tiny">COLUMNAR · snapshot/file list supplied by the planner</text>
+          <circle cx="44" cy="186" r="12" class="box"/><path d="M24 232 Q44 200 64 232" class="wire"/><text x="44" y="254" text-anchor="middle" class="label">Client</text>
+          <rect x="180" y="174" width="140" height="72" rx="12" class="box"/><text x="250" y="207" text-anchor="middle" class="label">Query</text><text x="250" y="226" text-anchor="middle" class="sub">SUM + time filter</text>
+          <rect x="440" y="155" width="170" height="112" rx="12" class="box"/><text x="525" y="208" text-anchor="middle" class="label">Scan Worker</text><text x="525" y="227" text-anchor="middle" class="sub">decode + local sum</text>
+          <path d="M740 145 V235 A70 12 0 0 0 880 235 V145" class="store"/><ellipse cx="810" cy="145" rx="70" ry="12" class="store"/><text x="810" y="200" text-anchor="middle" class="label">Object Files</text><text x="810" y="218" text-anchor="middle" class="sub">Parquet pages</text>
+          <path d="M70 201 L170 201" class="wire"/><polygon points="180,201 170,206 170,196" class="head"/>
+          <path d="M180 219 L80 219" class="wire reply"/><polygon points="70,219 80,214 80,224" class="head reply"/>
+          <path d="M320 195 L430 195" class="wire"/><polygon points="440,195 430,200 430,190" class="head"/>
+          <path d="M440 219 L330 219" class="wire reply"/><polygon points="320,219 330,214 330,224" class="head reply"/>
+          <path d="M610 180 L730 180" class="wire"/><polygon points="740,180 730,185 730,175" class="head"/>
+          <path d="M740 204 L620 204" class="wire reply"/><polygon points="610,204 620,199 620,209" class="head reply"/>
+          <text x="379" y="185" text-anchor="middle" class="tiny">scan tasks</text>
+          <text x="675" y="169" text-anchor="middle" class="tiny">GET ranges</text>
+          <text x="675" y="224" text-anchor="middle" class="tiny">pages</text>
+          <rect x="116" y="78" width="336" height="20" rx="10" class="badge"/><text x="284" y="92" text-anchor="middle" class="badge-text">Time pruning: 30 TB -&gt; 1 TB raw</text>
+          <text x="118" y="109" class="tiny">No matching file =&gt; no data GET</text>
+          <rect x="466" y="78" width="360" height="20" rx="10" class="badge"/><text x="646" y="92" text-anchor="middle" class="badge-text">Projection: 3 of 20 equal-size fields</text>
+          <text x="467" y="108" class="tiny">time + country + price; payload omitted</text>
+          <g class="is-new">
+            <text x="118" y="304" class="tiny">Read compressed pages; decode selected values; apply exact filter</text>
+            <text x="118" y="333" class="clock">1 TB x (3/20) / 4 = 37.5 GB</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">A4 假设所选列压缩 4:1：1 TB×3/20÷4=37.5 GB。压缩率和解码 CPU 都需要实测。</span><span class="lang-en">Assuming A4’s 4:1 compression: 1 TB×3/20÷4=37.5 GB. Measure ratio and decode CPU.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d2s5t d2s5d">
+          <title id="d2s5t">Separate byte reduction from runtime</title>
+          <desc id="d2s5d">Worker returns partial aggregates to Query, and Query replies to Client; annotations separate candidate-byte reduction from runtime.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="90" y="18" width="854" height="366" rx="18" class="boundary"/><text x="106" y="38" class="tiny">COLUMNAR · snapshot/file list supplied by the planner</text>
+          <circle cx="44" cy="186" r="12" class="box"/><path d="M24 232 Q44 200 64 232" class="wire"/><text x="44" y="254" text-anchor="middle" class="label">Client</text>
+          <rect x="180" y="174" width="140" height="72" rx="12" class="box"/><text x="250" y="207" text-anchor="middle" class="label">Query</text><text x="250" y="226" text-anchor="middle" class="sub">SUM + time filter</text>
+          <rect x="440" y="155" width="170" height="112" rx="12" class="box"/><text x="525" y="208" text-anchor="middle" class="label">Scan Worker</text><text x="525" y="227" text-anchor="middle" class="sub">decode + local sum</text>
+          <path d="M740 145 V235 A70 12 0 0 0 880 235 V145" class="store"/><ellipse cx="810" cy="145" rx="70" ry="12" class="store"/><text x="810" y="200" text-anchor="middle" class="label">Object Files</text><text x="810" y="218" text-anchor="middle" class="sub">Parquet pages</text>
+          <path d="M70 201 L170 201" class="wire"/><polygon points="180,201 170,206 170,196" class="head"/>
+          <path d="M180 219 L80 219" class="wire reply"/><polygon points="70,219 80,214 80,224" class="head reply"/>
+          <path d="M320 195 L430 195" class="wire"/><polygon points="440,195 430,200 430,190" class="head"/>
+          <path d="M440 219 L330 219" class="wire reply"/><polygon points="320,219 330,214 330,224" class="head reply"/>
+          <path d="M610 180 L730 180" class="wire"/><polygon points="740,180 730,185 730,175" class="head"/>
+          <path d="M740 204 L620 204" class="wire reply"/><polygon points="610,204 620,199 620,209" class="head reply"/>
+          <text x="379" y="185" text-anchor="middle" class="tiny">scan tasks</text>
+          <text x="675" y="169" text-anchor="middle" class="tiny">GET ranges</text>
+          <text x="675" y="224" text-anchor="middle" class="tiny">pages</text>
+          <rect x="116" y="78" width="336" height="20" rx="10" class="badge"/><text x="284" y="92" text-anchor="middle" class="badge-text">Time pruning: 30 TB -&gt; 1 TB raw</text>
+          <text x="118" y="109" class="tiny">No matching file =&gt; no data GET</text>
+          <rect x="466" y="78" width="360" height="20" rx="10" class="badge"/><text x="646" y="92" text-anchor="middle" class="badge-text">Projection: 3 of 20 equal-size fields</text>
+          <text x="467" y="108" class="tiny">time + country + price; payload omitted</text>
+          <text x="118" y="304" class="tiny">Read compressed pages; decode selected values; apply exact filter</text>
+          <text x="118" y="333" class="clock">1 TB x (3/20) / 4 = 37.5 GB</text>
+          <g class="is-new">
+            <text x="118" y="359" class="tiny">30 TB / 37.5 GB = 800x fewer data bytes, not 800x faster</text>
+            <rect x="637" y="286" width="274" height="20" rx="10" class="badge"/><text x="774" y="300" text-anchor="middle" class="badge-text">Query merges partial aggregates</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">30 TB÷37.5 GB=800 倍数据字节缩减，包含分区、剪列、压缩三项；没有推出 800 倍响应速度。</span><span class="lang-en">30 TB/37.5 GB=800× fewer data bytes through three reductions; this does not imply 800× lower latency.</span></figcaption>
+      </div>
+    </figure><div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p><p>Query 解析 SUM(price) 与时间、国家过滤；规划器产出固定快照下的候选文件，Worker 读取页范围、解码、精确过滤并局部聚合。Parquet 的 row group 内按列组织 column chunk，文件元数据帮助定位需要的内容 <a href="#ref-3">[3]</a>。图里 decode 和 local sum 在同一 Worker 内，是执行算子，不是两个远程服务。Query 收集局部结果后才返回 Client，不能让文件服务直接回客户端一个尚未聚合的价格列。</p><p>A3 先从 30 TB 原始候选按一天时间范围剪成 1 TB，再读取 20 个等宽字段中的 3 个，得到 150 GB 未压缩列数据；A4 所选列 4:1 后是 37.5 GB。30,000 GB÷37.5 GB=800 是对“全期、全列、原始数据扫描”的字节比，不是与已经压缩的行存基线比较。时间剪枝给 30 倍，剪列给约 6.67 倍，压缩给 4 倍；三项相乘才有 800，列存本身不能独占这个数字。</p><p>这一步删掉的是全行 payload 的搬运，不是所有 CPU。过滤字段 country 和 event_time 都要读取；谓词只排除行却没有可用统计时，页仍得读并解码。列值相似有利于字典、RLE 等编码，但高基数字符串或加密 payload 未必压得好；列投影更少也可能多出随机范围请求。向量化按一批值处理，延迟物化在确有需要时才拼行，能减轻执行成本；这些是列式引擎的配套能力，不能把“每列拆一张行表”当作全部实现 [2]。</p><p>Dremel 2010 的特定实验里，T1 有 850 亿记录、未压缩 87 TB；聚合选定一列时，列布局的 MR 与 Dremel 读约 0.5 TB 压缩数据，行布局 MR 读整份约 87 TB。论文另说明行布局需要更重的压缩才能取得接近列布局的整体文件大小，所以两个数的基线并不对称 <a href="#ref-1">[1]</a>。87÷0.5=174 只描述该查询读的数据量比例；节点规模、执行模型、压缩与聚合树也影响耗时，不能将它移植成本章的 SLA。</p><p>A5 的 8 台 Worker 合计有效 8×250 MB/s=2 GB/s。37.5 GB÷2 GB/s=18.75 s，只是独占带宽且没有其他瓶颈时的数据扫描下界。两条查询均分时各 1 GB/s，下界变 37.5 s，已经超过 A2 的 30 s 目标。设计后果是控制并发、增加实测后的预算或缩小范围；不能先报 30 s 再用这个算术替它背书。COUNT DISTINCT、高基数 GROUP BY 还会放大聚合状态与 shuffle，筛选很多列或拼完整记录时，列存收益也会减小。</p></div><div class="lang-en"><p class="col-kicker">English</p><p>Query plans a snapshot-bound SUM with time/country filters. Workers get page ranges, decode, filter and partially aggregate. Parquet column chunks sit inside row groups, and metadata locates needed content [3]. Decode/sum are local operators, not remote services. Query merges partials before replying.</p><p>A3 reduces 30 TB raw to 1 TB by date, then 3/20 fields to 150 GB; A4 compression gives 37.5 GB. 30,000/37.5=800 compares all-period/all-field raw bytes, not a compressed row-store baseline. Time contributes 30×, projection about 6.67× and compression 4×.</p><p>Projection removes payload transfer, not all CPU. Read both predicate fields; unavailable pruning statistics still require page reads and decoding. Dictionary/RLE benefit suitable values, not arbitrary high-cardinality or encrypted payloads. Vectorized operations and late materialization complement column layouts; vertically splitting row tables is not a complete engine [2].</p><p>Dremel’s specific T1 experiment used 85 billion records and 87 TB uncompressed data. The selected-column MR/Dremel query read about 0.5 TB compressed, while record-oriented MR read about 87 TB; row layouts required heavier compression for comparable overall disk size [1]. The 174× byte ratio is query-specific; it is not a latency guarantee.</p><p>Eight A5 workers offer an assumed 2 GB/s effective data rate. 37.5/2=18.75 s is a scan lower bound; two equally sharing queries each need at least 37.5 s, beyond A2’s 30 s target. Bound concurrency, measure additional capacity or narrow scope. Distinct/group-by state, shuffle and wide record assembly add costs.</p></div></div></section>
+
+<section><h2><span class="lang-zh">3 · 分区演进：新规格与旧文件同时成立</span><span class="lang-en">3 · Partition evolution keeps old files meaningful</span></h2><figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d3s1t d3s1d">
+          <title id="d3s1t">Use one logical time predicate</title>
+          <desc id="d3s1d">Query sends event_time predicate to Planner and receives planned tasks.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <g class="is-new">
+            <rect x="90" y="18" width="854" height="366" rx="18" class="boundary"/><text x="106" y="38" class="tiny">PARTITION EVOLUTION · each file retains its own spec ID</text>
+            <rect x="120" y="166" width="150" height="90" rx="12" class="box"/><text x="195" y="208" text-anchor="middle" class="label">Query</text><text x="195" y="227" text-anchor="middle" class="sub">event_time predicate</text>
+            <rect x="410" y="166" width="160" height="90" rx="12" class="box"/><text x="490" y="208" text-anchor="middle" class="label">Planner</text><text x="490" y="227" text-anchor="middle" class="sub">pinned snapshot</text>
+            <path d="M270 195 L400 195" class="wire"/><polygon points="410,195 400,200 400,190" class="head"/>
+            <path d="M410 219 L280 219" class="wire reply"/><polygon points="270,219 280,214 280,224" class="head reply"/>
+            <text x="340" y="187" text-anchor="middle" class="tiny">filter</text>
+            <text x="340" y="236" text-anchor="middle" class="tiny">tasks</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">让查询写业务时间谓词，规划器负责变换；分区目录不该成为每个调用方的额外 SQL 接口。</span><span class="lang-en">Use a logical event-time predicate; partition layout belongs to the planner.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d3s2t d3s2d">
+          <title id="d3s2t">Plan old daily files with spec 1</title>
+          <desc id="d3s2d">Planner derives daily bounds for Spec 1 Files and receives matching file metadata.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="90" y="18" width="854" height="366" rx="18" class="boundary"/><text x="106" y="38" class="tiny">PARTITION EVOLUTION · each file retains its own spec ID</text>
+          <rect x="120" y="166" width="150" height="90" rx="12" class="box"/><text x="195" y="208" text-anchor="middle" class="label">Query</text><text x="195" y="227" text-anchor="middle" class="sub">event_time predicate</text>
+          <rect x="410" y="166" width="160" height="90" rx="12" class="box"/><text x="490" y="208" text-anchor="middle" class="label">Planner</text><text x="490" y="227" text-anchor="middle" class="sub">pinned snapshot</text>
+          <path d="M270 195 L400 195" class="wire"/><polygon points="410,195 400,200 400,190" class="head"/>
+          <path d="M410 219 L280 219" class="wire reply"/><polygon points="270,219 280,214 280,224" class="head reply"/>
+          <text x="340" y="187" text-anchor="middle" class="tiny">filter</text>
+          <text x="340" y="236" text-anchor="middle" class="tiny">tasks</text>
+          <g class="is-new">
+            <path d="M740 80 V145 A70 12 0 0 0 880 145 V80" class="store"/><ellipse cx="810" cy="80" rx="70" ry="12" class="store"/><text x="810" y="122.5" text-anchor="middle" class="label">Spec 1 Files</text><text x="810" y="140.5" text-anchor="middle" class="sub">day(event_time)</text>
+            <path d="M570 190 L627 190 Q635 190 635 182 L635 113 Q635 105 643 105 L730 105" class="wire"/><polygon points="740,105 730,110 730,100" class="head"/>
+            <path d="M740 129 L663 129 Q655 129 655 137 L655 201 Q655 209 647 209 L580 209" class="wire reply"/><polygon points="570,209 580,204 580,214" class="head reply"/>
+            <text x="697" y="91" text-anchor="middle" class="tiny">daily bounds</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">已有文件带着 spec 1，日分区仍按日解释。历史布局是文件身份的一部分，不随当前默认规格变动。</span><span class="lang-en">Existing files retain spec 1 and daily bounds; current defaults do not reinterpret old layout.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d3s3t d3s3d">
+          <title id="d3s3t">Add hourly files without moving old ones</title>
+          <desc id="d3s3d">Planner independently derives hourly bounds for Spec 2 Files and receives matching file metadata; the spec 1 path remains.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="90" y="18" width="854" height="366" rx="18" class="boundary"/><text x="106" y="38" class="tiny">PARTITION EVOLUTION · each file retains its own spec ID</text>
+          <rect x="120" y="166" width="150" height="90" rx="12" class="box"/><text x="195" y="208" text-anchor="middle" class="label">Query</text><text x="195" y="227" text-anchor="middle" class="sub">event_time predicate</text>
+          <rect x="410" y="166" width="160" height="90" rx="12" class="box"/><text x="490" y="208" text-anchor="middle" class="label">Planner</text><text x="490" y="227" text-anchor="middle" class="sub">pinned snapshot</text>
+          <path d="M270 195 L400 195" class="wire"/><polygon points="410,195 400,200 400,190" class="head"/>
+          <path d="M410 219 L280 219" class="wire reply"/><polygon points="270,219 280,214 280,224" class="head reply"/>
+          <text x="340" y="187" text-anchor="middle" class="tiny">filter</text>
+          <text x="340" y="236" text-anchor="middle" class="tiny">tasks</text>
+          <path d="M740 80 V145 A70 12 0 0 0 880 145 V80" class="store"/><ellipse cx="810" cy="80" rx="70" ry="12" class="store"/><text x="810" y="122.5" text-anchor="middle" class="label">Spec 1 Files</text><text x="810" y="140.5" text-anchor="middle" class="sub">day(event_time)</text>
+          <path d="M570 190 L627 190 Q635 190 635 182 L635 113 Q635 105 643 105 L730 105" class="wire"/><polygon points="740,105 730,110 730,100" class="head"/>
+          <path d="M740 129 L663 129 Q655 129 655 137 L655 201 Q655 209 647 209 L580 209" class="wire reply"/><polygon points="570,209 580,204 580,214" class="head reply"/>
+          <text x="697" y="91" text-anchor="middle" class="tiny">daily bounds</text>
+          <g class="is-new">
+            <path d="M740 270 V335 A70 12 0 0 0 880 335 V270" class="store"/><ellipse cx="810" cy="270" rx="70" ry="12" class="store"/><text x="810" y="312.5" text-anchor="middle" class="label">Spec 2 Files</text><text x="810" y="330.5" text-anchor="middle" class="sub">hour(event_time)</text>
+            <path d="M570 231 L627 231 Q635 231 635 239 L635 287 Q635 295 643 295 L730 295" class="wire"/><polygon points="740,295 730,300 730,290" class="head"/>
+            <path d="M740 319 L623 319 Q615 319 615 311 L615 282 Q615 274 607 274 L554 274 Q550 274 550 270 L550 266" class="wire reply"/><polygon points="550,256 555,266 545,266" class="head reply"/>
+            <text x="698" y="284" text-anchor="middle" class="tiny">hourly bounds</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">新写切到 spec 2 小时分区，旧日文件仍在。两种规格分别规划，结果交给同一次查询执行。</span><span class="lang-en">New writes use hourly spec 2; old daily files coexist and are independently planned.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d3s4t d3s4d">
+          <title id="d3s4t">Keep both layouts visible</title>
+          <desc id="d3s4d">Query and Planner retain both spec-specific request/reply routes and one logical SQL predicate.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="90" y="18" width="854" height="366" rx="18" class="boundary"/><text x="106" y="38" class="tiny">PARTITION EVOLUTION · each file retains its own spec ID</text>
+          <rect x="120" y="166" width="150" height="90" rx="12" class="box"/><text x="195" y="208" text-anchor="middle" class="label">Query</text><text x="195" y="227" text-anchor="middle" class="sub">event_time predicate</text>
+          <rect x="410" y="166" width="160" height="90" rx="12" class="box"/><text x="490" y="208" text-anchor="middle" class="label">Planner</text><text x="490" y="227" text-anchor="middle" class="sub">pinned snapshot</text>
+          <path d="M270 195 L400 195" class="wire"/><polygon points="410,195 400,200 400,190" class="head"/>
+          <path d="M410 219 L280 219" class="wire reply"/><polygon points="270,219 280,214 280,224" class="head reply"/>
+          <text x="340" y="187" text-anchor="middle" class="tiny">filter</text>
+          <text x="340" y="236" text-anchor="middle" class="tiny">tasks</text>
+          <path d="M740 80 V145 A70 12 0 0 0 880 145 V80" class="store"/><ellipse cx="810" cy="80" rx="70" ry="12" class="store"/><text x="810" y="122.5" text-anchor="middle" class="label">Spec 1 Files</text><text x="810" y="140.5" text-anchor="middle" class="sub">day(event_time)</text>
+          <path d="M570 190 L627 190 Q635 190 635 182 L635 113 Q635 105 643 105 L730 105" class="wire"/><polygon points="740,105 730,110 730,100" class="head"/>
+          <path d="M740 129 L663 129 Q655 129 655 137 L655 201 Q655 209 647 209 L580 209" class="wire reply"/><polygon points="570,209 580,204 580,214" class="head reply"/>
+          <text x="697" y="91" text-anchor="middle" class="tiny">daily bounds</text>
+          <path d="M740 270 V335 A70 12 0 0 0 880 335 V270" class="store"/><ellipse cx="810" cy="270" rx="70" ry="12" class="store"/><text x="810" y="312.5" text-anchor="middle" class="label">Spec 2 Files</text><text x="810" y="330.5" text-anchor="middle" class="sub">hour(event_time)</text>
+          <path d="M570 231 L627 231 Q635 231 635 239 L635 287 Q635 295 643 295 L730 295" class="wire"/><polygon points="740,295 730,300 730,290" class="head"/>
+          <path d="M740 319 L623 319 Q615 319 615 311 L615 282 Q615 274 607 274 L554 274 Q550 274 550 270 L550 266" class="wire reply"/><polygon points="550,256 555,266 545,266" class="head reply"/>
+          <text x="698" y="284" text-anchor="middle" class="tiny">hourly bounds</text>
+          <g class="is-new">
+            <text x="120" y="90" class="tiny">New writes use spec 2; existing spec 1 files stay unchanged</text>
+            <text x="120" y="120" class="tiny">Same SQL; separate filter projection for each spec</text>
+            <rect x="117" y="285" width="390" height="20" rx="10" class="badge"/><text x="312" y="299" text-anchor="middle" class="badge-text">1 hour query: 1 daily bucket or 1 hourly bucket</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">一小时查询可能命中一个旧日桶和一个新小时桶，实际取决于时间范围；不能把日文件当作已经细分。</span><span class="lang-en">A one-hour range may select a daily or hourly bucket, depending on where it falls; daily files were not split.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d3s5t d3s5d">
+          <title id="d3s5t">Distinguish specification from physical rewrite</title>
+          <desc id="d3s5d">The complete plan preserves both file layouts; an annotation separates spec evolution from physical cold-data coarsening.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="90" y="18" width="854" height="366" rx="18" class="boundary"/><text x="106" y="38" class="tiny">PARTITION EVOLUTION · each file retains its own spec ID</text>
+          <rect x="120" y="166" width="150" height="90" rx="12" class="box"/><text x="195" y="208" text-anchor="middle" class="label">Query</text><text x="195" y="227" text-anchor="middle" class="sub">event_time predicate</text>
+          <rect x="410" y="166" width="160" height="90" rx="12" class="box"/><text x="490" y="208" text-anchor="middle" class="label">Planner</text><text x="490" y="227" text-anchor="middle" class="sub">pinned snapshot</text>
+          <path d="M270 195 L400 195" class="wire"/><polygon points="410,195 400,200 400,190" class="head"/>
+          <path d="M410 219 L280 219" class="wire reply"/><polygon points="270,219 280,214 280,224" class="head reply"/>
+          <text x="340" y="187" text-anchor="middle" class="tiny">filter</text>
+          <text x="340" y="236" text-anchor="middle" class="tiny">tasks</text>
+          <path d="M740 80 V145 A70 12 0 0 0 880 145 V80" class="store"/><ellipse cx="810" cy="80" rx="70" ry="12" class="store"/><text x="810" y="122.5" text-anchor="middle" class="label">Spec 1 Files</text><text x="810" y="140.5" text-anchor="middle" class="sub">day(event_time)</text>
+          <path d="M570 190 L627 190 Q635 190 635 182 L635 113 Q635 105 643 105 L730 105" class="wire"/><polygon points="740,105 730,110 730,100" class="head"/>
+          <path d="M740 129 L663 129 Q655 129 655 137 L655 201 Q655 209 647 209 L580 209" class="wire reply"/><polygon points="570,209 580,204 580,214" class="head reply"/>
+          <text x="697" y="91" text-anchor="middle" class="tiny">daily bounds</text>
+          <path d="M740 270 V335 A70 12 0 0 0 880 335 V270" class="store"/><ellipse cx="810" cy="270" rx="70" ry="12" class="store"/><text x="810" y="312.5" text-anchor="middle" class="label">Spec 2 Files</text><text x="810" y="330.5" text-anchor="middle" class="sub">hour(event_time)</text>
+          <path d="M570 231 L627 231 Q635 231 635 239 L635 287 Q635 295 643 295 L730 295" class="wire"/><polygon points="740,295 730,300 730,290" class="head"/>
+          <path d="M740 319 L623 319 Q615 319 615 311 L615 282 Q615 274 607 274 L554 274 Q550 274 550 270 L550 266" class="wire reply"/><polygon points="550,256 555,266 545,266" class="head reply"/>
+          <text x="698" y="284" text-anchor="middle" class="tiny">hourly bounds</text>
+          <text x="120" y="90" class="tiny">New writes use spec 2; existing spec 1 files stay unchanged</text>
+          <text x="120" y="120" class="tiny">Same SQL; separate filter projection for each spec</text>
+          <rect x="117" y="285" width="390" height="20" rx="10" class="badge"/><text x="312" y="299" text-anchor="middle" class="badge-text">1 hour query: 1 daily bucket or 1 hourly bucket</text>
+          <g class="is-new">
+            <text x="120" y="350" class="clock">1 TB/day: ~1 TB vs ~41.7 GB before other pruning</text>
+            <text x="120" y="373" class="tiny">Cold coarsening is a physical rewrite, not just updateSpec()</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">A1 均匀 1 TB/天时一小时约 41.7 GB；旧日桶仍可能读约 1 TB。热细冷粗要真的重写文件，再走原子替换。</span><span class="lang-en">At uniform 1 TB/day an hour is about 41.7 GB; an old daily bucket can still be about 1 TB. Coarsening requires a rewrite.</span></figcaption>
+      </div>
+    </figure><div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p><p>分区键先看查询：本例大多数报表带 event_time 范围，因此时间变换让规划器排除整组文件。租户隔离与热点也要考虑，但不能因为有 tenant_id 就为每个租户每天建一个目录；极小租户会制造大量空桶和小文件。按租户分桶、排序或聚簇是替代方案，收益依赖过滤分布。分区不等于索引：只查一个 event_id 却不带时间，可能仍需要扫多个时间桶，所以在线点查留在 Hot KV。</p><p>图里的 spec 1 按天，spec 2 按小时。演进后新写采用小时，旧日文件保留旧 spec_id；Planner 把同一逻辑时间过滤分别投影到两套规格，并汇总候选任务。Iceberg 1.10.0 文档明确演进是元数据操作，不会立即重写旧文件 <a href="#ref-4">[4]</a>。这意味着修改规格可以迅速生效于后续写入，但不能承诺旧查询从此都少扫 24 倍；旧文件的物理边界仍在那里。</p><p>均匀输入时一小时原始量是 1 TB÷24≈41.7 GB。命中小时文件的查询候选约这一小时，命中旧日文件时粗粒度候选仍可能是 1 TB；页统计、排序和精确谓词还可能继续削减。这个比较是相同压缩与字段下的候选范围，不是承诺每天每小时一样热。若要让历史也变细，或把冷的小时文件合成按天、按月布局，就启动物理 rewrite；读取旧集合、写新集合、原子替换，不能只改 spec 让旧目录获得不存在的新含义。</p><p>Schema 演进与分区演进还要分开。事件里的 price 重命名不应把旧文件的另一列误读过来，稳定字段 ID 比列的位置或名字更可靠；删除字段后再用同名新字段也不能复活旧值 [4]。查询既要固定 snapshot，也要固定 schema 与 spec 解释。故障恢复时重跑同一批输入，若默认 spec 已变，输出可以用新规格，但提交必须说明输入覆盖与稳定批次身份；不能因两套布局共存就把同一事件写两遍。</p></div><div class="lang-en"><p class="col-kicker">English</p><p>Choose partitions from query predicates. Time transforms eliminate file groups, while tenant isolation and skew may favor bounded buckets or clustering rather than tiny tenant/day directories. Partitions are not point indexes; event_id without a time filter can span many buckets, so online reads stay in Hot KV.</p><p>Spec 1 is daily and spec 2 hourly. New writes use the latter; old files retain spec_id. Planner independently derives filters for each layout. Iceberg 1.10.0 calls evolution a metadata operation without eagerly rewriting old files [4]; historical scans do not instantly gain 24× pruning.</p><p>Under uniform input an hour is 1/24 TB≈41.7 GB. Hourly files have finer candidates than old daily files, before further statistics and predicates. This is not uniform production traffic. Historical refinement or cold coarsening needs a physical rewrite and atomic replacement, not reinterpretation of old paths.</p><p>Schema and partition evolution are distinct. Stable field IDs keep renames and reused names from reinterpreting old values [4]. Pin snapshot, schema and spec interpretation together. Recovery may write a new layout after a default changes, but must preserve input coverage and batch identity rather than duplicate events.</p></div></div></section>
+
+<section><h2><span class="lang-zh">4 · 湖仓写入：对象存在与表提交是两件事</span><span class="lang-en">4 · Lakehouse writes: objects versus table commits</span></h2><figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d4s1t d4s1d">
+          <title id="d4s1t">Record the batch identity</title>
+          <desc id="d4s1d">Writer asks Committer to commit batch b17; the return route is reserved for a durable commit result.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <g class="is-new">
+            <rect x="90" y="18" width="854" height="366" rx="18" class="boundary"/><text x="106" y="38" class="tiny">COMMIT · immutable objects first, atomic catalog publication last</text>
+            <circle cx="44" cy="186" r="12" class="box"/><path d="M24 232 Q44 200 64 232" class="wire"/><text x="44" y="254" text-anchor="middle" class="label">Writer</text>
+            <rect x="180" y="166" width="150" height="84" rx="12" class="box"/><text x="255" y="205" text-anchor="middle" class="label">Committer</text><text x="255" y="224" text-anchor="middle" class="sub">base=s40, batch=b17</text>
+            <path d="M70 201 L170 201" class="wire"/><polygon points="180,201 170,206 170,196" class="head"/>
+            <path d="M180 219 L80 219" class="wire reply"/><polygon points="70,219 80,214 80,224" class="head reply"/>
+            <text x="125" y="191" text-anchor="middle" class="tiny">commit batch</text>
+            <text x="125" y="236" text-anchor="middle" class="tiny">durable result</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">先固定 batch b17 与基线 s40。图上的回程是完成后走的路，上传成功之前不会提前回成功。</span><span class="lang-en">Fix batch b17 and base s40. The reply route is used only after durable publication.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d4s2t d4s2d">
+          <title id="d4s2t">Upload immutable data files</title>
+          <desc id="d4s2d">Committer PUTs unique Object Files and receives upload completion before catalog publication.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="90" y="18" width="854" height="366" rx="18" class="boundary"/><text x="106" y="38" class="tiny">COMMIT · immutable objects first, atomic catalog publication last</text>
+          <circle cx="44" cy="186" r="12" class="box"/><path d="M24 232 Q44 200 64 232" class="wire"/><text x="44" y="254" text-anchor="middle" class="label">Writer</text>
+          <rect x="180" y="166" width="150" height="84" rx="12" class="box"/><text x="255" y="205" text-anchor="middle" class="label">Committer</text><text x="255" y="224" text-anchor="middle" class="sub">base=s40, batch=b17</text>
+          <path d="M70 201 L170 201" class="wire"/><polygon points="180,201 170,206 170,196" class="head"/>
+          <path d="M180 219 L80 219" class="wire reply"/><polygon points="70,219 80,214 80,224" class="head reply"/>
+          <text x="125" y="191" text-anchor="middle" class="tiny">commit batch</text>
+          <text x="125" y="236" text-anchor="middle" class="tiny">durable result</text>
+          <g class="is-new">
+            <path d="M740 95 V170 A70 12 0 0 0 880 170 V95" class="store"/><ellipse cx="810" cy="95" rx="70" ry="12" class="store"/><text x="810" y="142.5" text-anchor="middle" class="label">Object Files</text><text x="810" y="160.5" text-anchor="middle" class="sub">unique data keys</text>
+            <path d="M240 166 L240 78 Q240 70 248 70 L672 70 Q680 70 680 78 L680 112 Q680 120 688 120 L730 120" class="wire"/><polygon points="740,120 730,125 730,115" class="head"/>
+            <path d="M740 144 L368 144 Q360 144 360 152 L360 173 Q360 181 352 181 L340 181" class="wire reply"/><polygon points="330,181 340,176 340,186" class="head reply"/>
+            <text x="480" y="62" text-anchor="middle" class="tiny">1. PUT immutable files</text>
+            <text x="535" y="137" text-anchor="middle" class="tiny">upload completion</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">文件先上传到唯一键。PUT 成功只证明对象存在，还没进入表；此时查询看不到这一批。</span><span class="lang-en">Upload unique immutable keys. Successful PUT means the object exists, not that the table contains it.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d4s3t d4s3d">
+          <title id="d4s3t">Build the immutable metadata tree</title>
+          <desc id="d4s3d">After uploading Object Files, Committer uploads Table Metadata containing manifests and snapshot references and receives completion.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="90" y="18" width="854" height="366" rx="18" class="boundary"/><text x="106" y="38" class="tiny">COMMIT · immutable objects first, atomic catalog publication last</text>
+          <circle cx="44" cy="186" r="12" class="box"/><path d="M24 232 Q44 200 64 232" class="wire"/><text x="44" y="254" text-anchor="middle" class="label">Writer</text>
+          <rect x="180" y="166" width="150" height="84" rx="12" class="box"/><text x="255" y="205" text-anchor="middle" class="label">Committer</text><text x="255" y="224" text-anchor="middle" class="sub">base=s40, batch=b17</text>
+          <path d="M70 201 L170 201" class="wire"/><polygon points="180,201 170,206 170,196" class="head"/>
+          <path d="M180 219 L80 219" class="wire reply"/><polygon points="70,219 80,214 80,224" class="head reply"/>
+          <text x="125" y="191" text-anchor="middle" class="tiny">commit batch</text>
+          <text x="125" y="236" text-anchor="middle" class="tiny">durable result</text>
+          <path d="M740 95 V170 A70 12 0 0 0 880 170 V95" class="store"/><ellipse cx="810" cy="95" rx="70" ry="12" class="store"/><text x="810" y="142.5" text-anchor="middle" class="label">Object Files</text><text x="810" y="160.5" text-anchor="middle" class="sub">unique data keys</text>
+          <path d="M240 166 L240 78 Q240 70 248 70 L672 70 Q680 70 680 78 L680 112 Q680 120 688 120 L730 120" class="wire"/><polygon points="740,120 730,125 730,115" class="head"/>
+          <path d="M740 144 L368 144 Q360 144 360 152 L360 173 Q360 181 352 181 L340 181" class="wire reply"/><polygon points="330,181 340,176 340,186" class="head reply"/>
+          <text x="480" y="62" text-anchor="middle" class="tiny">1. PUT immutable files</text>
+          <text x="535" y="137" text-anchor="middle" class="tiny">upload completion</text>
+          <g class="is-new">
+            <path d="M740 285 V350 A70 12 0 0 0 880 350 V285" class="store"/><ellipse cx="810" cy="285" rx="70" ry="12" class="store"/><text x="810" y="327.5" text-anchor="middle" class="label">Table Metadata</text><text x="810" y="345.5" text-anchor="middle" class="sub">manifest + snapshot</text>
+            <path d="M260 250 L260 302 Q260 310 268 310 L730 310" class="wire"/><polygon points="740,310 730,315 730,305" class="head"/>
+            <path d="M740 334 L248 334 Q240 334 240 326 L240 260" class="wire reply"/><polygon points="240,250 245,260 235,260" class="head reply"/>
+            <text x="529" y="300" text-anchor="middle" class="tiny">2. PUT meta41 -&gt; files</text>
+            <text x="528" y="353" text-anchor="middle" class="tiny">metadata durable</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">写好 manifest 和 snapshot 引用链，把所有依赖对象先落稳。读者不需要 LIST 整个桶才能知道表里有哪些文件。</span><span class="lang-en">Durably build manifest and snapshot references first; readers need not list the entire bucket.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d4s4t d4s4d">
+          <title id="d4s4t">Publish with a conditional catalog swap</title>
+          <desc id="d4s4d">Committer CASes Catalog from meta40 to meta41 and receives the published snapshot result; reply continues to Writer.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="90" y="18" width="854" height="366" rx="18" class="boundary"/><text x="106" y="38" class="tiny">COMMIT · immutable objects first, atomic catalog publication last</text>
+          <circle cx="44" cy="186" r="12" class="box"/><path d="M24 232 Q44 200 64 232" class="wire"/><text x="44" y="254" text-anchor="middle" class="label">Writer</text>
+          <rect x="180" y="166" width="150" height="84" rx="12" class="box"/><text x="255" y="205" text-anchor="middle" class="label">Committer</text><text x="255" y="224" text-anchor="middle" class="sub">base=s40, batch=b17</text>
+          <path d="M70 201 L170 201" class="wire"/><polygon points="180,201 170,206 170,196" class="head"/>
+          <path d="M180 219 L80 219" class="wire reply"/><polygon points="70,219 80,214 80,224" class="head reply"/>
+          <text x="125" y="191" text-anchor="middle" class="tiny">commit batch</text>
+          <text x="125" y="236" text-anchor="middle" class="tiny">durable result</text>
+          <path d="M740 95 V170 A70 12 0 0 0 880 170 V95" class="store"/><ellipse cx="810" cy="95" rx="70" ry="12" class="store"/><text x="810" y="142.5" text-anchor="middle" class="label">Object Files</text><text x="810" y="160.5" text-anchor="middle" class="sub">unique data keys</text>
+          <path d="M240 166 L240 78 Q240 70 248 70 L672 70 Q680 70 680 78 L680 112 Q680 120 688 120 L730 120" class="wire"/><polygon points="740,120 730,125 730,115" class="head"/>
+          <path d="M740 144 L368 144 Q360 144 360 152 L360 173 Q360 181 352 181 L340 181" class="wire reply"/><polygon points="330,181 340,176 340,186" class="head reply"/>
+          <text x="480" y="62" text-anchor="middle" class="tiny">1. PUT immutable files</text>
+          <text x="535" y="137" text-anchor="middle" class="tiny">upload completion</text>
+          <path d="M740 285 V350 A70 12 0 0 0 880 350 V285" class="store"/><ellipse cx="810" cy="285" rx="70" ry="12" class="store"/><text x="810" y="327.5" text-anchor="middle" class="label">Table Metadata</text><text x="810" y="345.5" text-anchor="middle" class="sub">manifest + snapshot</text>
+          <path d="M260 250 L260 302 Q260 310 268 310 L730 310" class="wire"/><polygon points="740,310 730,315 730,305" class="head"/>
+          <path d="M740 334 L248 334 Q240 334 240 326 L240 260" class="wire reply"/><polygon points="240,250 245,260 235,260" class="head reply"/>
+          <text x="529" y="300" text-anchor="middle" class="tiny">2. PUT meta41 -&gt; files</text>
+          <text x="528" y="353" text-anchor="middle" class="tiny">metadata durable</text>
+          <g class="is-new">
+            <path d="M440 170 V235 A70 12 0 0 0 580 235 V170" class="store"/><ellipse cx="510" cy="170" rx="70" ry="12" class="store"/><text x="510" y="212.5" text-anchor="middle" class="label">Catalog</text><text x="510" y="230.5" text-anchor="middle" class="sub">current metadata ptr</text>
+            <path d="M330 199 L430 199" class="wire"/><polygon points="440,199 430,204 430,194" class="head"/>
+            <path d="M440 219 L340 219" class="wire reply"/><polygon points="330,219 340,214 340,224" class="head reply"/>
+            <text x="385" y="188" text-anchor="middle" class="tiny">3. CAS</text>
+            <text x="385" y="238" text-anchor="middle" class="tiny">s41</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">Catalog 用 compare-and-swap 替换当前元数据指针。只改这一个发布点，读者看到完整旧版或完整新版。</span><span class="lang-en">Publish through one conditional metadata-pointer swap; readers see a complete old or new version.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d4s5t d4s5d">
+          <title id="d4s5t">Acknowledge table visibility, not only upload</title>
+          <desc id="d4s5d">Catalog CAS acknowledgment returns to Committer, then Writer; b17 remains discoverable for recovery.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="90" y="18" width="854" height="366" rx="18" class="boundary"/><text x="106" y="38" class="tiny">COMMIT · immutable objects first, atomic catalog publication last</text>
+          <circle cx="44" cy="186" r="12" class="box"/><path d="M24 232 Q44 200 64 232" class="wire"/><text x="44" y="254" text-anchor="middle" class="label">Writer</text>
+          <rect x="180" y="166" width="150" height="84" rx="12" class="box"/><text x="255" y="205" text-anchor="middle" class="label">Committer</text><text x="255" y="224" text-anchor="middle" class="sub">base=s40, batch=b17</text>
+          <path d="M70 201 L170 201" class="wire"/><polygon points="180,201 170,206 170,196" class="head"/>
+          <path d="M180 219 L80 219" class="wire reply"/><polygon points="70,219 80,214 80,224" class="head reply"/>
+          <text x="125" y="191" text-anchor="middle" class="tiny">commit batch</text>
+          <text x="125" y="236" text-anchor="middle" class="tiny">durable result</text>
+          <path d="M740 95 V170 A70 12 0 0 0 880 170 V95" class="store"/><ellipse cx="810" cy="95" rx="70" ry="12" class="store"/><text x="810" y="142.5" text-anchor="middle" class="label">Object Files</text><text x="810" y="160.5" text-anchor="middle" class="sub">unique data keys</text>
+          <path d="M240 166 L240 78 Q240 70 248 70 L672 70 Q680 70 680 78 L680 112 Q680 120 688 120 L730 120" class="wire"/><polygon points="740,120 730,125 730,115" class="head"/>
+          <path d="M740 144 L368 144 Q360 144 360 152 L360 173 Q360 181 352 181 L340 181" class="wire reply"/><polygon points="330,181 340,176 340,186" class="head reply"/>
+          <text x="480" y="62" text-anchor="middle" class="tiny">1. PUT immutable files</text>
+          <text x="535" y="137" text-anchor="middle" class="tiny">upload completion</text>
+          <path d="M740 285 V350 A70 12 0 0 0 880 350 V285" class="store"/><ellipse cx="810" cy="285" rx="70" ry="12" class="store"/><text x="810" y="327.5" text-anchor="middle" class="label">Table Metadata</text><text x="810" y="345.5" text-anchor="middle" class="sub">manifest + snapshot</text>
+          <path d="M260 250 L260 302 Q260 310 268 310 L730 310" class="wire"/><polygon points="740,310 730,315 730,305" class="head"/>
+          <path d="M740 334 L248 334 Q240 334 240 326 L240 260" class="wire reply"/><polygon points="240,250 245,260 235,260" class="head reply"/>
+          <text x="529" y="300" text-anchor="middle" class="tiny">2. PUT meta41 -&gt; files</text>
+          <text x="528" y="353" text-anchor="middle" class="tiny">metadata durable</text>
+          <path d="M440 170 V235 A70 12 0 0 0 580 235 V170" class="store"/><ellipse cx="510" cy="170" rx="70" ry="12" class="store"/><text x="510" y="212.5" text-anchor="middle" class="label">Catalog</text><text x="510" y="230.5" text-anchor="middle" class="sub">current metadata ptr</text>
+          <path d="M330 199 L430 199" class="wire"/><polygon points="440,199 430,204 430,194" class="head"/>
+          <path d="M440 219 L340 219" class="wire reply"/><polygon points="330,219 340,214 340,224" class="head reply"/>
+          <text x="385" y="188" text-anchor="middle" class="tiny">3. CAS</text>
+          <text x="385" y="238" text-anchor="middle" class="tiny">s41</text>
+          <g class="is-new">
+            <rect x="602" y="201" width="313" height="20" rx="10" class="badge"/><text x="758.5" y="215" text-anchor="middle" class="badge-text">CAS: expect meta40, publish meta41</text>
+            <text x="117" y="360" class="tiny">Success only after CAS; b17 must be recognized on recovery</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">只有发布成功才确认。b17 的提交身份必须可恢复查询，否则丢 ACK 后重试会把同一批追加两遍。</span><span class="lang-en">Acknowledge after publication. Recover batch b17’s identity so lost acknowledgments do not duplicate it.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d4s6t d4s6d">
+          <title id="d4s6t">Recover conflict and unknown outcomes</title>
+          <desc id="d4s6d">Catalog returns conflict or unknown outcome to Committer, which refreshes and checks b17 before retrying; Writer receives only the resolved result.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="90" y="18" width="854" height="366" rx="18" class="boundary"/><text x="106" y="38" class="tiny">COMMIT · immutable objects first, atomic catalog publication last</text>
+          <circle cx="44" cy="186" r="12" class="box"/><path d="M24 232 Q44 200 64 232" class="wire"/><text x="44" y="254" text-anchor="middle" class="label">Writer</text>
+          <rect x="180" y="166" width="150" height="84" rx="12" class="box"/><text x="255" y="205" text-anchor="middle" class="label">Committer</text><text x="255" y="224" text-anchor="middle" class="sub">base=s40, batch=b17</text>
+          <path d="M70 201 L170 201" class="wire"/><polygon points="180,201 170,206 170,196" class="head"/>
+          <path d="M180 219 L80 219" class="wire reply"/><polygon points="70,219 80,214 80,224" class="head reply"/>
+          <text x="125" y="191" text-anchor="middle" class="tiny">commit batch</text>
+          <text x="125" y="236" text-anchor="middle" class="tiny">durable result</text>
+          <path d="M740 95 V170 A70 12 0 0 0 880 170 V95" class="store"/><ellipse cx="810" cy="95" rx="70" ry="12" class="store"/><text x="810" y="142.5" text-anchor="middle" class="label">Object Files</text><text x="810" y="160.5" text-anchor="middle" class="sub">unique data keys</text>
+          <path d="M240 166 L240 78 Q240 70 248 70 L672 70 Q680 70 680 78 L680 112 Q680 120 688 120 L730 120" class="wire"/><polygon points="740,120 730,125 730,115" class="head"/>
+          <path d="M740 144 L368 144 Q360 144 360 152 L360 173 Q360 181 352 181 L340 181" class="wire reply"/><polygon points="330,181 340,176 340,186" class="head reply"/>
+          <text x="480" y="62" text-anchor="middle" class="tiny">1. PUT immutable files</text>
+          <text x="535" y="137" text-anchor="middle" class="tiny">upload completion</text>
+          <path d="M740 285 V350 A70 12 0 0 0 880 350 V285" class="store"/><ellipse cx="810" cy="285" rx="70" ry="12" class="store"/><text x="810" y="327.5" text-anchor="middle" class="label">Table Metadata</text><text x="810" y="345.5" text-anchor="middle" class="sub">manifest + snapshot</text>
+          <path d="M260 250 L260 302 Q260 310 268 310 L730 310" class="wire"/><polygon points="740,310 730,315 730,305" class="head"/>
+          <path d="M740 334 L248 334 Q240 334 240 326 L240 260" class="wire reply"/><polygon points="240,250 245,260 235,260" class="head reply"/>
+          <text x="529" y="300" text-anchor="middle" class="tiny">2. PUT meta41 -&gt; files</text>
+          <text x="528" y="353" text-anchor="middle" class="tiny">metadata durable</text>
+          <path d="M440 170 V235 A70 12 0 0 0 580 235 V170" class="store"/><ellipse cx="510" cy="170" rx="70" ry="12" class="store"/><text x="510" y="212.5" text-anchor="middle" class="label">Catalog</text><text x="510" y="230.5" text-anchor="middle" class="sub">current metadata ptr</text>
+          <path d="M330 199 L430 199" class="wire"/><polygon points="440,199 430,204 430,194" class="head"/>
+          <path d="M440 219 L340 219" class="wire reply"/><polygon points="330,219 340,214 340,224" class="head reply"/>
+          <text x="385" y="188" text-anchor="middle" class="tiny">3. CAS</text>
+          <text x="385" y="238" text-anchor="middle" class="tiny">s41</text>
+          <rect x="602" y="201" width="313" height="20" rx="10" class="badge"/><text x="758.5" y="215" text-anchor="middle" class="badge-text">CAS: expect meta40, publish meta41</text>
+          <text x="117" y="360" class="tiny">Success only after CAS; b17 must be recognized on recovery</text>
+          <g class="is-new">
+            <path d="M440 229 L340 229" class="wire fail"/><polygon points="330,229 340,224 340,234" class="head fail"/>
+            <text x="585" y="270" class="tiny">conflict / UNKNOWN</text>
+            <text x="600" y="254" class="tiny">Refresh + validate; lookup b17 before retry</text>
+            <text x="400" y="286" class="tiny">Reject stale overwrite / premature GC</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">冲突刷新再验证，UNKNOWN 先查 b17 是否已进入可信提交历史；不能覆盖新指针，也不能把结果未知的文件立刻当垃圾删。</span><span class="lang-en">Refresh and validate conflicts; resolve UNKNOWN through trusted batch history before retrying or collecting output.</span></figcaption>
+      </div>
+    </figure><div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p><p>湖仓中的“表格式”不是一台串在 Query 和 Object Files 中间转发字节的服务。它规定快照、schema、分区、文件与删除等元数据如何描述一张表；Catalog 给出当前元数据入口，计算引擎实现读取与写入。以 Iceberg v2 的 snapshot/manifest 机制为例 <a href="#ref-6">[6]</a>，本章画的是原子发布与恢复职责；其他格式的协议可以不同，不能把这里的 Catalog CAS 图原封不动称为所有 Hudi 写入的实现。</p><p>正常写入固定基线 s40 与 batch b17。Committer 为这一批生成唯一对象键，上传不可变数据，再上传引用这些文件的 manifest 与新元数据树；确认依赖对象全部完成后，请 Catalog 在当前仍为 meta40 时发布 meta41。只有这个条件更新成功，才沿 Catalog→Committer→Writer 返回提交结果。图里前两步的 upload completion 是存储确认，第三步才是表可见确认。查询不会靠文件名最晚或桶里文件最多判断“最新表”。</p><p>两个写者都基于 s40 时，一个先发布 s41，另一个的条件更新失败。它刷新入口，检查自己的新增是否还能安全追加、是否与并发删除或重写冲突，再重新建候选提交。Iceberg 的可靠性文档把原子元数据指针交换和乐观并发重试作为核心 <a href="#ref-5">[5]</a>。它不是“失败就覆盖 Catalog”。普通追加可能重用已写文件，涉及替换与删除则需要验证输入仍有效；重试次数、退避和提交并发上限也是控制面容量的一部分。</p><p>最危险的是 CAS 成功但 ACK 丢失。Writer 只知道 UNKNOWN；再次上传并追加 b17，可能重复统计整批。这里要求可信提交记录保留 b17 或等价的稳定输入范围身份，恢复时检查它是否曾被接受；即使 current 已从 s41 走到 s42，也不能只看当前页是否等于自己的指针。如果历史证据被裁剪且没有可查询的幂等结果，就无法安全猜未提交，应保留输出并转人工核对。表格式的原子快照并不自动赠送业务 event_id 唯一约束。</p><p>三个崩溃窗口要能口述：数据已写、元数据未完成，产生尚未引用的候选；元数据已写、Catalog 未发布，产生完整但不可见的候选；Catalog 已发布、客户端没收到，产生结果未知但已经可见的提交。前两种可以恢复发布或等待安全垃圾回收，第三种必须先查身份。外部事件输入与表提交不在一个事务时，位点在确认表提交后推进，重放按稳定 ID 去重；先推进再写表会把故障窗口变成永久漏数。</p></div><div class="lang-en"><p class="col-kicker">English</p><p>A table format specifies snapshots, schemas, partition/files/deletes, not a byte-forwarding service. Catalog resolves metadata and engines execute reads/writes. The diagram models Iceberg v2 snapshot/manifest publication [6]; other formats can use different protocols.</p><p>Fix s40 and batch b17, upload unique immutable data and its metadata tree, then conditionally change meta40 to meta41 only if the base still matches. Upload completion is storage confirmation; catalog publication makes the table visible. Return through Committer only afterward. Filename recency and bucket contents do not define the current table.</p><p>If two writers share s40, the second loses the conditional update after s41 is published. Refresh, validate compatibility and construct a new commit rather than overwrite Catalog. Iceberg documents atomic pointer replacement and optimistic retry [5]. Safe appends may reuse files; replacements/deletes require stronger input validation. Bound retries and commit concurrency.</p><p>A lost ACK after successful CAS creates UNKNOWN. Re-appending b17 can duplicate the batch. Preserve trusted batch/range identity in recoverable commit history or an equivalent idempotent result. A newer current pointer is not proof that b17 failed. Without retained evidence, keep output and escalate rather than guess. Atomic snapshots do not enforce business event_id uniqueness.</p><p>Distinguish data-only candidates, complete metadata not yet published, and published commits with lost replies. Recover publication or safely collect the first two; resolve identity first for the third. When input offsets and table commits are separate, advance progress only after confirmed table durability and deduplicate replay. Advancing first can lose data.</p></div></div></section>
+
+<section><h2><span class="lang-zh">5 · 快照读取：固定一份完整文件清单</span><span class="lang-en">5 · Snapshot reads pin one complete file set</span></h2><figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s1t d5s1d">
+          <title id="d5s1t">Resolve and pin a catalog pointer</title>
+          <desc id="d5s1d">Client calls Query; Query reads Catalog and receives a current metadata pointer, then replies through its reserved result route.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <g class="is-new">
+            <rect x="90" y="18" width="854" height="366" rx="18" class="boundary"/><text x="106" y="38" class="tiny">SNAPSHOT READ · metadata lookups and byte reads are separate</text>
+            <circle cx="44" cy="186" r="12" class="box"/><path d="M24 232 Q44 200 64 232" class="wire"/><text x="44" y="254" text-anchor="middle" class="label">Client</text>
+            <rect x="180" y="174" width="140" height="72" rx="12" class="box"/><text x="250" y="207" text-anchor="middle" class="label">Query</text><text x="250" y="226" text-anchor="middle" class="sub">authorize + pin</text>
+            <path d="M440 80 V145 A70 12 0 0 0 580 145 V80" class="store"/><ellipse cx="510" cy="80" rx="70" ry="12" class="store"/><text x="510" y="122.5" text-anchor="middle" class="label">Catalog</text><text x="510" y="140.5" text-anchor="middle" class="sub">current metadata ptr</text>
+            <path d="M70 201 L170 201" class="wire"/><polygon points="180,201 170,206 170,196" class="head"/>
+            <path d="M180 219 L80 219" class="wire reply"/><polygon points="70,219 80,214 80,224" class="head reply"/>
+            <path d="M320 195 L362 195 Q370 195 370 187 L370 113 Q370 105 378 105 L430 105" class="wire"/><polygon points="440,105 430,110 430,100" class="head"/>
+            <path d="M440 129 L398 129 Q390 129 390 137 L390 211 Q390 219 382 219 L330 219" class="wire reply"/><polygon points="320,219 330,214 330,224" class="head reply"/>
+            <text x="425" y="94" text-anchor="end" class="tiny">get pointer</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">鉴权后先取得可信 Catalog 指针。拿到版本只是规划起点，最终结果还必须等数据任务全部完成。</span><span class="lang-en">Authorize, resolve a trusted catalog pointer, then wait for all required tasks before success.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s2t d5s2d">
+          <title id="d5s2t">Read table metadata directly</title>
+          <desc id="d5s2d">Query reads Table Metadata at the pointer supplied by Catalog and receives snapshot and manifests; Catalog is not a data proxy.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="90" y="18" width="854" height="366" rx="18" class="boundary"/><text x="106" y="38" class="tiny">SNAPSHOT READ · metadata lookups and byte reads are separate</text>
+          <circle cx="44" cy="186" r="12" class="box"/><path d="M24 232 Q44 200 64 232" class="wire"/><text x="44" y="254" text-anchor="middle" class="label">Client</text>
+          <rect x="180" y="174" width="140" height="72" rx="12" class="box"/><text x="250" y="207" text-anchor="middle" class="label">Query</text><text x="250" y="226" text-anchor="middle" class="sub">authorize + pin</text>
+          <path d="M440 80 V145 A70 12 0 0 0 580 145 V80" class="store"/><ellipse cx="510" cy="80" rx="70" ry="12" class="store"/><text x="510" y="122.5" text-anchor="middle" class="label">Catalog</text><text x="510" y="140.5" text-anchor="middle" class="sub">current metadata ptr</text>
+          <path d="M70 201 L170 201" class="wire"/><polygon points="180,201 170,206 170,196" class="head"/>
+          <path d="M180 219 L80 219" class="wire reply"/><polygon points="70,219 80,214 80,224" class="head reply"/>
+          <path d="M320 195 L362 195 Q370 195 370 187 L370 113 Q370 105 378 105 L430 105" class="wire"/><polygon points="440,105 430,110 430,100" class="head"/>
+          <path d="M440 129 L398 129 Q390 129 390 137 L390 211 Q390 219 382 219 L330 219" class="wire reply"/><polygon points="320,219 330,214 330,224" class="head reply"/>
+          <text x="425" y="94" text-anchor="end" class="tiny">get pointer</text>
+          <g class="is-new">
+            <path d="M740 80 V145 A70 12 0 0 0 880 145 V80" class="store"/><ellipse cx="810" cy="80" rx="70" ry="12" class="store"/><text x="810" y="122.5" text-anchor="middle" class="label">Table Metadata</text><text x="810" y="140.5" text-anchor="middle" class="sub">s41 + manifests</text>
+            <path d="M280 174 L280 70 Q280 62 288 62 L692 62 Q700 62 700 70 L700 97 Q700 105 708 105 L730 105" class="wire"/><polygon points="740,105 730,110 730,100" class="head"/>
+            <path d="M810 68 L810 58 Q810 50 802 50 L248 50 Q240 50 240 58 L240 164" class="wire reply"/><polygon points="240,174 235,164 245,164" class="head reply"/>
+            <text x="600" y="88" class="tiny">metadata GET</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">Query 自己读取 snapshot 和 manifest。Catalog 只给当前指针，文件字节不会沿 Catalog 回来。</span><span class="lang-en">Query reads snapshot/manifests directly. Catalog returns pointers and does not proxy data bytes.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s3t d5s3d">
+          <title id="d5s3t">Dispatch snapshot-bound scan tasks</title>
+          <desc id="d5s3d">Query dispatches tasks to Scan Worker, Worker reads selected Object Files and applicable deletes, and returns partial results to Query, then Client.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="90" y="18" width="854" height="366" rx="18" class="boundary"/><text x="106" y="38" class="tiny">SNAPSHOT READ · metadata lookups and byte reads are separate</text>
+          <circle cx="44" cy="186" r="12" class="box"/><path d="M24 232 Q44 200 64 232" class="wire"/><text x="44" y="254" text-anchor="middle" class="label">Client</text>
+          <rect x="180" y="174" width="140" height="72" rx="12" class="box"/><text x="250" y="207" text-anchor="middle" class="label">Query</text><text x="250" y="226" text-anchor="middle" class="sub">authorize + pin</text>
+          <path d="M440 80 V145 A70 12 0 0 0 580 145 V80" class="store"/><ellipse cx="510" cy="80" rx="70" ry="12" class="store"/><text x="510" y="122.5" text-anchor="middle" class="label">Catalog</text><text x="510" y="140.5" text-anchor="middle" class="sub">current metadata ptr</text>
+          <path d="M70 201 L170 201" class="wire"/><polygon points="180,201 170,206 170,196" class="head"/>
+          <path d="M180 219 L80 219" class="wire reply"/><polygon points="70,219 80,214 80,224" class="head reply"/>
+          <path d="M320 195 L362 195 Q370 195 370 187 L370 113 Q370 105 378 105 L430 105" class="wire"/><polygon points="440,105 430,110 430,100" class="head"/>
+          <path d="M440 129 L398 129 Q390 129 390 137 L390 211 Q390 219 382 219 L330 219" class="wire reply"/><polygon points="320,219 330,214 330,224" class="head reply"/>
+          <text x="425" y="94" text-anchor="end" class="tiny">get pointer</text>
+          <path d="M740 80 V145 A70 12 0 0 0 880 145 V80" class="store"/><ellipse cx="810" cy="80" rx="70" ry="12" class="store"/><text x="810" y="122.5" text-anchor="middle" class="label">Table Metadata</text><text x="810" y="140.5" text-anchor="middle" class="sub">s41 + manifests</text>
+          <path d="M280 174 L280 70 Q280 62 288 62 L692 62 Q700 62 700 70 L700 97 Q700 105 708 105 L730 105" class="wire"/><polygon points="740,105 730,110 730,100" class="head"/>
+          <path d="M810 68 L810 58 Q810 50 802 50 L248 50 Q240 50 240 58 L240 164" class="wire reply"/><polygon points="240,174 235,164 245,164" class="head reply"/>
+          <text x="600" y="88" class="tiny">metadata GET</text>
+          <g class="is-new">
+            <rect x="440" y="270" width="150" height="74" rx="12" class="box"/><text x="515" y="304" text-anchor="middle" class="label">Scan Worker</text><text x="515" y="323" text-anchor="middle" class="sub">tasks pinned to s41</text>
+            <path d="M740 270 V335 A70 12 0 0 0 880 335 V270" class="store"/><ellipse cx="810" cy="270" rx="70" ry="12" class="store"/><text x="810" y="312.5" text-anchor="middle" class="label">Object Files</text><text x="810" y="330.5" text-anchor="middle" class="sub">data + deletes</text>
+            <path d="M290 246 L290 287 Q290 295 298 295 L430 295" class="wire"/><polygon points="440,295 430,300 430,290" class="head"/>
+            <path d="M440 319 L278 319 Q270 319 270 311 L270 256" class="wire reply"/><polygon points="270,246 275,256 265,256" class="head reply"/>
+            <path d="M590 295 L730 295" class="wire"/><polygon points="740,295 730,300 730,290" class="head"/>
+            <path d="M740 319 L600 319" class="wire reply"/><polygon points="590,319 600,314 600,324" class="head reply"/>
+            <text x="361" y="286" text-anchor="middle" class="tiny">tasks</text>
+            <text x="665" y="286" text-anchor="middle" class="tiny">GET ranges</text>
+            <text x="665" y="338" text-anchor="middle" class="tiny">pages</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">每个任务携带同一 s41 与字段 ID、删除语义。回程 Object Files→Scan Worker→Query→Client，不跳过协调器。</span><span class="lang-en">Each task carries s41, field IDs and delete semantics; replies return through Worker and Query.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s4t d5s4d">
+          <title id="d5s4t">Hold the snapshot across concurrent commits</title>
+          <desc id="d5s4d">Existing s41 tasks remain pinned while Catalog may publish s42; no in-flight task changes file lists.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="90" y="18" width="854" height="366" rx="18" class="boundary"/><text x="106" y="38" class="tiny">SNAPSHOT READ · metadata lookups and byte reads are separate</text>
+          <circle cx="44" cy="186" r="12" class="box"/><path d="M24 232 Q44 200 64 232" class="wire"/><text x="44" y="254" text-anchor="middle" class="label">Client</text>
+          <rect x="180" y="174" width="140" height="72" rx="12" class="box"/><text x="250" y="207" text-anchor="middle" class="label">Query</text><text x="250" y="226" text-anchor="middle" class="sub">authorize + pin</text>
+          <path d="M440 80 V145 A70 12 0 0 0 580 145 V80" class="store"/><ellipse cx="510" cy="80" rx="70" ry="12" class="store"/><text x="510" y="122.5" text-anchor="middle" class="label">Catalog</text><text x="510" y="140.5" text-anchor="middle" class="sub">current metadata ptr</text>
+          <path d="M70 201 L170 201" class="wire"/><polygon points="180,201 170,206 170,196" class="head"/>
+          <path d="M180 219 L80 219" class="wire reply"/><polygon points="70,219 80,214 80,224" class="head reply"/>
+          <path d="M320 195 L362 195 Q370 195 370 187 L370 113 Q370 105 378 105 L430 105" class="wire"/><polygon points="440,105 430,110 430,100" class="head"/>
+          <path d="M440 129 L398 129 Q390 129 390 137 L390 211 Q390 219 382 219 L330 219" class="wire reply"/><polygon points="320,219 330,214 330,224" class="head reply"/>
+          <text x="425" y="94" text-anchor="end" class="tiny">get pointer</text>
+          <path d="M740 80 V145 A70 12 0 0 0 880 145 V80" class="store"/><ellipse cx="810" cy="80" rx="70" ry="12" class="store"/><text x="810" y="122.5" text-anchor="middle" class="label">Table Metadata</text><text x="810" y="140.5" text-anchor="middle" class="sub">s41 + manifests</text>
+          <path d="M280 174 L280 70 Q280 62 288 62 L692 62 Q700 62 700 70 L700 97 Q700 105 708 105 L730 105" class="wire"/><polygon points="740,105 730,110 730,100" class="head"/>
+          <path d="M810 68 L810 58 Q810 50 802 50 L248 50 Q240 50 240 58 L240 164" class="wire reply"/><polygon points="240,174 235,164 245,164" class="head reply"/>
+          <text x="600" y="88" class="tiny">metadata GET</text>
+          <rect x="440" y="270" width="150" height="74" rx="12" class="box"/><text x="515" y="304" text-anchor="middle" class="label">Scan Worker</text><text x="515" y="323" text-anchor="middle" class="sub">tasks pinned to s41</text>
+          <path d="M740 270 V335 A70 12 0 0 0 880 335 V270" class="store"/><ellipse cx="810" cy="270" rx="70" ry="12" class="store"/><text x="810" y="312.5" text-anchor="middle" class="label">Object Files</text><text x="810" y="330.5" text-anchor="middle" class="sub">data + deletes</text>
+          <path d="M290 246 L290 287 Q290 295 298 295 L430 295" class="wire"/><polygon points="440,295 430,300 430,290" class="head"/>
+          <path d="M440 319 L278 319 Q270 319 270 311 L270 256" class="wire reply"/><polygon points="270,246 275,256 265,256" class="head reply"/>
+          <path d="M590 295 L730 295" class="wire"/><polygon points="740,295 730,300 730,290" class="head"/>
+          <path d="M740 319 L600 319" class="wire reply"/><polygon points="590,319 600,314 600,324" class="head reply"/>
+          <text x="361" y="286" text-anchor="middle" class="tiny">tasks</text>
+          <text x="665" y="286" text-anchor="middle" class="tiny">GET ranges</text>
+          <text x="665" y="338" text-anchor="middle" class="tiny">pages</text>
+          <g class="is-new">
+            <rect x="625" y="205" width="277" height="20" rx="10" class="badge"/><text x="763.5" y="219" text-anchor="middle" class="badge-text">New s42 does not change this query</text>
+            <text x="119" y="354" class="tiny">Each task carries s41, schema IDs and applicable delete files</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">查询中途提交 s42 不改变 s41 的文件清单。旧快照引用的对象必须保留到受保护的读者完成。</span><span class="lang-en">Publishing s42 does not alter s41 tasks. Protect objects referenced by active readers.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s5t d5s5d">
+          <title id="d5s5t">Propagate missing-file failure honestly</title>
+          <desc id="d5s5d">Object Files returns required-file failure to Scan Worker; Worker fails Query, which fails Client through its existing return path.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="90" y="18" width="854" height="366" rx="18" class="boundary"/><text x="106" y="38" class="tiny">SNAPSHOT READ · metadata lookups and byte reads are separate</text>
+          <circle cx="44" cy="186" r="12" class="box"/><path d="M24 232 Q44 200 64 232" class="wire"/><text x="44" y="254" text-anchor="middle" class="label">Client</text>
+          <rect x="180" y="174" width="140" height="72" rx="12" class="box"/><text x="250" y="207" text-anchor="middle" class="label">Query</text><text x="250" y="226" text-anchor="middle" class="sub">authorize + pin</text>
+          <path d="M440 80 V145 A70 12 0 0 0 580 145 V80" class="store"/><ellipse cx="510" cy="80" rx="70" ry="12" class="store"/><text x="510" y="122.5" text-anchor="middle" class="label">Catalog</text><text x="510" y="140.5" text-anchor="middle" class="sub">current metadata ptr</text>
+          <path d="M70 201 L170 201" class="wire"/><polygon points="180,201 170,206 170,196" class="head"/>
+          <path d="M180 219 L80 219" class="wire reply"/><polygon points="70,219 80,214 80,224" class="head reply"/>
+          <path d="M320 195 L362 195 Q370 195 370 187 L370 113 Q370 105 378 105 L430 105" class="wire"/><polygon points="440,105 430,110 430,100" class="head"/>
+          <path d="M440 129 L398 129 Q390 129 390 137 L390 211 Q390 219 382 219 L330 219" class="wire reply"/><polygon points="320,219 330,214 330,224" class="head reply"/>
+          <text x="425" y="94" text-anchor="end" class="tiny">get pointer</text>
+          <path d="M740 80 V145 A70 12 0 0 0 880 145 V80" class="store"/><ellipse cx="810" cy="80" rx="70" ry="12" class="store"/><text x="810" y="122.5" text-anchor="middle" class="label">Table Metadata</text><text x="810" y="140.5" text-anchor="middle" class="sub">s41 + manifests</text>
+          <path d="M280 174 L280 70 Q280 62 288 62 L692 62 Q700 62 700 70 L700 97 Q700 105 708 105 L730 105" class="wire"/><polygon points="740,105 730,110 730,100" class="head"/>
+          <path d="M810 68 L810 58 Q810 50 802 50 L248 50 Q240 50 240 58 L240 164" class="wire reply"/><polygon points="240,174 235,164 245,164" class="head reply"/>
+          <text x="600" y="88" class="tiny">metadata GET</text>
+          <rect x="440" y="270" width="150" height="74" rx="12" class="box"/><text x="515" y="304" text-anchor="middle" class="label">Scan Worker</text><text x="515" y="323" text-anchor="middle" class="sub">tasks pinned to s41</text>
+          <path d="M740 270 V335 A70 12 0 0 0 880 335 V270" class="store"/><ellipse cx="810" cy="270" rx="70" ry="12" class="store"/><text x="810" y="312.5" text-anchor="middle" class="label">Object Files</text><text x="810" y="330.5" text-anchor="middle" class="sub">data + deletes</text>
+          <path d="M290 246 L290 287 Q290 295 298 295 L430 295" class="wire"/><polygon points="440,295 430,300 430,290" class="head"/>
+          <path d="M440 319 L278 319 Q270 319 270 311 L270 256" class="wire reply"/><polygon points="270,246 275,256 265,256" class="head reply"/>
+          <path d="M590 295 L730 295" class="wire"/><polygon points="740,295 730,300 730,290" class="head"/>
+          <path d="M740 319 L600 319" class="wire reply"/><polygon points="590,319 600,314 600,324" class="head reply"/>
+          <text x="361" y="286" text-anchor="middle" class="tiny">tasks</text>
+          <text x="665" y="286" text-anchor="middle" class="tiny">GET ranges</text>
+          <text x="665" y="338" text-anchor="middle" class="tiny">pages</text>
+          <rect x="625" y="205" width="277" height="20" rx="10" class="badge"/><text x="763.5" y="219" text-anchor="middle" class="badge-text">New s42 does not change this query</text>
+          <text x="119" y="354" class="tiny">Each task carries s41, schema IDs and applicable delete files</text>
+          <g class="is-new">
+            <path d="M740 307 L600 307" class="wire fail"/><polygon points="590,307 600,302 600,312" class="head fail"/>
+            <path d="M470 270 L470 263 Q470 256 463 256 L348 256 Q340 256 340 248 L340 236 Q340 231 335 231 L330 231" class="wire fail"/><polygon points="320,231 330,226 330,236" class="head fail"/>
+            <path d="M180 219 L80 219" class="wire fail"/><polygon points="70,219 80,214 80,224" class="head fail"/>
+            <text x="614" y="362" class="tiny">missing required file =&gt; query fails</text>
+            <text x="120" y="376" class="tiny">Never hide a lost file by returning an incomplete SUM</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">必需文件丢失时红线逐跳回传。不能跳过坏文件再给一个更小的 SUM；归档恢复要走第一组的 pending 合同。</span><span class="lang-en">A required-file failure returns hop by hop; do not skip the file and report a smaller SUM.</span></figcaption>
+      </div>
+    </figure><div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p><p>正常读在 Query 完成鉴权后，从 Catalog 取得一个可信入口，再直接读它指向的 Table Metadata，选择 s41、解析 manifest 与所需文件。图上 Catalog 没有连到 Object Files，因为它不是数据代理；Query 把计划交给 Scan Worker，Worker 自己做范围读取和局部聚合。结果沿 Worker→Query→Client 返回。文件清单与数据访问可以缓存，但缓存键必须包含表身份、snapshot 与解释版本，不能把租户 A 的计划拿给租户 B。</p><p>一个 snapshot 描述逻辑上的一致文件集合。Iceberg v2 的删除文件也有适用范围与序列规则，读取需要与数据文件共同解释 <a href="#ref-6">[6]</a>；只扫 Parquet 数据而忽略 deletion metadata，会让删除的事件重新进入 SUM。Reader 固定字段 ID 与 spec，不因另一位 Writer 改名或发布 s42 就重新查 current。单表的快照一致性也不意味着两张独立提交的表天然处于同一业务事务；跨表报表要另定义共同水位或接受不一致窗口。</p><p>读者拿着 s41 跑到一半，后台发布 s42 并合并旧文件；如果立即删旧文件，尚未完成的 s41 任务会 404。A10 给受保护查询最长 30 分钟，超过由执行器取消并结束读取保护，但保留用于 time travel 的快照、分支和活跃写者可能保护更久。可用租约登记、保守期限或格式支持的保留机制协调；租约过期后仍能发对象 GET 的失控 Worker 要被停止或拒绝访问。拿“我们查询通常很快”替代读者存活合同，会在最长尾的任务上翻车。</p><p>有统计可剪枝，只能剪掉被证明不匹配的文件；遇到缺统计就保留候选，不能把未知当不存在。必需文件读失败时先按同一对象身份做有界重试，仍不可恢复则 Worker 失败返回 Query，再返回 Client；不能忽略坏片继续给较小总额。若业务允许近似或不完整结果，必须显式另立合同，返回覆盖范围与缺失标记。这里 SUM 的默认合同是完整，所以红线终点在 Client，不会在 Worker 处悄悄吸收。</p><p>对象服务的一致读取也不能代替表事务。S3 公开说明对象 PUT/DELETE 的读后写一致，同时不同键之间不提供原子更新 <a href="#ref-10">[10]</a>。一批十个对象逐个写好后，桶列表完全可以看到一个正在增长的集合；它并不知道哪些属于同一次业务提交。不可变对象加可信 Catalog 发布点消除的是“读到半批表”的问题，鉴权、完整性校验、对象保留与查询取消仍是引擎必须实现的职责。</p></div><div class="lang-en"><p class="col-kicker">English</p><p>Authorize in Query, resolve Catalog, directly load its Table Metadata and plan s41. Catalog does not proxy objects. Workers get byte ranges and return aggregates through Query. Cache by table, snapshot and interpretation identity with tenant permissions; never reuse another tenant’s authorized plan.</p><p>A snapshot defines a logical file set, including applicable v2 delete files and sequence semantics [6]. Ignoring deletion metadata resurrects events in SUM. Keep field/spec identity and snapshot stable across s42 publication. Independent table snapshots do not provide a cross-table transaction; define shared progress or accept a window.</p><p>A running s41 query can fail if compaction deletes its objects immediately after s42. A10 bounds protected queries to 30 minutes, but time-travel snapshots, branches and writers can need longer protection. Coordinate leases or conservative retention and stop readers whose protection expires. Typical runtime is not a lifetime contract.</p><p>Prune only proven nonmatches; missing statistics keep candidates. Retry required files within bounds using the same identity, then propagate unrecoverable failure Worker→Query→Client. Partial/approximate answers need a separate explicit contract with coverage; this SUM contract requires completeness.</p><p>Object consistency does not replace table transactions. S3 documents strong object read-after-write without atomic updates across keys [10]. A list can expose a growing batch without knowing business commit boundaries. Immutable objects plus catalog publication avoid partial-table visibility; the engine still handles authorization, integrity, retention and cancellation.</p></div></div></section>
+
+<section><h2><span class="lang-zh">6 · 小文件合并：写新文件、原子替换、延后回收</span><span class="lang-en">6 · Compact files through atomic replacement</span></h2><figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d6s1t d6s1d">
+          <title id="d6s1t">Read a bounded rewrite input set</title>
+          <desc id="d6s1d">Compactor reads the selected Input Files in snapshot s41 and receives rows with applicable deletion semantics.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <g class="is-new">
+            <rect x="90" y="18" width="854" height="366" rx="18" class="boundary"/><text x="106" y="38" class="tiny">COMPACTION · rewrite preserves rows, versions and deletions</text>
+            <path d="M120 110 V200 A70 12 0 0 0 260 200 V110" class="store"/><ellipse cx="190" cy="110" rx="70" ry="12" class="store"/><text x="190" y="165" text-anchor="middle" class="label">Input Files</text><text x="190" y="183" text-anchor="middle" class="sub">128 x 4 MB in s41</text>
+            <rect x="410" y="110" width="160" height="90" rx="12" class="box"/><text x="490" y="152" text-anchor="middle" class="label">Compactor</text><text x="490" y="171" text-anchor="middle" class="sub">validate base s41</text>
+            <path d="M570 140 L622 140 Q630 140 630 132 L630 83 Q630 75 622 75 L196.5 75 Q190 75 190 81.5 L190 88" class="wire"/><polygon points="190,98 185,88 195,88" class="head"/>
+            <path d="M260 160 L400 160" class="wire reply"/><polygon points="410,160 400,165 400,155" class="head reply"/>
+            <text x="435" y="67" class="tiny">read selected inputs</text>
+            <text x="330" y="151" text-anchor="middle" class="tiny">rows + deletes</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">在固定 s41 上选一批输入，应用该快照应生效的删除与版本；合并不能把被删除的行救回来。</span><span class="lang-en">Select inputs in fixed s41 and preserve applicable deletes and versions.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d6s2t d6s2d">
+          <title id="d6s2t">Write an unpublished replacement</title>
+          <desc id="d6s2d">Compactor writes immutable Output Files and receives completion; old Input Files remain in the published snapshot.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="90" y="18" width="854" height="366" rx="18" class="boundary"/><text x="106" y="38" class="tiny">COMPACTION · rewrite preserves rows, versions and deletions</text>
+          <path d="M120 110 V200 A70 12 0 0 0 260 200 V110" class="store"/><ellipse cx="190" cy="110" rx="70" ry="12" class="store"/><text x="190" y="165" text-anchor="middle" class="label">Input Files</text><text x="190" y="183" text-anchor="middle" class="sub">128 x 4 MB in s41</text>
+          <rect x="410" y="110" width="160" height="90" rx="12" class="box"/><text x="490" y="152" text-anchor="middle" class="label">Compactor</text><text x="490" y="171" text-anchor="middle" class="sub">validate base s41</text>
+          <path d="M570 140 L622 140 Q630 140 630 132 L630 83 Q630 75 622 75 L196.5 75 Q190 75 190 81.5 L190 88" class="wire"/><polygon points="190,98 185,88 195,88" class="head"/>
+          <path d="M260 160 L400 160" class="wire reply"/><polygon points="410,160 400,165 400,155" class="head reply"/>
+          <text x="435" y="67" class="tiny">read selected inputs</text>
+          <text x="330" y="151" text-anchor="middle" class="tiny">rows + deletes</text>
+          <g class="is-new">
+            <path d="M740 110 V200 A70 12 0 0 0 880 200 V110" class="store"/><ellipse cx="810" cy="110" rx="70" ry="12" class="store"/><text x="810" y="165" text-anchor="middle" class="label">Output Files</text><text x="810" y="183" text-anchor="middle" class="sub">1 x 512 MB candidate</text>
+            <path d="M570 165 L730 165" class="wire"/><polygon points="740,165 730,170 730,160" class="head"/>
+            <path d="M740 185 L580 185" class="wire reply"/><polygon points="570,185 580,180 580,190" class="head reply"/>
+            <text x="655" y="155" text-anchor="middle" class="tiny">write</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">128×4 MB=512 MB，写成一个候选大文件。旧文件仍在权威快照里，所以崩溃不会留下半张表。</span><span class="lang-en">128×4 MB=512 MB creates one candidate file while old files remain authoritative.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d6s3t d6s3d">
+          <title id="d6s3t">Atomically replace exactly the input set</title>
+          <desc id="d6s3d">Compactor validates the input set against Catalog and conditionally publishes s42 that removes inputs and adds output in one snapshot.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="90" y="18" width="854" height="366" rx="18" class="boundary"/><text x="106" y="38" class="tiny">COMPACTION · rewrite preserves rows, versions and deletions</text>
+          <path d="M120 110 V200 A70 12 0 0 0 260 200 V110" class="store"/><ellipse cx="190" cy="110" rx="70" ry="12" class="store"/><text x="190" y="165" text-anchor="middle" class="label">Input Files</text><text x="190" y="183" text-anchor="middle" class="sub">128 x 4 MB in s41</text>
+          <rect x="410" y="110" width="160" height="90" rx="12" class="box"/><text x="490" y="152" text-anchor="middle" class="label">Compactor</text><text x="490" y="171" text-anchor="middle" class="sub">validate base s41</text>
+          <path d="M570 140 L622 140 Q630 140 630 132 L630 83 Q630 75 622 75 L196.5 75 Q190 75 190 81.5 L190 88" class="wire"/><polygon points="190,98 185,88 195,88" class="head"/>
+          <path d="M260 160 L400 160" class="wire reply"/><polygon points="410,160 400,165 400,155" class="head reply"/>
+          <text x="435" y="67" class="tiny">read selected inputs</text>
+          <text x="330" y="151" text-anchor="middle" class="tiny">rows + deletes</text>
+          <path d="M740 110 V200 A70 12 0 0 0 880 200 V110" class="store"/><ellipse cx="810" cy="110" rx="70" ry="12" class="store"/><text x="810" y="165" text-anchor="middle" class="label">Output Files</text><text x="810" y="183" text-anchor="middle" class="sub">1 x 512 MB candidate</text>
+          <path d="M570 165 L730 165" class="wire"/><polygon points="740,165 730,170 730,160" class="head"/>
+          <path d="M740 185 L580 185" class="wire reply"/><polygon points="570,185 580,180 580,190" class="head reply"/>
+          <text x="655" y="155" text-anchor="middle" class="tiny">write</text>
+          <g class="is-new">
+            <path d="M420 290 V350 A70 12 0 0 0 560 350 V290" class="store"/><ellipse cx="490" cy="290" rx="70" ry="12" class="store"/><text x="490" y="330" text-anchor="middle" class="label">Catalog</text><text x="490" y="348" text-anchor="middle" class="sub">s41 -&gt; s42</text>
+            <path d="M465 200 L465 268.5" class="wire"/><polygon points="465,278.5 460,268.5 470,268.5" class="head"/>
+            <path d="M515 278.5 L515 210" class="wire reply"/><polygon points="515,200 520,210 510,210" class="head reply"/>
+            <text x="440" y="252" text-anchor="end" class="tiny">validate</text>
+            <text x="536" y="251" class="tiny">CAS ACK</text>
+            <text x="120" y="280" class="tiny">s42: remove inputs + add output</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">一次快照同时 remove inputs 与 add output；不能先把新旧都列入表，再逐个删旧，否则查询会重复计数。</span><span class="lang-en">One snapshot removes inputs and adds output together; listing both sets would double count.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d6s4t d6s4d">
+          <title id="d6s4t">Validate concurrent mutations</title>
+          <desc id="d6s4d">Catalog validates the rewrite against concurrent deletion or input replacement before acknowledging; conflicts require replan or safe retry.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="90" y="18" width="854" height="366" rx="18" class="boundary"/><text x="106" y="38" class="tiny">COMPACTION · rewrite preserves rows, versions and deletions</text>
+          <path d="M120 110 V200 A70 12 0 0 0 260 200 V110" class="store"/><ellipse cx="190" cy="110" rx="70" ry="12" class="store"/><text x="190" y="165" text-anchor="middle" class="label">Input Files</text><text x="190" y="183" text-anchor="middle" class="sub">128 x 4 MB in s41</text>
+          <rect x="410" y="110" width="160" height="90" rx="12" class="box"/><text x="490" y="152" text-anchor="middle" class="label">Compactor</text><text x="490" y="171" text-anchor="middle" class="sub">validate base s41</text>
+          <path d="M570 140 L622 140 Q630 140 630 132 L630 83 Q630 75 622 75 L196.5 75 Q190 75 190 81.5 L190 88" class="wire"/><polygon points="190,98 185,88 195,88" class="head"/>
+          <path d="M260 160 L400 160" class="wire reply"/><polygon points="410,160 400,165 400,155" class="head reply"/>
+          <text x="435" y="67" class="tiny">read selected inputs</text>
+          <text x="330" y="151" text-anchor="middle" class="tiny">rows + deletes</text>
+          <path d="M740 110 V200 A70 12 0 0 0 880 200 V110" class="store"/><ellipse cx="810" cy="110" rx="70" ry="12" class="store"/><text x="810" y="165" text-anchor="middle" class="label">Output Files</text><text x="810" y="183" text-anchor="middle" class="sub">1 x 512 MB candidate</text>
+          <path d="M570 165 L730 165" class="wire"/><polygon points="740,165 730,170 730,160" class="head"/>
+          <path d="M740 185 L580 185" class="wire reply"/><polygon points="570,185 580,180 580,190" class="head reply"/>
+          <text x="655" y="155" text-anchor="middle" class="tiny">write</text>
+          <path d="M420 290 V350 A70 12 0 0 0 560 350 V290" class="store"/><ellipse cx="490" cy="290" rx="70" ry="12" class="store"/><text x="490" y="330" text-anchor="middle" class="label">Catalog</text><text x="490" y="348" text-anchor="middle" class="sub">s41 -&gt; s42</text>
+          <path d="M465 200 L465 268.5" class="wire"/><polygon points="465,278.5 460,268.5 470,268.5" class="head"/>
+          <path d="M515 278.5 L515 210" class="wire reply"/><polygon points="515,200 520,210 510,210" class="head reply"/>
+          <text x="440" y="252" text-anchor="end" class="tiny">validate</text>
+          <text x="536" y="251" class="tiny">CAS ACK</text>
+          <text x="120" y="280" class="tiny">s42: remove inputs + add output</text>
+          <g class="is-new">
+            <rect x="625" y="260" width="284" height="20" rx="10" class="badge"/><text x="767" y="274" text-anchor="middle" class="badge-text">Concurrent delete: validate or retry</text>
+            <text x="627" y="300" class="tiny">Conflict cannot resurrect deleted rows</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">并发 DELETE 或另一份 rewrite 要做语义验证。CAS 重试并不等于把过期 manifest 原样再覆盖一次。</span><span class="lang-en">Validate concurrent DELETE/rewrite semantics; CAS retry is not permission to overwrite with stale manifests.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d6s5t d6s5d">
+          <title id="d6s5t">Retain objects needed by old snapshots</title>
+          <desc id="d6s5d">Catalog publishes s42 while retained s41 still references Input Files; new readers use replacement Output Files.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="90" y="18" width="854" height="366" rx="18" class="boundary"/><text x="106" y="38" class="tiny">COMPACTION · rewrite preserves rows, versions and deletions</text>
+          <path d="M120 110 V200 A70 12 0 0 0 260 200 V110" class="store"/><ellipse cx="190" cy="110" rx="70" ry="12" class="store"/><text x="190" y="165" text-anchor="middle" class="label">Input Files</text><text x="190" y="183" text-anchor="middle" class="sub">128 x 4 MB in s41</text>
+          <rect x="410" y="110" width="160" height="90" rx="12" class="box"/><text x="490" y="152" text-anchor="middle" class="label">Compactor</text><text x="490" y="171" text-anchor="middle" class="sub">validate base s41</text>
+          <path d="M570 140 L622 140 Q630 140 630 132 L630 83 Q630 75 622 75 L196.5 75 Q190 75 190 81.5 L190 88" class="wire"/><polygon points="190,98 185,88 195,88" class="head"/>
+          <path d="M260 160 L400 160" class="wire reply"/><polygon points="410,160 400,165 400,155" class="head reply"/>
+          <text x="435" y="67" class="tiny">read selected inputs</text>
+          <text x="330" y="151" text-anchor="middle" class="tiny">rows + deletes</text>
+          <path d="M740 110 V200 A70 12 0 0 0 880 200 V110" class="store"/><ellipse cx="810" cy="110" rx="70" ry="12" class="store"/><text x="810" y="165" text-anchor="middle" class="label">Output Files</text><text x="810" y="183" text-anchor="middle" class="sub">1 x 512 MB candidate</text>
+          <path d="M570 165 L730 165" class="wire"/><polygon points="740,165 730,170 730,160" class="head"/>
+          <path d="M740 185 L580 185" class="wire reply"/><polygon points="570,185 580,180 580,190" class="head reply"/>
+          <text x="655" y="155" text-anchor="middle" class="tiny">write</text>
+          <path d="M420 290 V350 A70 12 0 0 0 560 350 V290" class="store"/><ellipse cx="490" cy="290" rx="70" ry="12" class="store"/><text x="490" y="330" text-anchor="middle" class="label">Catalog</text><text x="490" y="348" text-anchor="middle" class="sub">s41 -&gt; s42</text>
+          <path d="M465 200 L465 268.5" class="wire"/><polygon points="465,278.5 460,268.5 470,268.5" class="head"/>
+          <path d="M515 278.5 L515 210" class="wire reply"/><polygon points="515,200 520,210 510,210" class="head reply"/>
+          <text x="440" y="252" text-anchor="end" class="tiny">validate</text>
+          <text x="536" y="251" class="tiny">CAS ACK</text>
+          <text x="120" y="280" class="tiny">s42: remove inputs + add output</text>
+          <rect x="625" y="260" width="284" height="20" rx="10" class="badge"/><text x="767" y="274" text-anchor="middle" class="badge-text">Concurrent delete: validate or retry</text>
+          <text x="627" y="300" class="tiny">Conflict cannot resurrect deleted rows</text>
+          <g class="is-new">
+            <rect x="115" y="326" width="270" height="20" rx="10" class="badge"/><text x="250" y="340" text-anchor="middle" class="badge-text">s41 remains readable while retained</text>
+            <text x="629" y="318" class="tiny">128 opens -&gt; 1; bytes ~same</text>
+            <text x="629" y="340" class="tiny">Rewrite IO ~512 MB read + 512 MB write</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">128 次文件打开降到约 1 次，数据字节没凭空少 128 倍；重写要读 512 MB、写 512 MB，并暂存两份。</span><span class="lang-en">Opens drop roughly 128→1, not data bytes. Rewrite reads and writes 512 MB and temporarily retains both copies.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d6s6t d6s6d">
+          <title id="d6s6t">Collect only after reachability and lifetime checks</title>
+          <desc id="d6s6d">The complete rewrite graph retains old inputs until protected snapshots/readers finish and keeps in-progress writer outputs out of orphan collection.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="90" y="18" width="854" height="366" rx="18" class="boundary"/><text x="106" y="38" class="tiny">COMPACTION · rewrite preserves rows, versions and deletions</text>
+          <path d="M120 110 V200 A70 12 0 0 0 260 200 V110" class="store"/><ellipse cx="190" cy="110" rx="70" ry="12" class="store"/><text x="190" y="165" text-anchor="middle" class="label">Input Files</text><text x="190" y="183" text-anchor="middle" class="sub">128 x 4 MB in s41</text>
+          <rect x="410" y="110" width="160" height="90" rx="12" class="box"/><text x="490" y="152" text-anchor="middle" class="label">Compactor</text><text x="490" y="171" text-anchor="middle" class="sub">validate base s41</text>
+          <path d="M570 140 L622 140 Q630 140 630 132 L630 83 Q630 75 622 75 L196.5 75 Q190 75 190 81.5 L190 88" class="wire"/><polygon points="190,98 185,88 195,88" class="head"/>
+          <path d="M260 160 L400 160" class="wire reply"/><polygon points="410,160 400,165 400,155" class="head reply"/>
+          <text x="435" y="67" class="tiny">read selected inputs</text>
+          <text x="330" y="151" text-anchor="middle" class="tiny">rows + deletes</text>
+          <path d="M740 110 V200 A70 12 0 0 0 880 200 V110" class="store"/><ellipse cx="810" cy="110" rx="70" ry="12" class="store"/><text x="810" y="165" text-anchor="middle" class="label">Output Files</text><text x="810" y="183" text-anchor="middle" class="sub">1 x 512 MB candidate</text>
+          <path d="M570 165 L730 165" class="wire"/><polygon points="740,165 730,170 730,160" class="head"/>
+          <path d="M740 185 L580 185" class="wire reply"/><polygon points="570,185 580,180 580,190" class="head reply"/>
+          <text x="655" y="155" text-anchor="middle" class="tiny">write</text>
+          <path d="M420 290 V350 A70 12 0 0 0 560 350 V290" class="store"/><ellipse cx="490" cy="290" rx="70" ry="12" class="store"/><text x="490" y="330" text-anchor="middle" class="label">Catalog</text><text x="490" y="348" text-anchor="middle" class="sub">s41 -&gt; s42</text>
+          <path d="M465 200 L465 268.5" class="wire"/><polygon points="465,278.5 460,268.5 470,268.5" class="head"/>
+          <path d="M515 278.5 L515 210" class="wire reply"/><polygon points="515,200 520,210 510,210" class="head reply"/>
+          <text x="440" y="252" text-anchor="end" class="tiny">validate</text>
+          <text x="536" y="251" class="tiny">CAS ACK</text>
+          <text x="120" y="280" class="tiny">s42: remove inputs + add output</text>
+          <rect x="625" y="260" width="284" height="20" rx="10" class="badge"/><text x="767" y="274" text-anchor="middle" class="badge-text">Concurrent delete: validate or retry</text>
+          <text x="627" y="300" class="tiny">Conflict cannot resurrect deleted rows</text>
+          <rect x="115" y="326" width="270" height="20" rx="10" class="badge"/><text x="250" y="340" text-anchor="middle" class="badge-text">s41 remains readable while retained</text>
+          <text x="629" y="318" class="tiny">128 opens -&gt; 1; bytes ~same</text>
+          <text x="629" y="340" class="tiny">Rewrite IO ~512 MB read + 512 MB write</text>
+          <g class="is-new">
+            <text x="119" y="373" class="tiny">GC only after retained refs + active readers + writers are safe</text>
+            <text x="629" y="364" class="tiny">Uncommitted output is not immediately garbage</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">GC 同时检查保留快照、活跃读者和写者安全窗口。对象刚没出现在当前指针里，不代表马上可以删。</span><span class="lang-en">GC checks retained references, active readers and writer safety; absence from the current pointer is insufficient.</span></figcaption>
+      </div>
+    </figure><div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p><p>A7 每天产生 100×1,440=144,000 个小文件，30 天就是 4,320,000 个。即使只保存几百 GB，文件打开、计划任务和元数据也可能先成为瓶颈。表格式的 manifest 能减少规划时对整桶 LIST 的依赖，所以不能把所有小文件代价统称为 LIST；真正仍要支付的是候选文件跟踪、范围请求、footer 读取和执行调度。延长写入批次、按分区汇聚 writer 或在上游缓冲，是在生成端减少碎片的替代方案，但会增加新鲜度延迟。</p><p>合并先在 s41 固定一批 128 个 4 MB 输入，读取应生效的版本与删除，再写一个约 512 MB 的候选输出。Catalog 原子发布 s42：从表集合移除这批输入，同时加入候选输出。Iceberg maintenance 文档说明小文件合并减少元数据与 file-open 成本 <a href="#ref-7">[7]</a>。它是保持逻辑行集合的 rewrite，不是“把所有文件 append 一份再慢慢删除旧数据”。LSM 的层间合并与这里可以共享重写直觉，但对象、索引与发布协议不同，细节回 Ch37。</p><p>按 A8 的串行教学模型，128×10 ms=1.28 s 打开开销，合成一个后约 10 ms。实际请求会并行，而且大文件可能拆多个 scan task，所以不能说延迟必降 128 倍。文件数据量仍约 512 MB，最低重写流量约读 512 MB+写 512 MB=1.024 GB；保留旧快照时这批对象峰值至少两份约 1.024 GB，元数据、失败输出和额外副本另算。目标文件太大还会降低任务并行度，要用分区大小与查询范围调节，而非背一个“官方最优 512 MB”。</p><p>并发 DELETE 恰好落在这批输入上时，Compactor 不能只检查 current 指针变了没。要验证输入集合、相关删除与序列是否仍相容，必要时重新读删除或重新选择输入；发布输出时保持格式规定的删除适用语义。另一个 Compactor 已移走某输入，也不能再把过期读出的旧内容加入新表。CAS 是原子发布工具，语义验证才回答“这个候选还能不能发布”。遗漏它的恢复重试会把一次普通维护变成数据复活。</p><p>GC 必须区分“当前表没用”与“任何合法操作都不会再用”。旧快照、分支与受保护 reader 的引用还在，就留旧文件；未提交 output 可能是正在写、提交结果未知或等待重试，也不能立刻清掉。Maintenance 文档明确指出 orphan 保留窗口过短可能把进行中的文件删掉 <a href="#ref-7">[7]</a>。本章不套一个通用 TTL：先核可达集合与提交身份，再等写者安全窗口；生命周期策略也要与表保留规则协调，否则一个对象桶的自动过期会绕过 Catalog 毁掉可读快照。</p></div><div class="lang-en"><p class="col-kicker">English</p><p>A7 creates 144,000 files/day and 4.32 million in 30 days. Manifests reduce bucket-list planning, but candidate metadata, range/footer requests and task scheduling still cost work. Larger batches or partition-aware writer aggregation reduce fragmentation at the cost of freshness.</p><p>Read 128×4 MB inputs in s41 with applicable versions/deletes, write roughly 512 MB output, then atomically remove inputs/add output in s42. Iceberg maintenance links compaction to lower metadata and file-open costs [7]. This preserves logical rows rather than append duplicates and later delete them; Ch37 covers LSM-specific mechanisms.</p><p>The serial teaching open cost falls from 1.28 s to about 10 ms. Real opens and scan splits are parallel, so latency need not fall 128×. About 512 MB stays logically present; rewrite traffic is at least 1.024 GB and overlapping old/new objects occupy at least 1.024 GB for this set. Tune target size against parallelism and query scope.</p><p>Concurrent DELETE/rewrite requires validating input identity and deletion/sequence compatibility, then rereading or replanning when necessary. Another compactor may already have replaced inputs. CAS provides atomic publication; semantic validation decides whether the candidate remains safe. Retrying stale content can resurrect rows.</p><p>GC distinguishes absence from current metadata from safety for every legal operation. Retain snapshot/branch/reader references and protect writing, UNKNOWN and retry candidates. Maintenance warns that short orphan retention can delete in-progress files [7]. Check reachability, commit identity and writer lifetime; coordinate object lifecycle with table retention.</p></div></div></section>
+
+<section><h2><span class="lang-zh">7 · 批流与回放：先隔离结果，再切读取入口</span><span class="lang-en">7 · Batch/stream replay and verified cutover</span></h2><figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d7s1t d7s1d">
+          <title id="d7s1t">Start with one replayable source</title>
+          <desc id="d7s1d">Log asynchronously supplies live input to Processor v1; processor-to-view commits are added next.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <g class="is-new">
+            <rect x="90" y="18" width="854" height="366" rx="18" class="boundary"/><text x="106" y="38" class="tiny">REPLAY · same processing model, isolated output, verified publication</text>
+            <path d="M162 166 h86 a42 42 0 0 1 0 84 h-86 a42 42 0 0 1 0 -84" class="queue"/><path d="M262 175 v66" class="queue"/><path d="M254 175 v66" class="queue"/><path d="M246 175 v66" class="queue"/><text x="189" y="214" text-anchor="middle" class="label">Log</text>
+            <rect x="450" y="80" width="180" height="78" rx="12" class="box"/><text x="540" y="116" text-anchor="middle" class="label">Processor v1</text><text x="540" y="135" text-anchor="middle" class="sub">live range / logic</text>
+            <path d="M210 166 L210 138 Q210 130 218 130 L440 130" class="wire async"/><polygon points="450,130 440,135 440,125" class="head async"/>
+            <text x="340" y="122" class="tiny">live input</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">Kappa 的前提是输入可回放，变换确定且输出可恢复；一句“只用流”不能自动保证重算结果正确。</span><span class="lang-en">Kappa requires replayable input and recoverable deterministic transformation, not merely a streaming label.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d7s2t d7s2d">
+          <title id="d7s2t">Checkpoint after the serving view commit</title>
+          <desc id="d7s2d">Processor v1 commits View v1 and receives a durable result before advancing the corresponding source checkpoint.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="90" y="18" width="854" height="366" rx="18" class="boundary"/><text x="106" y="38" class="tiny">REPLAY · same processing model, isolated output, verified publication</text>
+          <path d="M162 166 h86 a42 42 0 0 1 0 84 h-86 a42 42 0 0 1 0 -84" class="queue"/><path d="M262 175 v66" class="queue"/><path d="M254 175 v66" class="queue"/><path d="M246 175 v66" class="queue"/><text x="189" y="214" text-anchor="middle" class="label">Log</text>
+          <rect x="450" y="80" width="180" height="78" rx="12" class="box"/><text x="540" y="116" text-anchor="middle" class="label">Processor v1</text><text x="540" y="135" text-anchor="middle" class="sub">live range / logic</text>
+          <path d="M210 166 L210 138 Q210 130 218 130 L440 130" class="wire async"/><polygon points="450,130 440,135 440,125" class="head async"/>
+          <text x="340" y="122" class="tiny">live input</text>
+          <g class="is-new">
+            <path d="M740 80 V145 A70 12 0 0 0 880 145 V80" class="store"/><ellipse cx="810" cy="80" rx="70" ry="12" class="store"/><text x="810" y="122.5" text-anchor="middle" class="label">View v1</text><text x="810" y="140.5" text-anchor="middle" class="sub">published</text>
+            <path d="M630 110 L730 110" class="wire"/><polygon points="740,110 730,115 730,105" class="head"/>
+            <path d="M740 130 L640 130" class="wire reply"/><polygon points="630,130 640,125 640,135" class="head reply"/>
+            <text x="682" y="99" text-anchor="middle" class="tiny">commit</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">消费位点在下游持久提交后推进。若 sink 与 checkpoint 不在同一事务，用稳定批次或事件 ID 抵挡重复。</span><span class="lang-en">Advance source progress after durable sink commit; use stable identities when checkpoint and sink are not atomic.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d7s3t d7s3d">
+          <title id="d7s3t">Replay into an isolated new view</title>
+          <desc id="d7s3d">Log independently supplies replay input to Processor v2, which durably commits isolated View v2 and receives acknowledgment; View v1 remains live.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="90" y="18" width="854" height="366" rx="18" class="boundary"/><text x="106" y="38" class="tiny">REPLAY · same processing model, isolated output, verified publication</text>
+          <path d="M162 166 h86 a42 42 0 0 1 0 84 h-86 a42 42 0 0 1 0 -84" class="queue"/><path d="M262 175 v66" class="queue"/><path d="M254 175 v66" class="queue"/><path d="M246 175 v66" class="queue"/><text x="189" y="214" text-anchor="middle" class="label">Log</text>
+          <rect x="450" y="80" width="180" height="78" rx="12" class="box"/><text x="540" y="116" text-anchor="middle" class="label">Processor v1</text><text x="540" y="135" text-anchor="middle" class="sub">live range / logic</text>
+          <path d="M210 166 L210 138 Q210 130 218 130 L440 130" class="wire async"/><polygon points="450,130 440,135 440,125" class="head async"/>
+          <text x="340" y="122" class="tiny">live input</text>
+          <path d="M740 80 V145 A70 12 0 0 0 880 145 V80" class="store"/><ellipse cx="810" cy="80" rx="70" ry="12" class="store"/><text x="810" y="122.5" text-anchor="middle" class="label">View v1</text><text x="810" y="140.5" text-anchor="middle" class="sub">published</text>
+          <path d="M630 110 L730 110" class="wire"/><polygon points="740,110 730,115 730,105" class="head"/>
+          <path d="M740 130 L640 130" class="wire reply"/><polygon points="630,130 640,125 640,135" class="head reply"/>
+          <text x="682" y="99" text-anchor="middle" class="tiny">commit</text>
+          <g class="is-new">
+            <rect x="450" y="270" width="180" height="78" rx="12" class="box"/><text x="540" y="306" text-anchor="middle" class="label">Processor v2</text><text x="540" y="325" text-anchor="middle" class="sub">replay from S</text>
+            <path d="M740 270 V335 A70 12 0 0 0 880 335 V270" class="store"/><ellipse cx="810" cy="270" rx="70" ry="12" class="store"/><text x="810" y="312.5" text-anchor="middle" class="label">View v2</text><text x="810" y="330.5" text-anchor="middle" class="sub">isolated candidate</text>
+            <path d="M210 250 L210 290 Q210 298 218 298 L440 298" class="wire async"/><polygon points="450,298 440,303 440,293" class="head async"/>
+            <path d="M630 300 L730 300" class="wire"/><polygon points="740,300 730,305 730,295" class="head"/>
+            <path d="M740 320 L640 320" class="wire reply"/><polygon points="630,320 640,315 640,325" class="head reply"/>
+            <text x="379" y="287" class="tiny">replay</text>
+            <text x="682" y="289" text-anchor="middle" class="tiny">commit</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">修 bug 重算写隔离 View v2；不把历史 replay 混到 View v1 的实时累计里。验证后才换读入口。</span><span class="lang-en">Replay into isolated View v2 instead of mixing history into live aggregates; switch reads only after validation.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d7s4t d7s4d">
+          <title id="d7s4t">Define ranges and a cutover barrier</title>
+          <desc id="d7s4d">Both processors keep independent log routes and views; S and per-partition end vector H define retained input and validation scope.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="90" y="18" width="854" height="366" rx="18" class="boundary"/><text x="106" y="38" class="tiny">REPLAY · same processing model, isolated output, verified publication</text>
+          <path d="M162 166 h86 a42 42 0 0 1 0 84 h-86 a42 42 0 0 1 0 -84" class="queue"/><path d="M262 175 v66" class="queue"/><path d="M254 175 v66" class="queue"/><path d="M246 175 v66" class="queue"/><text x="189" y="214" text-anchor="middle" class="label">Log</text>
+          <rect x="450" y="80" width="180" height="78" rx="12" class="box"/><text x="540" y="116" text-anchor="middle" class="label">Processor v1</text><text x="540" y="135" text-anchor="middle" class="sub">live range / logic</text>
+          <path d="M210 166 L210 138 Q210 130 218 130 L440 130" class="wire async"/><polygon points="450,130 440,135 440,125" class="head async"/>
+          <text x="340" y="122" class="tiny">live input</text>
+          <path d="M740 80 V145 A70 12 0 0 0 880 145 V80" class="store"/><ellipse cx="810" cy="80" rx="70" ry="12" class="store"/><text x="810" y="122.5" text-anchor="middle" class="label">View v1</text><text x="810" y="140.5" text-anchor="middle" class="sub">published</text>
+          <path d="M630 110 L730 110" class="wire"/><polygon points="740,110 730,115 730,105" class="head"/>
+          <path d="M740 130 L640 130" class="wire reply"/><polygon points="630,130 640,125 640,135" class="head reply"/>
+          <text x="682" y="99" text-anchor="middle" class="tiny">commit</text>
+          <rect x="450" y="270" width="180" height="78" rx="12" class="box"/><text x="540" y="306" text-anchor="middle" class="label">Processor v2</text><text x="540" y="325" text-anchor="middle" class="sub">replay from S</text>
+          <path d="M740 270 V335 A70 12 0 0 0 880 335 V270" class="store"/><ellipse cx="810" cy="270" rx="70" ry="12" class="store"/><text x="810" y="312.5" text-anchor="middle" class="label">View v2</text><text x="810" y="330.5" text-anchor="middle" class="sub">isolated candidate</text>
+          <path d="M210 250 L210 290 Q210 298 218 298 L440 298" class="wire async"/><polygon points="450,298 440,303 440,293" class="head async"/>
+          <path d="M630 300 L730 300" class="wire"/><polygon points="740,300 730,305 730,295" class="head"/>
+          <path d="M740 320 L640 320" class="wire reply"/><polygon points="630,320 640,315 640,325" class="head reply"/>
+          <text x="379" y="287" class="tiny">replay</text>
+          <text x="682" y="289" text-anchor="middle" class="tiny">commit</text>
+          <g class="is-new">
+            <rect x="116" y="76" width="248" height="20" rx="10" class="badge"/><text x="240" y="90" text-anchor="middle" class="badge-text">Cutover H; retain input from S</text>
+            <text x="650" y="185" class="tiny">Offsets are per partition</text>
+            <text x="650" y="205" class="tiny">Late event time is separate</text>
+            <text x="650" y="228" class="tiny">Lambda: disjoint ranges + corrections</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">Lambda 合并要定义不重叠的批/流范围与迟到更正。Kappa 也要记录分区位点向量 H，事件时间不是消费位点。</span><span class="lang-en">Lambda needs disjoint batch/stream coverage and late corrections; Kappa also needs per-partition progress H.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d7s5t d7s5d">
+          <title id="d7s5t">Prove replay can catch up</title>
+          <desc id="d7s5d">The complete graph shows independent live and replay processing with durable view acknowledgments; publication follows verified progress through H.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="90" y="18" width="854" height="366" rx="18" class="boundary"/><text x="106" y="38" class="tiny">REPLAY · same processing model, isolated output, verified publication</text>
+          <path d="M162 166 h86 a42 42 0 0 1 0 84 h-86 a42 42 0 0 1 0 -84" class="queue"/><path d="M262 175 v66" class="queue"/><path d="M254 175 v66" class="queue"/><path d="M246 175 v66" class="queue"/><text x="189" y="214" text-anchor="middle" class="label">Log</text>
+          <rect x="450" y="80" width="180" height="78" rx="12" class="box"/><text x="540" y="116" text-anchor="middle" class="label">Processor v1</text><text x="540" y="135" text-anchor="middle" class="sub">live range / logic</text>
+          <path d="M210 166 L210 138 Q210 130 218 130 L440 130" class="wire async"/><polygon points="450,130 440,135 440,125" class="head async"/>
+          <text x="340" y="122" class="tiny">live input</text>
+          <path d="M740 80 V145 A70 12 0 0 0 880 145 V80" class="store"/><ellipse cx="810" cy="80" rx="70" ry="12" class="store"/><text x="810" y="122.5" text-anchor="middle" class="label">View v1</text><text x="810" y="140.5" text-anchor="middle" class="sub">published</text>
+          <path d="M630 110 L730 110" class="wire"/><polygon points="740,110 730,115 730,105" class="head"/>
+          <path d="M740 130 L640 130" class="wire reply"/><polygon points="630,130 640,125 640,135" class="head reply"/>
+          <text x="682" y="99" text-anchor="middle" class="tiny">commit</text>
+          <rect x="450" y="270" width="180" height="78" rx="12" class="box"/><text x="540" y="306" text-anchor="middle" class="label">Processor v2</text><text x="540" y="325" text-anchor="middle" class="sub">replay from S</text>
+          <path d="M740 270 V335 A70 12 0 0 0 880 335 V270" class="store"/><ellipse cx="810" cy="270" rx="70" ry="12" class="store"/><text x="810" y="312.5" text-anchor="middle" class="label">View v2</text><text x="810" y="330.5" text-anchor="middle" class="sub">isolated candidate</text>
+          <path d="M210 250 L210 290 Q210 298 218 298 L440 298" class="wire async"/><polygon points="450,298 440,303 440,293" class="head async"/>
+          <path d="M630 300 L730 300" class="wire"/><polygon points="740,300 730,305 730,295" class="head"/>
+          <path d="M740 320 L640 320" class="wire reply"/><polygon points="630,320 640,315 640,325" class="head reply"/>
+          <text x="379" y="287" class="tiny">replay</text>
+          <text x="682" y="289" text-anchor="middle" class="tiny">commit</text>
+          <rect x="116" y="76" width="248" height="20" rx="10" class="badge"/><text x="240" y="90" text-anchor="middle" class="badge-text">Cutover H; retain input from S</text>
+          <text x="650" y="185" class="tiny">Offsets are per partition</text>
+          <text x="650" y="205" class="tiny">Late event time is separate</text>
+          <text x="650" y="228" class="tiny">Lambda: disjoint ranges + corrections</text>
+          <g class="is-new">
+            <text x="120" y="356" class="clock">1 TB / (100-20) MB/s = 12,500 s ~3.47 h</text>
+            <text x="120" y="376" class="tiny">Checkpoint after durable sink; verify through H, then switch view</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">A11 backlog 1 TB、回放 100 MB/s、新增 20 MB/s，净追赶 80 MB/s，约 3.47 小时。吞吐没超新增就永远追不平。</span><span class="lang-en">A11’s 1 TB backlog drains at 100−20=80 MB/s in about 3.47 hours; replay must exceed ingestion.</span></figcaption>
+      </div>
+    </figure><div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p><p>Lambda 用批计算与实时增量共同服务，代价是两套逻辑和合并合同；Kappa 让同一类流处理依靠可回放输入重算。Kreps 2014 的原文强调双栈复杂度，并描述新版本处理器重放历史、赶上后切换输出 <a href="#ref-9">[9]</a>。这两句是选型入口，不是正确性证明。能否复算还取决于输入留存、外部依赖版本、状态初始化、迟到政策和下游幂等；有界大 shuffle 的任务也未必适合硬塞进一个持续流算子。</p><p>图里的 Processor v1 持续提交 View v1，消费位点在对应下游提交确认后推进。Processor v2 从 S 回放到独立 View v2，不能把历史计数再追加到在线累加器。若提交 sink 成功、checkpoint 未写就崩溃，重放会重复该批；稳定 batch/event_id 与原子下游结果处理负责消重。只说流引擎“exactly once”而不解释 sink 的提交协议，不足以保证外部表、邮件或计费也只发生一次。</p><p>Lambda 也要写明确合并边界：批结果覆盖哪些输入位点，流结果从哪里开始，迟到与更正归谁处理。事件时间小于昨天，不代表该事件已进入昨夜批结果；用“批算昨天、流算今天”直接相加会漏掉迟到数据，也可能重复刷新中的那一段。用分区输入位点向量定义覆盖，更正历史窗口或按稳定事件版本重算；时间 watermark 是处理策略的证据，不能冒充每个分区完整消费的 durable offset。</p><p>回放容量按净速度。A11 有 1 TB 积压，回放有效 100 MB/s，持续新增 20 MB/s，净 80 MB/s；1,000,000 MB÷80=12,500 s≈3.47 h。只除以 100 会报 2.78 h，漏掉回放期间新增的 250 GB。若回放仅 20 MB/s，backlog 不下降；低于 20 就越追越远。留存必须盖住选定 S 到追平完成的输入范围，还要包含部署与故障恢复余量；不能在处理器运行时让源日志把 S 后尚未读取的片段删掉。</p><p>切流选一个分区位点向量 H，让 v2 证明状态与输出均持久覆盖到 H，并核对行数、关键聚合、删除与迟到修正；再条件发布读取入口。若要求无缺口切换，可短暂停消费或写一个可恢复的切换屏障，保证 v2 接续 H 后新增，v1 不再承担权威新输出。旧视图保留给正在跑的读者与可验证回退；新视图接了更多写以后，退回旧版也要追这些变化。回放逻辑修好不代表历史删除或权限撤销可以被原始日志重新复活。</p></div><div class="lang-en"><p class="col-kicker">English</p><p>Lambda merges batch and live increments with two logic stacks; Kappa reuses stream processing over replayable input. Kreps describes replaying with a new processor and switching output after catch-up [9]. Correctness still requires retention, versioned dependencies, state initialization, late-event policy and idempotent output.</p><p>Processor v1 commits View v1 before checkpointing; v2 replays from S into isolated View v2. A crash after sink commit but before checkpoint repeats input, requiring stable identities and atomic deduplicated effects. Engine-level exactly-once language does not establish external sink, email or billing semantics.</p><p>Lambda needs explicit batch coverage, streaming start and correction ownership. Yesterday’s event time does not prove inclusion in yesterday’s batch. Define coverage with partition-specific input progress and correct/recompute late versions; an event-time watermark is not a durable consumed offset.</p><p>Drain 1 TB at net 100−20=80 MB/s: 12,500 s≈3.47 h. Dividing by 100 gives 2.78 h and omits 250 GB arriving during true catch-up. At or below 20 MB/s there is no convergence. Retention must cover S through completion plus deployment/recovery margin.</p><p>Choose per-partition H, prove durable state/output coverage, validate counts/aggregates/deletes/corrections, then conditionally publish the read entry. A recoverable barrier or brief pause can coordinate continuation after H. Retain old views for readers and validated rollback, which must include newer changes. Replay must respect historical deletions and revoked access.</p></div></div></section>
+
+<section><h2><span class="lang-zh">八个翻车点：答案要说出失败窗口</span><span class="lang-en">Eight failure-prone answers</span><table><thead><tr><th><span class="lang-zh">原说法</span><span class="lang-en">Weak answer</span></th><th><span class="lang-zh">失败原因</span><span class="lang-en">Why it fails</span></th><th><span class="lang-zh">改成什么</span><span class="lang-en">Replace with</span></th></tr></thead><tbody><tr><td><span class="lang-zh">温层就是本地列存，冷层才是对象</span><span class="lang-en">Warm must be local; only cold uses objects</span></td><td><span class="lang-zh">把访问、布局、介质揉在一起</span><span class="lang-en">Conflates access, layout and medium</span></td><td><span class="lang-zh">温列式文件可在对象上，按算力与访问目标分层</span><span class="lang-en">Warm columnar objects are valid; tier by compute/access contract</span></td></tr><tr><td><span class="lang-zh">少扫 800 倍，所以 800 倍更快</span><span class="lang-en">800× fewer bytes means 800× faster</span></td><td><span class="lang-zh">忽略解码、并发、打开与 shuffle</span><span class="lang-en">Ignores decode, contention, opens and shuffle</span></td><td><span class="lang-zh">拆开三个字节因子，再测执行预算</span><span class="lang-en">Separate byte factors and measure execution</span></td></tr><tr><td><span class="lang-zh">改小时 spec，旧数据就细分</span><span class="lang-en">Hourly spec subdivides old data</span></td><td><span class="lang-zh">旧文件仍是旧物理边界</span><span class="lang-en">Old physical boundaries remain</span></td><td><span class="lang-zh">按 spec 分别规划；历史布局需 rewrite</span><span class="lang-en">Plan by spec; rewrite historical layout</span></td></tr><tr><td><span class="lang-zh">PUT 完所有文件就提交表了</span><span class="lang-en">All PUTs mean table commit</span></td><td><span class="lang-zh">对象存在不等于进入快照</span><span class="lang-en">Object existence is not snapshot membership</span></td><td><span class="lang-zh">不可变树完成后条件发布 Catalog</span><span class="lang-en">Publish Catalog conditionally after the immutable tree</span></td></tr><tr><td><span class="lang-zh">丢 ACK 就再 append 一批</span><span class="lang-en">Lost ACK means append again</span></td><td><span class="lang-zh">可能重复已接受的 batch</span><span class="lang-en">The batch may already be accepted</span></td><td><span class="lang-zh">查可信提交身份，UNKNOWN 不猜</span><span class="lang-en">Resolve trusted identity; do not guess UNKNOWN</span></td></tr><tr><td><span class="lang-zh">合并后立刻删输入</span><span class="lang-en">Delete inputs immediately after merge</span></td><td><span class="lang-zh">旧 snapshot reader 仍需要它们</span><span class="lang-en">Old snapshot readers still need inputs</span></td><td><span class="lang-zh">保留引用、读者和写者窗口一起核</span><span class="lang-en">Check retained refs and reader/writer protection</span></td></tr><tr><td><span class="lang-zh">CAS 重试总能发布旧输出</span><span class="lang-en">CAS retry always permits stale output</span></td><td><span class="lang-zh">并发 DELETE 可能被复活</span><span class="lang-en">Concurrent deletes may be resurrected</span></td><td><span class="lang-zh">验证输入和删除语义，冲突重算</span><span class="lang-en">Validate inputs/delete semantics and replan conflicts</span></td></tr><tr><td><span class="lang-zh">有 replay 就一定能恢复</span><span class="lang-en">Replay always guarantees recovery</span></td><td><span class="lang-zh">留存不足或净吞吐非正会失败</span><span class="lang-en">Retention or nonpositive net rate can prevent recovery</span></td><td><span class="lang-zh">固定 [S,H]，算净追赶，隔离验证再切流</span><span class="lang-en">Retain [S,H], size net catch-up, isolate and verify before cutover</span></td></tr></tbody></table></section>
+<section><h2><span class="lang-zh">追问与收尾：把机制放回设计题</span><span class="lang-en">Follow-ups and where this fits</span></h2><div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p><p>搜索 <a class="chip" href="ch13.html">Ch13</a>：倒排服务在线检索，query log 进温列存，构建输入可以回放；对象存储 <a class="chip" href="ch22.html">Ch22</a>：保存字节，表格式负责一致集合，两者的删除保留要协调；排行榜 <a class="chip" href="ch23.html">Ch23</a>：实时有序视图与历史赛季表分开，已结束赛季也可能因审计再次变热。消息队列 <a class="chip" href="ch20.html">Ch20</a>：日志是输送与回放输入，保留有上限，落地表是另一种读取接口，不能把 Kafka 当无限数仓。</p><p>面试官问“高基数 ID 绝对不能分区吗”，答查询与文件规模决定，而不是一律禁止。固定数量 bucket(id) 可以限制桶数，但点查仍要匹配索引与文件统计。问“文件越大越好吗”，答打开成本与并行度相互制约，还要考虑重写峰值、时间范围与延迟目标。问“批层一定准吗”，答它也会受重复输入、逻辑 bug、删除和快照选择影响；准不准取决于同一份明确的业务定义与校验。</p><p>最后口述：访问合同拆热视图与分析，原始一天 1 TB、全年 365 TB；查一天三列在假设压缩下读 37.5 GB。8 Worker 的独占扫描下界 18.75 s，两并发已超过 30 s 目标，要限额或重测容量。分区新旧规格共存，文件先落、Catalog 后发布；合并原子替换并保护旧快照，未知提交查 batch 身份。回放净追赶约 3.47 小时，保留输入、验证隔离输出再切流。下一章 Ch44 讨论服务边界与治理，当前数据合同可以作为跨服务接口的约束。</p></div><div class="lang-en"><p class="col-kicker">English</p><p>Ch13 keeps online inverted indexes separate from analytic query logs; Ch22 stores bytes while table formats manage coherent sets and coordinated retention; Ch23 separates live boards and historical seasons. Ch20 logs transport/replay data with bounded retention rather than act as an infinite warehouse.</p><p>High cardinality is not a blanket partitioning ban; bounded buckets can fit a workload. Bigger files trade fewer opens against parallelism and rewrite peaks. Batch processing is not inherently correct: duplicate input, bugs, deletions and snapshot selection still need business definitions and validation.</p><p>Close with access-separated serving/analytics, 1 TB/day and 365 TB raw/year, and 37.5 GB for the assumed one-day/three-field query. Eight-worker scan lower bound is 18.75 s; two queries exceed 30 s. Specs coexist, catalog publishes after immutable files, rewrites protect snapshots, and UNKNOWN resolves batch identity. Replay needs about 3.47 h net catch-up. Ch44 follows with service boundaries/governance.</p></div></div></section>
+
+<section><h2><span class="lang-zh">原文与核对范围</span><span class="lang-en">References and what was checked</span><ol class="references"><li id="ref-1">[1] Sergey Melnik et al.. <a href="https://static.googleusercontent.com/media/research.google.com/en//pubs/archive/36632.pdf" target="_blank" rel="noopener">Dremel: Interactive Analysis of Web-Scale Datasets · PVLDB</a> (<span class="lang-zh">2010</span><span class="lang-en">2010</span>). <span class="lang-zh">核对 T1 的 850 亿记录、87 TB、单列约 0.5 TB 压缩读实验；不作为本章延迟目标。</span><span class="lang-en">Checks the 85B-record T1 and 87 TB versus roughly 0.5 TB scan experiment; not a latency target.</span></li><li id="ref-2">[2] Daniel Abadi, Samuel Madden, Nabil Hachem. <a href="https://www.cs.umd.edu/~abadi/papers/abadi-sigmod08.pdf" target="_blank" rel="noopener">Column-Stores vs. Row-Stores: How Different Are They Really? · SIGMOD</a> (<span class="lang-zh">2008</span><span class="lang-en">2008</span>). <span class="lang-zh">核对列布局之外的压缩、延迟物化与列上执行；本章 3/20 和 4:1 为假设。</span><span class="lang-en">Checks compression, late materialization and column execution; 3/20 and 4:1 are our assumptions.</span></li><li id="ref-3">[3] Apache Parquet. <a href="https://parquet.apache.org/docs/file-format/" target="_blank" rel="noopener">File Format</a> (<span class="lang-zh">在线文档</span><span class="lang-en">living docs</span>). <span class="lang-zh">核对 row group、column chunk、page 与文件元数据读取关系。</span><span class="lang-en">Checks row groups, column chunks, pages and metadata-guided reads.</span></li><li id="ref-4">[4] Apache Iceberg. <a href="https://iceberg.apache.org/docs/1.10.0/evolution/" target="_blank" rel="noopener">Evolution · 1.10.0</a> (<span class="lang-zh">2025</span><span class="lang-en">2025</span>). <span class="lang-zh">核对字段 ID、旧/新 partition spec 共存及元数据演进不重写旧文件。</span><span class="lang-en">Checks field IDs, mixed specs and evolution without eager historical rewrites.</span></li><li id="ref-5">[5] Apache Iceberg. <a href="https://iceberg.apache.org/docs/1.10.0/reliability/" target="_blank" rel="noopener">Reliability · 1.10.0</a> (<span class="lang-zh">2025</span><span class="lang-en">2025</span>). <span class="lang-zh">核对原子元数据指针更新、乐观并发与提交验证；b17 恢复是本章设计要求。</span><span class="lang-en">Checks atomic pointer updates and optimistic validation; b17 recovery is our requirement.</span></li><li id="ref-6">[6] Apache Iceberg. <a href="https://iceberg.apache.org/spec/" target="_blank" rel="noopener">Table Specification · v2 snapshot/manifest/delete semantics</a> (<span class="lang-zh">在线规范</span><span class="lang-en">living spec</span>). <span class="lang-zh">核对快照、manifest、分区规格及删除文件序列适用规则；本章聚焦 v2。</span><span class="lang-en">Checks snapshots, manifests, specs and applicable delete sequencing, focusing on v2.</span></li><li id="ref-7">[7] Apache Iceberg. <a href="https://iceberg.apache.org/docs/1.10.0/maintenance/" target="_blank" rel="noopener">Maintenance · 1.10.0</a> (<span class="lang-zh">2025</span><span class="lang-en">2025</span>). <span class="lang-zh">核对文件合并、快照保留与 orphan 删除窗口；本章 512 MB、30 min 不是默认值。</span><span class="lang-en">Checks compaction, retained snapshots and orphan safety; 512 MB and 30 min are not defaults.</span></li><li id="ref-8">[8] Michael Armbrust, Ali Ghodsi, Reynold Xin, Matei Zaharia. <a href="https://www.cidrdb.org/cidr2021/papers/cidr2021_paper17.pdf" target="_blank" rel="noopener">Lakehouse: A New Generation of Open Platforms that Unify Data Warehousing and Advanced Analytics · CIDR</a> (<span class="lang-zh">2021</span><span class="lang-en">2021</span>). <span class="lang-zh">核对低成本存储上开放文件与表管理的结合；成本单位由 A4 自定。</span><span class="lang-en">Checks managed open files over low-cost storage; A4 prices are illustrative.</span></li><li id="ref-9">[9] Jay Kreps. <a href="https://www.oreilly.com/radar/questioning-the-lambda-architecture/" target="_blank" rel="noopener">Questioning the Lambda Architecture · O’Reilly</a> (<span class="lang-zh">2014</span><span class="lang-en">2014</span>). <span class="lang-zh">核对双逻辑复杂度、新处理器回放和输出切换；追赶数由 A11 自算。</span><span class="lang-en">Checks dual-stack complexity, new-processor replay and output switching; A11 sizes catch-up.</span></li><li id="ref-10">[10] Amazon Web Services. <a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/Welcome.html" target="_blank" rel="noopener">What is Amazon S3? · consistency model</a> (<span class="lang-zh">在线文档</span><span class="lang-en">living docs</span>). <span class="lang-zh">核对对象读后写一致与跨键非原子，以及对象介质不等于固定温度或延迟。</span><span class="lang-en">Checks object consistency without cross-key atomicity and differing object access contracts.</span></li></ol><p class="cite"><span class="lang-zh">站内延伸：</span><span class="lang-en">Related:</span> <a class="chip" href="ch02.html">Ch02</a><a class="chip" href="ch03.html">Ch03</a><a class="chip" href="ch13.html">Ch13</a><a class="chip" href="ch20.html">Ch20</a><a class="chip" href="ch22.html">Ch22</a><a class="chip" href="ch23.html">Ch23</a><a class="chip" href="ch37.html">Ch37</a> <a class="chip" href="ch44.html"><span class="lang-zh">Ch44</span><span class="lang-en">Ch44</span></a></p></section>
+<section><h2><span class="lang-zh">闪卡：答案要带路径或失败条件</span><span class="lang-en">Flashcards: include paths or failure conditions</span><p class="cite"><span class="lang-zh">点一下翻面。先口述，再核对。</span><span class="lang-en">Click to flip. Explain first, then check.</span></p><div class="cards-grid"><button type="button" class="flip"><span class="q"><span class="lang-zh">分层的三个轴是什么？</span><span class="lang-en">What are the three tiering axes?</span></span><span class="a"><span class="lang-zh">访问温度、数据布局、存储介质；温列存也能放对象上。</span><span class="lang-en">Access temperature, layout and medium; warm columnar files can live on objects.</span></span></button><button type="button" class="flip"><span class="q"><span class="lang-zh">输入与保留怎么估？</span><span class="lang-en">How do input and retention size?</span></span><span class="a"><span class="lang-zh">10 亿×1 KB=1 TB/天；×365=365 TB 原始。物理开销另列。</span><span class="lang-en">1B×1 KB=1 TB/day; 365 TB raw/year, physical overhead separate.</span></span></button><button type="button" class="flip"><span class="q"><span class="lang-zh">为什么扫描是 37.5 GB？</span><span class="lang-en">Why 37.5 GB scanned?</span></span><span class="a"><span class="lang-zh">30 天剪成 1 天=1 TB；×3/20÷4=37.5 GB，过滤字段也要读。</span><span class="lang-en">Select one day=1 TB; ×3/20÷4=37.5 GB, including predicate fields.</span></span></button><button type="button" class="flip"><span class="q"><span class="lang-zh">800 倍能说成提速吗？</span><span class="lang-en">Does 800× imply faster queries?</span></span><span class="a"><span class="lang-zh">不能。它是三个因子组成的原始数据字节比；CPU、并发和 shuffle 另算。</span><span class="lang-en">No: it is a three-factor raw-byte ratio; CPU, concurrency and shuffle remain.</span></span></button><button type="button" class="flip"><span class="q"><span class="lang-zh">两条查询能守住 30 s 吗？</span><span class="lang-en">Can two scans meet 30 s?</span></span><span class="a"><span class="lang-zh">A5 均分后每条 1 GB/s，37.5 s 下界就已超过；要限额或重测。</span><span class="lang-en">A5 equal sharing gives 1 GB/s each and a 37.5 s lower bound; bound or resize.</span></span></button><button type="button" class="flip"><span class="q"><span class="lang-zh">改 spec 后旧文件怎样？</span><span class="lang-en">What happens to old files after evolution?</span></span><span class="a"><span class="lang-zh">保留旧规格，规划时分别变换谓词；历史物理布局改变仍要 rewrite。</span><span class="lang-en">Keep old specs and plan each separately; changing historical layout requires rewrite.</span></span></button><button type="button" class="flip"><span class="q"><span class="lang-zh">写入何时可以确认？</span><span class="lang-en">When can table writes acknowledge?</span></span><span class="a"><span class="lang-zh">不可变数据和元数据完成，再 Catalog 条件发布成功。PUT 完不是表提交。</span><span class="lang-en">After durable data/metadata and successful conditional Catalog publication, not merely PUT.</span></span></button><button type="button" class="flip"><span class="q"><span class="lang-zh">CAS ACK 丢了怎么办？</span><span class="lang-en">What if CAS ACK is lost?</span></span><span class="a"><span class="lang-zh">先查 b17 可信提交身份；UNKNOWN 不追加第二批，也不立即删输出。</span><span class="lang-en">Resolve trusted b17 identity; neither duplicate UNKNOWN batches nor immediately delete output.</span></span></button><button type="button" class="flip"><span class="q"><span class="lang-zh">读取数据的回程怎么走？</span><span class="lang-en">How does the data reply return?</span></span><span class="a"><span class="lang-zh">Object Files→Scan Worker→Query→Client；Catalog 只返回元数据入口。</span><span class="lang-en">Files→Worker→Query→Client; Catalog returns metadata pointers.</span></span></button><button type="button" class="flip"><span class="q"><span class="lang-zh">合并省了什么、付了什么？</span><span class="lang-en">What does compaction save and cost?</span></span><span class="a"><span class="lang-zh">128×4 MB→512 MB，少打开；至少读写合计 1.024 GB，并保护旧对象。</span><span class="lang-en">128×4 MB→512 MB reduces opens; at least 1.024 GB read/write plus old-object protection.</span></span></button><button type="button" class="flip"><span class="q"><span class="lang-zh">旧对象何时可删？</span><span class="lang-en">When may old objects be deleted?</span></span><span class="a"><span class="lang-zh">无保留快照/分支引用、读者已结束、写者与未知提交窗口安全；不是只看 current。</span><span class="lang-en">After retained refs, readers, writers and UNKNOWN outcomes are safe, not just current membership.</span></span></button><button type="button" class="flip"><span class="q"><span class="lang-zh">1 TB backlog 多久追平？</span><span class="lang-en">How long to drain 1 TB backlog?</span></span><span class="a"><span class="lang-zh">1 TB÷(100−20) MB/s=12,500 s≈3.47 h；隔离输出验证到 H 后切流。</span><span class="lang-en">1 TB/(100−20) MB/s=12,500 s≈3.47 h; verify isolated output through H before switching.</span></span></button></div></section>  <p><button type="button" class="read-toggle"><span class="when-off"><span class="lang-zh">我已学完本章</span><span class="lang-en">Mark this chapter done</span></span><span class="when-on"><span class="lang-zh">已学完本章</span><span class="lang-en">Completed</span></span></button></p>
+  <p class="cite"><span class="lang-zh">进度存在这台浏览器里。</span><span class="lang-en">Saved in this browser only.</span></p>
+</article>
+</main>
+<script src="../assets/js/nav.js"></script>
+<script src="../assets/js/lang.js"></script>
+<script src="../assets/js/slides.js"></script>
+<script src="../assets/js/progress.js"></script>
+</body>
+</html>
