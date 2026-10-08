@@ -11,14 +11,14 @@
 | 计划 | 内容 | 状态 | 触发语 |
 |---|---|---|---|
 | 1 | 静态壳 + 样板 Ch01、Ch09 | **已完成 · 2026-09-27** | 「开始计划 1」 |
-| 2 | 五路重构 Ch01–Ch45 | **章节全部完成并推送 GitHub · 2026-10-08 · Ch01–Ch45 已按 [`OPUS_REFACTOR.md`](./OPUS_REFACTOR.md) 完成，含逻辑审阅修复；内容提交 `197250d`** | 「开始重构」/「重构下一波」/「复审 chNN」 |
+| 2 | 五路重构 Ch01–Ch45 | **章节全部完成并推送 GitHub · 2026-10-08 · Ch01–Ch45 已按 [本文件的章节重构规范](#chapter-standard) 完成，含逻辑审阅修复；内容提交 `197250d`** | 「开始重构」/「重构下一波」/「复审 chNN」 |
 | 3 | 推 GitHub 并开 Pages | **GitHub 已更新 · 2026-10-08** · Pages 既有地址 https://socoo123.github.io/system_design_web/ （本次线上发布结果未核验） | 「提交并部署」 |
 
 国庆（10/1–10/7）只读主线 M1–M5。要在 10/1 能开读，计划 2 需在 9/30 前至少把 Ch01–Ch35 部署出去。用户说「赶国庆」时，车道连续写完剩余章。
 
 ### 逻辑审阅修复 · 2026-10-08
 
-用户明确授权按 `LOGIC_REVIEW_2026-10-08.md` 分批修复，单代理执行。本轮是定点修复，不重新推进已完成章节的重构车道；修复验收阶段未提交、推送或部署，后续 GitHub 提交授权与结果见下。
+用户明确授权按当日逻辑审阅报告分批修复（报告已在后续清理中删除），单代理执行。本轮是定点修复，不重新推进已完成章节的重构车道；修复验收阶段未提交、推送或部署，后续 GitHub 提交授权与结果见下。
 
 2026-10-08 后续用户授权「都提交到 github」：所有已完成章节、首页、审阅报告、逻辑修复与检查脚本共 32 个文件已提交到 `main` 并推送 `origin`。内容提交：[`197250d`](https://github.com/socoo123/system_design_web/commit/197250da931dcbfc69b24ecd3c2125bf4cd83ad7)，已核对 GitHub 远端 `main` 包含该提交。下文各章历史记录中的「未提交」指各自交付当时状态，相关成果现已全部纳入该提交。本次未另行核验 Pages 发布结果。
 
@@ -33,6 +33,10 @@
 导航恢复报告中的 33 处入口（组合目标拆为独立链接），追加清理 Ch04/Ch12/Ch20/Ch25/Ch35 的 9 处已完成目标禁用状态。Ch01 收尾改为两份单语表，消除 7 处跨语言嵌套；§3 部署状态对齐 §0。`tools/check.mjs` 新增跨语言祖先扫描与已存在章节的禁用入口检查；临时旧版夹具确认能拒绝原 7 处嵌套和 3 个禁用链接，修正夹具通过。
 
 验收：全站 check、45 章 audit、1,411 张 SVG XML 解析、全部章节本地文件链接、关键算术、JS 语法和 diff 检查通过。Ch02 全 23 帧与 Ch14 全 30 帧渲染视检，并补看相关修改帧深色版本及 Ch01 故障末帧；Ch01 收尾 zh/en/both 和 600px 深色截图确认英文不重复。独立临时 Chrome 实测三种语言的表格可见性、五个正文修改章的 600px 无整页溢出与翻页，以及 Ch40→Ch41 链接点击，均通过。证据、初始备份与本轮专属 diff 在 `/tmp/sd-logic-fix-20261008/`。这次是教材及本地页面验收，未做真实数据库/对象存储故障实验；未重新全量视觉审查全部 1,411 帧。未提交、推送或部署。
+
+### 首页与文档清理 · 2026-10-08
+
+用户授权删除首页国庆阅读提示（中英文）、当日逻辑审阅报告及中间参考 Markdown，并重新提交 GitHub。旧 D2 规则已删除；现行 SVG 章节规范已完整并入本文件 §5，独立规范文件删除，工具与计划中的引用同步更新。根目录 Markdown 仅保留 `PLAN.md` 和 `AGENTS.md`。
 
 ### 五条车道（计划 2 才填）
 
@@ -92,13 +96,13 @@
 
 2026-10-08 用户指定单代理优化 Ch45：按 Opus 与 Ch02/Ch03 基线审阅旧版 JSON，完整渲染视检全部 8 张 D2 图，新建静态章节为 7 组 / 37 帧内联 SVG（5/6/5/6/5/5/5）。拆清模型/部署边界、capture/账本/对账、聚合规则与持久版本，以及同库 Order/Stock 两聚合短事务的例外；补齐命令幂等结果、两端 Outbox 与 ACK、事件/资金双身份、受验证合同与隔离重放、冻结 v9 的关单竞态、持久退款义务和远端 UNKNOWN。金额 8000→10999 分，条件预算 180 ms；热点 300/s 对 100/s 上限；36000/(600−300)=120 s；三份七天裸载荷 1.08864 TB，均标 assumption。37 帧成品逐张视检，218 个非图例箭头端点、7 个深色末帧及 zh/en/both/600px 页面检查通过；11 份一手原文直接下载核验，12 行假设、8 条翻车点、12 张闪卡，中文 8,985 汉字，双语节点 188/188。整站 check、章节 audit、SVG XML/有限数值、累计坐标、数字/语言/本地链接、11 项算术、JS 语法与 diff 检查通过；临时独立 Chrome 的 35 项控件交互断言通过，dump-dom 超时已由 CDP 路径替代。首页接入 Ch45，E 车道清本章锁并追加完成，保留已完成 Ch44；完整交付记录 `/tmp/sd-gen/ch45-delivery.md`。未做真实数据库/PSP/MQ 或负载压测，未提交、推送或部署。
 
-**质量基线是根目录 [`OPUS_REFACTOR.md`](./OPUS_REFACTOR.md)，样板页是 `chapters/ch02.html` 和 `chapters/ch03.html`。** 所有章节——新写、重写、复审——都必须按它 §2 的流程走完：逐张渲染现状 → 列 bug 清单 → 用 `tools/board-kit.mjs` 从一份坐标重画 → 正文逐段对图、重算数字 → 下载原文核引用 → 按 §8 验收。旧的 `CH09_REFACTOR_SPEC.md` 已删除，Ch09 不再是样板。
+**质量基线是本文件 §5 的[章节重构规范](#chapter-standard)，样板页是 `chapters/ch02.html` 和 `chapters/ch03.html`。** 所有章节——新写、重写、复审——都必须按 §5.2 的流程走完：逐张渲染现状 → 列 bug 清单 → 用 `tools/board-kit.mjs` 从一份坐标重画 → 正文逐段对图、重算数字 → 下载原文核引用 → 按 §5.8 验收。Ch09 不再是样板。
 
-「待复审」是按旧规范写完、但没过 Opus 验收的章。2026-09-29 用 `node tools/audit-chapter.mjs` 扫过：这 10 章全部缺图例、仍用旧式三段圆柱，Ch11、Ch19、Ch28、Ch29、Ch38 的一手引用不足 6 条。Ch02 就是这样一章，逐张渲染后几乎每张图都有回程跳跃、箭头指空或机制画反。复审是整章按 §2 重做，不是在旧图上补图例、改颜色。复审通过后从「待复审」移到「已完成」。
+「待复审」是按旧规范写完、但没过 Opus 验收的章。2026-09-29 用 `node tools/audit-chapter.mjs` 扫过：这 10 章全部缺图例、仍用旧式三段圆柱，Ch11、Ch19、Ch28、Ch29、Ch38 的一手引用不足 6 条。Ch02 就是这样一章，逐张渲染后几乎每张图都有回程跳跃、箭头指空或机制画反。复审是整章按 §5.2 重做，不是在旧图上补图例、改颜色。复审通过后从「待复审」移到「已完成」。
 
 `tools/check.mjs` 的 deck 数量仍然有效：Ch01–Ch08 为 4–6 组，Ch09–Ch35 为 5–7 组，Ch36–Ch45 为 6–8 组；每组 3–6 帧；`viewBox` 横版。设计题与基础章中文可见汉字目标 6,500–9,000；方法章（Ch01–Ch03）至少 5,500。英文事实、数字、图注与中文逐项对齐。不要把样板章的 deck 标题套到别的主题上。
 
-车道 agent 不得改 `assets/js/slides.js`、`assets/css/style.css`、`tools/board-kit.mjs` 和 `OPUS_REFACTOR.md`；发现全站 bug 先报告。
+车道 agent 不得改 `assets/js/slides.js`、`assets/css/style.css`、`tools/board-kit.mjs` 和本文件 §5 的规范；发现全站 bug 先报告。
 
 锁：动笔前把自己的「进行中」写成 `ChNN · 日期`，只改自己那一行。`node tools/check.mjs` 和 `node tools/audit-chapter.mjs chNN` 都通过、且逐张截图看过后清锁；新章把「下一章」改为车道内下一章，复审章从「待复审」删掉；两种都在「已完成」里追加章号。上下文被清、锁非空 → 先写完锁住的那一章。
 
@@ -134,14 +138,14 @@ tools/check.mjs
 
 ## 2. 计划 2 · 五路重构全部章节
 
-这是按 [`OPUS_REFACTOR.md`](./OPUS_REFACTOR.md) 重做，不是把 JSON 压成提词器。原料在 `legacy/src/content/chapters/chXX.json`。版式以 `chapters/ch02.html`、`chapters/ch03.html` 为准，图元用 `tools/board-kit.mjs`，播放器是现有的 `assets/js/slides.js`。D2 退场。
+这是按 [本文件的章节重构规范](#chapter-standard) 重做，不是把 JSON 压成提词器。原料在 `legacy/src/content/chapters/chXX.json`。版式以 `chapters/ch02.html`、`chapters/ch03.html` 为准，图元用 `tools/board-kit.mjs`，播放器是现有的 `assets/js/slides.js`。D2 退场。
 
-细则全在 `OPUS_REFACTOR.md`，这里只列最容易犯的：
+细则全在本文件 §5，这里只列最容易犯的：
 
 - **逐张渲染再交付。** `node tools/render-slides.mjs chNN`，每张 PNG 都看过。`check.mjs` 通过不代表图对。
 - **回程逐跳。** Cache → App → LB → Edge → Client，任何一跳都不能省；故障红线也逐跳。
 - **箭头落在边框上。** 不指空白，不戳进框，不缺箭头头。
-- **图上机制和正文一致。** look-aside、outbox、lease、复制 fan-out 最容易画反（规范 §3 G4）。
+- **图上机制和正文一致。** look-aside、outbox、lease、复制 fan-out 最容易画反（规范 §5.3 G4）。
 - **一份坐标生成一组 deck。** 帧间节点不动、只加一笔；同一节点全章同名；每张有图例、`title`、`desc`。
 - **存储用 path 身 + ellipse 盖**，不用旧式 `ellipse + rect + ellipse`。
 - **每个数字重算一遍，最坏情况假设写出来；每条引用打开原文找到那个数。**
@@ -182,12 +186,12 @@ tools/check.mjs
 2. 有锁的车道只续写锁住的那一章。
 3. **同时派 5 个** `generalPurpose`。默认每路 **1 章** 然后停。选章顺序：锁 → 「待复审」里章号最小的 → 「下一章」。
 4. 用户说「赶国庆」或「重构本车道剩余」：该车道先把剩余新章连续写完，再逐章清「待复审」，每章仍先上锁、写完解锁。
-5. 每人都读本文件 §0–§2、`OPUS_REFACTOR.md` 全文，以及样板 `chapters/ch02.html`、`chapters/ch03.html`。只改自己的 `chapters/chNN.html`。不得改播放器、样式、`tools/board-kit.mjs` 和规范文件。
-6. 写完跑 `node tools/check.mjs`、`node tools/audit-chapter.mjs chNN`，逐张看 `render-slides` 截图，按 `OPUS_REFACTOR.md` §8.3 汇报。只改 §0 自己那一行。
-7. 五路都回来后，父代理自己跑 `audit-chapter.mjs`，并用 `render-slides.mjs` 抽看每章每组的最后一帧和一张故障帧，按 `OPUS_REFACTOR.md` §8.2 一票否决项验收。不过就退回原车道，不算完成。再问要不要下一波。
+5. 每人都读本文件 §0–§2 和 §5 全文，以及样板 `chapters/ch02.html`、`chapters/ch03.html`。只改自己的 `chapters/chNN.html`。不得改播放器、样式、`tools/board-kit.mjs` 和规范文件。
+6. 写完跑 `node tools/check.mjs`、`node tools/audit-chapter.mjs chNN`，逐张看 `render-slides` 截图，按本文件 §5.8.3 汇报。只改 §0 自己那一行。
+7. 五路都回来后，父代理自己跑 `audit-chapter.mjs`，并用 `render-slides.mjs` 抽看每章每组的最后一帧和一张故障帧，按本文件 §5.8.2 一票否决项验收。不过就退回原车道，不算完成。再问要不要下一波。
 8. 某路写完就停。不要把别路的章切过来，除非用户点名收割。
 
-用户说「复审 chNN」或「按 opus 重构 chNN」：单代理只做这一章，按 `OPUS_REFACTOR.md` §2 走完，照样上锁、解锁、更新 §0。
+用户说「复审 chNN」或「按 opus 重构 chNN」：单代理只做这一章，按本文件 §5.2 走完，照样上锁、解锁、更新 §0。
 
 ## 3. 计划 3 · 提交并部署
 
@@ -208,3 +212,234 @@ tools/check.mjs
 - 无编码作业、无 AWS 服务清单、无 K8s YAML
 - 新图用内联 SVG。不再新写 D2、不用 mermaid
 - 不主动 git commit / push
+
+<a id="chapter-standard"></a>
+
+## 5. 章节重构与验收规范
+
+> 状态：现行章节重构标准，已并入本文件。
+> 来源：Opus 对 Ch02（review Grok 版）和 Ch03 的整章重构，2026-09-28 / 29。
+> 样板页：`chapters/ch02.html`、`chapters/ch03.html`。
+> 适用：Ch01–Ch45 的新写、重写和复审。已完成但没过 §5.8 验收的章，一律算「待复审」。
+
+### 5.1 为什么换规范
+
+Grok 按旧规范写的 Ch02 能过 `node tools/check.mjs`：deck 数对、每张都有 `<title>`、中英节点相等、字数超标。但逐张渲染后，**几乎每一张图都有错**：
+
+- 回程跳过中间节点：DB 直接回 Client，Cache 直接回 LB，Replica 直接回 Client。
+- 从 d1 到 e5，LB 出来的箭头都指向空白；箭头尖戳进框里 12 px；有线没箭头。
+- 图和正文讲的机制相反：正文讲 look-aside，图把 Cache 画在 App 和 DB 中间；正文警告双写，图上正好画了 App 直接 enqueue；正文说只有租约持有者回源，图上两个 App 都回源。
+- 正文算错：5 个粉丝 × 80 ms = 400 ms 已超 300 ms 目标，却被当成阈值；「7.23 这个商小于 1」。
+- 全站 `.store` 用的 `--drac-purple` 没定义，所有数据库圆柱都没有描边，没人发现。
+
+Ch03 是同一类问题：Cache / App / Object store 直接回 Client，复制画成 A → B 接力，同一个库一会叫 Disk 一会叫 Primary，150 ms 箭头指向磁盘。
+
+结论有三条，也是本规范的核心：
+
+1. **静态检查只能证明格式，不能证明图对。** 必须把每一张 slide 渲染成图片，逐张看。
+2. **手写坐标必然漂移。** 同一组 deck 的节点和连线必须由一份坐标定义生成，帧与帧之间只加不改。
+3. **图、正文、数字、引用要互相核对。** 改了图就要回头改正文；每个数字重算一遍；每条引用打开原文找到那个数。
+
+### 5.2 执行流程（按顺序，不跳步）
+
+1. **上锁**：在本文件 §0 自己那一行写 `ChNN · 日期`。
+2. **读**：本文件 §0–§2、本节全文、样板 `ch02.html` / `ch03.html`（看 deck 和正文怎么对齐）、要改的章节全文。
+3. **渲染现状**：`node tools/render-slides.mjs chNN`，逐张看 `/tmp/sd-render/chNN/*.png`。不要靠读 SVG 坐标猜。
+4. **列 bug 清单**：按 §5.3 的图、§5.5 的正文、§5.6 的双语、§5.7 的引用逐项过，写成列表。分两级：
+   - P0：语义错（回程跳跃、机制画反、算错、事实错、中英数字不一致）
+   - P1：版面错（压线、穿框、越界、缺图例、名称漂移、帧间跳变）
+5. **先定每组最后一帧**：最后一帧是完整、可口述的图。再倒推前面几帧，每帧只加一笔。
+6. **写生成脚本**：`/tmp/sd-gen/chNN.mjs`，从 `tools/board-kit.mjs` 引入图元（§5.4）。所有坐标集中在每组一个对象里。
+7. **预览循环**：`preview()` 写出单帧 HTML → `node tools/render-slides.mjs --dir=/tmp/sd-gen/chNN` 截图 → 看 → 改坐标 → 再截图，直到 §5.3 清单全过。
+8. **拼回**：先确认章节文件的修改时间没被别人动过，备份到 `/tmp`，再 `splice()`。拼完 HTML 是唯一产物，生成脚本不进仓库。
+9. **改正文**：逐段对照新图，按 §5.5 重算数字、修事实、补推导；同步英文。
+10. **核引用**：按 §5.7 下载原文逐个找数字。
+11. **验收**：按 §5.8 跑命令、看计数、截多模式图。
+12. **解锁**：本文件 §0 清锁，已完成里追加章号，下一章改为车道内下一章。
+
+### 5.3 图：必查 bug 清单
+
+每张图都要过下面每一项。例子都来自 Ch02 / Ch03 的实际修复。
+
+| # | 检查项 | 错误例子 | 正确做法 |
+|---|---|---|---|
+| G1 | 回程逐跳返回 | DB → Client、Cache → LB、Object store → Client | 每一对相邻节点一条请求、一条回程：Cache → App → LB → Edge → Client |
+| G2 | 箭头落在目标边框上 | LB 箭头指向空白；箭头尖戳进 pill 12 px | 终点取目标框的边；pill 取直边或圆端 cy 处；用 `arrow()`，线停在箭头底 |
+| G3 | 每条线都有箭头，没有残桩 | 淡化线旁多一截实线 stub；缺箭头头 | 不再走的线整条加 `muted`，不留残段 |
+| G4 | 图上机制和正文一致 | look-aside 画成 inline；outbox 画成 App 直接 enqueue；lease 两个 App 都回源；复制画成 A → B 链并有 B → Primary 回程 | look-aside：App 查 Cache，miss 时 App 自己查 DB 再回填。outbox：Primary 的 outbox 由 relay 发到 Queue。lease：只有持有者回源。复制：Primary 同时向各副本发异步日志，ack 只来自 Primary |
+| G5 | 标签语义准确 | LB 标 “not stateless”（有状态的是 App）；150 ms 指向 Disk | 标签说的是它所在的那个组件；跨洲 150 ms 画成远端用户到 Edge |
+| G6 | 同一节点全章同名 | d4 叫 Disk，d5 叫 Primary | 一个名字用到底；副标题可以变（`seek 10 ms` / `bypass read`） |
+| G7 | 路由不误导 | App 1 只连 Primary、App 2 只连 Replica，像是按实例路由 | 按读类型路由就只画一台 App 的全部路径，图注说明其他实例相同 |
+| G8 | 帧间连续 | 边界高度 250 → 320 跳变；a5 有的 App 2 → DB 到 b1 消失无说明 | 一组内节点位置和边界不动；要删的线先 `muted`，或在图注说明为什么不画 |
+| G9 | 不压线、不穿框、不越界 | `GET /feed` 压在区域边界上；Primary 圆柱骑在边界上；副标题压底弧；badge 压圆柱和边界 | 标签离边界 ≥ 16 px；组件整体在边界内；两条路径不交叉，交叉就改道或删掉冗余路径 |
+| G10 | 圆柱画法 | `ellipse + rect + ellipse` 三段，描边后盖顶出横线、底部有内弧 | 一条 path 画身 + 一个 ellipse 盖（`cyl()`） |
+| G11 | 有图例 | 无图例，读者分不清同步 / 回程 / 异步 / 失败 | 每张底部固定图例（`legend()`，y = 400） |
+| G12 | 故障线也逐跳 | 红线从 Cache 直接指向 Client | 红虚线 Cache → App → Edge → Client；停在哪一跳，就表示哪一层吸收了故障 |
+| G13 | 组件都有去处 | Queue 没有 Worker；Worker 没有下游；Session 只连一台 App | 画进图的组件至少一条入线和一条出线，否则不画 |
+| G14 | `title` / `desc` 与图一致 | 图改了，desc 仍描述旧路径 | desc 逐跳写出图上真实画的路径；改图必须同步改 desc |
+
+#### 5.3.1 deck 构图
+
+- 每组 3–6 帧，`viewBox="0 0 960 420"`。组数按 `tools/check.mjs`：Ch01–Ch08 为 4–6 组，Ch09–Ch35 为 5–7 组，Ch36–Ch45 为 6–8 组。
+- 累积绘制：`old` 是已经在板上的，`fresh` 是本帧新加的一笔，包在 `<g class="is-new">` 里。
+- **最后一帧必须是完整图**，能在 60 秒内口述。被否决的方案用红虚线加 `reject:` 标签画进完整图，比单独画一张对比卡更好（例：Ch03 d2s5「图片经 App 返回」）。
+- 至少 70% 的 deck 是架构、时序、状态或故障演化图；指标卡或左右对比卡最多 1 组。估算章也一样：Ch03 把「DAU → QPS → 台数」画成一条请求链逐帧长出 LB 和 10 台实例，而不是 5 张数字卡。
+- 组件只在需要时出现：LB 在要扩到多台时才加（Ch03 d1s4），不要第一帧就画全。
+- SVG 内文字一律英文（中文、EN、对照三种模式共用一张图）；中文解释放 figcaption。
+- figcaption 回答「这一笔为什么加、改变了哪个决定」，要带算式；不要复述框里的字。
+
+### 5.4 画法：`tools/board-kit.mjs`
+
+图元从 Ch02 / Ch03 的生成脚本抽出，输出和两章现有 SVG 逐字相同。类名对应 `assets/css/style.css` 的 `.board` 规则。
+
+| 函数 | 画什么 | 语义 |
+|---|---|---|
+| `client(cx, cy, label)` | 圆头 + 肩弧 | client / 外部调用方 |
+| `box(x, y, w, h, label, sub, cls)` | 圆角矩形 | 无状态服务；`box ok` / `box bad` 表示达标 / 过载或故障 |
+| `pill(...)` | 胶囊 | Edge / LB / gateway |
+| `cyl(cx, y1, y2, rx, label, sub, bad)` | path 身 + ellipse 盖 | 持久存储 |
+| `cache(x, y, w, h, label, sub, bad)` | 双层矩形 | cache / CDN |
+| `queue(x, y, w, h, label, bad)` | 胶囊 + 三道竖槽 | MQ / event stream |
+| `frame(x, y, w, h)` | 虚线大框 | system / region / trust boundary |
+| `arrow(pts, kind)` | 正交折线 + 箭头 | `''` 请求 · `reply` 绿色回程 · `async` 橙虚线 · `fail` 红虚线 · 可叠加 `muted` |
+| `badge` / `text(..., 'clock')` | 徽标 / 等宽强调字 | 本帧强调的数字，如 `+0.5 ms` |
+| `legend()` | 底部图例 | 每张都要 |
+| `slideHTML` / `figureHTML` / `splice` / `preview` | 输出与拼接 | 见下 |
+
+坐标约定（按这个来，基本不会压线）：
+
+- **双车道**：同一对节点之间，请求在上（中心线 cy − 9），回程在下（cy + 9）。`client(44, 200)` 的端口是 `(70, 191)` 出、`(70, 209)` 进；框的左边同理。
+- **标签**：请求标签在线上方 8 px（y − 8），回程标签在线下方 16 px（y + 16）。标签控制在 ~40 个字符内。
+- **折线**只走水平 / 垂直，拐角半径 8 由 `arrow()` 自动处理。不要斜线穿过别的组件。
+- **边界**底边 ≤ y 384，给 y = 400 的图例留空；边界标签在 `(x + 16, y + 20)`。
+- **圆柱**有副标题时 `y2 − y1 ≥ 46`。
+- **cache** 的箭头接前层矩形 `(x, y, w, h)`，后层只是阴影。
+
+生成脚本骨架：
+
+```js
+// /tmp/sd-gen/ch04.mjs
+import { text, arrow, box, pill, cyl, cache, client, frame, splice, preview } from "/Users/zy/ai_web_page/system_design_web/tools/board-kit.mjs";
+
+const A = {                                   // 一组 deck 一个坐标对象，节点和连线只定义一次
+  region: () => frame(120, 18, 824, 364) + text(136, 38, "RATE LIMITER · one region"),
+  cl: () => client(44, 200),
+  edge: () => pill(200, 170, 110, 60, "Edge", "TLS"),
+  app: (sub = "stateless", cls = "box") => box(560, 160, 150, 80, "App", sub, cls),
+  cE: (lab = "GET /api") => arrow([[70, 191], [200, 191]]) + text(160, 183, lab, "tiny", "middle"),
+  eC: (lab = "200") => arrow([[200, 209], [70, 209]], "reply") + text(160, 225, lab, "tiny", "middle"),
+};
+const base = [A.region(), A.cl(), A.edge(), A.cE(), A.eC()];
+
+const decks = [[
+  { id: "a1", title: "…", desc: "逐跳写出图上画的路径", old: [], fresh: base, zh: "中文图注", en: "English caption" },
+  { id: "a2", title: "…", desc: "…", old: base, fresh: [A.app()], zh: "…", en: "…" },
+]];
+
+if (process.argv[2] === "splice") console.log(splice("/Users/zy/ai_web_page/system_design_web/chapters/ch04.html", decks));
+else console.log(preview(decks, "/tmp/sd-gen/ch04"));
+```
+
+`splice()` 按顺序替换章节里全部 `<figure class="deck">`，数量对不上会报错。`id` 用 `d1s1` 这类全章唯一的名字，它同时是 `aria-labelledby` 的前缀和截图文件名。
+
+### 5.5 正文：必查清单
+
+| # | 检查项 | Ch02 / Ch03 的实际例子 |
+|---|---|---|
+| T1 | 每个数字重算，写出算式 | 5 × 80 ms = 400 ms 已超 300 ms，阈值改成 3 个粉丝（240 ms）；「7.23 商小于 1」改成 5,787 ÷ 6,000 ≈ 0.96 |
+| T2 | 隐含假设说出来 | 约 324.3 次 Primary 读按 116 次强读 + 2,083×10% 普通 miss 计算；336 只适用于额外新增 116 次读，集合与故障回源口径都要写明 |
+| T3 | 量级不同的两件事分开算 | 0.1% 零星 Cache 错误在峰值只有 6 次/秒，可以绕到 Primary；整层宕机是 6,000 次/秒，必须封顶约 100 次/秒，其余给 ≤ 30 s 旧值或 503，按 5,900 次/秒失败 34 秒花完一天预算 |
+| T4 | 聚合和单台分清 | 960 Mb/s 是 10 台合计出口，每台约 96 Mb/s |
+| T5 | 物理边界准确 | 「和数据库挤在同一个进程里」应为同一台机器 |
+| T6 | 机制名和机制一致 | 见 §5.3 G4；正文里 look-aside、outbox、lease、复制的描述要和图一字不差地对上 |
+| T7 | 解法真的能消掉问题 | 「Edge 靠近用户」消不掉跨洋 150 ms；要在用户附近放一套命中路径（Edge、App、Cache） |
+| T8 | 例子本身成立 | 按用户分的 timeline key 不会单键 440 次/秒；热点键例子要换成共享对象（`post:9`） |
+| T9 | 路由说法准确 | 「user 42 落在 00–7f」应为 `hash(user_id)` 的高位落在 00–7f |
+| T10 | 单位和比例准确 | 1024 与 1000 在 KB 差 2.4%，GB 差 7.4%，TB 差 10%，不是笼统的「约 2%」 |
+| T11 | 补上会翻车的边界 | 滞后副本回填缓存会把删帖前的旧 timeline 写回去；图片走签名 URL 直传，峰值上传 480 Mb/s 不经过 App |
+| T12 | 假设表覆盖全部假设 | 图上用到的每个假设都要有一行并编号（Ch03 补了 CDN 命中率 90%、接入 RTT 20 ms + Cache 命中率 95%、SLO 99.9% + Cache 错误率 0.1%） |
+| T13 | 改完图清旧说法 | grep 旧节点名和旧结论（`Disk`、「只在 Stanford 那份」），全部改掉 |
+| T14 | 去翻译腔 | 「舰队」→「整层 App」；「磁盘只死一次」「字节数不够格」这类硬译重写成口语 |
+| T15 | 结尾同步 | 翻车点表、追问、闪卡要收进新推导（Ch03 翻车点从 5 条补到 6 条，闪卡加 2 张） |
+
+#### 5.5.1 正文深度
+
+- 图注只回答「这一笔改变了哪个决定」。每组图后至少写「正常路径、为什么这样选、替代方案、故障窗口、常见错误」五类里的三类，每类是有因果关系的段落。
+- 每个方案按「约束 → 决策 → 代价 → 失败时行为」写。
+- 数字至少展开一步计算，并写明它留下或删掉了哪个组件。假设要标成 assumption，不能写得像公开生产数据。
+- 合格密度的样子：
+
+> 峰值 6,000 读/秒，按 95% 命中（假设），5,700 留在 Cache，300 次/秒回 Primary，按每盘约 100 次寻道是 3 块盘。整层 Cache 一挂，6,000 次/秒全要寻道，约 60 块盘，所以绕路必须封顶，其余请求给旧值或 503。
+
+- 字数门槛：方法章（Ch01–Ch03）中文 ≥ 5,500 汉字；其他章目标 6,500–9,000。只防压缩，不鼓励注水；重复图注、同义改写、堆云服务名不算。
+
+### 5.6 双语
+
+- `lang-zh` 与 `lang-en` 节点数相等（`tools/audit-chapter.mjs` 会数）。
+- 英文不逐句硬译，但事实、数字、结论逐项对应。改中文数字必须同时改英文。
+- **对照模式重复英文**：表格的中文列里不能再夹 `lang-en` span；表头各用各的语言（Ch02 收尾表就错在这里）。
+- **EN 模式露中文**：表格首列标签、`<th>` 也要包 `lang-zh` / `lang-en`（Ch02 假设表首列错在这里）。
+- 专业词留英文；SVG 内一律英文。
+
+### 5.7 引用
+
+- 首选标准、论文、项目原文、厂商工程原文。站内「见某章」不算引用。不确定的来源不写，禁止虚构论文。
+- 正文就地标 `[n]`，页末 `<ol class="references">` 给作者 / 机构、标题、年份、可打开的链接，并用一句话写明本章用了它的哪个数字。
+- **每个被引用的数字都要打开原文找到**。PDF 抽出文字后搜数字。Ch03 这样核过：Dean 两份幻灯片（Stanford CS295、LADIS 2009）的 100 ns / 0.5 ms / 10 ms / 150 ms / 20 µs；SRE 书的 52.56 分钟、250 次错误、0.0002% 占 20%；SRE Workbook 两个 99.9% 区域乘成 99.9999%；NIST 的 KiB / GiB / TiB。
+- 出处写准版本：缩略图例子两份 Dean 幻灯片都有，不是只在 Stanford 那份；从磁盘顺序读 1 MB，LADIS 2009 写 20 ms，Stanford 写 30 ms，引用时要说明是哪一份。
+- 引用只证明外部事实，本章自己的推导仍要在页内算给读者看。
+
+### 5.8 验收
+
+#### 5.8.1 命令
+
+```sh
+node tools/check.mjs                  # 站点格式
+node --check assets/js/slides.js
+git diff --check
+node tools/audit-chapter.mjs chNN     # 本规范的计数，任何 FAIL 都要处理
+node tools/render-slides.mjs chNN     # 护眼主题逐张截图，全部看过
+node tools/render-slides.mjs chNN d4s5,d5s5 --theme=dracula                 # 深色抽查最密的帧
+node tools/render-slides.mjs chNN --page --locale=both --section=4 --slide=5 # 整页：zh / en / both 各看一次
+```
+
+`audit-chapter.mjs` 检查：deck 数与每组帧数、每张 `title` + `desc`、图例、`is-new`、旧式三段圆柱为 0、`lang-zh` = `lang-en`、汉字数、重复 id、引用条数。它不能代替看图。
+
+已知不算 bug：窄屏下图板横向滚动，是全站 `.board` 720 px 最小宽度造成的；headless Chrome 按 420 px 截图时右侧会被截断（改前的页面也一样），窄屏用 600 px 截。
+
+#### 5.8.2 一票否决
+
+出现任一项即退回：
+
+- 没有逐张渲染看过就交付
+- 任何回程跳过中间节点；任何箭头指向空白、缺箭头或戳进框
+- 图上画的机制与正文相反
+- 同一节点在章内换名字
+- 截图里能看到压线、穿框、组件越出边界
+- 还有旧式三段圆柱；缺图例；`title` / `desc` 缺失或与图不符
+- 任何数字算错，或最坏情况假设没说
+- `lang-zh` ≠ `lang-en`；对照模式重复英文；EN 模式露中文
+- 引用打不开、与结论不符或虚构
+- 主体仍是名词方片，或违反 70% 规则
+- 中文字数低于门槛，或主要信息只在图注 / 闪卡里
+- 引入 D2、Mermaid、Canvas、外站 CDN；`check.mjs` 不通过
+
+#### 5.8.3 交付报告
+
+写给用户，按这个顺序：
+
+1. 结果：改了哪些文件，deck / slide 数从多少到多少，是否提交（默认不提交）。
+2. 图的 bug：按 §5.3 编号归类，每类一句话 + 例子。
+3. 正文的事实更正：原说法 → 新说法，附算式。
+4. 新增内容：假设行、推导段、翻车点、闪卡、引用。
+5. 引用核对：哪些原文下载核过。
+6. 验收：§5.8.1 各命令结果、`audit-chapter.mjs` 关键数字、截图覆盖了哪些主题 / 语言 / 宽度。
+7. 没做的和已知问题。
+
+### 5.9 并行与共享文件
+
+- 只改自己车道、自己上锁的 `chapters/chNN.html`。
+- `assets/css/style.css`、`assets/js/slides.js`、`tools/board-kit.mjs` 是共享文件，车道 agent 不改。发现全站 bug（如 Ch02 时发现的 `--drac-purple` 未定义）先报告，由用户或父代理决定。
+- 写入前看目标文件的修改时间；如果刚被改过，说明有别的 agent 在写，先停下确认。
+- 播放器已实现：1800 ms 基础节拍，0.5× / 1× / 1.5× / 2×，默认循环，`sd-deck-speed` / `sd-deck-loop` 持久化，60% 进入视口才播，同时只播一个 deck，`prefers-reduced-motion` 时关闭自动播放。章节不写自己的播放脚本，只在复杂时序图上按需设 `data-interval`。
+- 不主动 commit / push。

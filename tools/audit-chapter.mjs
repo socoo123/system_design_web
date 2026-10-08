@@ -1,4 +1,4 @@
-// Counts the OPUS_REFACTOR.md §7 acceptance numbers for one or more chapters.
+// Counts the PLAN.md §5.8 acceptance numbers for one or more chapters.
 //   node tools/audit-chapter.mjs ch02 ch03
 // Exit code 1 if any hard rule fails. This does not replace looking at every rendered slide.
 import fs from "node:fs";

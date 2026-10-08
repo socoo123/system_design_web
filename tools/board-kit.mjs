@@ -1,5 +1,5 @@
 // SVG primitives for chapter decks, extracted from the Ch02 / Ch03 generators.
-// Classes map to `.board` rules in assets/css/style.css. Usage: see OPUS_REFACTOR.md §4.
+// Classes map to `.board` rules in assets/css/style.css. Usage: see PLAN.md §5.4.
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
