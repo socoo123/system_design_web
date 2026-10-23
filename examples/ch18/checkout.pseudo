@@ -1,0 +1,29 @@
+checkout(auth, key, intent):
+  # intent = quote_id, currency, address_version, sorted unique (sku, qty).
+  require authenticated owner, nonempty key, positive integer quantities
+  digest = SHA256(canonical(auth.user_id, intent))
+  BEGIN READ COMMITTED
+  claimed = INSERT Request(user_id,request_key,digest,receipt=NULL)
+            ON CONFLICT(user_id,request_key) DO NOTHING
+  if not claimed:
+    r = SELECT Request WHERE user_id=:auth_user_id AND request_key=:key
+        # A NEW statement snapshot after the conflicting insert finishes.
+    require r.digest == digest else ROLLBACK and return 409
+    COMMIT; return r.receipt              # Original creation result, not live status.
+  q = SELECT immutable Quote WHERE id=intent.quote_id
+  require q.owner=auth.user_id AND q.unexpired AND q.matches(intent)
+  total = sum(q.unit_price[sku] * qty)     # Integer minor units; checked overflow.
+  currency = q.currency
+  o = INSERT Order(owner=auth.user_id,total,currency,pending_pay,expire_at=DB_NOW+900s)
+  for (sku, qty) in intent.items ORDER BY sku:
+    changed = UPDATE Stock SET available=available-qty,reserved=reserved+qty
+              WHERE sku_id=sku AND available>=qty
+    require changed == 1 else ROLLBACK and return out_of_stock
+    INSERT Item(o.id,sku,qty,q.unit_price[sku])
+    INSERT Reservation(o.id,sku,qty,HELD) # PK(order_id,sku_id).
+  INSERT Outbox(event_id,kind=order_created,order_id=o.id,version=1)
+  receipt = {http:201, order_id:o.id, status:pending_pay, total, currency}
+  UPDATE Request SET receipt=:receipt WHERE user_id=:auth_user_id AND request_key=:key
+  COMMIT; return receipt
+  # Any exception before COMMIT rolls back Request/Order/Item/Stock/Hold/Outbox.
+  # Retry the WHOLE transaction on deadlock; a lost commit reply uses the SAME key.

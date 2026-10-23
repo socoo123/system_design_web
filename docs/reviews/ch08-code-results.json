@@ -1,0 +1,96 @@
+{
+  "redis_version": "7.2.5",
+  "tests": [
+    {
+      "name": "page_source_sync",
+      "passed": true,
+      "blocks": 7
+    },
+    {
+      "name": "acquire_busy_matching_renew_release",
+      "passed": true
+    },
+    {
+      "name": "expired_owner_cannot_renew_or_release_successor",
+      "passed": true,
+      "ttl_before": 20000,
+      "ttl_after": 20000
+    },
+    {
+      "name": "invalid_ttl_no_mutation",
+      "passed": true
+    },
+    {
+      "name": "20_competitors_one_acquire_wrong_owners_cannot_release",
+      "passed": true,
+      "winners": 1
+    },
+    {
+      "name": "acquisition_reply_discarded_owner_still_exists_safe_cleanup",
+      "passed": true
+    },
+    {
+      "name": "counterexample_get_then_del_deletes_successor",
+      "passed": true
+    },
+    {
+      "name": "SQL_normal_stale_duplicate_invalid_and_insufficient",
+      "passed": true,
+      "state": [
+        1,
+        34,
+        12
+      ]
+    },
+    {
+      "name": "issued_not_installed_boundary_and_version_12_vs_13",
+      "passed": true
+    },
+    {
+      "name": "single_database_transaction_contract_traces",
+      "passed": true,
+      "replay_no_debit": true,
+      "payload_mismatch": true,
+      "rollback_all": true,
+      "last_item_guard": true
+    },
+    {
+      "name": "split_acquisition_INCR_counterexample",
+      "passed": true,
+      "events": [
+        [
+          "A acquire",
+          null
+        ],
+        [
+          "A expires",
+          null
+        ],
+        [
+          "B acquire+INCR",
+          100
+        ],
+        [
+          "A late INCR",
+          101
+        ]
+      ]
+    },
+    {
+      "name": "capacity_time_arithmetic",
+      "passed": true,
+      "base_commands": 1800,
+      "busy_retries_commands": 2400,
+      "hot_key_ceiling": 50,
+      "lease_remaining": 9.7,
+      "pause": 34,
+      "remaining_before_pause": 29
+    }
+  ],
+  "limits": [
+    "Redis is one isolated instance with no persistence; no failover, clock-shift or throughput experiment.",
+    "SQL predicates executed in SQLite, not PostgreSQL; transaction pseudocode checked against official PostgreSQL semantics and traces.",
+    "Dropped reply is deliberately discarded by client, not a network fault.",
+    "INCR counterexample is a deterministic trace, not a live coordinator test."
+  ]
+}

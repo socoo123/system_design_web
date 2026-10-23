@@ -1,0 +1,15 @@
+expiry_round():
+  cutoff = DB_NOW; cursor = (-infinity, -infinity)
+  repeat:
+    rows = SELECT expire_at,id FROM Orders
+      WHERE status=pending_pay AND expire_at<=cutoff
+        AND (expire_at,id)>cursor ORDER BY expire_at,id LIMIT 500
+    for row in rows:
+      try: global_rate_limit(100_attempts_per_second); close(row.id,expired)
+      catch transient_database_failure: record_metric_and_continue
+      # Failure leaves pending_pay + expire_at unchanged and discoverable.
+    if rows empty: break
+    cursor = rows.last(expire_at,id)
+  # Next round RESTARTS from oldest due row, never from yesterday's final cursor.
+  # Concurrent rounds/delayed messages are safe because close rechecks under row lock.
+  # At 35 new due/s and 70 net completed/s, outage backlog drains at 35/s.

@@ -1,0 +1,28 @@
+public_page(auth, query):
+  authorize_post(auth, query.post)  # also required on a cache hit
+  ctx = validate_signed_cursor(query)  # post, scope, order, limit, expiry
+  key = body_slice_key(ctx)  # excludes pending/private author state
+  hit = cache.get(key)
+  if hit and safe_to_send(hit.not_after): return public_projection(hit)
+  lease = cache.try_lease(key)  # OWNER(token), BUSY, or CACHE_UNAVAILABLE
+  if lease == BUSY:
+    page = cache.wait_for_fill(key, bounded_deadline)
+    return public_projection(page) if page and safe_to_send(page.not_after) else 503
+  # Only OWNER or unavailable-cache bypass can consume an origin-page permit.
+  if not global_origin_quota.try_acquire():
+    if lease is OWNER: cache.release_if_current(key, lease.token)
+    return 503 Retry-After
+  started = clock.now()
+  not_after = started + (5 seconds - clock_error_and_send_margin)
+  page = authority.fresh_statement_query(ctx)  # no older transaction/replica
+  if not safe_to_send(not_after): return 503  # never restart the 5 seconds
+  if lease is OWNER:
+    cache.fill_if_current(key, lease.token, page, not_after)
+    # ONE cache-side atomic check+write; invalidation rotates/revokes token.
+  return public_projection(page) if safe_to_send(not_after) else 503
+
+invalidate(committed_visibility_event):
+  cache.rotate_token_and_delete(affected_key)  # atomic, repeated is safe
+# Fill rejection may still return a pre-delete snapshot inside its 5 s bound.
+# Lease loss/restart never resets not_after. An unavailable authority fails closed.
+# Requires bounded clock error/output delay; already sent copies cannot be recalled.

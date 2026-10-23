@@ -1,0 +1,17 @@
+// PostgreSQL READ COMMITTED; operation_id PRIMARY KEY; all data in one DB.
+// Validate amount > 0; bind op_id to canonical (sku, amount).
+BEGIN
+claimed = INSERT operation(op_id, sku, amount)
+          VALUES (:op, :sku, :amount)
+          ON CONFLICT (op_id) DO NOTHING RETURNING op_id
+if claimed is empty:
+    receipt = SELECT sku, amount, result FROM operation WHERE op_id = :op
+    if receipt is missing: ROLLBACK; retry same op within budget
+    if receipt.payload != (sku, amount): ROLLBACK; return PAYLOAD_MISMATCH
+    COMMIT; return receipt.result
+rows = UPDATE inventory SET qty = qty - :amount
+       WHERE sku = :sku AND :amount > 0 AND qty >= :amount
+result = (rows == 1 ? SUCCESS : UNAVAILABLE)
+UPDATE operation SET result = :result WHERE op_id = :op
+COMMIT                                      // claim + debit + receipt together
+// A lost COMMIT reply is UNKNOWN: query/retry the SAME operation ID.

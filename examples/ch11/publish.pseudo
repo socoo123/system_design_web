@@ -1,0 +1,29 @@
+publish(authenticated_author, key, request):
+  author = authenticated_author
+  hash = digest(canonicalizeAndValidate(request))
+  prior = primary.readPublishKey(authenticated_author, key)
+  if prior exists: return replayOr409(prior, hash)
+  post_id, event_id = allocateUniqueIds()
+  response = {status: 201, post_id: post_id}
+  try:
+    BEGIN on the author's PostgreSQL shard
+    INSERT PublishKey(author, key, hash, post_id, response, now + 24h)
+    mode = SELECT AuthorMode FOR SHARE  // serialized with cutover
+    INSERT Post(post_id, author, server_created_at, request, live, v=1)
+    INSERT Outbox(event_id, post_id, server_created_at, mode.generation)
+    COMMIT
+    return response
+  catch unique_conflict on PublishKey(author, key):
+    ROLLBACK
+    prior = primary.readPublishKey(author, key)  // NEW statement
+    if prior absent: return 503  // no invented success
+    return replayOr409(prior, hash)
+  catch commit_result_unknown:
+    discardConnection(); return 503  // retry the SAME key
+  catch other_database_failure:
+    ROLLBACK if possible; return 503
+
+relay(event):
+  broker.publish(event)  // same event_id on every retry
+  await broker.durableAck()
+  primary.markPublished(event.event_id)

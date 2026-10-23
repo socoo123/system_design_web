@@ -1,0 +1,21 @@
+GET product(id):                          # teaching pseudocode, not Java
+    require validId(id)                    # otherwise 400
+    entry = cache.getWithin(id, 5ms)        # timeout/open circuit => MISS
+    if usable(entry):
+        return replyBefore(200, entry.row, entry.valid_until)
+
+    if originGate.tryAdmitOne() != GRANTED:
+        return 503                         # no DB call; no automatic retry
+    observed_at = boundedClock.now()
+    valid_until = observed_at + 30s - 300ms
+    result = store.readOnceFresh(id, remainingRequestBudget())
+    # one query, no hidden retry; NOT_FOUND and TIMEOUT also spend admission
+    if result is ERROR or TIMEOUT:
+        return 503                         # never convert failure into 404
+    if result is NOT_FOUND:
+        return 404                         # this example does not cache 404
+    entry = Entry(result.row, valid_until)
+    if not usable(entry):
+        return 503                         # late result: no fill and no 200
+    cache.tryFillAsync(id, entry)           # best effort; preserve deadline
+    return replyBefore(200, entry.row, entry.valid_until)

@@ -22,12 +22,21 @@ const pos = args.filter((a) => !a.startsWith("--"));
 const chapter = opt.dir ? undefined : pos[0];
 const only = opt.dir ? pos[0] : pos[1];
 const theme = opt.theme || "parchment";
-const out = opt.out || `/tmp/sd-render/${chapter || path.basename(opt.dir || "preview")}`;
+// Headless Chrome CLI clamps its layout viewport to at least 500 CSS px even
+// when the screenshot region is narrower. Reject misleading mobile evidence.
+if (opt.page && Number(opt.width || 1280) < 500) {
+  throw new Error("--page --width below 500 is unsupported by Chrome CLI: it crops a wider viewport. Use Playwright page.setViewportSize or CDP Emulation.setDeviceMetricsOverride for real mobile validation.");
+}
+const out = path.resolve(opt.out || `/tmp/sd-render/${chapter || path.basename(opt.dir || "preview")}`);
 fs.mkdirSync(out, { recursive: true });
 
 function shot(file, png, w = 960, h = 420, extra = []) {
+  file = path.resolve(file);
+  png = path.resolve(png);
+  if (fs.existsSync(png)) fs.unlinkSync(png);
   execFileSync(chrome, ["--headless=new", "--disable-gpu", "--hide-scrollbars", "--force-device-scale-factor=1.4",
     ...extra, `--screenshot=${png}`, `--window-size=${w},${h}`, `file://${file}`], { stdio: "ignore" });
+  if (!fs.existsSync(png) || fs.statSync(png).size === 0) throw new Error(`Chrome did not produce ${png}`);
   console.log(png);
 }
 
@@ -48,7 +57,7 @@ if (opt.dir) {
   html = html.replace("<script src=\"file://", `<script>localStorage.setItem("sd-locale","${locale}");localStorage.setItem("sd-theme","${theme}");</script><script src="file://`);
   let css = ".topbar,.chapter>header{display:none}";
   if (opt.section) css += `.chapter>section:not(:nth-of-type(${opt.section})){display:none}`;
-  if (opt.slide) css += `.deck .slide{visibility:hidden!important;opacity:0!important}.deck .slide:nth-of-type(${opt.slide}){visibility:visible!important;opacity:1!important;transform:none!important}.deck .slide .is-new{animation:none!important}`;
+  if (opt.slide) css += `.deck .slide{visibility:hidden!important;opacity:0!important}.deck .slide:nth-child(${opt.slide} of .slide){visibility:visible!important;opacity:1!important;transform:none!important}.deck .slide .is-new{animation:none!important}`;
   html = html.replace("</head>", `<style>${css}</style></head>`);
   const name = `page-${locale}-${theme}-s${opt.section || "all"}-w${opt.width || 1280}`;
   const file = path.join(out, `${name}.html`);

@@ -28,81 +28,23 @@
   <header>
     <div class="ch-kicker"><span class="lang-zh">CHAPTER 02 · 面试方法</span><span class="lang-en">CHAPTER 02 · method</span></div>
     <h1><span class="lang-zh">从零扩展到百万用户</span><span class="lang-en">Scale from zero to a million users</span></h1>
-    <p class="ch-meta-line"><span class="lang-zh">主线约 40 分钟 + 深挖约 15 分钟 · 前置：Ch01 · 5 组自动播放演进图</span><span class="lang-en">~40 min core + ~15 min deep dives · after Ch01 · 5 autoplay evolution decks</span></p>
+    <p class="ch-meta-line"><span class="lang-zh">主线约 25 分钟 + 深挖约 10 分钟 · 前置：Ch01 · 5 组自动播放演进图</span><span class="lang-en">~25 min core + ~10 min deep dives · after Ch01 · 5 autoplay evolution decks</span></p>
   </header>
 
-  <section class="goal">
-    <h2><span class="lang-zh">这一章结束你能做什么</span><span class="lang-en">What you can do after this chapter</span></h2>
-    <div class="bilingual">
-      <div class="lang-zh"><p class="col-kicker">中文</p><ul>
-        <li>从单进程加本地库画起，每次只加一笔，并说出这一笔被哪条算术逼出来。</li>
-        <li>在同一张图上标出谁有状态、哪条读打缓存、哪条读仍回主库、哪条工作必须离开请求。</li>
-        <li>讲清主库宕机、副本延迟、缓存击穿三条故障路径，以及基本假设下为什么还不分片。</li>
-      </ul></div>
-      <div class="lang-en"><p class="col-kicker">English</p><ul>
-        <li>Start from one process plus a local database, add one stroke at a time, and name the arithmetic that forced it.</li>
-        <li>On one picture, mark who owns state, which reads hit cache, which reads still reach the primary, and which work must leave the request.</li>
-        <li>Walk primary loss, replica lag, and cache stampede, and say why the base assumptions do not yet shard.</li>
-      </ul></div>
-    </div>
-  </section>
+<section class="goal"><h2><span class="lang-zh">本章核心：让瓶颈决定下一笔</span><span class="lang-en">Core: let the bottleneck choose the next step</span></h2>
+<div class="bilingual"><div class="lang-zh"><ul><li><strong>先算再加：</strong>CPU、读预算、写预算和慢工作各自推动不同组件。</li><li><strong>先选读契约：</strong>允许旧的读走缓存；读己之写先绕缓存并验证已确认历史。</li><li><strong>故障不改口：</strong>缓存失败要有回源预算，切主需要旧主隔离与合格日志前缀。</li></ul></div><div class="lang-en"><ul><li><strong>Size before adding:</strong> CPU, reads, writes, and slow work drive different components.</li><li><strong>Choose the read contract first:</strong> stale-ok reads use cache; read-your-writes bypasses it and verifies acknowledged history.</li><li><strong>Keep the contract during failures:</strong> bound origin load, fence the old primary, and verify the promotion prefix.</li></ul></div></div>
+</section>
 
-  <section>
-    <h2><span class="lang-zh">30 秒开场与边界</span><span class="lang-en">The 30-second open and scope</span></h2>
-    <div class="bilingual">
-      <div class="lang-zh"><p class="col-kicker">中文</p>
-        <p class="say">我会从一台机器上的应用进程加本地数据库画起，不先画终图。假设日活一百万、每人每天 20 次请求、95% 是读、峰值按平均的 10 倍。平均大约 231.5 QPS，峰值大约 2,315。这个峰值会先打穿单机 CPU 和单库读预算，所以我按顺序加：拆出数据库、负载均衡和第二台应用、副本和缓存、会话外置和异步队列。基本假设下写峰值大约 116 QPS，单主写预算还够，这一轮不分片。多地域双活只点名，不画进第一张图。</p>
-        <p>这章练的是演进。百万用户先收成三个澄清：日活还是注册总量，读写各占多少、写完会不会立刻读，这一轮是否只做单个地域。问完就把假设写在白板上。面试官改数字，后面的除法跟着改。本章所有 QPS 都是假设算出来的，不是任何一家公司的线上数字。</p>
-        <p>产品只固定到能把路径走通：一个读多写少的社区。<code>GET /home</code> 看时间线，<code>POST /posts</code> 发帖，再异步通知关注者。账户、帖子和会话要事务，所以第一版权威存储是一台关系库。全文搜索、推荐、计费、静态边缘分发都不在这张图上。多地域双活只点名：分区时两个地域都接写，就要准备合并；单地域的主从超时，已经够把一致性选择讲清楚。</p>
-      </div>
-      <div class="lang-en"><p class="col-kicker">English</p>
-        <p class="say">I start with one app process and a local database on one machine. I do not open on the final picture. Assume one million daily actives, 20 requests each per day, 95% reads, and a 10× peak. That is about 231.5 QPS on average and about 2,315 at the peak. The peak breaks a single box’s CPU and a single primary’s read budget first, so I add, in order: a separate database, a load balancer and a second app, a replica and a cache, then an external session store and an async queue. Under the base assumptions the write peak is about 116 QPS, still inside one primary’s write budget, so this round does not shard. Multi-region active-active is named and not drawn.</p>
-        <p>This chapter is the evolution method. It is not a URL shortener and not a recital of one product’s end state. “A million users” collapses into three questions: daily actives or signups, the read/write mix and whether a user reads what they just wrote, and whether this round can live in one region. Write the assumptions on the board. If the interviewer changes a number, the arithmetic changes with it. Waiting in silence for a secret production QPS does not help. Every QPS on this page is computed from labeled assumptions, not from any company’s live traffic.</p>
-        <p>The product is only fixed enough to walk a path: a read-heavy community. <code>GET /home</code> reads the caller’s timeline. <code>POST /posts</code> creates a post and notifies followers asynchronously. Accounts, posts, and sessions need keys and transactions, so version one keeps authority in one relational primary. Full-text search, recommendations, billing, and edge distribution of static bytes stay off the diagram. Multi-region active-active can be named as a later problem: once both regions accept writes during a partition, you must plan the merge. A single-region primary timeout is already enough to force the consistency choice.</p>
-      </div>
-    </div>
-    <table>
-      <thead><tr><th><span class="lang-zh">假设</span><span class="lang-en">Assumption</span></th><th><span class="lang-zh">取值</span><span class="lang-en">Value</span></th><th><span class="lang-zh">它推动或拿掉的组件</span><span class="lang-en">What it adds or removes</span></th></tr></thead>
-      <tbody>
-        <tr><td><span class="lang-zh">A1–A4 · 日活、请求、读写、峰值</span><span class="lang-en">A1–A4 · DAU, requests, read/write mix, peak</span></td><td>1,000,000 × 20 / 86,400 × 10</td><td><span class="lang-zh">平均 231.5 QPS，峰值 2,315；读 2,199，写 116</span><span class="lang-en">231.5 average QPS, 2,315 peak; 2,199 reads, 116 writes</span></td></tr>
-        <tr><td><span class="lang-zh">A5 · 应用 CPU</span><span class="lang-en">A5 · app CPU</span></td><td><span class="lang-zh">4 ms / 请求，机器 8 核</span><span class="lang-en">4 ms/request, 8-core box</span></td><td><span class="lang-zh">峰值约 9.3 核，拿掉「峰值仍单进程」</span><span class="lang-en">About 9.3 cores at peak, so the peak cannot stay one process</span></td></tr>
-        <tr><td><span class="lang-zh">A6 · 存储</span><span class="lang-en">A6 · storage</span></td><td><span class="lang-zh">注册 = 5 × 日活，每人 20 帖，每行 2 KB</span><span class="lang-en">accounts = 5 × DAU, 20 posts each, 2 KB/row</span></td><td><span class="lang-zh">原始 200 GB，两份 400 GB，低于 2 TB，存储不逼分片</span><span class="lang-en">200 GB raw, 400 GB with a copy, under 2 TB, so storage does not force shards</span></td></tr>
-        <tr><td><span class="lang-zh">A7–A8 · 主库预算与命中率</span><span class="lang-en">A7–A8 · primary budget and hit rate</span></td><td><span class="lang-zh">读 400/s，写 800/s；允许旧的读命中目标 90%</span><span class="lang-en">400 reads/s, 800 writes/s; 90% hit goal for stale-ok reads</span></td><td><span class="lang-zh">5.5 倍读预算逼出缓存；含 116 强读时约 324.3 回源/s；116 写先不分片</span><span class="lang-en">5.5× read budget forces cache; including 116 strong reads gives 324.3 origin/s; 116 writes do not shard</span></td></tr>
-      </tbody>
-    </table>
-    <div class="bilingual">
-      <div class="lang-zh"><p class="col-kicker">算术要写出除法，并写明它改了哪一笔</p>
-        <p>一天的请求数是 1,000,000 × 20 = 20,000,000。再除以一天的秒数：20,000,000 ÷ 86,400 = 231.48，口播成平均 231.5 QPS。峰值系数是假设 A4 的 10 倍，231.5 × 10 = 2,315 QPS。读占 95%，2,315 × 0.95 = 2,199；写占 5%，2,315 × 0.05 = 116。后面每加一个盒子，都要能指回这组数。改了日活或每人请求数，就重做这一次除法，不要把 2,315 背成行业常数。</p>
-        <p>单进程先死在 CPU。假设每个请求在应用里烧掉 4 毫秒 CPU，这是 A5，不是测量。平均 231.5 × 0.004 ≈ 0.93 核，八核机器在平均负载上还剩得下数据库。峰值 2,315 × 0.004 ≈ 9.3 核，应用单独就超过 8 核。被拿掉的部署是「峰值时应用仍和数据库挤在同一台机器上」。换 16 核能再撑一轮垂直扩容，但进程崩溃和单块磁盘这两个单点都还在。</p>
-        <p>读预算把缓存加进来，写预算把分片先拿掉。假设 A7：读 p99 不超过 200 毫秒时，主库承担 400 次简单读每秒，写预算是 800 笔简单事务每秒。这两个数是设计预算，不是某款数据库的标称上限。2,199 ÷ 400 = 5.5，单主接全部读不成立。假设 A8 把命中率 90% 定为要挣到的目标。若全部读都允许旧，回源读是 2,199 × 0.10 ≈ 220，低于 400；加入写后强读后用下一节的分流口径重算。写峰值 116 低于 800，大约还有 6.9 倍余量，所以基本假设下不分片。</p>
-        <p>存储也先不分片。假设 A6：注册用户是日活的 5 倍，5,000,000 个账户；每人 20 条帖子；行加上索引按 2 KB 算，每人 40 KB。5,000,000 × 40 KB = 200 GB 原始数据。再复制一份是 400 GB。单主的数据预算我定为 2 TB，400 GB 在预算里面。数据量撑不起「第一天就分片」这个理由。分片要等面试官把写放大，那笔算术放在副本和队列都讲完之后。</p>
-      </div>
-      <div class="lang-en"><p class="col-kicker">Show the division, and say which stroke it changes</p>
-        <p>Requests per day are 1,000,000 × 20 = 20,000,000. Divide by the seconds in a day: 20,000,000 ÷ 86,400 = 231.48, spoken as 231.5 average QPS. Assumption A4’s peak factor is 10, so 231.5 × 10 = 2,315 QPS. Reads are 95%, 2,315 × 0.95 = 2,199. Writes are 5%, 2,315 × 0.05 = 116. Every later box has to point back at this set. If daily actives or requests per user change, redo the division. Do not memorize 2,315 as an industry constant.</p>
-        <p>The single process dies on CPU before it dies on “not enough boxes.” Assumption A5 spends 4 ms of app CPU per request. That is not a measurement. The average is 231.5 × 0.004 ≈ 0.93 cores, so an 8-core box still has room for the database at the average. The peak is 2,315 × 0.004 ≈ 9.3 cores. The app alone exceeds 8 cores and the database has nothing left to run queries. The deployment this removes is “at the peak, the app still shares one machine with the database.” A 16-core box can buy one more round of vertical scale. A process crash and a single disk are still there. Vertical scale is a fair alternative for the average or a short campaign. It is not the answer to the peak plus a single point of failure.</p>
-        <p>The read budget adds the cache. The write budget removes sharding for now. Assumption A7: under our own target that read p99 stays within 200 ms, the primary takes 400 simple reads per second, and 800 simple write transactions per second. Those are design budgets, not a vendor’s nameplate. 2,199 ÷ 400 = 5.5, so the read peak is five and a half budgets. One primary cannot absorb every read. Assumption A8 sets a 90% hit rate as a goal we must earn, not a measurement. If all reads were stale-ok, origin would be 2,199 × 0.10 ≈ 220, under 400; the next section recomputes it with strong-read bypasses. The write peak of 116 is under 800, with about 6.9× of headroom, so the base diagram stops after the queue and does not shard.</p>
-        <p>Storage does not shard yet either. Assumption A6: five registered accounts per daily active, 5,000,000 accounts, 20 posts each, 2 KB per row including index overhead, 40 KB per account. 5,000,000 × 40 KB = 200 GB raw. One extra copy is 400 GB. The single-primary data budget I am using is 2 TB. 400 GB sits inside it. Bytes are not a day-one sharding argument. Sharding waits until the interviewer turns the write rate up. That division comes after replicas and the queue.</p>
-      </div>
-    </div>
-    <h3><span class="lang-zh">延迟数量级只用来比较，并且标明年份</span><span class="lang-en">Latency orders of magnitude are for comparison, and they carry a year</span></h3>
-    <div class="bilingual">
-      <div class="lang-zh"><p>Jeff Dean 在 2009 年 LADIS 的 “Numbers Everyone Should Know” 里给出：主存引用大约 100 纳秒，同机房往返 500,000 纳秒也就是 0.5 毫秒，磁盘寻道 10,000,000 纳秒也就是 10 毫秒，加州到荷兰再回到加州 150,000,000 纳秒也就是 150 毫秒。[2] 寻道是当时机械盘的数量级，不是 2026 年的 NVMe。同机房八次串行 SQL 大约 4 毫秒，相对假设的 200 毫秒读目标很便宜，所以拆库是为了分开核和故障域，不是为了省延迟。跨洋 150 毫秒说明第一张图不画第二个地域。</p>
-        <p>示例目标同样是假设，用来决定故障时保哪一边：读路径可用性按 99.9% 来设计，p99 不超过 200 毫秒；写确认 p99 不超过 300 毫秒，通知可以晚几秒。面试时说「这是我为了继续设计写下的目标，请你改」。不要把它们说成某家社区产品的内部 SLO。</p>
-      </div>
-      <div class="lang-en"><p>In the “Numbers Everyone Should Know” slide of his 2009 LADIS keynote, Jeff Dean listed orders of magnitude: a main-memory reference around 100 ns, a round trip in the same datacenter at 500,000 ns (0.5 ms), a disk seek at 10,000,000 ns (10 ms), and a California–Netherlands–California packet at 150,000,000 ns (150 ms). [2] The seek line is a spinning-disk figure from that talk, not a 2026 NVMe measurement, so it is not this chapter’s disk latency. Two comparisons still hold. One extra SQL round trip inside a datacenter is on the 0.5 ms step; eight serial queries are about 4 ms, cheap next to a 200 ms read p99. Splitting the database off the app is about cores and failure domains, not about saving that hop. The transoceanic 150 ms is a different step. It is why the first picture has no second region: the round trip alone would spend a large part of the read budget before the app runs. The cache exists to keep hot rows on the memory side of that gap, not to recite 10 ms as today’s disk.</p>
-        <p>The example targets are assumptions too, used to decide which side a failure protects. Design the read path toward 99.9% availability and a p99 within 200 ms. The write acknowledgement stays within a 300 ms p99. Notifications may take seconds. Say “these are targets I wrote down so the design can continue; please correct them.” Do not present them as a community product’s internal SLO.</p>
-      </div>
-    </div>
-    <h3><span class="lang-zh">这一轮明确不画的东西</span><span class="lang-en">What this round deliberately does not draw</span></h3>
-    <div class="bilingual">
-      <div class="lang-zh"><p>多地域双活不进第一张图。跨洋同步会把写确认预算吃掉。Brewer 在 2012 年写过：平时可以同时要一致性和可用性，超时出现时才必须为这一次操作二选一；「三选二」太粗，选择可以细到某类操作、某行、某个用户。[1] 双活等于分区时两边都可能写，恢复时要合并。静态边缘分发、搜索和推荐后置，第一天的瓶颈还没指到它们。</p></div>
-      <div class="lang-en"><p>Multi-region active-active stays off the first picture. Dean’s 0.5 ms and 150 ms already show that a transoceanic synchronous commit would consume the write budget. Brewer wrote in 2012 that a system can keep both consistency and availability until a partition or a timeout, and only then must choose for that operation. “Pick two of three” is too coarse, and the choice can be as fine as one operation, one row, or one user. [1] Active-active means both sides may write during a partition and must merge afterward. A primary timeout inside one region already forces that choice, so a second region is not required to tell it. Edge caching of static bytes, a search index, and recommendations wait too. They change read semantics, and day-one bottlenecks do not point at them yet.</p></div>
-    </div>
-  </section>
+<section><h2><span class="lang-zh">边界与扩容决策</span><span class="lang-en">Scope and scaling decisions</span></h2>
+<div class="bilingual"><div class="lang-zh"><p>场景是单地域、读多写少的社区：<code>GET /home</code>、<code>POST /posts</code>、异步通知。先确认百万指日活还是注册量、写后是否立刻读、能否只做单地域。本章所有流量和预算均为<strong>教学假设</strong>；读 p99≤200 ms、写确认 p99≤300 ms 是待压测目标。</p></div><div class="lang-en"><p>The scenario is a single-region, read-heavy community: <code>GET /home</code>, <code>POST /posts</code>, and asynchronous notifications. Clarify DAU versus registrations, read-after-write needs, and region scope. All rates and budgets are <strong>teaching assumptions</strong>; read p99≤200 ms and write-ack p99≤300 ms are targets to validate.</p></div></div>
+<table><thead><tr><th><span class="lang-zh">观测或假设</span><span class="lang-en">Observation or assumption</span></th><th><span class="lang-zh">计算</span><span class="lang-en">Calculation</span></th><th><span class="lang-zh">设计决定</span><span class="lang-en">Decision</span></th></tr></thead><tbody><tr><td><span class="lang-zh">100万 DAU，每人20请求/日，峰值10倍</span><span class="lang-en">1M DAU, 20 requests/day each, 10× peak</span></td><td><span class="lang-zh">20,000,000 / 86,400 ≈ 231.5；峰值≈2,315/s</span><span class="lang-en">20,000,000 / 86,400 ≈ 231.5; peak≈2,315/s</span></td><td><span class="lang-zh">95%读≈2,199；5%写≈116</span><span class="lang-en">95% reads≈2,199; 5% writes≈116</span></td></tr><tr><td><span class="lang-zh">应用每请求4 ms CPU；8核主机</span><span class="lang-en">4 ms app CPU/request; 8-core host</span></td><td><span class="lang-zh">2,315 × 0.004 ≈ 9.26核</span><span class="lang-en">2,315 × 0.004 ≈ 9.26 cores</span></td><td><span class="lang-zh">先拆库、加应用；两台不等于容灾余量足够</span><span class="lang-en">Separate DB and scale apps; two instances do not prove failure capacity</span></td></tr><tr><td><span class="lang-zh">读预算400/s；写预算800事务/s</span><span class="lang-en">Read budget 400/s; write budget 800 transactions/s</span></td><td><span class="lang-zh">2,199 / 400 ≈ 5.5；116 / 800 ≈ 0.145</span><span class="lang-en">2,199 / 400 ≈ 5.5; 116 / 800 ≈ 0.145</span></td><td><span class="lang-zh">缓存和副本缓解读；基础写量不逼分片</span><span class="lang-en">Cache and replicas address reads; baseline writes do not force shards</span></td></tr><tr><td><span class="lang-zh">20名关注者，通知每次80 ms</span><span class="lang-en">20 followers; 80 ms/notification</span></td><td><span class="lang-zh">串行 20 × 80 ms = 1.6 s</span><span class="lang-en">Serial 20 × 80 ms = 1.6 s</span></td><td><span class="lang-zh">通知离开300 ms确认路径</span><span class="lang-en">Move notifications off the 300 ms acknowledgement path</span></td></tr></tbody></table>
+<details><summary><span class="lang-zh">容量口径与故障余量</span><span class="lang-en">Capacity units and failure headroom</span></summary><div class="bilingual"><div class="lang-zh"><p>注册=5×日活；每人20帖，单行含索引2 KB（十进制）：5,000,000×20×2 KB=200 GB<strong>每份</strong>，主副两份共400 GB。比较单机2 TB预算时用200 GB；还需预留日志、临时空间、备份和增长，副本也不是备份。读400/s和写800事务/s假设在同一混合负载中可同时达到；outbox插入包含在800的基准事务内，后台扇出写不包含，需另测。</p></div><div class="lang-en"><p>Registrations=5×DAU; 20 posts each, 2 KB per indexed row in decimal units: 5,000,000×20×2 KB=200 GB <strong>per copy</strong>, 400 GB across primary and replica. Compare 200 GB with a per-node 2 TB budget; reserve logs, temporary space, backups, and growth. Replication is not backup. The 400 reads/s and 800 writes/s assume simultaneous mixed-load budgets. The write transaction includes its outbox insert, but not background fan-out writes, which require separate sizing.</p></div></div>
+<div class="bilingual"><div class="lang-zh"><p>应用以60% CPU为教学预算，每台8×60%=4.8核，正常至少⌈9.26/4.8⌉=2台；任失一台仍守预算至少3台。图中两台只演示水平扩展。真正应用数量还受内存、并发连接、下游和可用区故障约束。后文统一用四舍五入的2,199读、116写，避免混合精度。</p></div><div class="lang-en"><p>At a teaching CPU budget of 60%, each node offers 8×60%=4.8 cores. Normal load needs ceil(9.26/4.8)=2 nodes; retaining the budget after one loss needs 3. The two-node diagram illustrates scale-out. Memory, concurrency, dependencies, and zone failures still affect the count. Later arithmetic consistently uses rounded 2,199 reads and 116 writes.</p></div></div>
+</details>
+</section>
 
-  <section>
-    <h2><span class="lang-zh">单进程到负载均衡：会话问题在这里出现</span><span class="lang-en">One process to a load balancer: the session problem shows up here</span></h2>
-    <figure class="deck">
+<section><h2><span class="lang-zh">第一步：拆出数据库，再处理应用状态</span><span class="lang-en">Step 1: separate the database, then remove app-local state</span></h2>
+<figure class="deck">
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="a1t a1d">
           <title id="a1t">One process and a local database on one host</title>
@@ -126,7 +68,7 @@
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="a2t a2d">
           <title id="a2t">Split the app host from the database host</title>
-          <desc id="a2d">The same client, app process, and database, now on two hosts joined by a private network. GET /home reaches the app, SQL crosses a same-datacenter round trip of about 0.5 ms, rows return to the app, and 200 returns to the client. The database is still a single copy.</desc>
+          <desc id="a2d">The same client, app process, and database, now on two hosts joined by a private network. GET /home reaches the app, SQL crosses a network hop; 0.5 ms is a historical RTT example, not SQL latency, rows return to the app, and 200 returns to the client. The database is still a single copy.</desc>
           <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
           <circle cx="44" cy="176" r="12" class="box"/><path d="M24 222 Q44 190 64 222" class="wire"/><text x="44" y="244" text-anchor="middle" class="label">Client</text>
           <rect x="290" y="52" width="130" height="88" rx="12" class="box"/><text x="355" y="93" text-anchor="middle" class="label">App process</text><text x="355" y="112" text-anchor="middle" class="sub">HTTP + SQL</text>
@@ -139,11 +81,11 @@
             <text x="284" y="44" class="tiny">APP HOST</text>
             <rect x="692" y="26" width="156" height="134" rx="14" class="boundary"/>
             <text x="704" y="44" class="tiny">DB HOST</text>
-            <path d="M420 82 L700 82" class="wire"/><polygon points="710,82 700,87 700,77" class="head"/><text x="565" y="75" text-anchor="middle" class="tiny">SQL · ≈0.5 ms RTT</text>
+            <path d="M420 82 L700 82" class="wire"/><polygon points="710,82 700,87 700,77" class="head"/><text x="565" y="75" text-anchor="middle" class="tiny">SQL · RTT example</text>
             <text x="300" y="200" class="tiny">separate cores · separate failure domains</text>
           </g>
         </svg>
-        <figcaption><span class="lang-zh">只拆主机，不加组件。SQL 多了一段约 0.5 毫秒的同机房往返（Dean 2009），换来的是应用和数据库各自的 CPU 和故障域，不是更低的延迟。库仍然只有一份。</span><span class="lang-en">Split the hosts; add no component. SQL now pays a same-datacenter round trip of about 0.5 ms (Dean 2009). What it buys is separate cores and separate failure domains for the app and the database, not lower latency. The database is still one copy.</span></figcaption>
+        <figcaption><span class="lang-zh">只拆主机，不加组件。SQL 多了一段网络往返（0.5 ms 仅为 Dean 2009 的历史量级，不含查询执行），换来的是应用和数据库各自的 CPU 和故障域，不是更低的延迟。库仍然只有一份。</span><span class="lang-en">Split the hosts; add no component. SQL gains a network hop; 0.5 ms is Dean’s historical 2009 RTT example, excluding query execution. What it buys is separate cores and separate failure domains for the app and the database, not lower latency. The database is still one copy.</span></figcaption>
       </div>
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="a3t a3d">
@@ -217,36 +159,13 @@
         </svg>
         <figcaption><span class="lang-zh">这一阶段的完整图：负载均衡、两台有状态应用、一台库，200 经负载均衡回到客户端。两台应用都连同一台库，库上的 SPOF 还在，下一组图先处理它。</span><span class="lang-en">The complete picture for this stage: a load balancer, two stateful apps, one database, and a 200 back through the balancer. Both apps depend on the same database, so its SPOF is still there. The next deck deals with it first.</span></figcaption>
       </div>
-    </figure>
-    <div class="bilingual">
-      <div class="lang-zh"><p class="col-kicker">把 GET /home 在单机上走完</p>
-        <p>用户带上 Cookie <code>sid=8f3</code> 请求 <code>GET /home</code>。连接进应用进程，进程在内存里查出 user_id=42，在同一台机器的库里查时间线，把帖子放进 200 返回。回程箭头表示请求结束了；没有它，这张图只是两个名词。库和进程共享一块盘、一组核、一个故障域。进程崩溃或盘损坏，站点不可用，而且没有第二份帖子可以升起来。</p>
-        <p>拆开的理由是峰值 CPU，不是延迟。9.3 核对 8 核，数据库在峰值时分不到查询时间。拆到两台主机之后，应用和库各用自己的核和盘。代价是每次 SQL 多一次同机房往返。按 Dean 2009 年那张表，这一跳是 0.5 毫秒；首页串行 8 次查询大约 4 毫秒。[2] 相对 200 毫秒的读目标，这 4 毫秒是拆分的账单，不是拆分的理由。</p>
-        <p>垂直加核在平均负载上成立。0.93 核可以留在一台更大的机器上，省掉内网和第二份部署。它赢的条件是峰值系数没那么高。面试官坚持 10 倍峰值时，16 核仍把 9.3 核的应用和库的查询挤在一起，进程和磁盘的单点还在。口播是：平均可以垂直；峰值加单点故障，就拆主机。</p>
-      </div>
-      <div class="lang-en"><p class="col-kicker">Walk GET /home on one host</p>
-        <p>The user sends <code>GET /home</code> with Cookie <code>sid=8f3</code>. DNS points the name at this machine, and the connection enters the app process. The process maps the sid to user_id=42 in its own memory, runs the timeline query on the database on the same machine, and returns the posts in a 200 body. The reply arrow is the end of the request. Without it the drawing is two nouns. The database and the process share one disk, one pool of cores, and one failure domain. A process crash, a ruined disk, or the operating system killing both makes the site unavailable, and there is no second copy of the posts to promote.</p>
-        <p>Peak CPU is the arithmetic that splits them. Latency is not. 9.3 cores against 8 leaves the database without query time at the peak. After the split, the app can fill its own cores, and the database keeps its own cores and its own disk. The cost is one same-datacenter round trip per SQL call. On Dean’s 2009 table that hop is the 0.5 ms step. Eight serial queries on the home page are about 4 ms of round trips. [2] Next to a 200 ms read target, those 4 ms are the bill for the split, not the reason for it. The bill is cheap, so do not stuff the peak and the database back together to avoid one network hop.</p>
-        <p>Adding cores is a real alternative, and it wins at the average. 0.93 cores can stay on one bigger machine and skip the private network, the second deploy, and the second monitor. It wins when the peak factor is milder, or when the surge is a few days rather than every busy hour. If the interviewer holds the 10× peak, a 16-core box only packs a 9.3-core app next to the database’s queries. The process and the disk are still single points. Say it this way: vertical at the average; split hosts when the peak and a single failure both matter. More RAM is not horizontal scale.</p>
-      </div>
-    </div>
-    <div class="bilingual">
-      <div class="lang-zh"><p class="col-kicker">负载均衡一出现，就要承认会话在内存里</p>
-        <p>第二台应用是 9.3 核逼出来的，不是为了图上看起来「有集群」。一台应用进程消化不了峰值 CPU，客户端却只应该看见一个地址，所以前面放负载均衡：健康检查把死进程摘掉，活着的进程分摊新连接。到这一笔为止，库仍然只有一份。均衡器解决的是应用进程的入口，不是数据的副本。</p>
-        <p>会话在加均衡器时就要标出来。登录时 App 1 把 sid 和 user_id 放进自己的内存。均衡器若轮询，下一个 <code>GET /home</code> 落到 App 2，内存里没有这张表，用户看起来像未登录。粘滞把同一 Cookie 钉在 App 1 上，能继续看时间线。窗口是：App 1 重启或被健康检查摘掉，内存表一起消失，用户要重新登录。两台机器的 CPU 都在干活，用户状态没有水平扩展。</p>
-        <p>「加了负载均衡就可以水平扩展」把入口复制和状态复制说成了同一件事。这一阶段的图是两台应用，标着 session in RAM，库上还贴着 SPOF。先不上第二台、只把单进程垂直加大，只在 CPU 预算还够时成立。峰值已经要第二台进程时，粘滞是下一笔要拆掉的状态，不是终点。</p>
-      </div>
-      <div class="lang-en"><p class="col-kicker">The moment the balancer appears, admit the session is in memory</p>
-        <p>The second app is forced by 9.3 cores, not by a desire to draw a cluster. One process cannot spend the peak CPU, and the client should still see one address, so a load balancer sits in front. Health checks drop a dead process, and live processes share new connections. The database is still one copy. The balancer fixes the app entrance, not the data’s copies.</p>
-        <p>Mark the session problem when the balancer appears. Do not wait until the second box is drawn and then pretend to notice. At login, App 1 stores sid and user_id in its own memory. If the balancer rotates connections, the next <code>GET /home</code> lands on App 2, which has no such table and treats the user as logged out. Pinning that cookie to App 1 is stickiness. It keeps this user on the timeline. The failure window is concrete: when App 1 restarts or fails a health check, the table dies with it and the user logs in again. Scale-in has to move sessions or the moved users drop offline too. Both machines spend CPU, and the user state has not scaled out.</p>
-        <p>The short line “a load balancer means we scale horizontally” treats a copied entrance as copied state. The honest picture at this stage is two app boxes labeled session in RAM, and a SPOF still sitting on the database. The alternative is to skip the second app and enlarge one process, which avoids stickiness. That alternative holds only while the CPU budget holds. Once the peak wants a second process, stickiness is the state the next stroke removes, not the place the design stops.</p>
-      </div>
-    </div>
-  </section>
+    </figure><div class="bilingual"><div class="lang-zh"><p>A1→A5 保留同一条请求链：本机库→独立库→LB→两台应用。拆库隔离资源竞争；水平扩容要求会话不绑定某台进程。粘滞能临时保住登录体验，但实例故障仍丢会话，LB 自身和数据库也仍需可用性方案。不要把“加了LB”当成扩展完成。</p></div><div class="lang-en"><p>A1→A5 preserve the request chain: local DB → separate DB → LB → two apps. Separating the DB isolates resource contention; scaling the app requires sessions independent of a process. Stickiness can temporarily preserve login continuity but cannot survive loss of that process. The LB and database also need availability plans.</p></div></div>
+<div class="bilingual"><div class="lang-zh"><p>图 A2 的0.5 ms仅来自2009年网络往返数量级；它不包括SQL执行、排队、刷盘，也不是今天的延迟承诺。不能用“八个SQL≈4 ms”证明p99。拆库增加网络跳数，但让资源独立扩展。<a href="#ref-dean">[1]</a></p></div><div class="lang-en"><p>The 0.5 ms in A2 is a historical 2009 network-RTT example, excluding SQL execution, queueing, and flushes. It is neither a current latency promise nor evidence that eight SQL calls fit a p99 budget. The extra hop buys independent resource scaling. <a href="#ref-dean">[1]</a></p></div></div>
+</section>
 
-  <section>
-    <h2><span class="lang-zh">副本和缓存：哪条读命中，哪条仍回主库</span><span class="lang-en">Replica and cache: which reads hit, which still reach the primary</span></h2>
-    <figure class="deck">
+<section><h2><span class="lang-zh">第二步：旁路缓存与读己之写</span><span class="lang-en">Step 2: cache-aside and read-your-writes</span></h2>
+<div class="bilingual"><div class="lang-zh"><p>图 B1→B5 分开三条路径：允许旧的读命中缓存；未命中查副本再回填；读己之写绕缓存，去有资格服务的当前主库。先判请求契约，再查缓存，否则旧缓存命中会绕过所有位点检查。</p></div><div class="lang-en"><p>B1→B5 separate three paths: stale-ok cache hits; misses read the replica and fill the cache; read-your-writes bypasses cache for an eligible current primary. Classify before lookup, or an old hit evades every position check.</p></div></div>
+<figure class="deck">
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="b1t b1d">
           <title id="b1t">Every read and write still hits one database</title>
@@ -322,7 +241,7 @@
             <path d="M490 80 L430 80" class="wire reply"/><polygon points="420,80 430,75 430,85" class="head reply"/><text x="455" y="96" text-anchor="middle" class="tiny">weak hit</text>
           <text x="452" y="306" class="tiny">ryw: min_pos before cache lookup</text><path d="M710 118 L430 118" class="wire reply"/><polygon points="420,118 430,113 430,123" class="head reply"/><path d="M710 240 L652 240 Q644 240 644 232 L644 160 Q644 152 636 152 L401 152 Q400 152 400 151 L400 150" class="wire reply"/><polygon points="400,140 405,150 395,150" class="head reply"/></g>
         </svg>
-        <figcaption><span class="lang-zh">先分一致性再查缓存：写后读带 min_pos 绕缓存查当前主库；允许旧的读才查 Cache，miss 由应用查副本。缓存始终不直连数据库。</span><span class="lang-en">Classify consistency first: read-your-writes carry min_pos and bypass cache to the current primary. Only stale-ok reads consult Cache; the app sends misses to the replica. Cache never queries a database.</span></figcaption>
+        <figcaption><span class="lang-zh">先分一致性再查缓存：写后读带 min_pos 绕缓存查当前主库；允许旧的读才查 Cache，miss 由应用查副本。本章旁路缓存始终不直连数据库。</span><span class="lang-en">Classify consistency first: read-your-writes carry min_pos and bypass cache to the current primary. Only stale-ok reads consult Cache; the app sends misses to the replica. In this cache-aside design, Cache never queries a database.</span></figcaption>
       </div>
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="b4t b4d">
@@ -382,48 +301,47 @@
             <text x="452" y="326" class="tiny">origin ≈ 2,083 × 10% + 116 = 324.3/s</text>
           <path d="M710 118 L430 118" class="wire reply"/><polygon points="420,118 430,113 430,123" class="head reply"/><path d="M710 240 L652 240 Q644 240 644 232 L644 160 Q644 152 636 152 L401 152 Q400 152 400 151 L400 150" class="wire reply"/><polygon points="400,140 405,150 395,150" class="head reply"/></g>
         </svg>
-        <figcaption><span class="lang-zh">终图先按下界分流：116 次强读绕缓存核验主库；其余 2,083 次允许旧的读才查缓存，miss 走副本。最坏全回主库：2,083×10%+116=324.3/s，不把强读再计一次 miss。会话仍在应用内存。</span><span class="lang-en">The final frame classifies by bound first: 116 strong reads bypass cache and check the primary; 2,083 stale-ok reads use cache and send misses to the replica. Worst-case primary load is 2,083×10%+116=324.3/s, with no duplicated misses. Sessions remain in app memory.</span></figcaption>
+        <figcaption><span class="lang-zh">终图先按下界分流：116 次强读绕缓存核验主库；其余 2,083 次允许旧的读才查缓存，miss 走副本。保持90%命中而回源汇到主库时：2,083×10%+116=324.3/s，不把强读再计一次 miss。会话仍在应用内存。</span><span class="lang-en">The final frame classifies by bound first: 116 read-your-writes reads bypass cache and check the primary; 2,083 stale-ok reads use cache and send misses to the replica. At the assumed 90% hit rate, consolidated primary load is 2,083×10%+116=324.3/s, with no duplicated misses. Sessions remain in app memory.</span></figcaption>
       </div>
-    </figure>
-    <div class="bilingual">
-      <div class="lang-zh"><p class="col-kicker">三条读路径按这个顺序走</p>
-        <p><code>GET /home</code> 进负载均衡，因粘滞落到持有 sid 的应用。应用先识别一致性要求，再决定是否查 <code>feed:42</code>。写成功响应携带 <code>min_pos=(shard, history, commit_pos)</code>，作者下一次 GET 带回这个下界。本章写后读直接绕缓存，在当前主库新快照中核对该历史与位点；若副本能证明连续 apply 到下界，也可改由副本服务。没有证明就等待、回当前主库或明确失败。只有允许旧的读先查共享缓存：命中返回，未命中由应用查副本再回填。图画一台应用的分流，另一台遵循相同规则。</p>
-        <p>写路径不能先改缓存。<code>POST /posts</code> 在主库插入并提交，响应附带最小提交位点；应用尝试删除 <code>feed:42</code>。删除失败要有重试责任，不能把已提交帖子猜成未写。Nishtala 等人的 demand-filled look-aside 也是由应用回源回填，写先 SQL 再 delete，因为删除幂等。[3] 但普通 DEL 不能挡住删除之后的旧读回填；其论文用缓存端原子校验的 lease token，并在 delete 时撤销旧 token。新 token 若从落后副本取得旧值也不自动满足写后读，所以强读仍先按位点分流。短 TTL 约束缓存驻留时间，不证明副本追平。</p>
-      </div>
-      <div class="lang-en"><p class="col-kicker">Walk the three read paths in this order</p>
-        <p><code>GET /home</code> enters the load balancer and lands on the app holding sid. The app classifies consistency before consulting <code>feed:42</code>. A successful write returns <code>min_pos=(shard, history, commit_pos)</code>; the author carries that bound on the next GET. Here read-your-writes bypass cache and check the bound in a fresh snapshot at the current primary. A replica may serve only after proving continuous apply through that position in the same history. Otherwise wait, use the current primary, or fail explicitly. Only stale-ok reads consult the shared cache first: hits return, misses let the app query the replica and refill. The second app follows the same routing.</p>
-        <p>The write path cannot update cache first. <code>POST /posts</code> commits on the primary and returns a minimum commit position; the app attempts to delete <code>feed:42</code>. Failed invalidation needs retry responsibility, rather than treating a committed post as absent. Nishtala et al. use application-driven look-aside fills and SQL followed by idempotent delete. [3] Ordinary DEL still permits a late old refill. Their lease token is checked atomically at the cache and revoked on delete. Even a new token can fetch old data from a lagging replica, so read-your-writes still route by position first. A short TTL bounds cache residence, not replication lag.</p>
-      </div>
-    </div>
-    <div class="bilingual">
-      <div class="lang-zh"><p class="col-kicker">5.5 倍读预算逼出缓存；副本先解决单份数据</p>
-        <p>不加缓存时，峰值 2,199 次读全部落到主库，2,199 ÷ 400 = 5.5。命中率 90% 是假设 A8，要靠键和 TTL 挣出来。先按所有读都可缓存比较，回源约 220；写后读绕缓存后的基线约 324.3，见下节。若在前一比较里只给 70%，未命中是 2,199 × 0.30 ≈ 660，660 ÷ 400 ≈ 1.65，一台副本不够，要两台才把未命中放进预算。命中率守不住，副本就不只是可用性备份，而成了读容量，台数要重算。</p>
-        <p>90% 命中让普通读的回源预算看起来够了，副本仍然要加，因为帖子不能只留一份磁盘。默认同地域异步：201 等主库本地持久提交，不等副本 flush，更不等副本 apply。主库磁盘失效时，未复制的已确认尾部可能丢失。若把「抵御单主机/磁盘失效且不丢已确认写」写成硬约束，必须在成功前等至少一个独立故障域的合格副本持久确认；不足时不能降级返回满足该合同的成功，结果未知时按原请求身份查证。提升只选包含全部已确认前缀的副本，且先隔离旧主。[4][5] receive、flush、apply 是三层：持久确认不等于读可见。MySQL 8.4 的半同步 ACK 在 relay log 刷盘后发出，却会在等待超时后退回异步，因此名称不能充当合同。[6] Dean 的 0.5 ms 是网络往返数量级，实际等待还含刷盘；跨洋 150 ms 仅网络就吃掉 300 ms 预算的一半。[2]</p>
-        <p>只加副本、不加缓存，是命中目标不存在时的另一条路：2,199 ÷ 400 ≈ 6 台副本才能摊开峰值读。每台都要接日志，最慢的那台把陈旧窗口拉长，主库的写路径也不会变轻。缓存把大多数读留在内存一侧，副本数量按故障和剩余未命中来定。两者解决的约束不同，不能互相代替。</p>
-      </div>
-      <div class="lang-en"><p class="col-kicker">A 5.5× read budget adds the cache; the replica first fixes the single copy</p>
-        <p>Without a cache, all 2,199 peak reads land on the primary. Divided by the budget of 400, that is 5.5×. That division is why the cache appears, not a sentence like “reads are heavy so the industry adds a cache.” The 90% hit rate is assumption A8. Key design and TTL have to earn it. For the all-cacheable comparison, origin reads are about 220. With strong-read bypasses the baseline is 324.3, computed below. If the all-cacheable comparison allows only 70%, misses are 2,199 × 0.30 ≈ 660, and 660 ÷ 400 ≈ 1.65, so one replica cannot hold the misses. Two replicas are required to put misses inside the budget. If the hit rate cannot be defended, the replica stops being only an availability copy and becomes capacity, and the count has to be recomputed.</p>
-        <p>A replica is still needed even when ordinary cache misses fit, because posts need another disk copy. Default same-region async returns 201 after local durable commit, without waiting for replica flush or apply. Losing the primary disk can lose its unreplicated acknowledged suffix. If the contract is to preserve acknowledged writes through a single primary host/disk failure, success must wait for durable confirmation from an eligible replica in an independent failure domain. Missing confirmation cannot degrade into success under that contract; resolve uncertain results with the original request identity. Promote only a candidate containing the entire acknowledged prefix, after isolating the old primary. [4][5] Receive, flush, and apply are distinct: durability does not imply read visibility. MySQL 8.4 semi-sync acknowledges flushed relay logs but can fall back to async on timeout, so its name does not prove this contract. [6] Dean’s 0.5 ms is a network order of magnitude; actual waiting also includes flush. A 150 ms ocean round trip alone uses half the 300 ms budget. [2]</p>
-        <p>Replicas without a cache are a different road, the road where the 90% goal does not exist: about 2,199 ÷ 400 ≈ 6 replicas to spread the read peak. Each one applies the log, the slowest one stretches the stale window, and the primary’s write path is no lighter. The cache keeps most reads on the memory side, so replica count follows failure and the leftover misses, not the entire read peak. The two boxes answer different constraints. One does not stand in for the other.</p>
-      </div>
-    </div>
-    <div class="bilingual">
-      <div class="lang-zh"><p class="col-kicker">写完立刻刷新，旧在哪一个窗口</p>
-        <p>用户发帖，主库提交，201 带回 min_pos。日志还没 apply 时，副本和共享缓存都可能缺这行。作者刷新必须先识别这个下界，再绕过没有足够证明的缓存；本章直接读当前主库的新快照。若切主后的历史不包含这个已确认位点，强读要报告无法满足，不能把回主库说成一定读到。允许旧的读仍可能拿到旧时间线，产品承诺要分开。</p>
-        <p>回主库的读要算进预算，并先把集合分开。把峰值 2,199 读/s 视为包含 116 次写后读的总量，剩余允许旧的读为 2,199−116=2,083。A8 的 90% 命中率只对这 2,083 次查缓存的读成立：约 208.3 次 miss，加 116 次绕缓存，故障时全回主库约 324.3 读/s，低于 400，不重复计数。若 116 次写后读是题目另加的流量，总读变成 2,315，才是 2,199×10%+116≈336；它不是本章基线。70% 命中下，2,083×30%+116=740.9，超过预算。会话保留并单调推进 min_pos，每次强读都必须证明满足；不能在一次读取后或 TTL 到期时清掉下界；两秒粘主只是体验启发式，TTL 到期不是副本追平的证明，不能替代读己之写合同。</p>
-        <p>「有了副本就不会丢已确认的写」不成立。异步复制下，主库已经确认、日志还没到任何副本的事务，会在主库磁盘消失时丢掉。副本提供的是一份可以升起来的数据，它可以比客户端看见的 201 更旧。「未命中就查数据库」也不分路径：写后读查副本，用户会看见自己的帖子消失；允许旧的读全部查主库，会把 400 的预算打穿。</p>
-      </div>
-      <div class="lang-en"><p class="col-kicker">Where “I refreshed and it was gone” actually sits</p>
-        <p>The user posts, the primary commits, and 201 carries min_pos. Until replica apply, both replica and shared cache can lack the row. The author’s refresh must identify the bound before any cache hit; here it bypasses cache and reads a fresh snapshot at the current primary. If the promoted history lacks that acknowledged position, the strong read reports that the bound cannot be met. Returning to a primary alone cannot recover a lost async write. Stale-ok readers retain a separate contract.</p>
-        <p>Count primary reads using disjoint sets. Treat 2,199 reads/s as the total including 116 read-your-writes; stale-ok traffic is 2,199−116=2,083. A8’s 90% hit rate applies only to those cache lookups: 208.3 misses plus 116 bypasses give 324.3 primary reads/s when every origin read returns to it, under 400 without double counting. If the 116 follow-up reads are extra traffic, total reads become 2,315 and 2,199×10%+116≈336 applies; that is not this chapter’s baseline. At 70% hits, 2,083×30%+116=740.9 exceeds capacity. Retain and monotonically advance the session’s min_pos; every strong read must prove it is satisfied, without clearing the floor after one read or TTL expiry. Two-second stickiness is an experience heuristic; its expiry proves no replica progress and cannot implement the read-your-writes contract.</p>
-        <p>A common mistake is “a replica means acknowledged writes cannot be lost.” Under async replication, transactions the primary has acknowledged whose log has reached no replica disappear if the primary disk disappears with them. The replica answers “there is a copy that can be promoted.” The promoted copy can be older than the 201 the client already saw. Another mistake is “a miss reads the database,” without splitting read-your-writes from stale-ok reads. Sending read-your-writes to the replica makes a user’s own post vanish. Sending stale-ok reads to the primary turns a large part of the 2,199 into primary traffic and breaks the 400 budget. Label the paths, then talk about consistency.</p>
-      </div>
-    </div>
-  </section>
+    </figure><h3><span class="lang-zh">“强读”在本章具体承诺什么</span><span class="lang-en">What “strong read” means here</span></h3>
+<div class="bilingual"><div class="lang-zh"><p>本章沿用图中的 <code>ryw / min_pos</code>：<strong>至少包含本会话已确认的写，不承诺全局线性一致或所有用户的绝对最新值</strong>。回执记录 <code>(history, position)</code>；会话对同一历史单调推进下界，不因一次读取成功或两秒TTL到期而清除。副本若证明包含该连续前缀，也只能宣称满足这个下界。跨历史不能只比LSN整数，必须验证祖先前缀；异步切主丢了所需写时，返回无法满足。</p></div><div class="lang-en"><p>Here <code>ryw / min_pos</code> means <strong>at least this session’s acknowledged writes, not global linearizability or everyone’s latest value</strong>. Receipts carry <code>(history, position)</code>; the session monotonically advances the bound within a history and never clears it after one read or a two-second TTL. A replica proving the prefix satisfies only that bound. Across histories, verify ancestry rather than comparing numeric LSNs; if asynchronous failover lost the required write, report an unsatisfied contract.</p></div></div>
+<div class="bilingual"><div class="lang-zh"><p>位点证明还必须对应<strong>实际查询的快照</strong>：在当前读权威上建立新快照，并用这份快照的前缀证明核验下界，不能复用早于提交的长事务快照。主库路由名或健康检查不能代替权威证明。本章 <code>GET /home</code> 的读己之写分支合并权威 Post 中作者自己的帖子；关注者异步Feed投影可继续落后。仅等待数据库apply不能制造尚未执行的worker写入。<a href="#ref-isolation">[6]</a></p></div><div class="lang-en"><p>The proof must describe the <strong>query’s actual snapshot</strong>: open a fresh snapshot under current read authority and verify the bound using that snapshot’s prefix evidence; never reuse a transaction snapshot predating the commit. A route name or health check is not authority proof. The read-your-writes branch of <code>GET /home</code> merges the author’s own authoritative Post rows; asynchronous follower-feed projections may still lag. Database apply cannot create worker writes that have not happened. <a href="#ref-isolation">[6]</a></p></div></div>
+<h3><span class="lang-zh">可运行Java：先分流，再消耗回源预算</span><span class="lang-en">Runnable Java: classify, then spend the origin budget</span></h3>
+<div class="bilingual"><div class="lang-zh"><p>下面方法与 <a href="../examples/ch02/ReadPath.java">ReadPath.java</a> 同源，Java17、无依赖。输入为可信身份生成的缓存键、读取模式和已验证回执；输出是快照或 <code>Unavailable</code>（接口可映射503）。这是<strong>可运行契约模型</strong>：Cache、Origin、Budget由接口注入，真实分布式适配器未实现。</p></div><div class="lang-en"><p>This method comes from <a href="../examples/ch02/ReadPath.java">ReadPath.java</a>, Java 17 without dependencies. Inputs are a key derived from trusted identity, a read mode, and a validated receipt; output is a snapshot or <code>Unavailable</code> (mapped to 503 by an API). This is a <strong>runnable contract model</strong> with injected Cache, Origin, and Budget interfaces, not a distributed adapter.</p></div></div>
+<pre data-language="Java 17 · executable contract model" data-kind="runnable" data-source="ReadPath.java"><code>    Snapshot read(Request request) {
+        boolean strong = request.strong() || request.minPos() != null;
+        if (strong) {                          // classify BEFORE any cache lookup
+            if (!budget.admit()) throw new Unavailable(&quot;origin budget&quot;);
+            Snapshot value = origin.freshPrimary(request.key());
+            if (!value.covers(request.minPos()))
+                throw new Unavailable(&quot;required history unavailable&quot;);
+            return value;                      // never downgrade to stale data
+        }
+        try {
+            Snapshot hit = cache.get(request.key());
+            if (hit != null) return hit;
+        } catch (Unavailable ignored) { /* cache error is not an empty DB result */ }
+        if (!budget.admit()) throw new Unavailable(&quot;origin budget&quot;);
+        long startedAt = clock.millis();
+        Snapshot value = origin.staleReplica(request.key());
+        // Failed DB reads throw. Do not convert failures into cached empty results.
+        long remainingTtl = ttlMillis - (clock.millis() - startedAt);
+        if (remainingTtl &gt; 0) {
+            try { cache.put(request.key(), value, remainingTtl); }
+            catch (Unavailable ignored) { /* a successful stale-ok read still returns */ }
+        }
+        return value;                          // TTL is not a replica-freshness proof
+    }</code></pre>
+<div class="bilingual"><div class="lang-zh"><p><code>freshPrimary</code> 的真实适配器必须固定同一连接/读权威，建立新快照并提供其历史前缀证明；<code>appliedPrefixes</code>来自这份快照的证明，不能由客户端填写。模型用历史→前缀映射演示合法祖先与丢失分支。<code>Budget</code> 只表达所有应用共享的速率准入，不是每个进程各有400次；它不可用时关闭回源。并发上限由真实Origin适配器的有界执行/连接池另行控制，占用在finally释放，boolean准入不能代表并发许可。普通读的副本失败也返回不可用；若另加主库回退，每次尝试都要重新准入。</p></div><div class="lang-en"><p>The real <code>freshPrimary</code> adapter pins one connection/read authority, opens a fresh snapshot and supplies its history-prefix evidence. Its <code>appliedPrefixes</code> is snapshot evidence, never client input. The model maps histories to prefixes to distinguish valid ancestors from lost branches. <code>Budget</code> models only aggregate rate admission across apps, not 400 per process; an unavailable guard closes origin access. The real Origin adapter separately bounds execution/connections and releases occupancy in finally; a boolean admission is not a concurrency permit. Replica failure also fails the ordinary read. Any added primary fallback must acquire admission for each attempt.</p></div></div>
+<h3><span class="lang-zh">命中率的分母必须先分开</span><span class="lang-en">Separate the hit-rate denominator</span></h3>
+<div class="bilingual"><div class="lang-zh"><p>2,199总读中假设116次为写后读，其余2,083次允许旧。90%命中只应用于后者：<strong>2,083×10%+116=324.3次回源/s</strong>。正常约208.3到副本、116到主库；故障时若汇到一个合格原点，324.3仍低于共享400预算，但没有由此证明p99。70%命中时为740.9/s；全缓存故障时为2,199/s，不能全部放行。</p></div><div class="lang-en"><p>Assume 116 of 2,199 total reads are read-your-writes, leaving 2,083 stale-ok reads. Apply 90% hits only to that set: <strong>2,083×10%+116=324.3 origin reads/s</strong>. Normally about 208.3 reach a replica and 116 the primary. If a failure consolidates them on one eligible origin, 324.3 fits the shared 400 budget, without proving p99. At 70% hits the total is 740.9/s; a full cache outage yields 2,199/s, which cannot all be admitted.</p></div></div>
+<details><summary><span class="lang-zh">失效与旧值回填：TTL不是强一致</span><span class="lang-en">Invalidation and stale fills: TTL is not strong consistency</span></summary><div class="bilingual"><div class="lang-zh"><p>普通旁路缓存允许这个反例：R读到旧行→W提交并删键→R回填旧行。删缓存与数据库提交不在同一事务，删失败或进程崩溃也会留下旧值；因此强读必须绕缓存。示例从TTL扣除本进程测得的加载耗时，将剩余TTL交给缓存服务原子写入并负责到期；不跨进程保存单调时钟截止值，命中不续期；缓存写入的网络耗时也不在这个TTL扣减中；副本还可持续落后并重复回填，TTL仍<strong>不构成从数据库写入时刻起的硬陈旧上限</strong>。</p></div><div class="lang-en"><p>Ordinary cache-aside permits this race: R reads old data → W commits and deletes the key → R fills the old data. Cache deletion and DB commit are separate; a failed delete or crash can also leave old values. Stronger reads therefore bypass cache. The example subtracts locally measured load duration from TTL and passes the remainder to the cache service for atomic storage and expiry. It never shares process-monotonic deadlines, and hits do not renew TTL. Cache-write network delay is outside that deduction, and a lagging replica can repeatedly refill old data, so TTL is <strong>not a hard staleness bound measured from the DB write</strong>.</p></div></div>
+<div class="bilingual"><div class="lang-zh"><p>图E4额外假设一个共享post:9承担20%峰值读，即2,199×20%≈440/s；这不是每人独立feed键的流量。该帧展示进阶lease：缓存原子授予每键令牌，删键使旧令牌失效，回填时比较令牌；租约过期、等待者数量和重试截止也须有界。NSDI 2013的lease解决失效与旧回填重排，并抑制惊群；它不是普通memcached GET/SET自动具备的保证，也不证明副本内容最新。全缓存故障时令牌服务也消失，仍靠独立回源准入。<a href="#ref-memcache">[2]</a></p></div><div class="lang-en"><p>E4 additionally assumes one shared post:9 takes 20% of peak reads, 2,199×20%≈440/s; this is not the traffic of each user-specific feed key. It shows an advanced lease: cache atomically grants a per-key token, deletion invalidates old tokens, and fills compare ownership. Bound lease life, waiters, and retry deadlines. The NSDI 2013 design addresses delete/fill reordering and herds; plain memcached GET/SET does not provide that guarantee, and the token does not prove replica freshness. A full cache outage removes the token service, so independent origin admission remains necessary. <a href="#ref-memcache">[2]</a></p></div></div>
+</details>
+</section>
 
-  <section>
-    <h2><span class="lang-zh">会话外置，慢工作离开请求</span><span class="lang-en">Push session out, and let slow work leave the request</span></h2>
-    <figure class="deck">
+<section><h2><span class="lang-zh">第三步：会话外置，通知异步化</span><span class="lang-en">Step 3: externalize sessions and queue notifications</span></h2>
+<figure class="deck">
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="c1t c1d">
           <title id="c1t">Sessions still live inside the app processes</title>
@@ -434,7 +352,7 @@
           <rect x="134" y="170" width="96" height="60" rx="30" class="box alt"/><text x="182" y="197" text-anchor="middle" class="label">LB</text><text x="182" y="216" text-anchor="middle" class="sub">sticky</text>
           <rect x="290" y="52" width="130" height="88" rx="12" class="box"/><text x="355" y="93" text-anchor="middle" class="label">App 1</text><text x="355" y="112" text-anchor="middle" class="sub">session in RAM</text>
           <rect x="290" y="266" width="130" height="72" rx="12" class="box"/><text x="355" y="299" text-anchor="middle" class="label">App 2</text><text x="355" y="318" text-anchor="middle" class="sub">session in RAM</text>
-          <path d="M70 190 L126 190" class="wire"/><polygon points="136,190 126,195 126,185" class="head"/><text x="100" y="183" text-anchor="middle" class="tiny">GET</text>
+          <path d="M70 190 L126 190" class="wire"/><polygon points="136,190 126,195 126,185" class="head"/><text x="100" y="183" text-anchor="middle" class="tiny">weak</text>
           <path d="M136 210 L80 210" class="wire reply"/><polygon points="70,210 80,205 80,215" class="head reply"/><text x="100" y="226" text-anchor="middle" class="tiny">200</text>
           <path d="M224 182 L240 182 Q248 182 248 174 L248 92 Q248 84 256 84 L280 84" class="wire"/><polygon points="290,84 280,89 280,79" class="head"/>
           <path d="M290 110 L272 110 Q264 110 264 118 L264 192 Q264 200 256 200 L240 200" class="wire reply"/><polygon points="230,200 240,195 240,205" class="head reply"/>
@@ -443,8 +361,8 @@
           <path d="M710 64 V122 A60 12 0 0 0 830 122 V64" class="store"/><ellipse cx="770" cy="64" rx="60" ry="12" class="store"/><text x="770" y="103" text-anchor="middle" class="label">Primary</text><text x="770" y="121" text-anchor="middle" class="sub">writes · ryw</text>
           <path d="M710 196 V246 A60 12 0 0 0 830 246 V196" class="store"/><ellipse cx="770" cy="196" rx="60" ry="12" class="store"/><text x="770" y="231" text-anchor="middle" class="label">Replica</text><text x="770" y="249" text-anchor="middle" class="sub">async</text>
           <path d="M770 138 L770 173" class="wire async"/><polygon points="770,183 765,173 775,173" class="head async"/><text x="780" y="166" text-anchor="start" class="tiny">log</text>
-          <path d="M420 64 L480 64" class="wire"/><polygon points="490,64 480,69 480,59" class="head"/><text x="455" y="57" text-anchor="middle" class="tiny">GET</text>
-          <path d="M490 80 L430 80" class="wire reply"/><polygon points="420,80 430,75 430,85" class="head reply"/><text x="455" y="96" text-anchor="middle" class="tiny">hit</text>
+          <path d="M420 64 L480 64" class="wire"/><polygon points="490,64 480,69 480,59" class="head"/><text x="455" y="57" text-anchor="middle" class="tiny">weak</text>
+          <path d="M490 80 L430 80" class="wire reply"/><polygon points="420,80 430,75 430,85" class="head reply"/><text x="455" y="96" text-anchor="middle" class="tiny">weak hit</text>
           <path d="M420 104 L700 104" class="wire"/><polygon points="710,104 700,109 700,99" class="head"/>
           <path d="M420 122 L652 122 Q660 122 660 130 L660 214 Q660 222 668 222 L700 222" class="wire"/><polygon points="710,222 700,227 700,217" class="head"/>
           <g class="is-new">
@@ -466,14 +384,14 @@
           <path d="M224 182 L240 182 Q248 182 248 174 L248 92 Q248 84 256 84 L280 84" class="wire"/><polygon points="290,84 280,89 280,79" class="head"/>
           <path d="M290 110 L272 110 Q264 110 264 118 L264 192 Q264 200 256 200 L240 200" class="wire reply"/><polygon points="230,200 240,195 240,205" class="head reply"/>
           <path d="M224 218 L240 218 Q248 218 248 226 L248 294 Q248 302 256 302 L280 302" class="wire"/><polygon points="290,302 280,307 280,297" class="head"/>
-          <path d="M70 190 L126 190" class="wire"/><polygon points="136,190 126,195 126,185" class="head"/><text x="100" y="183" text-anchor="middle" class="tiny">GET</text>
+          <path d="M70 190 L126 190" class="wire"/><polygon points="136,190 126,195 126,185" class="head"/><text x="100" y="183" text-anchor="middle" class="tiny">weak</text>
           <path d="M136 210 L80 210" class="wire reply"/><polygon points="70,210 80,205 80,215" class="head reply"/><text x="100" y="226" text-anchor="middle" class="tiny">200</text>
           <rect x="497" y="47" width="124" height="46" rx="8" class="cache"/><rect x="490" y="40" width="124" height="46" rx="8" class="cache"/><text x="552" y="60" text-anchor="middle" class="label">Cache</text><text x="552" y="79" text-anchor="middle" class="sub">feed:{user}</text>
           <path d="M710 64 V122 A60 12 0 0 0 830 122 V64" class="store"/><ellipse cx="770" cy="64" rx="60" ry="12" class="store"/><text x="770" y="103" text-anchor="middle" class="label">Primary</text><text x="770" y="121" text-anchor="middle" class="sub">writes · ryw</text>
           <path d="M710 196 V246 A60 12 0 0 0 830 246 V196" class="store"/><ellipse cx="770" cy="196" rx="60" ry="12" class="store"/><text x="770" y="231" text-anchor="middle" class="label">Replica</text><text x="770" y="249" text-anchor="middle" class="sub">async</text>
           <path d="M770 138 L770 173" class="wire async"/><polygon points="770,183 765,173 775,173" class="head async"/><text x="780" y="166" text-anchor="start" class="tiny">log</text>
-          <path d="M420 64 L480 64" class="wire"/><polygon points="490,64 480,69 480,59" class="head"/><text x="455" y="57" text-anchor="middle" class="tiny">GET</text>
-          <path d="M490 80 L430 80" class="wire reply"/><polygon points="420,80 430,75 430,85" class="head reply"/><text x="455" y="96" text-anchor="middle" class="tiny">hit</text>
+          <path d="M420 64 L480 64" class="wire"/><polygon points="490,64 480,69 480,59" class="head"/><text x="455" y="57" text-anchor="middle" class="tiny">weak</text>
+          <path d="M490 80 L430 80" class="wire reply"/><polygon points="420,80 430,75 430,85" class="head reply"/><text x="455" y="96" text-anchor="middle" class="tiny">weak hit</text>
           <path d="M420 104 L700 104" class="wire"/><polygon points="710,104 700,109 700,99" class="head"/>
           <path d="M420 122 L652 122 Q660 122 660 130 L660 214 Q660 222 668 222 L700 222" class="wire"/><polygon points="710,222 700,227 700,217" class="head"/>
           <g class="is-new">
@@ -515,7 +433,7 @@
             <path d="M830 100 L896 100 Q904 100 904 108 L904 274 Q904 282 896 282 L774 282 Q770 282 770 286 L770 290" class="wire async"/><polygon points="770,300 765,290 775,290" class="head async"/><text x="786" y="276" text-anchor="start" class="tiny">outbox relay</text>
           </g>
         </svg>
-        <figcaption><span class="lang-zh">发帖只写主库：帖子和 outbox 同一事务提交，删键，201 立即返回。relay 从 outbox 读出这行再投进队列（虚线）。应用不在提交后直接 publish，所以没有「帖子在、通知丢了」的窗口。</span><span class="lang-en">The POST writes only the primary: the post and an outbox row commit in one transaction, the cache key is deleted, and 201 returns at once. A relay reads the outbox row and publishes it to the queue (dashed). The app never publishes after commit, so there is no “post saved, notification lost” gap.</span></figcaption>
+        <figcaption><span class="lang-zh">发帖只写主库：帖子和 outbox 同一事务提交，尽力删键，201 返回提交结果。relay 从 outbox 读出这行再投进队列（虚线）。待投递意图与帖子共同落库；relay 需重试，仍可能重复投递。</span><span class="lang-en">The POST writes only the primary: the post and an outbox row commit in one transaction, cache deletion is best effort, and 201 reports the commit. A relay reads the outbox row and publishes it to the queue (dashed). The intent survives with the post; the relay retries and may publish duplicates.</span></figcaption>
       </div>
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="c4t c4d">
@@ -530,7 +448,7 @@
           <path d="M224 182 L240 182 Q248 182 248 174 L248 92 Q248 84 256 84 L280 84" class="wire"/><polygon points="290,84 280,89 280,79" class="head"/>
           <path d="M290 110 L272 110 Q264 110 264 118 L264 192 Q264 200 256 200 L240 200" class="wire reply"/><polygon points="230,200 240,195 240,205" class="head reply"/>
           <path d="M224 218 L240 218 Q248 218 248 226 L248 294 Q248 302 256 302 L280 302" class="wire"/><polygon points="290,302 280,307 280,297" class="head"/>
-          <path d="M70 190 L126 190" class="wire"/><polygon points="136,190 126,195 126,185" class="head"/><text x="100" y="183" text-anchor="middle" class="tiny">GET</text>
+          <path d="M70 190 L126 190" class="wire"/><polygon points="136,190 126,195 126,185" class="head"/><text x="100" y="183" text-anchor="middle" class="tiny">weak</text>
           <path d="M136 210 L80 210" class="wire reply"/><polygon points="70,210 80,205 80,215" class="head reply"/><text x="100" y="226" text-anchor="middle" class="tiny">200</text>
           <path d="M494 182 V224 A58 12 0 0 0 610 224 V182" class="store"/><ellipse cx="552" cy="182" rx="58" ry="12" class="store"/><text x="552" y="213" text-anchor="middle" class="label">Session</text><text x="552" y="231" text-anchor="middle" class="sub">shared</text>
           <path d="M419 134 L444 134 Q452 134 452 142 L452 184 Q452 192 460 192 L484 192" class="wire"/><polygon points="494,192 484,197 484,187" class="head"/>
@@ -539,8 +457,8 @@
           <path d="M710 64 V122 A60 12 0 0 0 830 122 V64" class="store"/><ellipse cx="770" cy="64" rx="60" ry="12" class="store"/><text x="770" y="103" text-anchor="middle" class="label">Primary</text><text x="770" y="121" text-anchor="middle" class="sub">writes · ryw</text>
           <path d="M710 196 V246 A60 12 0 0 0 830 246 V196" class="store"/><ellipse cx="770" cy="196" rx="60" ry="12" class="store"/><text x="770" y="231" text-anchor="middle" class="label">Replica</text><text x="770" y="249" text-anchor="middle" class="sub">async</text>
           <path d="M770 138 L770 173" class="wire async"/><polygon points="770,183 765,173 775,173" class="head async"/><text x="780" y="166" text-anchor="start" class="tiny">log</text>
-          <path d="M420 64 L480 64" class="wire"/><polygon points="490,64 480,69 480,59" class="head"/><text x="455" y="57" text-anchor="middle" class="tiny">weak·DEL</text>
-          <path d="M490 80 L430 80" class="wire reply"/><polygon points="420,80 430,75 430,85" class="head reply"/><text x="455" y="96" text-anchor="middle" class="tiny">hit</text>
+          <path d="M420 64 L480 64" class="wire"/><polygon points="490,64 480,69 480,59" class="head"/><text x="455" y="57" text-anchor="middle" class="tiny">weak / DEL</text>
+          <path d="M490 80 L430 80" class="wire reply"/><polygon points="420,80 430,75 430,85" class="head reply"/><text x="455" y="96" text-anchor="middle" class="tiny">weak hit</text>
           <path d="M420 104 L700 104" class="wire"/><polygon points="710,104 700,109 700,99" class="head"/><text x="702" y="97" text-anchor="end" class="tiny">write · ryw</text>
           <path d="M420 122 L652 122 Q660 122 660 130 L660 214 Q660 222 668 222 L700 222" class="wire"/><polygon points="710,222 700,227 700,217" class="head"/><text x="668" y="170" text-anchor="start" class="tiny">stale-ok</text>
           <path d="M718 300 h104 a18 18 0 0 1 0 36 h-104 a18 18 0 0 1 0 -36" class="queue"/><path d="M812 309 v18" class="queue"/><path d="M804 309 v18" class="queue"/><path d="M796 309 v18" class="queue"/><text x="754" y="324" text-anchor="middle" class="label">Queue</text>
@@ -552,50 +470,36 @@
         </svg>
         <figcaption><span class="lang-zh">分片前的完整图：无状态应用、共享会话、旁路缓存、主库和副本、outbox relay、队列和 worker。201 不经过 worker；写峰值 116 仍低于 800，所以没有分片。</span><span class="lang-en">The complete picture before any shard: stateless apps, shared sessions, look-aside cache, primary and replica, outbox relay, queue, and worker. The 201 does not pass through the worker. The write peak of 116 is still under 800, so there are no shards.</span></figcaption>
       </div>
-    </figure>
-    <div class="bilingual">
-      <div class="lang-zh"><p class="col-kicker">会话为什么不能留在主库，也不能留在进程里</p>
-        <p>登录成功后，应用把 <code>(sid, user_id, expires_at)</code> 写进共享会话存储，而不是写进某台进程的内存。之后任意一台应用收到 <code>GET /home</code>，都用 sid 读这份记录，再去查缓存或库。负载均衡可以按健康和负载分配，不必认 Cookie。图上负载均衡的标注从 sticky 改成 any app：粘滞曾经是问题，现在不再是路径的一部分。</p>
-        <p>会话若放在主库，每个请求多一次读。峰值 2,315 次请求大约是 2,315 次会话读。2,315 ÷ 400 ≈ 5.8，单是会话就把读预算用掉五倍多，约 324.3 次内容回源（含绕缓存强读）还没算。会话要离开主库，单独放进一个内存型的共享存储。它挂了，所有应用都无法把 sid 换成 user_id。所以会话存储至少两副本，超时预算也和主库分开，避免一次抖动把主库打满。</p>
-        <p>替代是签名令牌：应用本地验签，读路径不访问会话存储。立刻登出需要一份吊销列表，那份列表仍是共享存储；或者把访问令牌压得很短，用刷新令牌换新的。要立刻作废被偷的 sid，共享会话更直接。两种都不把会话放回主库，也不留在某一台应用的内存里。</p>
-      </div>
-      <div class="lang-en"><p class="col-kicker">Why the session cannot live on the primary or in the process</p>
-        <p>After login, the app writes <code>(sid, user_id, expires_at)</code> into the shared session store, not into one process’s memory. Whichever app receives <code>GET /home</code> reads that record by sid, then consults the cache or the database. The load balancer can place work by health and load and does not need to recognize the cookie. On the diagram the balancer’s label changes from sticky to any app: stickiness was the problem, and it is no longer part of the path.</p>
-        <p>If the shared session sits on the primary, every request adds a read. The peak of 2,315 requests is about 2,315 session reads. 2,315 ÷ 400 ≈ 5.8, so sessions alone spend more than five read budgets before the 324.3 content origin reads, including strong-read bypasses, are counted. The session store has to leave the primary and be its own shared in-memory state. Its failure window is sharp: no app can turn a sid into a user_id, so a timeline sitting in cache still cannot be attributed. Keep at least two copies of the session store, and give session-store timeouts a different budget from primary timeouts, so a session hiccup does not stampede the primary.</p>
-        <p>The alternative is a signed token. The app verifies the signature locally and the read path does not touch a session store. Instant logout then needs a denylist, and that list is itself shared state, or the access token lives only briefly and a refresh token rotates it. The token is the better fit when session-store availability should not sit on every GET. The shared session is the better fit when a stolen sid must die immediately. Neither puts the session back on the primary, and neither leaves it inside one app’s memory.</p>
-      </div>
-    </div>
-    <div class="bilingual">
-      <div class="lang-zh"><p class="col-kicker">1.6 秒的扇出必须离开 300 毫秒的确认</p>
-        <p>发帖本身是一行插入，116 QPS 放得进 800 的写预算。离开请求的是通知关注者。假设一条通知要 80 毫秒，中位关注者是 20，都是假设。串行做完是 20 × 80 毫秒 = 1.6 秒，超过写确认 p99 不超过 300 毫秒的目标。并行时请求仍被最慢的下游拖住。所以 201 在主库提交后就返回，通知进队列，由 worker 自己扩。</p>
-        <p>走一遍 <code>POST /posts</code>。应用验完会话，在同一事务里插入 <code>Post(author_id, body)</code> 和 <code>Outbox(post_id, kind=notify)</code>，提交，删除作者的缓存键，返回 201 和 post_id。relay 从 outbox 读出这一行投进队列；worker 消费队列，以 <code>post_id + follower_id</code> 做幂等键发送通知。队列按至少一次：崩溃后重投，收件方可能看到两次，幂等键收成一次。不要承诺恰好一次。</p>
-        <p>窗口在「提交成功」和「队列里真有这条消息」之间。若提交之后再从内存里 publish，进程死在两步中间，帖子已经在主库里，通知永远不会发出。outbox 把这两步收成同一事务：提交成功，relay 就能把这行投递出去，投完再标掉。队列不可用时，用户的 201 仍然成立，outbox 会积压。积压用更多 worker 消化，不把通知塞回请求。</p>
-        <p>队列不是分片的替代。116 QPS 也不该因为「架构都有队列」就上队列。这条队列不提高主库的写上限，只把 1.6 秒的扇出移出 300 毫秒的确认。关注者不超过 3 人时，3 × 80 毫秒 = 240 毫秒，还在 300 毫秒以内，可以在请求里做完；中位数 20 远超这个阈值，所以图上默认入队。另一个错误是 201 什么都不带，客户端立刻 <code>GET /home</code> 打副本，正好踩进上一节的 lag Δ。201 正文里带上刚写的帖子，客户端不必马上读一份可能还旧的时间线。</p>
-      </div>
-      <div class="lang-en"><p class="col-kicker">A 1.6 s fan-out has to leave a 300 ms acknowledgement</p>
-        <p>The post itself is one insert on the primary. A write peak of 116 QPS fits the 800 write budget. What leaves the request is notifying followers. Assume one downstream notification takes 80 ms and the median post has 20 followers. Both are assumptions. Done serially, 20 × 80 ms = 1.6 s, past the target that write p99 stays within 300 ms. Even in parallel, the request waits on the slowest downstream, and the app process cannot spend that time on other peak CPU. So 201 returns after the primary commits, the notification enters the queue, and workers scale on their own.</p>
-        <p>Walk <code>POST /posts</code>. The app checks the session, and in one primary transaction inserts <code>Post(author_id, body)</code> and an <code>Outbox(post_id, kind=notify)</code> row, commits, deletes the author’s timeline cache key, and returns 201 with the post_id. A relay reads the outbox row and publishes it to the queue. A worker consumes the queue, notifies followers, and uses <code>post_id + follower_id</code> as the idempotency key. Design the queue as at-least-once. A worker crash redelivers, the receiver may see the notification twice, and the idempotency key collapses the effect to once. Do not promise exactly-once on the acknowledgement path.</p>
-        <p>The failure window sits between “commit succeeded” and “the queue actually contains the message.” If the app publishes from memory after the commit, and the process dies between the two steps, the post is on the primary and the notification never leaves. The outbox makes those two steps one transaction: if the commit succeeded, the relay can deliver the row, and it marks the outbox row after delivery. When the queue itself is down, the user’s 201 still stands, notifications slow down, and the outbox table grows. A backlog is capacity. Add workers. Do not pull notification back onto the request.</p>
-        <p>A common mistake is to treat the queue as a substitute for sharding, or the reverse mistake, to add a queue at 116 write QPS “because architectures have one.” This queue does not raise the primary’s write ceiling. It only moves a 1.6 s fan-out out of a 300 ms acknowledgement. Doing the fan-out inline for users with few followers is a fair alternative: at most 3 followers is 3 × 80 ms = 240 ms, still inside 300 ms, so it can stay in the request, and the rest is queued. A median of 20 is far above that threshold, so the default path on the diagram is the queue. Another mistake is an empty 201 that makes the client immediately <code>GET /home</code> against the replica. That steps straight into the previous lag Δ. Put the new post in the 201 body so the client can draw it without reading a timeline that may still be old.</p>
-      </div>
-    </div>
-  </section>
+    </figure><div class="bilingual"><div class="lang-zh"><p>共享会话记录 <code>(sid,user_id,expires_at)</code> 使任意应用都可接请求；存储故障时身份验证失败关闭，不能把有缓存当成已授权。每请求一次会话读约2,315/s，需独立容量与故障预算。共享会话的即时撤销还要求读取不命中旧副本/旧缓存；签名令牌则需短寿命或撤销机制。</p></div><div class="lang-en"><p>A shared <code>(sid,user_id,expires_at)</code> record lets any app serve the user. Failed identity validation closes access; cached content is not authorization. One lookup per request adds about 2,315 session reads/s and needs its own capacity and failure budget. Immediate session revocation also requires avoiding stale session replicas/caches; signed tokens need short lifetimes or revocation support.</p></div></div>
+<h3><span class="lang-zh">提交数据和投递意图，不把队列塞进事务</span><span class="lang-en">Commit data with delivery intent, not with the queue</span></h3>
+<pre data-language="Pseudocode · transaction and outbox" data-kind="pseudocode"><code>createPost(user, requestKey, body):
+    begin transaction on the current authoritative primary
+    insert RequestReceipt(user, requestKey, hash(body))  # UNIQUE(user, requestKey)
+    # On conflict: rollback this attempt; read committed receipt, reject changed body.
+    insert Post(postId, user, body)
+    insert Outbox(eventId, postId, kind=&quot;notify&quot;)
+    save stable response in RequestReceipt
+    commit                       # post + intent + receipt, NOT the queue
+    # Commit timeout: outcome unknown; resolve with the same requestKey.
+    bestEffortDelete(&quot;feed:&quot; + user)  # bounded; failure does not undo commit
+    return 201 with post and verified (history, commitPosition)
 
-  <section>
-    <h2><span class="lang-zh">先证明单主写得下，再按写预算分片</span><span class="lang-en">Prove one primary can take the writes, then shard from the write budget</span></h2>
-    <div class="bilingual">
-      <div class="lang-zh"><p class="col-kicker">基本假设下，分片是被拿掉的组件</p>
-        <p>到队列为止，写峰值是 116，写预算是 800。116 ÷ 800 ≈ 0.15。数据 400 GB，低于 2 TB。再加分片会带来路由、跨片扇出和热点，而没有任何一条假设被单主违反。面试里先说「这一步我不分片」。分片键仍然要会讲，因为面试官下一句就可能改假设。</p>
-        <p>改写的假设单独标出，不和每天 20 次请求混在一个式子里。每个日活每天写 50 条消息：1,000,000 × 50 = 50,000,000。50,000,000 ÷ 86,400 = 578.7 平均写 QPS，峰值 ×10 = 5,787。5,787 ÷ 800 = 7.23，所以要 8 个写分区。8 × 800 = 6,400，盖住 5,787，并给写后读留一点余量。图上只画两片讲路由；口播说 8，不画八个圆柱。</p>
-        <p>分片键用 <code>user_id</code>。首页读的是「我的时间线」，行按读者的 user_id 放，<code>GET /home</code> 就落在一片上。发帖在作者自己的片上插入 Post，worker 再按每个关注者的 user_id 把时间线条目写到对方那一片。跨片发生在已经离开请求的队列上，不发生在 200 毫秒的读里面。若时间线只存在作者片上，每次首页都要按关注列表去很多片收集，峰值读会乘上关注数。读占 95% 时，扇出放在写路径的 worker 上。</p>
-      </div>
-      <div class="lang-en"><p class="col-kicker">Under the base assumptions, sharding is the component that gets removed</p>
-        <p>Through the queue, the primary’s write peak is 116 QPS and the write budget is 800. 116 ÷ 800 ≈ 0.15, about fifteen percent of the budget. The data is 400 GB, under the 2 TB single-primary budget. Adding shards would pay for routing, cross-shard fan-out, resharding, and hot keys, and no base assumption is violated by one primary. Saying “I do not shard at this step” matches the numbers better than drawing eight shards from memory. The shard key, hot keys, and cross-shard queries still have to be speakable, because the interviewer’s next sentence may change the assumption.</p>
-        <p>Label the changed assumption by itself. Do not mix it into the twenty-requests formula. Assume messaging rather than an occasional post: 50 messages per daily active per day. 1,000,000 × 50 = 50,000,000 writes a day. 50,000,000 ÷ 86,400 = 578.7 average write QPS. Times the 10× peak, that is 5,787 QPS. 5,787 ÷ 800 = 7.23, so at least 8 write partitions are required to keep each one inside 800. 8 × 800 = 6,400, which covers 5,787 and leaves a little room for read-your-writes on that shard’s primary. The diagram draws two shards, enough to show <code>user_id</code> routing. Say the count is 8 out loud. Do not draw eight cylinders to fill the board.</p>
-        <p>The shard key is <code>user_id</code>. Home reads “my timeline.” If those rows live under the reader’s user_id, <code>GET /home</code> hits one shard. The author inserts the Post on their own shard, and the worker writes a timeline row onto each follower’s shard by that follower’s user_id. The cross-shard work rides the queue that already left the request. It does not ride the 200 ms read. Storing the timeline only on the author’s shard makes every <code>GET /home</code> collect from many shards using the follow list. That is synchronous scatter-gather, and it multiplies the read peak by the follow count. With reads at 95%, putting fan-out on the write-path worker is forced by the read budget.</p>
-      </div>
-    </div>
-    <figure class="deck">
+relay(outboxRow):
+    publish durable message(eventId, postId)
+    wait for broker acknowledgement
+    mark outbox row delivered     # crash before this step causes duplicate publish
+
+worker(event):
+    deliver with downstream idempotency key (eventId, followerId)
+    # Persisting a local &quot;seen&quot; flag alone cannot atomically deduplicate an external send.
+    acknowledge queue only after durable effect / confirmed idempotent acceptance</code></pre>
+<div class="bilingual"><div class="lang-zh"><p>唯一约束与本地数据库事务覆盖 Post、Outbox、RequestReceipt；队列发布另做，至少一次投递必须按业务效果幂等。outbox解决“提交后进程死、投递意图丢失”，不保证队列与DB同事务，也不保证任何故障下最终送达。需要relay重试、死信/人工补偿和积压监控。缓存失效可另记持久事件重试，但仍不升级为强一致。<a href="#ref-outbox">[7]</a></p></div><div class="lang-en"><p>The unique constraint and local DB transaction cover Post, Outbox, and RequestReceipt. Queue publication is separate; at-least-once delivery needs effect-level idempotency. Outbox preserves intent across a post-commit process crash. It neither joins the broker to the DB transaction nor guarantees delivery under every failure. Relay retries, dead-letter recovery, and backlog monitoring remain necessary. Persisted invalidation events can retry cache deletion without creating strong consistency. <a href="#ref-outbox">[7]</a></p></div></div>
+<div class="bilingual"><div class="lang-zh"><p>20×80 ms=1.6 s解释为何移出请求；关注者减少到3时，240 ms也只是通知串行耗时估计，未含事务、网络、排队与尾延迟，不能证明300 ms的p99目标。队列宕机时加worker没有作用，先修复投递链路；下游恢复后再按其预算消化积压。</p></div><div class="lang-en"><p>20×80 ms=1.6 s motivates asynchronous work. Even three followers at 240 ms is only a serial notification estimate, excluding transaction time, network, queueing, and tails; it cannot establish a 300 ms p99. More workers do not fix an unavailable broker. Restore the delivery path, then drain backlog within downstream budgets.</p></div></div>
+</section>
+
+<section><h2><span class="lang-zh">第四步：写预算改变时才讨论分片</span><span class="lang-en">Step 4: revisit sharding when the write budget changes</span></h2>
+<div class="bilingual"><div class="lang-zh"><p>基础116前台写/s、每份200 GB，不直接逼出分片。另设一个明确替换的场景：100万DAU每人每天写50条，峰值为 <code>1,000,000×50/86,400×10≈5,787/s</code>。若每片800事务/s，理想均匀前台写下界是⌈5,787/800⌉=8；图只画两片说明路由。</p></div><div class="lang-en"><p>The baseline 116 foreground writes/s and 200 GB per copy do not directly force sharding. In a separately changed scenario, 1M DAU each write 50 messages/day: <code>1,000,000×50/86,400×10≈5,787/s</code> peak. At 800 transactions/s per shard, the ideal uniform foreground-write lower bound is ceil(5,787/800)=8. The diagram draws two shards only to explain routing.</p></div></div>
+<figure class="deck">
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d1t d1d">
           <title id="d1t">One primary’s write budget breaks under the messaging assumption</title>
@@ -619,7 +523,7 @@
           <path d="M420 204 L484 204" class="wire"/><polygon points="494,204 484,209 484,199" class="head"/><text x="457" y="197" text-anchor="middle" class="tiny">sid</text>
           <path d="M730 132 L730 167" class="wire async"/><polygon points="730,177 725,167 735,167" class="head async"/>
           <path d="M778 106 L792 106 Q800 106 800 114 L800 268 Q800 276 792 276 L561.5 276 Q555 276 555 282.5 L555 289" class="wire async"/><polygon points="555,299 550,289 560,289" class="head async"/><text x="690" y="270" text-anchor="middle" class="tiny">outbox relay</text>
-          <path d="M620 318 L672 318" class="wire async"/><polygon points="682,318 672,323 672,313" class="head async"/><text x="651" y="311" text-anchor="middle" class="tiny">consume</text>
+          <path d="M620 318 L672 318" class="wire async"/><polygon points="682,318 672,323 672,313" class="head async"/><text x="651" y="311" text-anchor="middle" class="tiny">work</text>
           <path d="M682 60 V116 A48 12 0 0 0 778 116 V60" class="store"/><ellipse cx="730" cy="60" rx="48" ry="12" class="store"/><text x="730" y="98" text-anchor="middle" class="label">Primary</text><text x="730" y="116" text-anchor="middle" class="sub">all users</text>
           <path d="M682 190 V236 A48 12 0 0 0 778 236 V190" class="store"/><ellipse cx="730" cy="190" rx="48" ry="12" class="store"/><text x="730" y="231" text-anchor="middle" class="label">Replica</text>
           <rect x="682" y="293" width="120" height="50" rx="12" class="box alt"/><text x="742" y="315" text-anchor="middle" class="label">Worker</text><text x="742" y="334" text-anchor="middle" class="sub">notify</text>
@@ -654,7 +558,7 @@
           <path d="M420 204 L484 204" class="wire"/><polygon points="494,204 484,209 484,199" class="head"/><text x="457" y="197" text-anchor="middle" class="tiny">sid</text>
           <path d="M730 132 L730 167" class="wire async"/><polygon points="730,177 725,167 735,167" class="head async"/>
           <path d="M778 106 L792 106 Q800 106 800 114 L800 268 Q800 276 792 276 L561.5 276 Q555 276 555 282.5 L555 289" class="wire async"/><polygon points="555,299 550,289 560,289" class="head async"/><text x="690" y="270" text-anchor="middle" class="tiny">outbox relay</text>
-          <path d="M620 318 L672 318" class="wire async"/><polygon points="682,318 672,323 672,313" class="head async"/><text x="651" y="311" text-anchor="middle" class="tiny">consume</text>
+          <path d="M620 318 L672 318" class="wire async"/><polygon points="682,318 672,323 672,313" class="head async"/><text x="651" y="311" text-anchor="middle" class="tiny">work</text>
           <path d="M682 60 V116 A48 12 0 0 0 778 116 V60" class="store"/><ellipse cx="730" cy="60" rx="48" ry="12" class="store"/><text x="730" y="98" text-anchor="middle" class="label">Shard A</text><text x="730" y="116" text-anchor="middle" class="sub">hash 00–7f</text>
           <path d="M682 190 V236 A48 12 0 0 0 778 236 V190" class="store"/><ellipse cx="730" cy="190" rx="48" ry="12" class="store"/><text x="730" y="231" text-anchor="middle" class="label">Replica A</text>
           <rect x="682" y="293" width="120" height="50" rx="12" class="box alt"/><text x="742" y="315" text-anchor="middle" class="label">Worker</text><text x="742" y="334" text-anchor="middle" class="sub">fan-out</text>
@@ -697,7 +601,7 @@
           <path d="M730 132 L730 167" class="wire async"/><polygon points="730,177 725,167 735,167" class="head async"/>
           <path d="M870 132 L870 167" class="wire async"/><polygon points="870,177 865,167 875,167" class="head async"/>
           <path d="M778 106 L792 106 Q800 106 800 114 L800 268 Q800 276 792 276 L561.5 276 Q555 276 555 282.5 L555 289" class="wire async"/><polygon points="555,299 550,289 560,289" class="head async"/><text x="690" y="270" text-anchor="middle" class="tiny">outbox relay</text>
-          <path d="M620 318 L672 318" class="wire async"/><polygon points="682,318 672,323 672,313" class="head async"/><text x="651" y="311" text-anchor="middle" class="tiny">consume</text>
+          <path d="M620 318 L672 318" class="wire async"/><polygon points="682,318 672,323 672,313" class="head async"/><text x="651" y="311" text-anchor="middle" class="tiny">work</text>
           <g class="is-new">
             <path d="M802 318 L926 318 Q934 318 934 310 L934 99 Q934 96 931 96 L928 96" class="wire async"/><polygon points="918,96 928,91 928,101" class="head async"/><text x="868" y="311" text-anchor="middle" class="tiny">fan-out rows</text>
           </g>
@@ -734,34 +638,21 @@
           <path d="M730 132 L730 167" class="wire async"/><polygon points="730,177 725,167 735,167" class="head async"/>
           <path d="M870 132 L870 167" class="wire async"/><polygon points="870,177 865,167 875,167" class="head async"/>
           <path d="M778 106 L792 106 Q800 106 800 114 L800 268 Q800 276 792 276 L561.5 276 Q555 276 555 282.5 L555 289" class="wire async"/><polygon points="555,299 550,289 560,289" class="head async"/><text x="690" y="270" text-anchor="middle" class="tiny">outbox relay</text>
-          <path d="M620 318 L672 318" class="wire async"/><polygon points="682,318 672,323 672,313" class="head async"/><text x="651" y="311" text-anchor="middle" class="tiny">consume</text>
+          <path d="M620 318 L672 318" class="wire async"/><polygon points="682,318 672,323 672,313" class="head async"/><text x="651" y="311" text-anchor="middle" class="tiny">work</text>
           <path d="M802 318 L926 318 Q934 318 934 310 L934 99 Q934 96 931 96 L928 96" class="wire async"/><polygon points="918,96 928,91 928,101" class="head async"/><text x="868" y="311" text-anchor="middle" class="tiny">fan-out rows</text>
           <g class="is-new">
-            <text x="136" y="366" class="tiny">8 × 800 = 6,400 ≥ 5,787 · the base case of 116 writes never gets here</text>
+            <text x="136" y="366" class="tiny">8 × 800 = 6,400 ≥ 5,787 · idealized foreground-write lower bound</text>
           </g>
         </svg>
-        <figcaption><span class="lang-zh">分片后的完整图：两片各有主和副本，缓存、会话、队列、worker 都还在。8 × 800 = 6,400，盖住 5,787。基本假设的 116 写不会走到这张图。</span><span class="lang-en">The complete sharded picture: two shards, each with a primary and a replica, plus cache, session, queue, and worker. 8 × 800 = 6,400 covers 5,787. The base case of 116 writes never reaches this picture.</span></figcaption>
+        <figcaption><span class="lang-zh">分片后的完整图：两片各有主和副本，缓存、会话、队列、worker 都还在。8 × 800 = 6,400，覆盖理想均匀的前台写；扇出写和热点须另算。基本假设的 116 写不会走到这张图。</span><span class="lang-en">The complete sharded picture: two shards, each with a primary and a replica, plus cache, session, queue, and worker. 8 × 800 = 6,400 covers idealized uniform foreground writes; fan-out writes and skew need separate budgets. The base case of 116 writes never reaches this picture.</span></figcaption>
       </div>
-    </figure>
-    <div class="bilingual">
-      <div class="lang-zh"><p class="col-kicker">两片怎么接请求，八片怎么口播</p>
-        <p>用户 42 的 <code>GET /home</code> 先查会话，再查 <code>feed:42</code>。未命中时，应用算 user_id 落在哪一段。图上按 hash(user_id) 的最高字节示意：00–7f 进片 A，80–ff 进片 B。假设 hash(42) 落在 A，于是只对片 A 的主库或它的副本发查询，200 从这一片返回；hash 落在 B 的用户同样只打片 B。应用进程仍然无状态，片的路由是函数，不是粘在某一台应用上的内存。</p>
-        <p>写只打作者那一片。<code>POST</code> 在作者片的主库提交 Post 和 outbox。worker 按每个关注者的 user_id 把时间线条目写到对应片。关注者在片 B，虚线就落到片 B，首页请求不为这个扇出等待。队列在分片之后还有第二份工作：它是跨片写入留在同步路径外面的通道。worker 落后时，关注者的首页暂时看不到新帖，作者的 201 里已经有这篇帖子。这是产品窗口，不是写失败。</p>
-        <p>还没到 5,787 时，更干净的替代是按 user_id 做范围分区，仍放在同一台主库上。那不增加写 QPS 上限，只让大表维护更便宜。基本假设 200 GB、116 写，用这个就够，不需要八台主库。另一条是把单机写预算提高到能盖住 5,787。若单机写预算能到 6,000，5,787 ÷ 6,000 ≈ 0.96，商小于 1，分片再次被拿掉。分片是预算除法的结果，不是百万用户的同义词。</p>
-        <p>热点还在。某个 user_id 的写入远高于平均数，它那一片会单独打满 800，其余七片还空着。读热点继续用缓存挡住；写热点要把这个逻辑用户拆成多个子键再聚合，或给这一片单独加写预算。单调递增的时间戳当唯一分片键，会把新写入堆在最右边。user_id 避开的是这个堆叠，不是「永远没有热点」。</p>
-      </div>
-      <div class="lang-en"><p class="col-kicker">How two shards take a request, and how eight are spoken</p>
-        <p>User 42’s <code>GET /home</code> checks the session, then <code>feed:42</code>. On a miss the app computes which range owns the user_id. The diagram sketches the top byte of hash(user_id): 00–7f goes to shard A, 80–ff to shard B. Say hash(42) lands on A, so the query goes only to shard A’s primary or its replica, and the 200 returns from that shard. A user whose hash lands on B hits only shard B. App processes stay stateless. Shard routing is a function, not memory stuck to one app.</p>
-        <p>Writes hit only the author’s shard. The <code>POST</code> commits the Post and the outbox on the author’s primary. The worker reads follower ids and writes a timeline row onto each follower’s shard. If the follower is on shard B, the dashed arrow lands on shard B, and the home request does not wait on shard B for that fan-out. That is the queue’s second job after sharding. It already moved 1.6 s out of the acknowledgement. It is also the path for cross-shard writes that must stay off the synchronous read. If the worker is behind, a follower’s home is temporarily missing the new post, while the author’s 201 already contains it. Call that a product window, not a failed write.</p>
-        <p>The cleaner alternative, while the rate is not 5,787, is to range-partition the table by user_id and still keep it on one primary, so index and maintenance work can run per partition. That does not raise the write-QPS ceiling. It only makes a large table cheaper to maintain. The base assumptions, 200 GB and 116 writes, are enough for that, and do not need eight primaries. Another alternative is a larger primary whose write budget covers 5,787. If one machine’s write budget reaches 6,000, 5,787 ÷ 6,000 ≈ 0.96, the quotient drops below 1, and sharding is removed again. Sharding is the result of the division, not a synonym for the words “a million users.”</p>
-        <p>Hot keys survive sharding. If one user_id is written far above the average, that shard alone fills its 800 while the other seven sit idle. Read hot keys can still be stopped at the cache. A write hot key has to be split into sub-keys and aggregated, or that shard gets its own write budget. A monotonically increasing timestamp as the only shard key piles new writes on the rightmost range. A range split only postpones the pile. A high-cardinality key such as user_id avoids that pile. It does not mean there is never a hot key.</p>
-      </div>
-    </div>
-  </section>
+    </figure><div class="bilingual"><div class="lang-zh"><p>八片<strong>不是最终容量结论</strong>：若每帖再产生20笔独立Feed写，且每笔成本恰好等同预算事务，工作量才可粗算5,787×21≈121,527事务/s，下界变成152片；批量写会改变这个式子。需测量平均与尾部关注者、放大系数、热点、后台读、复制成本和故障余量。异步只是移动时间，不会消灭工作。</p></div><div class="lang-en"><p>Eight shards are <strong>not a final capacity result</strong>. If each post adds 20 separate feed-write transactions and each costs exactly one budget transaction, work becomes approximately 5,787×21=121,527 transactions/s, a lower bound of 152 shards. Batching changes that equation. Measure average/tail followers, amplification, hot keys, background reads, replication, and failure headroom. Asynchrony moves work in time; it does not remove it.</p></div></div>
+<div class="bilingual"><div class="lang-zh"><p>图D按hash(user_id)分片：作者Post和outbox落作者片，worker把Feed条目写入读者片；<code>GET /home</code>只读该读者片，作者自己的强读再合并同片权威Post。单个用户热点不会因平均分布而消失；迁移时还需版本化路由和所有权交接。分区表仍在单机，不会凭空增加CPU或IO预算。</p></div><div class="lang-en"><p>D shards by hash(user_id): Post and outbox live on the author’s shard; workers write feed entries on readers’ shards. <code>GET /home</code> reads that reader’s shard, merging authoritative same-shard own posts for read-your-writes. Average balance does not eliminate a hot user. Migration needs versioned routing and ownership transfer. Partitioning tables on one machine creates no extra CPU or I/O budget.</p></div></div>
+<div class="bilingual"><div class="lang-zh"><p>若只是把基础流量整体乘10，强读也乘10：<code>20,830×10%+1,160=3,243回源/s</code>，不是2,199。写1,160/s与应用约92.6核同样重算；两片仅是忽略后台放大的前台写下界。</p></div><div class="lang-en"><p>Multiplying the whole baseline by ten also multiplies read-your-writes: <code>20,830×10%+1,160=3,243 origin reads/s</code>, not 2,199. Recompute 1,160 foreground writes/s and about 92.6 app cores too. Two shards are only a foreground-write lower bound before background amplification.</p></div></div>
+</section>
 
-  <section>
-    <h2><span class="lang-zh">故障：主库宕机、副本延迟、缓存击穿</span><span class="lang-en">Failures: primary down, replica lag, cache stampede</span></h2>
-    <figure class="deck">
+<section><h2><span class="lang-zh">故障时守住三份契约</span><span class="lang-en">Keep three contracts during failure</span></h2>
+<figure class="deck">
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="e1t e1d">
           <title id="e1t">Steady state before any failure</title>
@@ -792,7 +683,7 @@
           <path d="M730 132 L730 167" class="wire async"/><polygon points="730,177 725,167 735,167" class="head async"/>
           <path d="M870 132 L870 167" class="wire async"/><polygon points="870,177 865,167 875,167" class="head async"/>
           <path d="M778 106 L792 106 Q800 106 800 114 L800 268 Q800 276 792 276 L561.5 276 Q555 276 555 282.5 L555 289" class="wire async"/><polygon points="555,299 550,289 560,289" class="head async"/><text x="690" y="270" text-anchor="middle" class="tiny">outbox relay</text>
-          <path d="M620 318 L672 318" class="wire async"/><polygon points="682,318 672,323 672,313" class="head async"/><text x="651" y="311" text-anchor="middle" class="tiny">consume</text>
+          <path d="M620 318 L672 318" class="wire async"/><polygon points="682,318 672,323 672,313" class="head async"/><text x="651" y="311" text-anchor="middle" class="tiny">work</text>
           <path d="M802 318 L926 318 Q934 318 934 310 L934 99 Q934 96 931 96 L928 96" class="wire async"/><polygon points="918,96 928,91 928,101" class="head async"/><text x="868" y="311" text-anchor="middle" class="tiny">fan-out rows</text>
           <g class="is-new">
             <text x="136" y="366" class="tiny">no failure · every budget holds</text>
@@ -830,7 +721,7 @@
           <path d="M730 132 L730 167" class="wire async muted"/><polygon points="730,177 725,167 735,167" class="head async muted"/>
           <path d="M870 132 L870 167" class="wire async"/><polygon points="870,177 865,167 875,167" class="head async"/>
           <path d="M778 106 L792 106 Q800 106 800 114 L800 268 Q800 276 792 276 L561.5 276 Q555 276 555 282.5 L555 289" class="wire async muted"/><polygon points="555,299 550,289 560,289" class="head async muted"/><text x="690" y="270" text-anchor="middle" class="tiny">outbox relay</text>
-          <path d="M620 318 L672 318" class="wire async"/><polygon points="682,318 672,323 672,313" class="head async"/><text x="651" y="311" text-anchor="middle" class="tiny">consume</text>
+          <path d="M620 318 L672 318" class="wire async"/><polygon points="682,318 672,323 672,313" class="head async"/><text x="651" y="311" text-anchor="middle" class="tiny">work</text>
           <path d="M802 318 L926 318 Q934 318 934 310 L934 99 Q934 96 931 96 L928 96" class="wire async"/><polygon points="918,96 928,91 928,101" class="head async"/><text x="868" y="311" text-anchor="middle" class="tiny">fan-out rows</text>
           <g class="is-new">
             <path d="M640 112 L640 206 Q640 214 648 214 L672 214" class="wire fail"/><polygon points="682,214 672,219 672,209" class="head fail"/><text x="634" y="158" text-anchor="end" class="tiny">fence → prefix check → promote</text>
@@ -868,7 +759,7 @@
           <path d="M730 132 L730 167" class="wire async"/><polygon points="730,177 725,167 735,167" class="head async"/>
           <path d="M870 132 L870 167" class="wire async"/><polygon points="870,177 865,167 875,167" class="head async"/>
           <path d="M778 106 L792 106 Q800 106 800 114 L800 268 Q800 276 792 276 L561.5 276 Q555 276 555 282.5 L555 289" class="wire async"/><polygon points="555,299 550,289 560,289" class="head async"/><text x="690" y="270" text-anchor="middle" class="tiny">outbox relay</text>
-          <path d="M620 318 L672 318" class="wire async"/><polygon points="682,318 672,323 672,313" class="head async"/><text x="651" y="311" text-anchor="middle" class="tiny">consume</text>
+          <path d="M620 318 L672 318" class="wire async"/><polygon points="682,318 672,323 672,313" class="head async"/><text x="651" y="311" text-anchor="middle" class="tiny">work</text>
           <path d="M802 318 L926 318 Q934 318 934 310 L934 99 Q934 96 931 96 L928 96" class="wire async"/><polygon points="918,96 928,91 928,101" class="head async"/><text x="868" y="311" text-anchor="middle" class="tiny">fan-out rows</text>
           <g class="is-new">
             <text x="740" y="160" text-anchor="start" class="clock">lag Δ</text>
@@ -910,7 +801,7 @@
           <path d="M730 132 L730 167" class="wire async"/><polygon points="730,177 725,167 735,167" class="head async"/>
           <path d="M870 132 L870 167" class="wire async"/><polygon points="870,177 865,167 875,167" class="head async"/>
           <path d="M778 106 L792 106 Q800 106 800 114 L800 268 Q800 276 792 276 L561.5 276 Q555 276 555 282.5 L555 289" class="wire async"/><polygon points="555,299 550,289 560,289" class="head async"/><text x="690" y="270" text-anchor="middle" class="tiny">outbox relay</text>
-          <path d="M620 318 L672 318" class="wire async"/><polygon points="682,318 672,323 672,313" class="head async"/><text x="651" y="311" text-anchor="middle" class="tiny">consume</text>
+          <path d="M620 318 L672 318" class="wire async"/><polygon points="682,318 672,323 672,313" class="head async"/><text x="651" y="311" text-anchor="middle" class="tiny">work</text>
           <path d="M802 318 L926 318 Q934 318 934 310 L934 99 Q934 96 931 96 L928 96" class="wire async"/><polygon points="918,96 928,91 928,101" class="head async"/><text x="868" y="311" text-anchor="middle" class="tiny">fan-out rows</text>
           <g class="is-new">
             <text x="136" y="366" class="tiny">not “cache down, query the DB”: 2,199 ÷ 400 = 5.5×</text>
@@ -948,7 +839,7 @@
           <path d="M730 132 L730 167" class="wire async muted"/><polygon points="730,177 725,167 735,167" class="head async muted"/>
           <path d="M870 132 L870 167" class="wire async"/><polygon points="870,177 865,167 875,167" class="head async"/>
           <path d="M778 106 L792 106 Q800 106 800 114 L800 268 Q800 276 792 276 L561.5 276 Q555 276 555 282.5 L555 289" class="wire async muted"/><polygon points="555,299 550,289 560,289" class="head async muted"/><text x="690" y="270" text-anchor="middle" class="tiny">outbox relay</text>
-          <path d="M620 318 L672 318" class="wire async"/><polygon points="682,318 672,323 672,313" class="head async"/><text x="651" y="311" text-anchor="middle" class="tiny">consume</text>
+          <path d="M620 318 L672 318" class="wire async"/><polygon points="682,318 672,323 672,313" class="head async"/><text x="651" y="311" text-anchor="middle" class="tiny">work</text>
           <path d="M802 318 L926 318 Q934 318 934 310 L934 99 Q934 96 931 96 L928 96" class="wire async"/><polygon points="918,96 928,91 928,101" class="head async"/><text x="868" y="311" text-anchor="middle" class="tiny">fan-out rows</text>
           <g class="is-new">
             <path d="M640 112 L640 206 Q640 214 648 214 L672 214" class="wire fail"/><polygon points="682,214 672,219 672,209" class="head fail"/><text x="634" y="158" text-anchor="end" class="tiny">① fence → prefix → promote</text>
@@ -958,170 +849,37 @@
         </svg>
         <figcaption><span class="lang-zh">三份契约同图：① 旧主已隔离、候选前缀合格才提升；② 异步 RPO 可能丢未复制尾部，强读先带 min_pos 绕缓存；③ lease 合并回源，所有回源共享 400/s 上限。不能用 RPO 允许双主。</span><span class="lang-en">Three contracts: ① promote only after old-primary fencing and an eligible prefix; ② async RPO may lose an unreplicated suffix, while strong reads bypass cache with min_pos; ③ leases merge reloads under a shared 400/s origin cap. RPO never permits two writers.</span></figcaption>
       </div>
-    </figure>
-    <div class="bilingual">
-      <div class="lang-zh"><p class="col-kicker">主库超时：取消，还是带着旧数据继续</p>
-        <p>片 A 的主库不再响应，只证明通信超时，不能证明它死了。应用先暂停这一片写入；允许旧的读可按产品契约继续，强读不能悄悄退化。Brewer 讨论的是超时后某次操作继续还是取消，[1] 不授予第二个写主。即使业务接受异步复制的 RPO，提升前也必须让旧主丧失写权：由写资源验证的权威/栅栏，或可靠断电、撤销存储访问等硬隔离，必须覆盖已有连接和在途写。只改应用 epoch 或路由不够。拿不到隔离证明就保持这一片不可写，片 B 仍可服务。</p>
-        <p>安全顺序是：暂停写 → 证明旧主已失去写权 → 核验候选持久日志的历史与连续前缀，并 apply 所需前缀 → 提升 → 发布新路由代次 → 恢复写，再补副本。[4] 旧主恢复只能作为隔离节点核对、重建并加入副本。默认异步下，仅在产品接受丢失未复制尾部时才能选当前合格前缀；丢失的 min_pos 不能继续答复强读成功。零丢已确认写合同则必须证明候选覆盖全部已确认前缀，无法证明就停写，而非选“看上去最前”的副本。该合同只抵御前述单主故障，不能覆盖所有持久副本同时损坏。持久副本确认与单写者隔离缺一不可；半同步超时退回异步仍要受合同控制。[5][6]</p>
-      </div>
-      <div class="lang-en"><p class="col-kicker">Primary timeout: cancel, or continue with older data</p>
-        <p>Shard A’s primary stops answering, which proves a timeout rather than death. Pause its writes; stale-ok reads may continue under their contract, while strong reads cannot silently degrade. Brewer’s per-operation continue/cancel decision [1] does not authorize a second writer. Even with accepted async RPO, promotion requires resource-enforced write authority/fencing or reliable hard isolation, such as power or storage-access removal, covering existing connections and in-flight writes. An application epoch or route change alone is insufficient. Without isolation proof, keep shard A unavailable for writes; shard B may continue.</p>
-        <p>The safe order is: pause writes → prove the old primary has lost write authority → verify the candidate’s durable history and continuous prefix, then apply the required prefix → promote → publish the new route generation → resume writes and rebuild replication. [4] A recovered old primary remains isolated until checked and rebuilt as a replica. Default async may use an eligible available prefix only when the product accepts loss of the unreplicated suffix; a lost min_pos must fail a strong read. The zero acknowledged-loss variant must prove coverage of every acknowledged commit, or keep writes paused. The contract covers the stated single-primary failure, not simultaneous destruction of all durable copies. Durable replica acknowledgement and single-writer isolation are both required; semi-sync’s async fallback remains subject to the contract. [5][6]</p>
-      </div>
-    </div>
-    <div class="bilingual">
-      <div class="lang-zh"><p class="col-kicker">副本延迟和缓存击穿是两条不同的红线</p>
-        <p>副本延迟不需要主库宕机。主库确认后、日志 apply 前，允许旧的读可能返回旧时间线，状态仍是 200，错误率看不见。写后读先带 min_pos 绕缓存；副本只有连续 apply 的证明才可服务，否则回当前主库、等待或失败。两秒粘主到期不证明追平。按前面的不交叠口径，90% 命中时约 208.3 次 miss 加 116 次强读，共约 324.3 次回源；故障时这些流量共享 400/s 上限，仍需留余量。</p>
-        <p>整份缓存失效时，读回到大约 2,199 QPS。2,199 ÷ 400 = 5.5。「缓存挂了就查数据库」会把主库一起打死。时间线键按读者分，单个 feed 键并不热；热键来自共享对象，比如一条爆款帖子 post:9。假设它占峰值读的 20%，大约 0.20 × 2,199 ≈ 440 QPS 打在同一个键上。键一过期，所有应用会在同一瞬间回源。</p>
-        <p>Nishtala 等人用租约对付回源风暴和旧值写回。未命中时给一个 64 位令牌，回填必须带上。默认同一个键最多每 10 秒一个令牌，其余请求稍等再重试。他们对易击穿的键观察一周：没有租约时数据库查询峰值 17K/s，有租约时 1.3K/s。[3] 这是他们的测量，不是这张图的 QPS。整集群宕机时没有进程发令牌，超过 400 的回源失败或降级，不把 2,199 放进主库。</p>
-        <p>不要把这三件事说成一句「高可用」。主库超时要在丢掉一段已确认的写、和让这一片暂时不可写之间选择。副本延迟会在主库健康时返回旧的 200。缓存失效会把 5.5 倍的读预算打回原点，必须有租约和封顶。三句话都要能指着同一张图上的红线或时钟说出来。</p>
-      </div>
-      <div class="lang-en"><p class="col-kicker">Replica lag and cache stampede are different red lines</p>
-        <p>Replica lag does not require a dead primary. Between commit acknowledgement and replica apply, stale-ok readers can receive old timelines with 200, invisible to error rate. Read-your-writes carry min_pos and bypass cache first; a replica serves only with continuous-apply proof, otherwise use the current primary, wait, or fail. Two-second stickiness expiring proves no catch-up. With the disjoint sets above, 90% hits yield about 208.3 misses plus 116 strong reads, 324.3 origin reads/s. During failures these share the 400/s cap and still need headroom.</p>
-        <p>Cache stampede is a different division. When the whole cache is gone, reads that a 90% hit rate used to absorb return at about 2,199 QPS. 2,199 ÷ 400 = 5.5, five and a half read budgets. “The cache died, so query the database” takes the shard primary down with it. A hot key expiring is the smaller version of the same event. Timeline keys are per reader, so no single feed key is hot; hot keys are shared objects such as a viral post, post:9. Assume that key is 20% of peak reads, about 0.20 × 2,199 ≈ 440 QPS on one key. While the cache holds, those 440 are hits. The moment the key expires, every app reloads together.</p>
-        <p>The leases in Nishtala et al. target that reload storm, and the stale set that writes an old value back. On a miss the cache gives the client a 64-bit token, and the fill must present the token. Their default returns a token for a given key at most once every 10 seconds. Other requests are told to wait briefly and retry after the token holder fills the value. On a set of keys that were particularly prone to stampedes, over one week, the peak database query rate from those misses was 17K/s without leases and 1.3K/s with leases. [3] 17K and 1.3K are their measurement on that key set, not the QPS of this diagram. The mechanism we can take is: one reload per key, everyone else waits. A total cache outage is beyond the lease, because no cache process remains to issue tokens. Then the origin budget is the control. Reloads above 400 fail or return an explicit degraded page. They do not enter the primary as 2,199. The queue still does not sit on the 200 during this failure. Notifications may be late. Notification retries must not spend the timeline’s read budget.</p>
-        <p>The common mistake is to collapse the three into “high availability.” A primary timeout chooses between losing a suffix of acknowledged writes and making that shard temporarily unable to write. Replica lag returns an old 200 while the primary is healthy. A cache expiry throws 5.5× the read budget at the origin and needs both a lease and a cap. All three sentences have to point at a red line or a clock on the same picture. They cannot point at a freshly drawn box labeled “disaster recovery.”</p>
-      </div>
-    </div>
-  </section>
+    </figure><table><thead><tr><th><span class="lang-zh">故障</span><span class="lang-en">Failure</span></th><th><span class="lang-zh">允许的行为</span><span class="lang-en">Allowed behavior</span></th><th><span class="lang-zh">不可宣称</span><span class="lang-en">Do not claim</span></th></tr></thead><tbody><tr><td><span class="lang-zh">缓存失效或全故障</span><span class="lang-en">Cache expiry or full outage</span></td><td><span class="lang-zh">lease合并热键；独立共享回源准入限量，超额503或明确降级</span><span class="lang-en">Lease coalescing for hot keys; independent aggregate admission; excess gets 503 or explicit degradation</span></td><td><span class="lang-zh">每台应用400/s；缓存失败就无界查库</span><span class="lang-en">400/s per app; unbounded DB fallback</span></td></tr><tr><td><span class="lang-zh">副本延迟</span><span class="lang-en">Replica lag</span></td><td><span class="lang-zh">允许旧的读可返回旧200；RYW绕缓存验证前缀和快照，失败不降级</span><span class="lang-en">Stale-ok reads may return old 200s; RYW verifies prefix and snapshot without downgrade</span></td><td><span class="lang-zh">TTL到期就证明追平；min_pos等于全局最新</span><span class="lang-en">TTL proves catch-up; min_pos means globally latest</span></td></tr><tr><td><span class="lang-zh">主库超时</span><span class="lang-en">Primary timeout</span></td><td><span class="lang-zh">暂停写，证明隔离旧主，再验证候选和提升；其他片独立服务</span><span class="lang-en">Pause writes, prove fencing, validate and promote the candidate; independent shards continue</span></td><td><span class="lang-zh">改DNS/路由即隔离；超时即写未发生</span><span class="lang-en">DNS/routing is fencing; timeout means no write occurred</span></td></tr></tbody></table>
+<pre data-language="Pseudocode · failover preconditions" data-kind="pseudocode"><code>onPrimaryTimeout(shard):
+    pause new writes for this shard
+    require proof old primary cannot write, including existing connections
+    candidate = verifyDurableHistoryAndContinuousPrefix()
+    if zeroAcknowledgedLoss:
+        require candidate covers every acknowledged commit
+    else:
+        require explicit accepted RPO for any lost suffix
+    apply required prefix before exposing reads
+    promote candidate; publish new routing generation
+    resume writes; rebuild an independent replica
+    # Any missing proof: remain paused. A timeout never proves rollback.</code></pre>
+<div class="bilingual"><div class="lang-zh"><p>默认异步201仅代表主库本地持久提交；单主磁盘失效可丢未复制的已确认尾部。若要求抵御这类故障且不丢已确认写，成功前必须获得独立故障域的合格副本持久确认；提升时还要验证覆盖全部已确认前缀。条件不满足就停写，不能降级成异步成功。旧主恢复保持隔离，重建后才能当副本。<a href="#ref-failover">[3]</a></p></div><div class="lang-en"><p>Default asynchronous 201 means local durable primary commit; losing its disk can lose an acknowledged unreplicated suffix. Preserving acknowledged writes through that failure requires durable confirmation from an eligible independent replica before success and promotion coverage of all acknowledged commits. Missing prerequisites pause writes rather than allowing asynchronous success. A recovered old primary remains isolated until rebuilt as a replica. <a href="#ref-failover">[3]</a></p></div></div>
+<details><summary><span class="lang-zh">产品参数不等于业务合同</span><span class="lang-en">Product settings are not the business contract</span></summary><div class="bilingual"><div class="lang-zh"><p>PostgreSQL17在配置同步副本后，<code>synchronous_commit=on</code>等远端flush，<code>remote_apply</code>还等apply；<code>remote_write</code>不保证副本OS崩溃后的持久性。没有同步副本配置，参数名字本身不会产生远端保证。MySQL8.4半同步ACK在relay log刷盘后，但等不到ACK会回退异步；零丢合同必须控制该降级。<a href="#ref-sync-commit">[4]</a> <a href="#ref-semisync">[5]</a></p></div><div class="lang-en"><p>With synchronous standbys configured, PostgreSQL 17 <code>synchronous_commit=on</code> waits for remote flush, while <code>remote_apply</code> also waits for apply. <code>remote_write</code> does not ensure survival of a replica OS crash. Without the standby configuration, the parameter name alone adds no remote guarantee. MySQL 8.4 semi-sync ACK follows relay-log flush but waiting can time out into async; a zero-loss contract must control that downgrade. <a href="#ref-sync-commit">[4]</a> <a href="#ref-semisync">[5]</a></p></div></div>
+<div class="bilingual"><div class="lang-zh"><p>无论接受多少RPO，都不能同时有两个合法写主。隔离需要数据库/存储层认可的写权威，或可靠断电、撤销存储权限等，覆盖已有连接和在途写；应用内epoch、心跳和路由切换本身不够。这里的伪代码列前置条件，不冒充现成的自动选主实现。</p></div><div class="lang-en"><p>Any accepted RPO still requires one authorized writer. Fencing must be enforced by the database/storage authority or reliable power/storage-access isolation, covering existing connections and in-flight writes. App epochs, heartbeats, and route changes alone are insufficient. This pseudocode lists prerequisites; it is not a ready-made election system.</p></div></div>
+</details>
+</section>
 
-  <section>
-    <h2><span class="lang-zh">追问怎么接</span><span class="lang-en">Follow-ups</span></h2>
-    <div class="bilingual">
-      <div class="lang-zh"><p class="col-kicker">1 · 为什么一百万用户还不分片？</p>
-        <p>因为基本假设下的写峰值是 116，写预算是 800，116 ÷ 800 ≈ 0.15。数据大约 400 GB，低于 2 TB。分片要等写被改成每天 50 条消息那种假设：50,000,000 ÷ 86,400 = 578.7 平均写 QPS，峰值 5,787，5,787 ÷ 800 = 7.23，才需要 8 个写分区。百万这个词本身不产生分片。</p>
-      </div>
-      <div class="lang-en"><p class="col-kicker">1 · Why not shard at a million users?</p>
-        <p>Because under the base assumptions the write peak is 116 and the write budget is 800, and 116 ÷ 800 ≈ 0.15. The data is about 400 GB, under 2 TB. Sharding waits for a changed write assumption such as 50 messages a day: 50,000,000 ÷ 86,400 = 578.7 average write QPS, peak 5,787, and 5,787 ÷ 800 = 7.23, which needs 8 write partitions. The word “million” does not create shards.</p>
-      </div>
-    </div>
-    <div class="bilingual">
-      <div class="lang-zh"><p class="col-kicker">2 · 发完帖立刻刷新，为什么看不到？</p>
-        <p>201 带回这次提交的 min_pos。作者刷新先按该下界分流，绕过没有下界证明的缓存；副本只有连续 apply 到所需位点才可服务，否则读当前主库新快照、等待或失败。若异步切主丢失该历史，必须明确报告无法满足。两秒粘主只是减轻体验问题的启发式，不能在到期后把旧结果当读己之写成功。</p>
-      </div>
-      <div class="lang-en"><p class="col-kicker">2 · I posted and refreshed, and the post is missing.</p>
-        <p>The 201 returns min_pos. Classify the author’s refresh by that bound before any cache hit. A replica serves only with continuous-apply proof; otherwise use a fresh current-primary snapshot, wait, or fail. If async failover lost the history, report the unsatisfied bound. Two-second stickiness is only a heuristic and cannot turn an old result into a successful read-your-writes after expiry.</p>
-      </div>
-    </div>
-    <div class="bilingual">
-      <div class="lang-zh"><p class="col-kicker">3 · 主库宕机会丢数据吗？</p>
-        <p>异步复制可能丢主库已确认、但任何副本都未持久保留的尾部。接受这段 RPO 不代表允许双主：先停写、隔离旧主、核验并应用候选前缀，才提升和发布新路由。零丢已确认写则要求成功前有独立副本持久 ACK、提升覆盖全部已确认前缀，等待不足不退回异步成功；达不到条件停写。[4][5][6]</p>
-      </div>
-      <div class="lang-en"><p class="col-kicker">3 · If the primary dies, do we lose data?</p>
-        <p>Async can lose the acknowledged suffix not durably retained on any replica. Accepted RPO never authorizes two writers: pause writes, isolate the old primary, verify and apply the candidate prefix, then promote and publish routing. Zero acknowledged loss additionally requires durable replica ACK before success, promotion covering all acknowledged commits, and no async-success fallback. Otherwise keep writes paused. [4][5][6]</p>
-      </div>
-    </div>
-    <div class="bilingual">
-      <div class="lang-zh"><p class="col-kicker">4 · 缓存整个挂了，能不能直接查库？</p>
-        <p>不能无预算地查。回源会从约 324.3 回到 2,199，是 400 的 5.5 倍。热键用租约收成一个回源。Nishtala 等人在易击穿的键上看到数据库查询峰值从 17K/s 降到 1.3K/s，那是他们的测量。[3] 整集群宕机时没有进程发令牌，超过 400 的请求失败或降级。</p>
-      </div>
-      <div class="lang-en"><p class="col-kicker">4 · The whole cache died. Do we just query the database?</p>
-        <p>Not without a budget. Origin traffic goes from about 324.3 back to 2,199, which is 5.5× the 400 budget. A hot-key stampede uses a lease so one reload fills the key. That is the token Nishtala et al. used in memcache. On keys prone to stampedes they saw the peak database query rate fall from 17K/s to 1.3K/s. That is their measurement. [3] When the whole cluster is down, no process remains to issue tokens, and requests above 400 fail or degrade. Notifications sitting on the queue do not spend this read budget.</p>
-      </div>
-    </div>
-    <div class="bilingual">
-      <div class="lang-zh"><p class="col-kicker">5 · 流量再乘 10 会先坏在哪？</p>
-        <p>先别加机器。峰值读大约 21,990。即使仍有 90% 命中，回源大约 2,199，已是 400 的 5.5 倍。写大约 1,160，1,160 ÷ 800 ≈ 1.5，两片写预算才盖住。应用 CPU 从 9.3 核变成大约 93 核。前提是会话已经在共享存储里；还在内存里的话，加进程只会让粘滞更脆。</p>
-      </div>
-      <div class="lang-en"><p class="col-kicker">5 · Traffic times ten. What breaks first?</p>
-        <p>Do not start by adding machines. Peak reads become about 21,990. Even with a 90% hit rate, origin reads are about 2,199, already 5.5× the 400 budget, so cache and replica capacity have to be recomputed. Writes become about 1,160, over 800, so the shard the base assumptions skipped now appears. 1,160 ÷ 800 ≈ 1.5, and two write budgets cover it. App CPU goes from 9.3 cores to about 93, and the app process count follows, provided sessions are already in the shared store. If sessions are still in memory, more processes only make stickiness more brittle.</p>
-      </div>
-    </div>
-    <div class="bilingual">
-      <div class="lang-zh"><p class="col-kicker">6 · 现在就做多地域双活吗？</p>
-        <p>不做。Dean 2009 的表里，同机房往返是 0.5 毫秒，跨洋是 150 毫秒。[2] 双活还意味着分区时两边都能写，恢复时要合并，这是 Brewer 说的分区选择，不是多画一个方框。[1] 单地域的超时、延迟和击穿还没讲完时，第二个地域只是把这三份契约再复制一遍。用户若跨洋，先说读可以旧多久，再决定要不要把只读副本放到更近的地方。那一步仍然不是两边同时写。</p>
-      </div>
-      <div class="lang-en"><p class="col-kicker">6 · Should we draw multi-region active-active now?</p>
-        <p>No. On Dean’s 2009 table a same-datacenter round trip and a transoceanic round trip are 0.5 ms against 150 ms. [2] Active-active also means both sides can write during a partition and must merge afterward. That is the partition mode Brewer describes, not one more box. [1] Until the single-region timeout, lag, and stampede are spoken, a second region only copies those three contracts. If users really are across an ocean, first state how old a read may be, then decide whether a read-only replica should sit closer to them. That step is still not both sides writing.</p>
-      </div>
-    </div>
-  </section>
+<section><h2><span class="lang-zh">面试复盘与可验证反例</span><span class="lang-en">Recap and falsifiable examples</span></h2>
+<div class="bilingual"><div class="lang-zh"><p>用一条主线收尾：峰值9.26核推动应用扩展；内容读超400预算推动缓存与副本；RYW先绕缓存并证明自己的历史；1.6秒通知进入outbox和队列；116前台写不直接分片。每个组件后面补一个失败条件，回答就有边界。</p></div><div class="lang-en"><p>Close with one line of reasoning: 9.26 peak CPU cores motivate app scale; reads beyond 400 motivate cache and replicas; RYW bypasses cache and proves its history; 1.6-second notifications move through an outbox and queue; 116 foreground writes do not directly force sharding. Name a failure condition for each component.</p></div></div>
+<table><thead><tr><th><span class="lang-zh">检查</span><span class="lang-en">Check</span></th><th><span class="lang-zh">预期</span><span class="lang-en">Expected</span></th></tr></thead><tbody><tr><td><span class="lang-zh">普通MISS→副本→回填→再次命中</span><span class="lang-en">Ordinary MISS → replica → fill → hit</span></td><td><span class="lang-zh">只首次读消耗回源；旧数据仅满足允许旧合同</span><span class="lang-en">Only the first read uses origin; old data satisfies only stale-ok</span></td></tr><tr><td><span class="lang-zh">旧缓存存在，min_pos=(h1,9)</span><span class="lang-en">Old cache exists; min_pos=(h1,9)</span></td><td><span class="lang-zh">先绕缓存；h1=9成功，h1=8即使h2=100仍失败</span><span class="lang-en">Bypass first; h1=9 passes, h1=8 fails even with h2=100</span></td></tr><tr><td><span class="lang-zh">全缓存故障且准入用完</span><span class="lang-en">Full cache outage; admission exhausted</span></td><td><span class="lang-zh">拒绝额外回源，不使400预算按应用台数放大</span><span class="lang-en">Reject excess origin work; do not multiply 400 by app count</span></td></tr><tr><td><span class="lang-zh">DB读失败或过期恰好到边界</span><span class="lang-en">DB read fails or expiry equals now</span></td><td><span class="lang-zh">失败不缓存为空、不延TTL；边界视为MISS</span><span class="lang-en">No empty-result caching or TTL extension on failure; boundary is a MISS</span></td></tr></tbody></table>
+<div class="bilingual"><div class="lang-zh"><p>运行：<code>java examples/ch02/ReadPath.java</code>（Java17）。测试覆盖正常、缓存旧值、禁止强读降级、合法祖先/丢失历史、无权威证明、缓存故障准入、TTL边界及DB读失败。内存模型只验证分支与合同，不证明真实数据库、分布式限额或切主实现；后者需适配器集成和故障测试。</p></div><div class="lang-en"><p>Run <code>java examples/ch02/ReadPath.java</code> on Java 17. Tests cover the normal path, old cache, no RYW downgrade, valid ancestors/lost history, missing authority, outage admission, TTL boundary, and DB-read failure. The memory model validates control flow and contracts, not real database semantics, distributed admission, or failover; those need adapter integration and fault tests.</p></div></div>
+</section>
 
-  <section>
-    <h2><span class="lang-zh">五个常见翻车点</span><span class="lang-en">Five answers that fail</span></h2>
-    <table>
-      <thead><tr><th><span class="lang-zh">翻车说法</span><span class="lang-en">Weak answer</span></th><th><span class="lang-zh">为什么不够</span><span class="lang-en">Why it fails</span></th><th><span class="lang-zh">改成什么</span><span class="lang-en">Replace it with</span></th></tr></thead>
-      <tbody>
-        <tr>
-          <td><span class="lang-zh">先把终图画满</span><span class="lang-en">Open with the final picture</span></td>
-          <td><span class="lang-zh">看不出 9.3 核、5.5 倍读预算、116 写这些数各自拿掉了什么</span><span class="lang-en">Hides which number removed which box: 9.3 cores, 5.5× reads, 116 writes</span></td>
-          <td><span class="lang-zh">从单进程加本地库开始，每笔对应一次除法</span><span class="lang-en">Start at one process and a local database. Each stroke is one division</span></td>
-        </tr>
-        <tr>
-          <td><span class="lang-zh">有负载均衡就是水平扩展</span><span class="lang-en">A load balancer means horizontal scale</span></td>
-          <td><span class="lang-zh">会话还在某一台的内存里，那台一死用户就掉线</span><span class="lang-en">The session is still in one process’s memory, and that death logs the user out</span></td>
-          <td><span class="lang-zh">先标 session in RAM，再把它挪到共享存储或签名令牌</span><span class="lang-en">Label session in RAM, then move it to a shared store or a signed token</span></td>
-        </tr>
-        <tr>
-          <td><span class="lang-zh">副本保证已确认的写不丢</span><span class="lang-en">A replica saves every acknowledged write</span></td>
-          <td><span class="lang-zh">异步日志没到副本的那一段会随主库磁盘消失</span><span class="lang-en">The async suffix that reached no replica dies with the primary disk</span></td>
-          <td><span class="lang-zh">说出异步 RPO；零丢合同要副本持久确认、合格提升、旧主隔离，不能超时退回异步成功</span><span class="lang-en">Name async RPO; zero acknowledged loss needs durable replica ACK, eligible promotion, old-primary fencing, and no async-success fallback</span></td>
-        </tr>
-        <tr>
-          <td><span class="lang-zh">缓存挂了就查数据库</span><span class="lang-en">Cache down, so query the database</span></td>
-          <td><span class="lang-zh">2,199 ÷ 400 = 5.5，原点会被一起打垮</span><span class="lang-en">2,199 ÷ 400 = 5.5, and the origin falls over with the cache</span></td>
-          <td><span class="lang-zh">同一键一个租约，原点封顶 400；超过的请求失败或降级</span><span class="lang-en">One lease per key, cap origin at 400, fail or degrade the rest</span></td>
-        </tr>
-        <tr>
-          <td><span class="lang-zh">百万用户所以要分片，并且我们是 AP</span><span class="lang-en">A million users means shard, and we are AP</span></td>
-          <td><span class="lang-zh">116 写低于 800；「三选二」被 Brewer 称为误导，选择发生在超时且可以按操作不同</span><span class="lang-en">116 writes are under 800. Brewer calls “pick two” misleading. The choice happens at a timeout and can differ per operation</span></td>
-          <td><span class="lang-zh">基本假设不分片；超时时时间线可以旧，余额类的写取消</span><span class="lang-en">Do not shard on the base assumptions. At a timeout a timeline may be old, and a balance write cancels</span></td>
-        </tr>
-      </tbody>
-    </table>
-  </section>
+<section><h2><span class="lang-zh">一手来源</span><span class="lang-en">Primary sources</span></h2>
+<div class="bilingual"><div class="lang-zh"><p>以下链接于2026-10-22重新核验。容量是本章教学推导；切主与读适配器要求是据语义明确的设计合同。</p></div><div class="lang-en"><p>Links checked on 2026-10-22. Capacity numbers are teaching calculations; failover and read-adapter prerequisites are explicit design contracts informed by these semantics.</p></div></div>
+<ol class="references"><li id="ref-dean">[1] <a href="https://www.cs.cornell.edu/projects/ladis2009/talks/dean-keynote-ladis2009.pdf">Jeff Dean, LADIS 2009 keynote</a>. <span class="lang-zh">历史RTT数量级，不是SQL或当前硬件基准。</span><span class="lang-en">Historical RTT magnitudes, not SQL or current hardware benchmarks.</span></li><li id="ref-memcache">[2] <a href="https://www.usenix.org/system/files/conference/nsdi13/nsdi13-final170_update.pdf">Scaling Memcache at Facebook, NSDI 2013</a>. <span class="lang-zh">§3.2.1：lease令牌、失效和惊群。</span><span class="lang-en">§3.2.1: lease tokens, invalidation, and herds.</span></li><li id="ref-failover">[3] <a href="https://www.postgresql.org/docs/17/warm-standby-failover.html">PostgreSQL 17 · Failover</a>. <span class="lang-zh">旧主隔离；故障切换工具需另外实现。</span><span class="lang-en">Old-primary isolation; external failover tooling.</span></li><li id="ref-sync-commit">[4] <a href="https://www.postgresql.org/docs/17/runtime-config-wal.html#GUC-SYNCHRONOUS-COMMIT">PostgreSQL 17 · synchronous_commit</a>. <span class="lang-zh">本地持久、远端flush与apply的区别。</span><span class="lang-en">Local durability versus remote flush and apply.</span></li><li id="ref-semisync">[5] <a href="https://dev.mysql.com/doc/refman/8.4/en/replication-semisync.html">MySQL 8.4 · Semisynchronous Replication</a>. <span class="lang-zh">relay log刷盘ACK及超时回退异步。</span><span class="lang-en">Relay-log flush ACK and timeout fallback to async.</span></li><li id="ref-isolation">[6] <a href="https://www.postgresql.org/docs/17/transaction-iso.html">PostgreSQL 17 · Transaction Isolation</a>. <span class="lang-zh">Read Committed语句快照与Repeatable Read事务快照。</span><span class="lang-en">Read Committed statement snapshots and Repeatable Read transaction snapshots.</span></li><li id="ref-outbox">[7] <a href="https://docs.aws.amazon.com/prescriptive-guidance/latest/cloud-design-patterns/transactional-outbox.html">AWS · Transactional outbox pattern</a>. <span class="lang-zh">本地事务保存投递意图；重复消息须幂等。</span><span class="lang-en">Local transaction preserves intent; duplicate delivery requires idempotency.</span></li></ol><p class="cite"><span class="lang-zh">继续阅读：</span><span class="lang-en">Continue:</span> <a href="ch03.html">Ch03</a> · <a href="ch38.html">Ch38</a> · <a href="ch41.html">Ch41</a></p></section>
 
-  <section>
-    <h2><span class="lang-zh">收尾：四笔取舍</span><span class="lang-en">Close on four trade-offs</span></h2>
-    <div class="bilingual">
-      <div class="lang-zh"><p class="col-kicker">中文</p>
-        <table><thead><tr><th>取舍</th><th>面试口述</th></tr></thead><tbody>
-          <tr><td>读的可用性对新鲜度</td><td>超时先停写；隔离旧主、核验前缀后才提升。无证明继续停写；允许旧的读与片 B 可继续。</td></tr>
-          <tr><td>命中率对陈旧窗口</td><td>强读先绕缓存并校验 min_pos；其余读按 90% 命中。总回源约 324.3/s。两秒粘主只是启发式。</td></tr>
-          <tr><td>共享会话对签名令牌</td><td>共享会话能立刻作废 sid，但每次 GET 都依赖它。令牌把读路径解开，作废要另做列表或短寿命。</td></tr>
-          <tr><td>单主对分片</td><td>116 写不分片。改成 5,787 写才要 8 片。首页读仍落在读者那一片，跨片扇出走队列。</td></tr>
-        </tbody></table>
-        <p class="say">最后二十秒：单进程加本地库过不了峰值大约 9.3 核。拆开之后加负载均衡，会话还在内存里，所以还不能算水平扩展。副本接允许旧的读，强读先绕缓存带位点，其余查缓存，总回源约 324.3/s。扇出 1.6 秒进队列。基本假设 116 写不分片。主库超时先停写，隔离旧主并核验前缀后才提升；缓存回源封在 400。</p>
-      </div>
-      <div class="lang-en"><p class="col-kicker">English</p>
-        <table><thead><tr><th>Trade-off</th><th>Interview line</th></tr></thead><tbody>
-          <tr><td>Read availability vs freshness</td><td>Pause writes on timeout; fence the old primary and verify the log prefix before promotion. Without proof, writes stay paused; stale-ok reads and shard B may continue.</td></tr>
-          <tr><td>Hit rate vs stale window</td><td>Strong reads bypass cache and check min_pos first; other reads target 90% hits. Total origin is about 324.3/s. Two-second stickiness is only a heuristic.</td></tr>
-          <tr><td>Shared session vs signed token</td><td>A shared session can kill a sid immediately and sits on every GET. A token frees the read path and needs a denylist or a short life to revoke.</td></tr>
-          <tr><td>One primary vs shards</td><td>116 writes do not shard. 5,787 writes need 8 shards. Home still hits the reader’s shard. Cross-shard fan-out stays on the queue.</td></tr>
-        </tbody></table>
-        <p class="say">Last twenty seconds: one process plus a local database cannot take about 9.3 cores at the peak. After the split, the load balancer still fronts in-memory sessions, so that is not horizontal scale yet. The replica takes stale-ok reads, strong reads bypass cache with a position bound, other reads use cache, and total origin is about 324.3/s. A 1.6 s fan-out enters the queue. The base case of 116 writes does not shard. On primary timeout, pause writes, fence the old primary, and verify the prefix before promotion. Cache reloads stay capped at 400.</p>
-      </div>
-    </div>
-  </section>
-
-  <section>
-    <h2><span class="lang-zh">引用</span><span class="lang-en">References</span></h2>
-    <ol class="references">
-      <li id="ref-brewer">[1] Eric Brewer, “CAP Twelve Years Later: How the ‘Rules’ Have Changed,” <em>IEEE Computer</em>, vol. 45, no. 2, pp. 23–29, February 2012. <a href="https://doi.org/10.1109/MC.2012.37">doi:10.1109/MC.2012.37</a>. 超时点上按操作选择一致性或可用性；「三选二」会误导；分片在分区时往往还能各自前进。</li>
-      <li id="ref-dean">[2] Jeff Dean, “Designs, Lessons and Advice from Building Large Distributed Systems,” LADIS 2009 keynote, “Numbers Everyone Should Know.” <a href="https://www.cs.cornell.edu/projects/ladis2009/talks/dean-keynote-ladis2009.pdf">Cornell LADIS 2009 slides</a>. 同机房往返 0.5 ms，跨洋往返 150 ms，主存约 100 ns，机械盘寻道 10 ms。这是 2009 年演讲里的数量级，寻道不是今天的 NVMe。</li>
-      <li id="ref-memcache">[3] Rajesh Nishtala, Hans Fugal, Steven Grimm, Marc Kwiatkowski, Herman Lee, Harry C. Li, Ryan McElroy, Mike Paleczny, Daniel Peek, Paul Saab, David Stafford, Tony Tung, and Venkateshwaran Venkataramani, “Scaling Memcache at Facebook,” NSDI 2013. <a href="https://www.usenix.org/conference/nsdi13/technical-sessions/presentation/nishtala">USENIX NSDI ’13</a>. Demand-filled look-aside，写后 delete；租约默认每键最多 10 秒一个令牌；他们在易击穿键上观察到数据库查询峰值从 17K/s 降到 1.3K/s。</li>
-      <li id="ref-failover">[4] PostgreSQL, <a href="https://www.postgresql.org/docs/17/warm-standby-failover.html">17 · Failover</a>. <span class="lang-zh">2026-10-08 核验：旧主必须失去主身份，避免双主；本章据此要求可证明的写资源隔离。</span><span class="lang-en">Checked 2026-10-08: prevent an old primary from remaining primary; this design requires proven write-resource isolation.</span></li>
-      <li id="ref-sync-commit">[5] PostgreSQL, <a href="https://www.postgresql.org/docs/17/runtime-config-wal.html#GUC-SYNCHRONOUS-COMMIT">17 · synchronous_commit</a>. <span class="lang-zh">核对 remote_write、持久 flush 与 remote_apply 的差别；需配置合格同步副本，不能只改参数名字。</span><span class="lang-en">Verified remote_write, durable flush, and remote_apply distinctions; eligible synchronous standbys must also be configured.</span></li>
-      <li id="ref-semisync">[6] MySQL, <a href="https://dev.mysql.com/doc/refman/8.4/en/replication-semisync.html">8.4 · Semisynchronous Replication</a>. <span class="lang-zh">核对 relay log 刷盘 ACK 和超时回退异步；默认回退不能充当零丢写合同。</span><span class="lang-en">Verified relay-log flush ACK and timeout fallback to async; fallback does not establish a zero-loss contract.</span></li>
-    </ol>
-    <p class="cite"><span class="lang-zh">站内延伸：</span><span class="lang-en">On this site:</span> <a class="chip" href="ch01.html">Ch01</a><a class="chip" href="ch03.html">Ch03 · 估算</a><a class="chip" href="ch37.html">Ch37 · 存储</a><a class="chip" href="ch38.html">Ch38 · 缓存</a></p>
-  </section>
-
-  <section>
-    <h2><span class="lang-zh">闪卡</span><span class="lang-en">Flashcards</span></h2>
-    <p class="cite"><span class="lang-zh">点一下翻面。能把除法和路径讲出来才算会。</span><span class="lang-en">Click to flip. Knowing means you can walk the division and the path.</span></p>
-    <div class="cards-grid">
-      <button type="button" class="flip"><span class="q"><span class="lang-zh">峰值 QPS 怎么从日活算出来？</span><span class="lang-en">How do you get peak QPS from DAU?</span></span><span class="a"><span class="lang-zh">1,000,000 × 20 ÷ 86,400 = 231.5 平均，×10 = 2,315 峰值。读 2,199，写 116。</span><span class="lang-en">1,000,000 × 20 ÷ 86,400 = 231.5 average, ×10 = 2,315 peak. Reads 2,199, writes 116.</span></span></button>
-      <button type="button" class="flip"><span class="q"><span class="lang-zh">哪一步算术拿掉单进程？</span><span class="lang-en">Which division removes the single process?</span></span><span class="a"><span class="lang-zh">峰值 2,315 × 4 ms ≈ 9.3 核，超过假设的 8 核。平均只有约 0.93 核。</span><span class="lang-en">Peak 2,315 × 4 ms ≈ 9.3 cores, past the assumed 8. The average is only about 0.93 cores.</span></span></button>
-      <button type="button" class="flip"><span class="q"><span class="lang-zh">负载均衡没有解决什么？</span><span class="lang-en">What does the load balancer not fix?</span></span><span class="a"><span class="lang-zh">内存会话和单份数据库。粘滞会把用户钉死在一台应用上。</span><span class="lang-en">In-memory sessions and the single database. Stickiness pins the user to one app.</span></span></button>
-      <button type="button" class="flip"><span class="q"><span class="lang-zh">哪条读走缓存，哪条仍回主库？</span><span class="lang-en">Which read hits cache, which still hits the primary?</span></span><span class="a"><span class="lang-zh">先按 min_pos 分流：写后读绕缓存、核验当前主库新快照；允许旧的读才查缓存，miss 走副本。</span><span class="lang-en">Classify by min_pos first: read-your-writes bypass cache and check a fresh primary snapshot. Only stale-ok reads use cache and send misses to replicas.</span></span></button>
-      <button type="button" class="flip"><span class="q"><span class="lang-zh">异步主库宕机会丢什么？</span><span class="lang-en">What does an async primary death lose?</span></span><span class="a"><span class="lang-zh">已确认但未复制的尾部可能丢；接受 RPO 也要先隔离旧主。零丢合同还要求持久 ACK、合格前缀，条件不足停写。</span><span class="lang-en">The acknowledged unreplicated suffix may be lost. Accepted RPO still requires old-primary fencing. Zero-loss also requires durable ACK and an eligible prefix; otherwise pause writes.</span></span></button>
-      <button type="button" class="flip"><span class="q"><span class="lang-zh">缓存全失效为什么不能直接查库？</span><span class="lang-en">Why not query the database when the cache dies?</span></span><span class="a"><span class="lang-zh">回源回到约 2,199，是 400 预算的 5.5 倍。同一键一个租约，原点封顶 400。</span><span class="lang-en">Origin returns to about 2,199, 5.5× the 400 budget. One lease per key, and cap origin at 400.</span></span></button>
-      <button type="button" class="flip"><span class="q"><span class="lang-zh">什么时候才分片？</span><span class="lang-en">When do you shard?</span></span><span class="a"><span class="lang-zh">116 写不分。改成 50 条消息/日活后，峰值写 5,787 ÷ 800 = 7.23，要 8 片。</span><span class="lang-en">116 writes do not. At 50 messages per DAU, peak writes 5,787 ÷ 800 = 7.23, so 8 shards.</span></span></button>
-      <button type="button" class="flip"><span class="q"><span class="lang-zh">什么工作必须离开请求？</span><span class="lang-en">What work must leave the request?</span></span><span class="a"><span class="lang-zh">通知关注者。20 × 80 ms = 1.6 s，超过 300 ms 的确认。用 outbox 保证提交后还能投递。</span><span class="lang-en">Notifying followers. 20 × 80 ms = 1.6 s, past a 300 ms ack. An outbox keeps delivery after the commit.</span></span></button>
-    </div>
-  </section>
+<section><h2><span class="lang-zh">闪卡</span><span class="lang-en">Flashcards</span></h2>
+<div class="cards-grid"><button type="button" class="flip"><span class="q"><span class="lang-zh">百万日活如何算峰值？</span><span class="lang-en">How does 1M DAU become peak QPS?</span></span><span class="a"><span class="lang-zh">100万×20/86,400≈231.5平均；×10≈2,315峰值，读2,199、写116。</span><span class="lang-en">1M×20/86,400≈231.5 average; ×10≈2,315 peak: 2,199 reads and 116 writes.</span></span></button><button type="button" class="flip"><span class="q"><span class="lang-zh">两台应用够不够容灾？</span><span class="lang-en">Do two apps provide failure headroom?</span></span><span class="a"><span class="lang-zh">9.26核/每台4.8预算，正常需2台；失一台仍守60%预算需3台。</span><span class="lang-en">9.26 cores / 4.8 per-node budget needs 2 normally; N−1 at the same 60% budget needs 3.</span></span></button><button type="button" class="flip"><span class="q"><span class="lang-zh">本章“强读”保证什么？</span><span class="lang-en">What does this chapter’s “strong read” promise?</span></span><span class="a"><span class="lang-zh">读己之写下界，不是全局最新。先绕缓存，再验证history、前缀和实际查询快照。</span><span class="lang-en">A read-your-writes floor, not globally latest. Bypass cache; verify history, prefix, and actual query snapshot.</span></span></button><button type="button" class="flip"><span class="q"><span class="lang-zh">90%命中后的回源怎么算？</span><span class="lang-en">Origin traffic at 90% hits?</span></span><span class="a"><span class="lang-zh">(2,199−116)×10%+116=324.3/s；全流量乘10时为3,243/s。</span><span class="lang-en">(2,199−116)×10%+116=324.3/s; multiplying all traffic by 10 yields 3,243/s.</span></span></button><button type="button" class="flip"><span class="q"><span class="lang-zh">写后删缓存为什么不强一致？</span><span class="lang-en">Why is delete-after-write not strong consistency?</span></span><span class="a"><span class="lang-zh">并发旧读可在删除后回填；删失败也留旧。TTL不证明副本追平，RYW绕缓存。</span><span class="lang-en">An old read can fill after deletion; failed deletes retain old data. TTL proves no catch-up; RYW bypasses cache.</span></span></button><button type="button" class="flip"><span class="q"><span class="lang-zh">切主先做什么？</span><span class="lang-en">What precedes promotion?</span></span><span class="a"><span class="lang-zh">暂停写、证明旧主隔离、核验候选前缀；异步可丢尾部，缺失min_pos不能伪装成功。</span><span class="lang-en">Pause writes, prove old-primary fencing, verify the prefix. Async may lose a suffix; missing min_pos cannot be reported as success.</span></span></button><button type="button" class="flip"><span class="q"><span class="lang-zh">outbox保证什么？</span><span class="lang-en">What does outbox guarantee?</span></span><span class="a"><span class="lang-zh">Post与投递意图同本地事务；不与队列同事务。relay可重复，效果幂等另做。</span><span class="lang-en">Post and delivery intent share a local transaction, not a broker transaction. Relay duplicates need effect-level idempotency.</span></span></button><button type="button" class="flip"><span class="q"><span class="lang-zh">5,787/800得8片，结束了吗？</span><span class="lang-en">Does 5,787/800 mean exactly 8 shards?</span></span><span class="a"><span class="lang-zh">只是理想均匀前台写下界；还要算扇出写、热点、后台读取与故障余量。</span><span class="lang-en">Only an ideal uniform foreground-write lower bound; include fan-out writes, skew, background reads, and failure headroom.</span></span></button></div></section>
 
   <p><button type="button" class="read-toggle"><span class="when-off"><span class="lang-zh">我已学完本章</span><span class="lang-en">Mark this chapter done</span></span><span class="when-on"><span class="lang-zh">已学完本章</span><span class="lang-en">Completed</span></span></button></p>
   <p class="cite"><span class="lang-zh">进度存在这台浏览器里。</span><span class="lang-en">Saved in this browser only.</span></p>

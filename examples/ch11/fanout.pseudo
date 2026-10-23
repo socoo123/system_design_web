@@ -1,0 +1,20 @@
+consume(event):
+  job = tasks.insertOrLoadUnique(event.event_id, pinned_mode,
+                                retained_audience_snapshot, cursor=START)
+  while not job.done:
+    old = job.cursor
+    if job.mode == PULL:
+      CelebLog.INSERT(event.author, event.post_id, event.created_at)
+        ON CONFLICT (author_id, post_id) DO NOTHING
+      page = END
+    else:
+      page = FollowGraph.page(job.snapshot, old, max=500)
+      for reader in page.readers:
+        TimelineStore.INSERT(reader, event.post_id, event.author, event.created_at)
+          ON CONFLICT (user_id, post_id) DO NOTHING
+        // Preserve original time; a replay never moves a post upward.
+        TimelineCache.invalidateBestEffort(reader)
+    // All outputs above have DURABLE acknowledgements; never reverse.
+    tasks.compareAndSetCursor(event.event_id, old, page.nextOrEND)
+    job = tasks.reload(event.event_id)
+  broker.ack(event)  // published_at alone does not mean job.done

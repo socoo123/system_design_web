@@ -1,0 +1,51 @@
+{
+  "passed": true,
+  "count": 27,
+  "checks": [
+    "guard source has explicit tenant predicate",
+    "file source has explicit tenant predicate",
+    "session source has explicit tenant predicate",
+    "pins source has explicit tenant predicate",
+    "generation source has explicit tenant predicate",
+    "job source has explicit tenant predicate",
+    "scoped insert/read: INSERT Version(auth.tenant,",
+    "scoped insert/read: INSERT VersionBlock(auth.tenant,",
+    "scoped insert/read: SessionBlock[auth.tenant,s.id]",
+    "scoped insert/read: INSERT Change(auth.tenant,",
+    "scoped insert/read: INSERT Outbox(auth.tenant,",
+    "scoped insert/read: Receipt[auth.tenant, auth.user, request_key]",
+    "scoped insert/read: File[auth.tenant,s.file_id]",
+    "durable delete job lookup uses composite identity",
+    "delete job insertion includes tenant",
+    "pin insertion scoped to tenant",
+    "change scan scoped to tenant",
+    "negative witness: locking A without tenant WHERE also increments B",
+    "source guard UPDATE changes only A counts and head",
+    "same file ID updates exactly one tenant row",
+    "B file remains at prior head",
+    "same session ID closes only A",
+    "same session ID releases only A pins",
+    "negative witness: generation-only DELETE status corrupts B READY state",
+    "source terminal transition preserves B with colliding generation",
+    "delete job completion uses full tenant/generation key",
+    "same owner/key receipts are independent across tenants"
+  ],
+  "source_hashes": {
+    "complete.pseudo": "2852bbe2d79af662867df163d2229dbe49aac5cac188fd94beb1c875b21601a5",
+    "gc.pseudo": "0fe4971bf9869ffb8c61c5952822e675fca72e856c5c645e8d9bcc89e270c72d",
+    "pin.pseudo": "3537cafa2a0c8c71cbe68343519fb5adb4d7e17a9aa6e8f679c7cbb14493a628",
+    "changes.pseudo": "3eb98cdadc561099c34fe6316fcdc53c0cba623c17cc061041cf14d319d928c4"
+  },
+  "extracted_statements": {
+    "guard": "UPDATE tenant_guard SET used_bytes=used_bytes+s.size,\n                            change_head=checked_add(change_head,1)\n      WHERE tenant_id=auth.tenant",
+    "file": "UPDATE File SET head=v\n      WHERE tenant_id=auth.tenant AND id=s.file_id AND head=s.base_version",
+    "session": "UPDATE Session SET state=COMMITTED, result=(v,seq)\n      WHERE tenant_id=auth.tenant AND id=s.id",
+    "pins": "DELETE SessionBlock WHERE tenant_id=auth.tenant AND session=s.id",
+    "generation": "UPDATE BlockGeneration SET state=DELETED\n      WHERE tenant_id=job.tenant AND generation=job.generation",
+    "job": "UPDATE DeleteJob SET complete=true\n      WHERE tenant_id=job.tenant AND generation=job.generation"
+  },
+  "limitations": [
+    "SQLite execution validates source predicate scope, not PG replication/row-lock deployment",
+    "Pseudocode parameter and enum/table spelling adapted as documented; tenant predicates unchanged"
+  ]
+}

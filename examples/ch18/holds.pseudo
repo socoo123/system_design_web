@@ -1,0 +1,28 @@
+finish_holds_locked(o, target):            # Called INSIDE the caller's transaction.
+  require caller holds Order(o.id) FOR UPDATE until COMMIT
+  require target in {COMMITTED, RELEASED}
+  holds = SELECT Reservation WHERE order_id=o.id ORDER BY sku_id FOR UPDATE
+  require holds exactly match persisted Items AND all holds.state == HELD
+  for h in holds ORDER BY sku_id:          # Every stock writer uses this order.
+    if target == COMMITTED:
+      n = UPDATE Stock SET reserved=reserved-h.qty,sold=sold+h.qty
+          WHERE sku_id=h.sku_id AND reserved>=h.qty
+    else:
+      n = UPDATE Stock SET reserved=reserved-h.qty,available=available+h.qty
+          WHERE sku_id=h.sku_id AND reserved>=h.qty
+    require n == 1                        # Corruption/missing row aborts caller.
+    n = UPDATE Reservation SET state=target
+        WHERE order_id=o.id AND sku_id=h.sku_id AND state=HELD
+    require n == 1                        # Never release another order's units.
+
+close(order_id, reason):
+  require reason in {expired, user_cancel} # Cancel also authenticates the owner.
+  BEGIN; o = SELECT Order WHERE id=order_id FOR UPDATE
+  if o.status != pending_pay: COMMIT; return no_change
+  if reason == expired AND o.expire_at > DB_NOW: COMMIT; return not_due
+  UPDATE Order SET status=(closed if expired else cancelled),version=version+1
+    WHERE id=o.id AND status=pending_pay; require affected_rows == 1
+  finish_holds_locked(o, RELEASED)
+  INSERT Outbox(event_id,kind=order_closed,order_id=o.id,version=o.version+1)
+  COMMIT                                 # State, own holds, counters and event.
+  # Any invariant/SQL failure rolls back ALL changes, including the order status.

@@ -1,0 +1,24 @@
+# Pseudocode: one decision/request; UNKNOWN is not quota exhaustion.
+admit_once(ctx, route, remaining):
+  if remaining <= 0: return ERROR(504)
+  key = encode_tuple(ctx.tenant, ctx.subject, route.method_and_id)
+  verdict = quota.take_once(key, timeout=min(5_ms, remaining))
+  # Server adapter: short atomic refill/check/debit + idle TTL (see Ch04).
+  # timeout/transport error -> UNKNOWN; server may already have debited.
+  # No automatic retry/refund; a late result cannot forward this request.
+  if verdict.kind == ALLOW: return ALLOW
+  if verdict.kind == DENY: return ERROR(429, retry_after=verdict.wait_hint)
+  if not route.explicit_public_safe_read: return ERROR(503)
+  if not deployment.fixed_pool_policy_valid(): return ERROR(503)
+  # Four non-overlapping owners; new/restarted owner starts EMPTY.
+  # At construction: tokens=0, last=monotonic_now(); cap=100, rate=100/s.
+  # Existing buckets never reset when Redis fails/recovers.
+  if emergency_bucket.try_take(monotonic_now()): return ALLOW_DEGRADED
+  return ERROR(503)                     # dependency/fallback capacity failure
+
+# emergency_bucket.try_take, under one process-local mutex:
+#   elapsed = max(0, now - last); last = max(last, now)
+#   tokens = min(100, tokens + elapsed * 100_per_second)
+#   if tokens < 1: return false
+#   tokens -= 1; return true
+# This is an aggregate emergency cap, not a distributed user quota or ledger.

@@ -1,0 +1,177 @@
+{
+  "passed": true,
+  "count": 40,
+  "checks": [
+    "live ordinal pin wins before GC",
+    "normal full block plus short tail commits v8/102",
+    "version references and logical quota commit together",
+    "same key cannot move to a different session/intent",
+    "lost reply can recover own minimal prior result after revocation",
+    "a new completion still checks current ACL",
+    "second retained version charges full logical size despite byte reuse",
+    "unknown final PUT cannot become READY or pinned",
+    "unknown PUT leaves durable candidate without a trusted pin",
+    "one missing ordinal still blocks file publication",
+    "retry after missing block completes one immutable manifest",
+    "two actual SQLite writers from parent 7 have one winner and one 412",
+    "counter and inserted event roll back after actual counter increment",
+    "next committed operation reuses rolled-back 102 without a hidden event",
+    "same tenant hash never substitutes for source read permission",
+    "source ACL revoked after pin still blocks commit",
+    "GC-first allows identical bytes only through a fresh generation",
+    "unknown DELETE cannot be marked terminal",
+    "late duplicate old DELETE cannot touch new physical key",
+    "fresh generation remains committable after old DELETE retry",
+    "H=0 is a valid fixed empty horizon",
+    "later commits do not turn H=0 into an unbounded request",
+    "raw first page captures committed H",
+    "empty authorized page advances over scanned private raw row",
+    "ACL visibility epoch change invalidates old page",
+    "old guard statement visibly changes the unrelated tenant",
+    "old generation-only statement visibly deletes unrelated READY state",
+    "fixed source guard predicate preserves B counts and head",
+    "fixed source generation predicate preserves B READY state",
+    "File update is explicitly tenant scoped after repair",
+    "Session update is explicitly tenant scoped after repair",
+    "Pin release is explicitly tenant scoped after repair",
+    "durable GC identity is explicitly tenant scoped after repair",
+    "GC terminal update is explicitly tenant scoped after repair",
+    "Pin adoption is explicitly tenant scoped after repair",
+    "Change query is explicitly tenant scoped after repair",
+    "independent binary/decimal transfer arithmetic",
+    "independent block-rounding upper bound",
+    "independent quota and orphan sizing",
+    "independent manifest and COW sizing"
+  ],
+  "traces": {
+    "parent_race": [
+      [
+        8,
+        102
+      ],
+      "412"
+    ],
+    "old_sql": {
+      "statements": [
+        "UPDATE tenant_guard SET used_bytes=used_bytes+:size, change_head=change_head+1",
+        "UPDATE block_generation SET state='DELETED' WHERE generation=:generation"
+      ],
+      "guards": [
+        [
+          "A",
+          102,
+          8
+        ],
+        [
+          "B",
+          502,
+          78
+        ]
+      ],
+      "generations": [
+        [
+          "A",
+          "g1",
+          "DELETED"
+        ],
+        [
+          "B",
+          "g1",
+          "DELETED"
+        ]
+      ]
+    },
+    "fixed_sql": {
+      "extracted_statements": [
+        "UPDATE tenant_guard SET used_bytes=used_bytes+s.size,\n                            change_head=checked_add(change_head,1)\n      WHERE tenant_id=auth.tenant",
+        "UPDATE BlockGeneration SET state=DELETED\n      WHERE tenant_id=job.tenant AND generation=job.generation"
+      ],
+      "adapted_statements": [
+        "UPDATE tenant_guard SET used_bytes=used_bytes+:size,\n                            change_head=checked_add(change_head,1)\n      WHERE tenant_id=:tenant",
+        "UPDATE block_generation SET state='DELETED'\n      WHERE tenant_id=:tenant AND generation=:generation"
+      ],
+      "guards": [
+        [
+          "A",
+          102,
+          8
+        ],
+        [
+          "B",
+          501,
+          70
+        ]
+      ],
+      "generations": [
+        [
+          "A",
+          "g1",
+          "DELETED"
+        ],
+        [
+          "B",
+          "g1",
+          "READY"
+        ]
+      ]
+    }
+  },
+  "htmlSha256": "39385aea292a15a9f37a7482ed82725a18e913183b1eb4415a7e325af780eb61",
+  "schemaSha256": "b911078c0305d4d2e3bcb57c9456c779490a12a2aa7fbf84622719c04c6bf8bd",
+  "numbers": {
+    "saves_daily": {
+      "exact": "20000000",
+      "decimal": 20000000.0
+    },
+    "peak_file_qps": {
+      "exact": "31250/27",
+      "decimal": 1157.4074074074074
+    },
+    "peak_inbound_gbps": {
+      "exact": "12500/27",
+      "decimal": 462.962962962963
+    },
+    "exact_50MB_block_peak": {
+      "exact": "125000/9",
+      "decimal": 13888.888888888889
+    },
+    "aggregate_block_peak_upper_bound": {
+      "exact": "2205171875/147456",
+      "decimal": 14954.778883192273
+    },
+    "quota_ceiling_PB": {
+      "exact": "500",
+      "decimal": 500.0
+    },
+    "resume_seconds": {
+      "exact": "8388608/78125",
+      "decimal": 107.3741824
+    },
+    "whole_file_seconds": {
+      "exact": "33554432/78125",
+      "decimal": 429.4967296
+    },
+    "digest_bytes_4MiB": {
+      "exact": "8192",
+      "decimal": 8192.0
+    },
+    "digest_bytes_64KiB": {
+      "exact": "524288",
+      "decimal": 524288.0
+    },
+    "cow_saved_fraction": {
+      "exact": "1/3",
+      "decimal": 0.3333333333333333
+    },
+    "abandoned_48h_TB": {
+      "exact": "20",
+      "decimal": 20.0
+    }
+  },
+  "limits": [
+    "Model definitions reused as SUT, new independent scenarios; author top-level runner not executed",
+    "SQLite writer serialization is coarser than PostgreSQL tenant row locks",
+    "Original schema executed unchanged; pseudocode parameter/enum/table spelling adapted, predicates preserved",
+    "Objects are a separate SQLite model, not S3/CDN/IAM or device persistence experiments"
+  ]
+}

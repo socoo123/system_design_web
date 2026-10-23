@@ -1,0 +1,24 @@
+submit(auth, conv, key, request):
+  require authenticated sender; validate bounded key and canonical request
+  digest = SHA256(canonical request including type and attachment references)
+  BEGIN transaction on the current conversation authority
+  c = SELECT conversation WHERE conv_id = conv FOR UPDATE
+  if c missing: ROLLBACK; return NOT_FOUND
+  old = SELECT send_receipt WHERE (conv, auth.user, key)
+  if old exists:
+    ROLLBACK
+    return old.request_hash == digest ? Sent(old.seq) : KEY_REUSED
+  m = SELECT member WHERE (conv, auth.user)
+  if m missing or not m.active: ROLLBACK; return FORBIDDEN
+  s = checked_add(c.head, 1)
+  UPDATE conversation SET head = s WHERE conv_id = conv
+  INSERT message(conv, s, auth.user, canonical_message_bytes(request))
+  INSERT send_receipt(conv, auth.user, key, digest, s)
+  INSERT outbox(conv, s, c.policy_version, committed_envelope(request, s))
+  COMMIT and wait for A5 durable commit confirmation
+  return Sent(s)
+on definite_abort_or_deadlock:
+  ROLLBACK; bounded retry with the same key, or return RETRY_LATER
+on commit_timeout_or_connection_loss:
+  discard connection; return UNKNOWN
+  // Retry the same key against the authority, never invent a new key.

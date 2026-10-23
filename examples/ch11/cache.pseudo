@@ -1,0 +1,20 @@
+readBody(post_id):
+  hit = cache.getUnexpired(post_id)  // hits never extend expiry
+  if hit exists: return hit.body
+  grant = cache.issueLease(post_id, installWithin=2s)
+  body = primary.read(post_id, requestDeadline)
+  result = cache.installIfCurrent(grant, body, fixedTTL=25s)
+  // CACHE SERVER atomically checks epoch, generation AND install deadline.
+  if result == REVOKED or result == TOO_LATE:
+    retryFromPrimaryWithinRequestDeadlineOr503()
+  else: return body
+
+deletePost(authenticated_author, post_id):
+  BEGIN on the author shard
+  UPDATE Post SET status=deleted, version=version+1
+    WHERE post_id=:post_id AND author_id=:authenticated_author
+  require exactly one authorized row; otherwise fail
+  INSERT Outbox(invalidation_event, post_id, new_version)
+  COMMIT
+  cache.revokeGenerationAndDelete(post_id)  // one atomic cache operation
+  // Relay retries invalidation; no synchronous scan of follower inboxes.

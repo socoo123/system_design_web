@@ -1,0 +1,26 @@
+Notification(notification_id PK, tenant_id, idempotency_key, body_hash,
+  receipt_202, channels, recipient_snapshot, encrypted_payload,
+  template_version, not_before, not_after,
+  UNIQUE(tenant_id, idempotency_key))
+
+Delivery(delivery_id PK, notification_id, channel, endpoint_id,
+  address_snapshot, not_before, not_after, status, uncertain DEFAULT false,
+  lease_owner, lease_epoch DEFAULT 0, lease_until,
+  send_count DEFAULT 0, max_sends, allow_unknown_retry,
+  next_attempt_at, wake_no DEFAULT 0, last_woken_at NOT NULL DEFAULT DB_NOW(),
+  UNIQUE(notification_id, channel, endpoint_id))
+
+Attempt(attempt_id PK, delivery_id, lease_epoch, provider,
+  attempted_token_version, registration_at, provider_message_id,
+  outcome, started_at, finished_at)
+Outbox(outbox_id PK, event_kind, aggregate_id, unique_key UNIQUE,
+  ready_at, publish_epoch, lease_until, published_at NULL)
+Receipt(provider, receipt_id, provider_message_id, observed_status, observed_at,
+  PRIMARY KEY(provider, receipt_id))
+
+Campaign(campaign_id PK, tenant_id, idempotency_key, audience_snapshot_ref,
+  template_version, expansion_cursor, UNIQUE(tenant_id, idempotency_key))
+Preference(tenant_id, user_id, channel, list_id, marketing_opt_in,
+  quiet_start, quiet_end, tz, version,
+  PRIMARY KEY(tenant_id, user_id, channel, list_id))
+Device(endpoint_id PK, user_id, platform, token, token_version, registration_at, status)

@@ -1,0 +1,22 @@
+# One key; fixed epoch; N=3, W=2; immutable mutation m
+PUT(key, m, deadline):
+    epoch, owners = placement.snapshot(key)  # distinct physical A, B, C
+    send APPLY(epoch, key, m) to ALL owners in parallel
+    acked = set()
+    while before(deadline):
+        reply = await_next_reply(deadline)
+        if reply == TIMEOUT: break
+        if reply.matches(epoch, key, m.id) and reply.durable:
+            if reply.node in owners: acked.add(reply.node)
+        if size(acked) >= 2:
+            return ACKNOWLEDGED(m.version)  # not "m must be the winner"
+    return UNKNOWN  # never roll back remotely applied mutations
+
+APPLY(epoch, key, m):
+    with local_key_serialization_and_membership_guard(epoch, key):
+        # validate ownership/epoch; reject obsolete routing before writing
+        next = winner(read_all_local_versions(key), m)  # reject conflicts first
+        WAL.append(m); WAL.sync()  # I/O failure: no durable ACK
+        visible[key] = next
+        # recovery replays WAL through this same winner rule
+        return DURABLE_ACK(node_id, epoch, key, m.id)

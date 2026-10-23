@@ -1,0 +1,26 @@
+start_payment(auth, order_id):
+  BEGIN; o = SELECT Order WHERE id=order_id FOR UPDATE
+  require o.owner=auth.user_id AND o.status=pending_pay AND o.expire_at>DB_NOW
+  a = SELECT latest Attempt WHERE order_id=o.id
+  if a exists AND a.state not in {FAILED_NO_CAPTURE, CANCELLED_NO_CAPTURE}:
+    COMMIT; return a                     # PREPARED/IN_FLIGHT/UNKNOWN also block.
+  # Both terminal states require provider evidence of irreversible NO capture.
+  a = INSERT Attempt(order_id=o.id,number=next_number,PSP_key=random_stable_key,
+                     amount=o.total,currency=o.currency,account=CONFIG,
+                     provider_binding=NULL,state=PREPARED)
+  COMMIT                                 # Identity and immutable parameters first.
+  try:
+    result = PSP.call(a.PSP_key, a.immutable_parameters) # OUTSIDE database locks.
+    persist_canonical_evidence(a, result) # Same validation/transition as capture.
+  catch timeout_or_uncertain_500:
+    UPDATE Attempt SET state=UNKNOWN
+      WHERE id=a.id AND state IN {PREPARED, IN_FLIGHT}
+    # Do not overwrite CAPTURED or a later confirmed terminal result.
+  return processing(a.id)
+
+recover(a):
+  if a.provider_binding exists: query THAT object using its configured account
+  else if provider_key_still_retained: retry SAME key and immutable parameters
+  else: keep UNKNOWN; reconcile provider records / operator; do not create anew
+  # A recovery worker scans durable PREPARED/IN_FLIGHT/UNKNOWN/action-required attempts.
+  # A 2s timeout, 5s first query or 15min close is NEVER NO_CAPTURE evidence.

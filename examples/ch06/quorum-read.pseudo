@@ -1,0 +1,17 @@
+# Full values, including tombstones; fixed N=3, R=2
+GET(key, deadline):
+    epoch, owners = placement.snapshot(key)
+    targets = choose_two_distinct(owners)
+    send READ(epoch, key) to targets in parallel
+    replies = map()  # one valid response per physical replica
+    while size(replies) < 2 and before(deadline):
+        reply = await_next_reply(deadline)
+        if reply == TIMEOUT: break
+        if reply.valid_for(epoch, key) and reply.node in targets:
+            replies[reply.node] = reply.record  # absence is a valid result
+    if size(replies) < 2: return UNAVAILABLE  # do not claim NOT_FOUND
+    best = fold(winner, replies.values, ABSENT)
+    enqueue_bounded_repairs(key, best, replies)  # original version, no wait
+    if best == ABSENT: return NOT_FOUND
+    if best.deleted: return NOT_FOUND(best.version)  # retain tombstone
+    return VALUE(best.value, best.version)

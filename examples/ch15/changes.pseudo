@@ -1,0 +1,19 @@
+changes(auth, cursor, bound_or_empty, acl_epoch):
+  // Guard values, membership, epoch and floor are for auth.tenant only.
+  begin short Metadata transaction:
+    SELECT tenant_guard WHERE tenant_id=auth.tenant FOR UPDATE
+    require current_membership(auth)
+    require acl_epoch == current_acl_epoch(auth) else RESET_REQUIRED
+    require retention_floor <= cursor <= tenant_guard.change_head else RESET_REQUIRED
+    H = tenant_guard.change_head if bound_or_empty is NONE else bound_or_empty
+    require cursor <= H <= tenant_guard.change_head
+    rows = SELECT Change WHERE tenant_id=auth.tenant AND cursor < seq AND seq <= H
+      ORDER BY seq LIMIT 100
+    // Walk raw rows, then authorize; do not paginate the filtered result.
+    visible = currently_authorized_events_or_removal_markers(auth, rows)
+    next = rows.last.seq if rows else H
+    COMMIT
+  return (visible, next, H, acl_epoch)
+  // Token binds tenant,user,H,epoch; client cannot supply another scope.
+  // Persist received work + next together locally. applied_cursor advances
+  // only after the full returned prefix has been applied or safely omitted.

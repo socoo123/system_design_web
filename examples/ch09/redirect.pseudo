@@ -1,0 +1,27 @@
+redirect(code, minimumVersion = 0):
+  if not validCodeShape(code): return 404 with no-store
+  if not clockWithinBudget(): return 503 with no-store
+  snapshot = firstUsable(Local[code], Redis[code], minimumVersion)
+  // Usable: now < valid_until AND version >= minimumVersion.
+  if snapshot is absent:
+    if not acquireAggregateOriginBudget(): return 503 with no-store
+    checked_at = wallClockNow()         // before a NEW primary SELECT
+    row = PRIMARY SELECT * FROM Link WHERE code = :code
+    if read failed: return 503 with no-store  // never negative-cache errors
+    snapshot = {row, checked_at,
+                valid_until: checked_at + (row absent ? 1s : 8s)}
+    if row exists and row.version < minimumVersion: return 503 with no-store
+    if wallClockNow() >= snapshot.valid_until: return 503 with no-store
+    bestEffortVersionCheckedFill(Redis, Local, snapshot)
+    // Both tiers retain this SAME deadline; cache failure is not a 404.
+  if not clockWithinBudget(): return 503 with no-store
+  if wallClockNow() >= snapshot.valid_until: return 503 with no-store
+  if snapshot.row absent: return 404 with no-store
+  if snapshot.row.status in {'revoked','blocked'}: return 410 with no-store
+  if snapshot.row.status == 'pending': return 200 review-page with no-store
+  if snapshot.row.status != 'active': return 503 with no-store  // no Location
+  if snapshot.row.expires_at != null and nowUpperBound() + 1s >= snapshot.row.expires_at:
+    return 410 with no-store
+  tryEnqueueBoundedClickEvent()          // allowed to drop; never waits for MQ
+  emit 302 {Location:snapshot.row.target_url, Cache-Control:'no-store'}
+  // Final check → emission <= 1s; recheck if delayed. No expired stale fallback.

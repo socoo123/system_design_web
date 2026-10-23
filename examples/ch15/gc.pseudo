@@ -1,0 +1,29 @@
+fence_candidate(tenant, generation):
+  // Trusted GC worker scope; every helper binds this tenant, never bare IDs.
+  begin Metadata transaction:
+    SELECT tenant_guard WHERE tenant_id=tenant FOR UPDATE
+    g = BlockGeneration[tenant, generation]
+    require g.state in {READY, ORPHAN, UPLOADING}
+    require g.age >= grace and not live_upload_attempt(g, db_now())
+    require no_retained_VersionBlock(g) and no_active_session_or_read_pin(g)
+    UPDATE BlockGeneration SET state=DELETING
+      WHERE tenant_id=tenant AND generation=g.generation
+    INSERT DeleteJob(tenant, g.generation, g.exact_object_key) ON CONFLICT DO NOTHING
+    COMMIT
+
+sweep(job):
+  job = require_durable_job(job.tenant, job.generation)
+  // Outside the DB transaction; retries always target this physical key.
+  result = Object.DELETE(job.exact_object_key, version_id=job.version_if_enabled)
+  if not confirmed_deleted_or_absent(result): return RETRY_SAME_JOB
+  // Timeout stays DELETING: never fall through to the terminal update.
+  begin Metadata transaction:
+    SELECT tenant_guard WHERE tenant_id=job.tenant FOR UPDATE
+    require job still targets the same DELETING generation
+    UPDATE BlockGeneration SET state=DELETED
+      WHERE tenant_id=job.tenant AND generation=job.generation
+    UPDATE DeleteJob SET complete=true
+      WHERE tenant_id=job.tenant AND generation=job.generation
+    COMMIT
+  // Retain the terminal generation fence. Never rebuild its physical key.
+  // Identical content can enter a fresh generation and be adopted normally.

@@ -28,107 +28,17 @@
   <header>
     <div class="ch-kicker"><span class="lang-zh">CHAPTER 03 · 面试方法</span><span class="lang-en">CHAPTER 03 · method</span></div>
     <h1><span class="lang-zh">粗略估算</span><span class="lang-en">Back-of-the-envelope estimates</span></h1>
-    <p class="ch-meta-line"><span class="lang-zh">约 40 分钟 · 前置：Ch01、Ch02 · 5 组图，每笔数字改一次设计</span><span class="lang-en">~40 min · after Ch01, Ch02 · 5 decks, each number changes a design</span></p>
+    <p class="ch-meta-line"><span class="lang-zh">约 25 分钟 · 前置：Ch01、Ch02 · 假设 → 峰值 → 预算 → 故障复算</span><span class="lang-en">~25 min · after Ch01, Ch02 · assumptions → peak → budget → failure check</span></p>
   </header>
 
-  <section class="goal">
-    <h2><span class="lang-zh">这一章结束你能做什么</span><span class="lang-en">What you can do after this chapter</span></h2>
-    <div class="bilingual">
-      <div class="lang-zh"><p class="col-kicker">中文</p>
-        <ul>
-          <li>用 2–4 分钟把 DAU 走成峰值 QPS，再除以单机可用 QPS，得到无状态层要画几台。</li>
-          <li>把 API 小响应和用户内容带宽画成两条不同的线，存储按主库加副本计，并指出 CDN 与日志不在这个数里。</li>
-          <li>用公开的数量级填一条请求的延迟预算，并用可用性的定义算一条依赖会不会吃光错误预算。</li>
-        </ul>
-      </div>
-      <div class="lang-en"><p class="col-kicker">English</p>
-        <ul>
-          <li>In 2–4 minutes, turn DAU into peak QPS and divide by usable QPS per box to get the stateless tier.</li>
-          <li>Draw API bytes and user-content bytes on different paths, size storage as primary plus replicas, and leave CDN and logs out of that total.</li>
-          <li>Fill one request’s latency budget with published orders of magnitude, and use the definition of availability to see whether one dependency spends the error budget.</li>
-        </ul>
-      </div>
-    </div>
-  </section>
-
-  <section>
-    <h2><span class="lang-zh">先把单位和假设钉死</span><span class="lang-en">Lock units and assumptions first</span></h2>
-    <div class="bilingual">
-      <div class="lang-zh"><p class="col-kicker">中文</p>
-        <p class="say">我先做 back-of-the-envelope。假设写在板上：1000 万 DAU，每人每天 20 次读、1 次写，峰值按 3 倍，一天口算先用 10<sup>5</sup> 秒。然后四笔改图：峰值 QPS 决定无状态层几台，带宽把 API 和图片拆开，存储乘副本，延迟和可用性只用数量级当预算。数字是教学假设，不是某家公司的线上报表。</p>
-        <p><a class="chip" href="ch01.html">Ch01</a> 管时间盒，<a class="chip" href="ch02.html">Ch02</a> 管盒子怎么加上去。这一章是澄清之后、高层图定稿之前的那几分钟。盒子画得出来，却说不清是 2 千 QPS 还是 2 万 QPS，后面的缓存、分片和多地域都是在猜。估算的产物是一个会改图的数量级，加上你写在板上的假设。算到小数点后三位，说明你已经离开 back-of-the-envelope。</p>
-        <p>本章容量用 10 的幂：1 KB = 10<sup>3</sup> 字节，1 MB = 10<sup>6</sup>，1 GB = 10<sup>9</sup>，1 TB = 10<sup>12</sup>。按 1024 进制的单位写作 KiB、GiB、TiB [6]；两套单位在 KB 上差 2.4%，GB 上差 7.4%，TB 上差 10%，都改不了要不要分片。存储留在字节（B），带宽最后写成 bit/s。1 byte = 8 bit。小写 b 是 bit，大写 B 是 byte。100 Mb/s ÷ 8 = 12.5 MB/s。把 100 Mbps 当成 100 MB/s，会把链路放大 8 倍。</p>
-        <p>一天精确是 86,400 秒。白板除以 10<sup>5</sup>。因为分母更大，这样得到的 QPS 偏小，大约是精确值的 86,400 / 100,000 = 0.864 倍。板上的 QPS 当下限，说完用 86,400 复核一次。两个分母不要混用：用 10<sup>5</sup> 除出来的 QPS，乘回去也要乘 10<sup>5</sup>，才能回到每天的请求数。</p>
-      </div>
-      <div class="lang-en"><p class="col-kicker">English</p>
-        <p class="say">I’ll start with back-of-the-envelope. Assumptions on the board: 10 million DAU, 20 reads and 1 write per user per day, a 3× peak, and 10<sup>5</sup> seconds in a day for mental math. Four numbers then change the drawing: peak QPS sets the stateless tier, bandwidth splits the API from images, storage multiplies by replicas, and latency and availability stay orders of magnitude used as a budget. These are teaching assumptions, not a company’s production dashboard.</p>
-        <p><a class="chip" href="ch01.html">Ch01</a> is the clock. <a class="chip" href="ch02.html">Ch02</a> is how the boxes appear. This chapter is the few minutes after clarify and before the high-level picture freezes. People can draw boxes and still not know whether the system is 2 thousand or 20 thousand QPS, so cache, sharding, and multi-region are guesses. The output is an order of magnitude that changes the drawing, plus the assumptions you left on the board. Three decimal places means you have left back-of-the-envelope.</p>
-        <p>Capacity in this chapter uses powers of ten: 1 KB = 10<sup>3</sup> bytes, 1 MB = 10<sup>6</sup>, 1 GB = 10<sup>9</sup>, 1 TB = 10<sup>12</sup>. The powers-of-1024 units are written KiB, GiB, and TiB [6]. The gap between the two is 2.4% at KB, 7.4% at GB, and 10% at TB, and none of it decides sharding. Storage stays in bytes (B). Bandwidth ends in bits per second. 1 byte = 8 bits. Lowercase b is a bit, uppercase B is a byte. 100 Mb/s ÷ 8 = 12.5 MB/s. Reading 100 Mbps as 100 MB/s inflates the link by 8×.</p>
-        <p>A day is exactly 86,400 seconds. On the board, divide by 10<sup>5</sup>. The larger denominator makes QPS about 86,400 / 100,000 = 0.864 of the exact value, so the board number is a floor. Check it once with 86,400. Do not mix the denominators: QPS you got by dividing by 10<sup>5</sup> has to be multiplied by 10<sup>5</sup> to return to requests per day.</p>
-      </div>
-    </div>
-    <table>
-      <thead>
-        <tr>
-          <th><span class="lang-zh">假设</span><span class="lang-en">Assumption</span></th>
-          <th><span class="lang-zh">板上的数</span><span class="lang-en">Number on the board</span></th>
-          <th><span class="lang-zh">它准备改的设计</span><span class="lang-en">Design it is about to change</span></th>
-        </tr>
-      </thead>
-      <tbody>
-        <tr>
-          <td><span class="lang-zh">Feed API，1000 万 DAU</span><span class="lang-en">Feed API, 10M DAU</span></td>
-          <td>10,000,000</td>
-          <td><span class="lang-zh">只有 DAU 进入 QPS，注册总量不进</span><span class="lang-en">Only DAU enters QPS, not total signups</span></td>
-        </tr>
-        <tr>
-          <td><span class="lang-zh">每人每天 20 次读、1 次写</span><span class="lang-en">20 reads and 1 write per user per day</span></td>
-          <td>200M reads/day, 10M writes/day</td>
-          <td><span class="lang-zh">读决定机器，写决定每天新增字节</span><span class="lang-en">Reads size boxes; writes size bytes per day</span></td>
-        </tr>
-        <tr>
-          <td><span class="lang-zh">日常峰值 3 倍，不是大促</span><span class="lang-en">Daily peak 3×, not a sale</span></td>
-          <td>×3</td>
-          <td><span class="lang-zh">机器按峰值买；倍数换了就重除</span><span class="lang-en">Buy for peak; a new multiplier means divide again</span></td>
-        </tr>
-        <tr>
-          <td><span class="lang-zh">无状态 JSON 服务，舒适 1000 QPS/台，按 60% 使用</span><span class="lang-en">Stateless JSON service, 1,000 QPS/box comfortable, planned at 60%</span></td>
-          <td>600 usable QPS</td>
-          <td><span class="lang-zh">峰值 ÷ 600 = 实例数</span><span class="lang-en">Peak ÷ 600 = instance count</span></td>
-        </tr>
-        <tr>
-          <td><span class="lang-zh">API 响应 20 KB；一次打开拉取约 500 KB 图片</span><span class="lang-en">20 KB API response; about 500 KB of images per open</span></td>
-          <td>20 KB vs 500 KB</td>
-          <td><span class="lang-zh">两条字节路径，图片不穿过 App</span><span class="lang-en">Two byte paths; images do not cross App</span></td>
-        </tr>
-        <tr>
-          <td><span class="lang-zh">CDN 命中率 90%</span><span class="lang-en">CDN hit rate 90%</span></td>
-          <td>90%</td>
-          <td><span class="lang-zh">对象存储只出未命中的那 10%</span><span class="lang-en">The object store serves only the 10% that miss</span></td>
-        </tr>
-        <tr>
-          <td><span class="lang-zh">元数据记录 1 KB，留 365 天，3 副本；新图 200 KB 另存</span><span class="lang-en">1 KB metadata row, 365 days, 3 replicas; new image 200 KB elsewhere</span></td>
-          <td>1 KB, ×365, ×3</td>
-          <td><span class="lang-zh">主库加两份副本；图、CDN、日志另计</span><span class="lang-en">Primary plus two replicas; images, CDN, and logs are separate</span></td>
-        </tr>
-        <tr>
-          <td><span class="lang-zh">Client 到附近 Edge 往返 20 ms；远程 Cache 命中率 95%</span><span class="lang-en">20 ms round trip from client to a nearby edge; 95% hit rate on the remote cache</span></td>
-          <td>20 ms, 95%</td>
-          <td><span class="lang-zh">延迟预算的起点；未命中率决定 Primary 扛多少寻道</span><span class="lang-en">Where the latency budget starts; the miss rate sets how many seeks Primary absorbs</span></td>
-        </tr>
-        <tr>
-          <td><span class="lang-zh">feed 读的工作 SLO 99.9%；Cache 调用错误率 0.1%</span><span class="lang-en">Working SLO of 99.9% for feed reads; 0.1% cache call error rate</span></td>
-          <td>99.9%, 0.1%</td>
-          <td><span class="lang-zh">一跳会不会花光错误预算，失败时走哪条退路</span><span class="lang-en">Whether one hop spends the error budget, and which fallback runs</span></td>
-        </tr>
-      </tbody>
-    </table>
-    <p class="cite"><span class="lang-zh">上表每一行都是为了继续画图而写的假设。面试官改一个数，你就重算受它影响的那一笔，不必把整张表推倒。</span><span class="lang-en">Every row is an assumption written so the drawing can continue. If they change one number, recompute only the step that number feeds.</span></p>
-  </section>
-
-  <section>
-    <h2><span class="lang-zh">峰值 QPS 落到无状态层：除出来的是台数</span><span class="lang-en">Peak QPS lands on the stateless tier: the division is a box count</span></h2>
-    <figure class="deck">
+<section class="goal"><h2><span class="lang-zh">本章核心：估算必须改变一个决定</span><span class="lang-en">Core: an estimate must change a decision</span></h2>
+<div class="bilingual"><div class="lang-zh"><ul><li><strong>先统一口径。</strong>人数变请求数，请求数变峰值；日总量用于存储，峰值用于吞吐。</li><li><strong>再给预算。</strong>原始单机能力、计划利用率、故障后目标分别写出；向上取整前不丢写流量。</li><li><strong>最后做反例。</strong>少一台、缓存全失效、对象变大时，哪个预算先被突破？</li></ul></div><div class="lang-en"><ul><li><strong>Normalize inputs.</strong> Users become requests, then peak rates; daily totals size storage, peaks size throughput.</li><li><strong>Set budgets.</strong> Separate baseline capacity, utilization target, and failure target; include writes before rounding up.</li><li><strong>Try a counterexample.</strong> Lose an instance, lose the cache, or increase object sizes: which budget breaks first?</li></ul></div></div>
+</section>
+<section><h2><span class="lang-zh">1 · 固定单位和教学假设</span><span class="lang-en">1 · Fix units and teaching assumptions</span></h2>
+<div class="bilingual"><div class="lang-zh"><p>本章贯穿一个 Feed API。所有业务量、峰值系数、单机能力和命中率都是<strong>教学假设，不是线上数据</strong>。先用数量级选择架构，再用精确算式检查靠近阈值的台数。下面保留的动画使用 100,000 秒/天的白板口算；最终配置统一用 86,400 秒/天。</p></div><div class="lang-en"><p>One Feed API carries the examples. All workload, peak, capacity, and hit-rate figures are <strong>teaching assumptions, not production data</strong>. Use magnitude to choose architecture and exact arithmetic near thresholds. The retained animations use 100,000 seconds/day for mental math; final sizing uses 86,400.</p></div></div><table><thead><tr><th><span class="lang-zh">输入</span><span class="lang-en">Input</span></th><th><span class="lang-zh">假设</span><span class="lang-en">Assumption</span></th><th><span class="lang-zh">用途</span><span class="lang-en">Use</span></th></tr></thead><tbody><tr><td><span class="lang-zh">日活与操作</span><span class="lang-en">DAU and operations</span></td><td>10M DAU; 20 reads + 1 write/user/day</td><td><span class="lang-zh">200M 读、10M 写/天；写均为新增行</span><span class="lang-en">200M reads, 10M writes/day; writes append rows</span></td></tr><tr><td><span class="lang-zh">峰值和成本</span><span class="lang-en">Peak and cost</span></td><td>3×; read cost = write cost = 1</td><td><span class="lang-zh">假设同池、峰值同时发生；实际需按请求成本加权</span><span class="lang-en">Shared pool, coincident peaks; weight actual request costs</span></td></tr><tr><td><span class="lang-zh">单机与故障目标</span><span class="lang-en">Instance and failure target</span></td><td>1,000 work units/s × 60% = 600/s</td><td><span class="lang-zh">同样 60% 预算承受一台不可用；均匀负载</span><span class="lang-en">Maintain 60% after one unavailable instance; balanced load</span></td></tr><tr><td><span class="lang-zh">响应与图片</span><span class="lang-en">Responses and images</span></td><td>20 KB JSON; 500 KB images/read</td><td><span class="lang-zh">图片直达 CDN；字节命中率 90%</span><span class="lang-en">Images via CDN; 90% byte hit rate</span></td></tr><tr><td><span class="lang-zh">存储</span><span class="lang-en">Storage</span></td><td>1 KB/row; 365 days; 3 total copies</td><td><span class="lang-zh">另有200 KB图片/写；副本含主库</span><span class="lang-en">Separate 200 KB image/write; copies include Primary</span></td></tr><tr><td><span class="lang-zh">缓存与服务目标</span><span class="lang-en">Cache and service target</span></td><td>95% read hit; 99.9% daily request SLO</td><td><span class="lang-zh">0.1%调用错误率；错误与miss是不同事件</span><span class="lang-en">0.1% call error rate; errors differ from misses</span></td></tr></tbody></table><div class="bilingual"><div class="lang-zh"><p>这里 KB 表示十进制 kB：1 KB=1,000 B，MB=10⁶ B，GB=10⁹ B，TB=10¹² B；KiB=2¹⁰ B，GiB=2³⁰ B，TiB=2⁴⁰ B。1 GiB≈1.074 GB，1 TiB≈1.100 TB，靠近容量边界时差异会改变结论。1 B=8 bit，因此100 Mb/s=12.5 MB/s（协议开销前）。定义见 <a href="https://physics.nist.gov/cuu/Units/binary.html">NIST 二进制前缀</a>。</p></div><div class="lang-en"><p>Here KB denotes decimal kB: 1 KB=1,000 B, MB=10⁶ B, GB=10⁹ B, TB=10¹² B; KiB=2¹⁰ B, GiB=2³⁰ B, TiB=2⁴⁰ B. 1 GiB≈1.074 GB and 1 TiB≈1.100 TB: differences matter near capacity limits. 1 B=8 bits, so 100 Mb/s=12.5 MB/s before overhead. See <a href="https://physics.nist.gov/cuu/Units/binary.html">NIST binary prefixes</a>.</p></div></div>
+</section>
+<section><h2><span class="lang-zh">2 · 峰值到台数：正常与 N−1 分开算</span><span class="lang-en">2 · Peak to instances: separate normal and N−1</span></h2>
+<div class="bilingual"><div class="lang-zh"><p><strong>动画是读流量的白板初算。</strong>10台与67%说明“故障时放宽利用率”的情景；不是保持60%的承诺。100,000秒会把QPS低估13.6%；读写共享同一预算时，写即使很少也必须加进来。</p></div><div class="lang-en"><p><strong>The animation is a read-only mental estimate.</strong> Ten boxes and 67% illustrate relaxed failure utilization, not a promise to preserve 60%. Using 100,000 seconds understates QPS by 13.6%; even small writes count in a shared budget.</p></div></div><figure class="deck">
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d1s1t d1s1d">
           <title id="d1s1t">Ten million DAU becomes a daily request count at the edge</title>
@@ -142,7 +52,7 @@
             <text x="136" y="334" class="sub">assumption: 10M DAU × 20 reads = 200M reads/day · × 1 write = 10M writes/day</text>
           </g>
         </svg>
-        <figcaption><span class="lang-zh">第一笔只画入口。1000 万 DAU 是假设，乘上人均 20 次读、1 次写，得到每天 2 亿次读和 1000 万次写。这是一天的总量，还不是速率，所以图上还没有应用层。</span><span class="lang-en">The first stroke is only the entrance. 10 million DAU is an assumption; times 20 reads and 1 write per user it gives 200 million reads and 10 million writes a day. That is a daily total, not a rate, so the app tier is not drawn yet.</span></figcaption>
+        <figcaption><span class="lang-zh">先数一天：10M DAU × 20 = 200M 读，另有 10M 写。DAU 是教学假设；人数、次数和速率是不同量。</span><span class="lang-en">Count a day first: 10M DAU × 20 = 200M reads, plus 10M writes. DAU is assumed; users, requests, and rates are distinct.</span></figcaption>
       </div>
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d1s2t d1s2d">
@@ -162,12 +72,12 @@
             <text x="136" y="352" class="sub">÷ 10⁵ s: 2,000 avg read QPS · 100 avg write QPS · exact 86,400: ≈ 2,315 and 116</text>
           </g>
         </svg>
-        <figcaption><span class="lang-zh">除以 10<sup>5</sup> 秒，平均 2,000 读 QPS、100 写 QPS 落到一台还没定容量的 App。20 KB 的 JSON 沿 App → Edge → Client 回来。这一步只说明读是写的 20 倍，还没决定台数。</span><span class="lang-en">Divide by 10<sup>5</sup> seconds: 2,000 average read QPS and 100 average write QPS land on one App that is not sized yet. The 20 KB JSON returns App → Edge → Client. This step only shows reads are 20× writes; it does not choose a box count.</span></figcaption>
+        <figcaption><span class="lang-zh">图中用 100,000 秒口算：2,000 读/s、100 写/s。精确日秒为 86,400；口算值比精确值低 13.6%，不是预留了安全余量。</span><span class="lang-en">The diagram uses 100,000 seconds: 2,000 reads/s and 100 writes/s. A day has 86,400 seconds; this shortcut understates the exact rate by 13.6%, providing no safety margin.</span></figcaption>
       </div>
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d1s3t d1s3d">
           <title id="d1s3t">The 3× peak lands on one app box</title>
-          <desc id="d1s3d">The same path now carries the peak: 6,000 read QPS and 300 write QPS. The single App is marked over capacity, because its comfortable rate is 1,000 QPS and the peak is six times that. The reply still returns through Edge.</desc>
+          <desc id="d1s3d">The same path carries the shortcut peak: 6,000 read QPS and 300 write QPS. The single App is over its baseline rate of 1,000 QPS: reads alone are six times that baseline. The planned per-instance budget is 600 QPS. The reply still returns through Edge.</desc>
           <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
           <rect x="120" y="18" width="824" height="364" rx="18" class="boundary"/><text x="136" y="38" class="tiny">FEED API · one region</text>
           <circle cx="44" cy="176" r="12" class="box"/><path d="M24 222 Q44 190 64 222" class="wire"/><text x="44" y="244" text-anchor="middle" class="label">Client</text>
@@ -178,13 +88,13 @@
           <text x="136" y="334" class="sub">assumption: 10M DAU × 20 reads = 200M reads/day · × 1 write = 10M writes/day</text>
           <text x="136" y="352" class="sub">÷ 10⁵ s: 2,000 avg read QPS · 100 avg write QPS · exact 86,400: ≈ 2,315 and 116</text>
           <g class="is-new">
-            <rect x="560" y="160" width="150" height="80" rx="12" class="box bad"/><text x="635" y="197" text-anchor="middle" class="label">App ×1</text><text x="635" y="216" text-anchor="middle" class="sub">comfortable 1,000/s</text>
+            <rect x="560" y="160" width="150" height="80" rx="12" class="box bad"/><text x="635" y="197" text-anchor="middle" class="label">App ×1</text><text x="635" y="216" text-anchor="middle" class="sub">baseline 1,000/s</text>
             <rect x="600" y="132" width="70" height="20" rx="10" class="badge"/><text x="635" y="146" text-anchor="middle" class="badge-text">6× over</text>
             <path d="M310 191 L550 191" class="wire"/><polygon points="560,191 550,196 550,186" class="head"/><text x="435" y="183" text-anchor="middle" class="tiny">peak 6,000 read · 300 write QPS</text>
             <text x="136" y="370" class="sub">× 3 daily peak: 6,000 read QPS · 300 write QPS · capacity is bought for the peak</text>
           </g>
         </svg>
-        <figcaption><span class="lang-zh">乘 3 倍日常峰值：6,000 读、300 写，箭头仍落在同一台 App 上。一台舒适 1,000 QPS，峰值是它的 6 倍，所以框变红。机器按峰值买，下一笔把台数除出来。</span><span class="lang-en">Apply the 3× daily peak: 6,000 reads and 300 writes, still landing on one App. One box is comfortable at 1,000 QPS and the peak is 6× that, so the box turns red. Capacity is bought for the peak; the next stroke divides out the count.</span></figcaption>
+        <figcaption><span class="lang-zh">乘峰值系数 3，得到白板 6,000 读/s、300 写/s。图中的 6 倍只比较读流量与单机基准 1,000；若读写同池且等成本，则合计是 6.3 倍。</span><span class="lang-en">A 3× peak gives 6,000 reads/s and 300 writes/s. The diagram’s 6× compares reads alone with a 1,000/s baseline; an equal-cost shared pool sees 6.3×.</span></figcaption>
       </div>
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d1s4t d1s4d">
@@ -208,12 +118,12 @@
             <path d="M520 209 L480 209" class="wire reply"/><polygon points="470,209 480,204 480,214" class="head reply"/>
           </g>
         </svg>
-        <figcaption><span class="lang-zh">6,000 ÷ (1,000 × 0.6) = 10。一台 App 变成 10 台无状态实例；台数大于 1，负载均衡才需要出现。回程经过负载均衡和 Edge。用 86,400 复核约 12 台，是同一个决定。</span><span class="lang-en">6,000 ÷ (1,000 × 0.6) = 10. One App becomes 10 stateless instances, and the load balancer appears only because there is now more than one. The reply goes back through the load balancer and Edge. The 86,400 check gives about 12, the same decision.</span></figcaption>
+        <figcaption><span class="lang-zh">10 台是白板读口径的正常配置：ceil(6,000/600)=10。精确读口径需 12 台；同池等成本读写需 13 台。图示用来解释从速率到台数，不是最终采购数。</span><span class="lang-en">Ten is the normal read-only shortcut: ceil(6,000/600)=10. Exact reads require 12; an equal-cost shared read/write pool requires 13. The drawing explains sizing, not a final purchase count.</span></figcaption>
       </div>
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d1s5t d1s5d">
-          <title id="d1s5t">Why 60 percent: one instance down still leaves headroom</title>
-          <desc id="d1s5d">One of the 10 instances is marked down for a deploy or a crash. The 9 survivors have 9,000 QPS of comfortable capacity, so the 6,000 peak uses 67 percent. Sizing to the ceiling with 6 boxes would put the peak at 120 percent after one loss. Peak writes of 300 QPS are 30 per instance and do not set the count.</desc>
+          <title id="d1s5t">One failure exceeds the 60 percent budget</title>
+          <desc id="d1s5d">One of ten instances is down. This read-only shortcut uses 6,000 of 9,000 baseline QPS, about 67 percent, exceeding the normal 60 percent budget. Six boxes would reach 120 percent after one loss. Writes must be budgeted separately; exact shared read/write demand needs thirteen instances normally or fourteen for N minus one at the same 60 percent budget.</desc>
           <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
           <rect x="120" y="18" width="824" height="364" rx="18" class="boundary"/><text x="136" y="38" class="tiny">FEED API · one region</text>
           <circle cx="44" cy="176" r="12" class="box"/><path d="M24 222 Q44 190 64 222" class="wire"/><text x="44" y="244" text-anchor="middle" class="label">Client</text>
@@ -233,58 +143,34 @@
             <text x="722" y="300" text-anchor="middle" class="sub">one down: 6,000 ÷ 9,000 = 67% · 6 boxes would be 120%</text>
           </g>
         </svg>
-        <figcaption><span class="lang-zh">完整图：10 台里挂一台（发布或宕机），剩 9 × 1,000 = 9,000，峰值只用 67%。若按天花板只买 6 台，挂一台就是 6,000 ÷ 5,000 = 120%，队列开始堆。60% 买的是这块余量。写峰值 300 分到每台 30，不改台数。</span><span class="lang-en">Complete picture: one of 10 is down for a deploy or a crash, 9 × 1,000 = 9,000 remain, and the peak uses 67%. Buy only 6 boxes at the ceiling and one loss makes it 6,000 ÷ 5,000 = 120%, where the queue starts to grow. The 60% buys that headroom. 300 peak writes are 30 per box and do not change N.</span></figcaption>
+        <figcaption><span class="lang-zh">故障反例：读口径 10 台掉 1 台，6,000/9,000≈67%，已经超过 60% 预算。要故障后仍≤60%，白板读口径需 11 台；精确共享读写需 14 台。写流量必须另计，不能因为占比小就丢掉。</span><span class="lang-en">Failure counterexample: losing one of ten gives 6,000/9,000≈67%, above the 60% budget. Preserving 60% requires 11 for shortcut reads, or 14 for exact shared read/write demand. Small write traffic must still be counted.</span></figcaption>
       </div>
-    </figure>
-    <h3><span class="lang-zh">正常路径：从 DAU 除到台数</span><span class="lang-en">Walkthrough: divide DAU down to a box count</span></h3>
-    <div class="bilingual">
-      <div class="lang-zh"><p class="col-kicker">中文</p>
-        <p>按板上的顺序念。假设 DAU = 10,000,000，每人每天读 20 次、写 1 次。读请求/天 = 10,000,000 × 20 = 200,000,000。写请求/天 = 10,000,000 × 1 = 10,000,000。读:写 = 200,000,000 : 10,000,000 = 20:1。白板把一天收成 10<sup>5</sup> 秒，平均读 QPS = 200,000,000 / 100,000 = 2,000，平均写 QPS = 10,000,000 / 100,000 = 100。日常峰值假设是 3 倍，而且这 3 倍是同一天流量的形状，不是在 2 亿次之外再加一轮。峰值读 QPS = 2,000 × 3 = 6,000，峰值写 QPS = 100 × 3 = 300。</p>
-        <p>无状态 App 的舒适处理能力假设为 1,000 QPS/台：一次请求主要打缓存、组 20 KB 的 JSON，不是一次跨库大查询。这个 1,000 是你写在板上的数量级，不是压测报告。计划用量取舒适值的 60%，这样峰值时整层 App 还留着空位给发布和估错的倍数。可用 QPS/台 = 1,000 × 0.6 = 600。实例数 = 6,000 / 600 = 10。写峰值 300 分到 10 台上大约每台 30 QPS，不改变 N。读:写 20:1 的设计后果是：App 层按读的峰值买，存储按写的每天积分买，两笔不要互相代替。</p>
-        <p>用 86,400 复核，避免 10<sup>5</sup> 的偏差被当成精确值。200,000,000 / 86,400 = 2,314.8，约 2,315 平均读 QPS。×3 = 6,944 峰值读 QPS。6,944 / 600 = 11.57，向上取整是 12 台。写的精确平均是 10,000,000 / 86,400 = 115.7 QPS，峰值约 347。10 台和 12 台是同一个决定：一小层无状态服务，前面一个 LB。它不会变成「必须先分库」。分片要等写 QPS 或数据量真正越过单集群，那是后面存储那一笔的事，不是 6,000 读 QPS 这一笔。</p>
-      </div>
-      <div class="lang-en"><p class="col-kicker">English</p>
-        <p>Say it in board order. Assume DAU = 10,000,000, with 20 reads and 1 write per user per day. Read requests/day = 10,000,000 × 20 = 200,000,000. Write requests/day = 10,000,000 × 1 = 10,000,000. Read:write = 200,000,000 : 10,000,000 = 20:1. With a day collapsed to 10<sup>5</sup> seconds, average read QPS = 200,000,000 / 100,000 = 2,000, and average write QPS = 10,000,000 / 100,000 = 100. The daily peak assumption is 3×, and that 3× is the shape of the same day, not a second pile of traffic on top of 200 million requests. Peak read QPS = 2,000 × 3 = 6,000. Peak write QPS = 100 × 3 = 300.</p>
-        <p>Assume a comfortable 1,000 QPS per stateless App box: the request mostly hits cache and assembles a 20 KB JSON body, not a wide database query. The 1,000 is an order of magnitude you write on the board, not a load-test report. Plan to use 60% of comfortable so the fleet still has room for a deploy and a wrong multiplier. Usable QPS/box = 1,000 × 0.6 = 600. Instances = 6,000 / 600 = 10. Peak writes of 300 spread over 10 boxes are about 30 QPS each and do not change N. The design consequence of 20:1 is that the fleet is bought from peak reads, and storage is bought from the daily write integral. Do not swap those two jobs.</p>
-        <p>Check with 86,400 so the 10<sup>5</sup> bias is not treated as exact. 200,000,000 / 86,400 = 2,314.8, about 2,315 average read QPS. Times 3 is 6,944 peak read QPS. 6,944 / 600 = 11.57, which rounds up to 12 boxes. Exact average writes are 10,000,000 / 86,400 = 115.7 QPS, and the peak is about 347. Ten versus twelve is the same decision: a small stateless tier behind one LB. It does not become “shard first.” Sharding waits until write QPS or bytes actually outgrow one cluster, which is the storage step, not this 6,000-read step.</p>
-      </div>
-    </div>
-    <h3><span class="lang-zh">为什么是 10 台，而峰值必须落在这层上</span><span class="lang-en">Why the count is 10, and why peak has to hit this tier</span></h3>
-    <div class="bilingual">
-      <div class="lang-zh"><p class="col-kicker">中文</p>
-        <p>60% 不是一个装饰系数。10 台全部在线时，舒适容量 = 10 × 1,000 = 10,000 QPS，峰值 6,000 只用了 6,000 / 10,000 = 60%。发布或宕掉 1 台之后，剩下 9 × 1,000 = 9,000 的舒适容量，6,000 / 9,000 = 67%，仍低于舒适线。要让峰值顶满舒适值，至少需要 6,000 / 1,000 = 6 台。买 10 台意味着大约还能再掉 4 台才坐到舒适天花板上。如果按天花板买，N = 6,000 / 1,000 = 6，峰值已经跑在 100% 舒适值上，再死 1 台就是 6,000 / 5,000 = 1.2 倍舒适值，队列会开始堆。</p>
-        <p>App 画成无状态，是因为这个除法要求任何一台都能接 LB 送来的下一笔读。会话、feed 的权威记录、图片字节都不放在这层。权威记录在后面的 Primary 里，图片在对象存储里。所以扩容是加实例，不是把用户粘到某一台上。10 台这个数量级也告诉你第一张图不需要服务网格、跨地域协调器或按用户哈希的分片。那些东西要等约束变了再加。</p>
-      </div>
-      <div class="lang-en"><p class="col-kicker">English</p>
-        <p>The 60% is the room you are buying. With all 10 boxes up, comfortable capacity = 10 × 1,000 = 10,000 QPS, and the peak of 6,000 uses 6,000 / 10,000 = 60%. After a deploy or one death, 9 × 1,000 = 9,000 remains, and 6,000 / 9,000 = 67%, still under the comfortable line. Sitting exactly on that line would take 6,000 / 1,000 = 6 boxes. Buying 10 means you can lose about 4 before you are on the ceiling. Size to the ceiling instead, N = 6,000 / 1,000 = 6, and one death becomes 6,000 / 5,000 = 1.2 times comfortable. That is where the queue starts to grow.</p>
-        <p>App is stateless because the division only works if any instance can take the next read from the LB. Sessions, the authoritative feed row, and image bytes do not live here. The row lives in Primary later, and the image lives in object storage. Scaling is adding instances, not pinning a user to a box. A count of about 10 also tells you the first picture does not need a service mesh, a cross-region coordinator, or a user-hash shard map. Those wait for a constraint that actually demands them.</p>
-      </div>
-    </div>
-    <h3><span class="lang-zh">替代：换单机能力，或峰值其实是大促</span><span class="lang-en">Alternative: a different box, or a peak that is actually a sale</span></h3>
-    <div class="bilingual">
-      <div class="lang-zh"><p class="col-kicker">中文</p>
-        <p>面试官若说「这种 JSON 服务一台舒适能到 5,000 QPS」，不要护着 10 这个结果，重做除法。可用 = 5,000 × 0.6 = 3,000。N = 6,000 / 3,000 = 2。再加 1 台给发布，画 3 台。方法没变，变的是你写上去的单机假设。反过来，若他们坚持 N = 1，那要求舒适容量至少 6,000 / 0.6 = 10,000 QPS，而且这台一挂整个读路径就没了。单机可以当第一版的口头替代，只要你把故障域说清楚：一台的可用性和 10 台不是同一个预算。</p>
-        <p>若峰值倍数从日常 3 改成大促 10，平均 2,000 × 10 = 20,000 峰值读 QPS。N = 20,000 / 600 ≈ 33.3，向上是 34 台。10 台的舒适天花板只有 10,000 QPS，吃不住 20,000。大促的 10 倍通常不该变成常年开机的 34 台，那是排队、限流和降级的理由。你要先问清这 10 倍是每天的形状，还是一年几次的活动。问清楚之前，板上只留一个倍数。</p>
-      </div>
-      <div class="lang-en"><p class="col-kicker">English</p>
-        <p>If they say a JSON box is comfortably 5,000 QPS, do not defend the 10. Divide again. Usable = 5,000 × 0.6 = 3,000. N = 6,000 / 3,000 = 2. Add one box for deploys and draw 3. The method is the same; the per-box assumption changed. If they insist on N = 1, that box must be at least 6,000 / 0.6 = 10,000 QPS comfortable, and its death removes the whole read path. One box is a fair first-version alternative only if you say the failure domain out loud: one box and ten boxes are not the same availability budget.</p>
-        <p>If the multiplier moves from a daily 3× to a sale at 10×, average 2,000 × 10 = 20,000 peak read QPS. N = 20,000 / 600 ≈ 33.3, which rounds up to 34. The 10-box comfortable ceiling is only 10,000 QPS, short of 20,000. A 10× sale is usually a reason to queue, limit, and degrade, not a reason to run 34 boxes all year. Ask whether the 10× is the shape of every day or a few events a year. Until that is answered, keep one multiplier on the board.</p>
-      </div>
-    </div>
-    <h3><span class="lang-zh">常见错误：用平均当峰值</span><span class="lang-en">Common mistake: treating the average as the peak</span></h3>
-    <div class="bilingual">
-      <div class="lang-zh"><p class="col-kicker">中文</p>
-        <p>只报 2,000 QPS，再除以 600，得到 2,000 / 600 ≈ 3.3，向上 4 台。4 × 600 = 2,400 QPS 的计划容量，峰值却是 6,000，差了 6,000 / 2,400 = 2.5 倍。4 台的舒适天花板是 4,000 QPS，连 6,000 的峰值都接不住。这个错误的图是峰值箭头仍然落在「按平均买的那一小撮机器」上，忙的那一个小时会先把连接和 CPU 打满，缓存超时之后流量又会掉进数据库。收尾时主动说：平时 2,000，峰值我按 6,000 买到 10 台；再高出这 3 倍假设，就限流，不按线性把机器乘上去。</p>
-      </div>
-      <div class="lang-en"><p class="col-kicker">English</p>
-        <p>Quote only 2,000 QPS and divide by 600: 2,000 / 600 ≈ 3.3, which rounds up to 4 boxes. Planned capacity is 4 × 600 = 2,400 QPS, against a peak of 6,000, short by 6,000 / 2,400 = 2.5×. The comfortable ceiling of 4 boxes is 4,000 QPS, which does not hold 6,000. The broken drawing keeps the peak arrow on a fleet that was bought for the average. The busy hour fills connections and CPU first, cache timeouts follow, and the load falls through to the database. Close with the line: steady state is 2,000, I buy 10 boxes for 6,000, and anything above that 3× assumption is shed rather than multiplied into more boxes.</p>
-      </div>
-    </div>
-  </section>
-
-  <section>
-    <h2><span class="lang-zh">带宽：小响应和用户内容走两条线</span><span class="lang-en">Bandwidth: a small response and user content take different paths</span></h2>
-    <figure class="deck">
+    </figure><div class="bilingual"><div class="lang-zh"><p><strong>精确主线：</strong>读峰值=200M/86,400×3≈6,944.44/s，写峰值≈347.22/s；等成本合计P≈7,291.67工作单位/s。单机预算C×u=1,000×0.6=600。正常N=ceil(P/600)=13；一台失效仍保持同预算时，(N−1)×600≥P，所以部署N=14。</p></div><div class="lang-en"><p><strong>Exact path:</strong> read peak=200M/86,400×3≈6,944.44/s; write peak≈347.22/s. Equal-cost total P≈7,291.67 work units/s. Per-instance budget C×u=1,000×0.6=600. Normal N=ceil(P/600)=13. To preserve the budget after losing one instance, (N−1)×600≥P, so deploy N=14.</p></div></div><table><thead><tr><th><span class="lang-zh">口径</span><span class="lang-en">Scope</span></th><th><span class="lang-zh">峰值工作量/s</span><span class="lang-en">Peak work/s</span></th><th><span class="lang-zh">正常 60%</span><span class="lang-en">Normal 60%</span></th><th><span class="lang-zh">N−1 仍 60%</span><span class="lang-en">N−1 at 60%</span></th></tr></thead><tbody><tr><td><span class="lang-zh">白板仅读</span><span class="lang-en">Shortcut reads</span></td><td>6,000</td><td>10</td><td>11</td></tr><tr><td><span class="lang-zh">白板等成本读写</span><span class="lang-en">Shortcut equal-cost reads+writes</span></td><td>6,300</td><td>11</td><td>12</td></tr><tr><td><span class="lang-zh">精确仅读</span><span class="lang-en">Exact reads</span></td><td>≈6,944.44</td><td>12</td><td>13</td></tr><tr><td><span class="lang-zh">精确等成本读写</span><span class="lang-en">Exact equal-cost reads+writes</span></td><td>≈7,291.67</td><td>13</td><td>14</td></tr></tbody></table><div class="bilingual"><div class="lang-zh"><p><strong>容量反例：</strong>13台正常预算7,800够用；掉1台后只剩7,200，比7,291.67少91.67。原始能力12,000仍有空闲，不代表60%目标达成。14台掉1台后，7,800才覆盖峰值。一般允许f台不可用时，N=ceil(P/(C×u))+f；“再加一台”只覆盖单实例故障，不能替代整可用区失效、热点或发布同时宕机的模型。</p></div><div class="lang-en"><p><strong>Counterexample:</strong> thirteen boxes budget 7,800 normally, but only 7,200 after one loss, short by 91.67. Spare baseline capacity of 12,000 does not satisfy the 60% target. Fourteen leave 7,800 after one loss. For f unavailable instances, N=ceil(P/(C×u))+f; one spare does not cover a whole zone, skew, or concurrent rollout and failure.</p></div></div><div class="bilingual"><div class="lang-zh"><p>C=1,000应来自指定请求混合、硬件与延迟目标下的测量；本章只有假设。60%是规划比例，不能自动等同CPU利用率。如果写的成本是读的5倍，就算QPS<sub>read</sub>+5×QPS<sub>write</sub>，并分别检查CPU、网络、内存与下游。Google SRE 的 <a href="https://sre.google/sre-book/handling-overload/">Handling Overload</a> 解释了把不同成本请求统一当QPS的局限。</p></div><div class="lang-en"><p>C=1,000 should be measured for a specific request mix, hardware, and latency target; here it is assumed. The 60% is a planning fraction, not automatically CPU utilization. If a write costs five reads, use QPS<sub>read</sub>+5×QPS<sub>write</sub>, then check CPU, network, memory, and dependencies separately. Google SRE’s <a href="https://sre.google/sre-book/handling-overload/">Handling Overload</a> explains the limitations of uniform QPS.</p></div></div>
+</section>
+<section><h2><span class="lang-zh">3 · 可运行实现：精确取整，不混预算</span><span class="lang-en">3 · Runnable implementation: exact ceilings and budgets</span></h2>
+<div class="bilingual"><div class="lang-zh"><p>下面是Java 17标准库示例的核心方法。输入dailyWork为日工作单位（读写成本已归一化），peakFactor为整数峰值系数，unitQps为单机同口径基准，utilizationPercent为1–100的规划百分比，failures为同时不可用实例数；输出部署台数。BigInteger避免中间乘法溢出和浮点取整误差；非法输入抛IllegalArgumentException，台数超过int范围抛ArithmeticException。</p></div><div class="lang-en"><p>This is the core of a Java 17 standard-library example. dailyWork is cost-normalized daily work, peakFactor an integer multiplier, unitQps the matching per-instance baseline, utilizationPercent a planning percentage from 1–100, and failures the simultaneously unavailable instance count. It returns deployed instances. BigInteger avoids intermediate overflow and floating-point ceilings; invalid inputs throw IllegalArgumentException, and counts outside int throw ArithmeticException.</p></div></div><pre data-language="Java 17 · runnable excerpt" data-kind="runnable" data-source="CapacityEstimate.java"><code>// dailyWork is cost-normalized work units, not arbitrary mixed QPS.
+static int instances(long dailyWork, int peakFactor, long unitQps,
+                     int utilizationPercent, int failures) {
+    if (dailyWork &lt; 0 || peakFactor &lt; 1 || unitQps &lt;= 0
+            || utilizationPercent &lt; 1 || utilizationPercent &gt; 100
+            || failures &lt; 0) {
+        throw new IllegalArgumentException(&quot;invalid capacity assumption&quot;);
+    }
+    if (dailyWork == 0) return 0; // no minimum warm pool in this model
+    BigInteger numerator = BigInteger.valueOf(dailyWork)
+            .multiply(BigInteger.valueOf(peakFactor))
+            .multiply(BigInteger.valueOf(100));
+    BigInteger denominator = BigInteger.valueOf(86_400)
+            .multiply(BigInteger.valueOf(unitQps))
+            .multiply(BigInteger.valueOf(utilizationPercent));
+    BigInteger[] qr = numerator.divideAndRemainder(denominator);
+    BigInteger survivors = qr[0].add(qr[1].signum() == 0
+            ? BigInteger.ZERO : BigInteger.ONE); // exact ceiling
+    return survivors.add(BigInteger.valueOf(failures)).intValueExact();
+}</code></pre><div class="bilingual"><div class="lang-zh"><p>正常调用instances(210_000_000,3,1000,60,0)返回13；failures=1返回14。它对应第一组动画“日请求→峰值→单机预算”，但改用精确日秒并加入写成本。零负载返回0，未考虑热备最小池；不支持小数成本/峰值系数，可先用共同整数单位归一化，成本模型需自行验证。它只验证算术，不测量吞吐、不证明N−1切流速度或SLO。</p></div><div class="lang-en"><p>instances(210_000_000,3,1000,60,0) returns 13; failures=1 returns 14. It follows deck one’s daily-demand→peak→budget steps, with exact day length and write cost. Zero demand returns zero, excluding a minimum warm pool. Fractional costs/multipliers are not directly supported; normalize into common integer units and validate that model. This verifies arithmetic, not throughput, failover speed, or SLOs.</p></div></div><div class="bilingual"><div class="lang-zh"><p>完整代码与正常、阈值、错误输入和容量反例：<a href="../examples/ch03/CapacityEstimate.java">CapacityEstimate.java</a>。运行：<code>javac --release 17 -d /tmp/ch03-java examples/ch03/CapacityEstimate.java</code>，再运行 <code>java -cp /tmp/ch03-java CapacityEstimate</code>。</p></div><div class="lang-en"><p>Complete normal, threshold, invalid-input, and failure-capacity checks: <a href="../examples/ch03/CapacityEstimate.java">CapacityEstimate.java</a>. Run <code>javac --release 17 -d /tmp/ch03-java examples/ch03/CapacityEstimate.java</code>, then <code>java -cp /tmp/ch03-java CapacityEstimate</code>.</p></div></div>
+</section>
+<section><h2><span class="lang-zh">4 · 带宽：把字节记到真正经过的链路</span><span class="lang-en">4 · Bandwidth: charge bytes to the actual path</span></h2>
+<div class="bilingual"><div class="lang-zh"><p>先写B/s，再乘8变bit/s。图继续使用6,000读/s白板值；精确值统一乘100,000/86,400≈1.1574。JSON与媒体分路径，聚合出口与单实例出口分开；不把CDN返回的字节塞给App。</p></div><div class="lang-en"><p>Write B/s first, then multiply by eight for bit/s. The diagram keeps 6,000 reads/s; exact rates multiply by 100,000/86,400≈1.1574. Separate JSON from media and aggregate from per-instance traffic; CDN bytes do not traverse App.</p></div></div><figure class="deck">
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d2s1t d2s1d">
           <title id="d2s1t">The API reply carries 20 KB of JSON back through every hop</title>
@@ -304,7 +190,7 @@
             <path d="M170 109 L144 109 Q136 109 136 117 L136 186 Q136 194 128 194 L80 194" class="wire reply"/><polygon points="70,194 80,189 80,199" class="head reply"/>
           </g>
         </svg>
-        <figcaption><span class="lang-zh">先只画 API 路径：GET /feed 经 Edge、负载均衡到 10 台 App，20 KB 的 JSON 一跳一跳回到 Client。图片字节不在这条线上。</span><span class="lang-en">Draw only the API path first: GET /feed passes Edge and the load balancer to the 10 Apps, and 20 KB of JSON comes back hop by hop to the client. No image bytes are on this line.</span></figcaption>
+        <figcaption><span class="lang-zh">JSON 沿 App→LB→Edge→Client 返回。图沿用 10 台白板读示意；本节估聚合带宽，不以它代替前节 13/14 台的严格规划。</span><span class="lang-en">JSON returns App→LB→Edge→Client. Ten Apps retain the shortcut illustration; aggregate bandwidth here does not replace the strict 13/14-instance plan.</span></figcaption>
       </div>
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d2s2t d2s2d">
@@ -326,7 +212,7 @@
             <text x="660" y="96" class="label">120 MB/s = 960 Mb/s</text><text x="660" y="118" class="sub">6,000 × 20 KB · ≈ 96 Mb/s per box</text>
           </g>
         </svg>
-        <figcaption><span class="lang-zh">6,000 × 20 KB = 120 MB/s = 960 Mb/s，是整层的聚合出口；分到 10 台，每台约 96 Mb/s。API 这条线按约 1 Gb/s 的量级准备，不按图片准备。</span><span class="lang-en">6,000 × 20 KB = 120 MB/s = 960 Mb/s, the aggregate egress of the tier. Spread over 10 boxes, each carries about 96 Mb/s. The API line is sized near 1 Gb/s, not for images.</span></figcaption>
+        <figcaption><span class="lang-zh">白板读峰值 6,000 × 20 KB = 120 MB/s = 960 Mb/s；图中均分 10 台是 96 Mb/s/台。精确读峰值则约 138.89 MB/s = 1.111 Gb/s。这里只算响应体。</span><span class="lang-en">Shortcut reads give 6,000 × 20 KB = 120 MB/s = 960 Mb/s, or 96 Mb/s across ten boxes. Exact read demand gives about 138.89 MB/s = 1.111 Gb/s. These are response bodies only.</span></figcaption>
       </div>
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d2s3t d2s3d">
@@ -353,7 +239,7 @@
             <text x="166" y="352" class="sub">CDN egress: 6,000 × 500 KB = 3 GB/s = 24 Gb/s · 25× the API line</text>
           </g>
         </svg>
-        <figcaption><span class="lang-zh">图片走第二条线：Client 直接向 CDN 取图，不经过 App。每次打开约 500 KB，峰值 6,000 × 500 KB = 3 GB/s = 24 Gb/s，是 API 那条线的 25 倍。</span><span class="lang-en">Images take a second line: the client fetches straight from the CDN, not through App. About 500 KB per open at the 6,000 peak is 3 GB/s = 24 Gb/s, 25× the API line.</span></figcaption>
+        <figcaption><span class="lang-zh">假设每次读都拉 500 KB 图片：6,000 × 500 KB = 3 GB/s = 24 Gb/s，直接由 CDN 到客户端，是 JSON 的 25 倍。</span><span class="lang-en">Assuming 500 KB of images per read: 6,000 × 500 KB = 3 GB/s = 24 Gb/s, delivered directly by CDN, 25× the JSON body.</span></figcaption>
       </div>
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d2s4t d2s4d">
@@ -383,7 +269,7 @@
             <path d="M676 306 L397 306" class="wire reply"/><polygon points="387,306 397,301 397,311" class="head reply"/><text x="531" y="322" text-anchor="middle" class="tiny">fill</text>
           </g>
         </svg>
-        <figcaption><span class="lang-zh">对象存储放耐久原件，CDN 只是可淘汰的副本。按 90% 命中（假设），回源只有 10%：3 GB/s × 0.1 = 300 MB/s = 2.4 Gb/s。边缘按 24 Gb/s 准备，源站按 2.4 Gb/s 准备，两个数都不属于 App。</span><span class="lang-en">The object store holds the durable originals; the CDN is an evictable copy. At an assumed 90% hit rate only 10% goes to origin: 3 GB/s × 0.1 = 300 MB/s = 2.4 Gb/s. The edge is sized for 24 Gb/s, the origin for 2.4 Gb/s, and neither number belongs to App.</span></figcaption>
+        <figcaption><span class="lang-zh">90% 必须是字节命中率，或对象等大时的请求命中率：回源 3 GB/s × 10% = 300 MB/s = 2.4 Gb/s。精确流量下则为约 2.778 Gb/s。</span><span class="lang-en">The 90% must be a byte hit rate, or a request hit rate for equal-sized objects: origin demand is 3 GB/s × 10% = 300 MB/s = 2.4 Gb/s, or about 2.778 Gb/s with exact traffic.</span></figcaption>
       </div>
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d2s5t d2s5d">
@@ -415,58 +301,12 @@
             <text x="592" y="190" text-anchor="start" class="tiny">reject: images via App · 24 Gb/s ≈ 2.4 Gb/s per box</text>
           </g>
         </svg>
-        <figcaption><span class="lang-zh">完整图：JSON 960 Mb/s 走 App，图片 24 Gb/s 走 CDN，回源 2.4 Gb/s。红虚线是被拒绝的设计：图片若从对象存储经 App 返回，10 台每台要多扛 2.4 Gb/s，按 6,000 QPS 买的机器会先被网卡卡住。</span><span class="lang-en">The complete picture: JSON at 960 Mb/s through App, images at 24 Gb/s through the CDN, 2.4 Gb/s of origin misses. The red dashed arrow is the rejected design: images routed from the object store through App would add 2.4 Gb/s to each of 10 boxes bought for 6,000 QPS, and the NIC becomes the bottleneck first.</span></figcaption>
+        <figcaption><span class="lang-zh">红线展示把所有图片改经 App 的反例：对白板 10 台增加 2.4 Gb/s/台。是否卡网卡取决于实测链路；图片直达 CDN 可避免这段 App 转发成本。</span><span class="lang-en">The red path routes all images through App, adding 2.4 Gb/s per box in the ten-box illustration. Whether the NIC saturates depends on measured capacity; direct CDN delivery avoids that App forwarding cost.</span></figcaption>
       </div>
-    </figure>
-    <h3><span class="lang-zh">正常路径：哪条线真正扛字节</span><span class="lang-en">Walkthrough: which line actually carries the bytes</span></h3>
-    <div class="bilingual">
-      <div class="lang-zh"><p class="col-kicker">中文</p>
-        <p>API 路径上的字节是 feed JSON，假设一次 20 KB = 20,000 字节。峰值读 QPS 沿用上一笔的白板数 6,000。峰值字节率 = 6,000 × 20,000 = 120,000,000 字节/秒 = 120 MB/s。换成 bit：120 × 8 = 960 Mb/s。这是 10 台 App 合起来的出口，量级约 1 Gb/s，不是说单台要一张跑满的 1 Gb/s 网卡。平均时只有 2,000 × 20 KB = 40 MB/s = 320 Mb/s。链路按峰值 960 Mb/s 买，不按平均 320 Mb/s 买，否则忙的那一秒会先打满网卡。</p>
-        <p>用户内容是另一条假设：一次打开要拉大约 500 KB 的图片，500 KB = 500,000 字节。这些字节的来源是对象存储里的原件或派生图，经过 CDN 回到 Client。峰值 = 6,000 × 500,000 = 3,000,000,000 字节/秒 = 3 GB/s。×8 = 24 Gb/s。24 Gb/s 除以 API 的 960 Mb/s：24,000 / 960 = 25，图片路径大约是 API 路径的 25 倍。所以图上出现第二条回程，App 的框上仍写 20 KB。CDN 是缓存，双层矩形；对象存储是耐久数据，画成圆柱。请求可以从 Client 直接到 CDN，不必先把图片字节拖进 App。</p>
-        <p>24 Gb/s 是 CDN 边缘的出口，不是对象存储的出口。按 90% 命中（假设），回源只有未命中的 10%：3 GB/s × 0.1 = 300 MB/s = 2.4 Gb/s，仍是 API 那条线 960 Mb/s 的 2.5 倍。命中率从 90% 掉到 80%，回源就翻倍到 4.8 Gb/s。所以对象存储的出口按命中率可能掉到的下限准备，不按平均命中率准备；CDN 边缘按 24 Gb/s 准备。两个数都和 App 的实例数无关。</p>
-        <p>单次传输时间解释为什么「包很大」不一定先改延迟预算。Dean 的两份幻灯片都写：在 1 Gb/s 网络上发送 2 KB 大约 20 微秒，这是数量级 [1][2]。20 KB 大约是 2 KB 的 10 倍，按这个数量级大约 200 微秒。纯比特算术是 20,000 × 8 / 10<sup>9</sup> 秒 = 160 微秒，和 200 微秒同一个数量级。相对后面 21 ms 左右的往返预算，0.2 ms 还不到 1%。500 KB 在 1 Gb/s 上是 4 × 10<sup>6</sup> bit / 10<sup>9</sup> = 4 ms，开始能看见，但 6,000 路并发根本塞不进一张 1 Gb/s 网卡。带宽这一笔改的是路径，不是把 App 的超时从 21 ms 改成 25 ms。</p>
-      </div>
-      <div class="lang-en"><p class="col-kicker">English</p>
-        <p>Bytes on the API path are the feed JSON, assumed at 20 KB = 20,000 bytes. Peak read QPS stays at the board figure of 6,000. Peak byte rate = 6,000 × 20,000 = 120,000,000 bytes/s = 120 MB/s. In bits, 120 × 8 = 960 Mb/s. That is the combined egress of the 10 Apps, on the order of 1 Gb/s, not one box saturating its own 1 Gb/s NIC. The average is only 2,000 × 20 KB = 40 MB/s = 320 Mb/s. Buy the link for the peak of 960 Mb/s, not the average of 320 Mb/s, or the busy second fills the NIC first.</p>
-        <p>User content is a separate assumption: one open pulls about 500 KB of images, and 500 KB = 500,000 bytes. Those bytes come from originals or renditions in object storage and return through the CDN to the client. Peak = 6,000 × 500,000 = 3,000,000,000 bytes/s = 3 GB/s. Times 8 is 24 Gb/s. Divide 24 Gb/s by the API’s 960 Mb/s: 24,000 / 960 = 25, so the image path is about 25× the API path. That is why a second return appears, while the App box still says 20 KB. The CDN is a cache, drawn as a double rectangle. Object storage is durable, drawn as a cylinder. The client can go to the CDN directly. The image bytes do not have to be dragged through App.</p>
-        <p>24 Gb/s is the CDN edge’s egress, not the object store’s. At an assumed 90% hit rate, origin sees only the 10% that miss: 3 GB/s × 0.1 = 300 MB/s = 2.4 Gb/s, still 2.5× the API line’s 960 Mb/s. If the hit rate falls from 90% to 80%, origin doubles to 4.8 Gb/s. So size the object store’s egress for the lowest hit rate you expect, not the average one, and size the CDN edge for 24 Gb/s. Neither number depends on the App instance count.</p>
-        <p>Transmit time is why a large body does not automatically rewrite the latency budget. Both of Dean’s slide decks say that sending 2 KB on a 1 Gb/s network is about 20 microseconds, as an order of magnitude [1][2]. 20 KB is about 10× 2 KB, so that order of magnitude is about 200 microseconds. Pure bit arithmetic is 20,000 × 8 / 10<sup>9</sup> seconds = 160 microseconds, the same order as 200 microseconds. Against the later round-trip budget near 21 ms, 0.2 ms is under 1%. A 500 KB object on 1 Gb/s is 4 × 10<sup>6</sup> bits / 10<sup>9</sup> = 4 ms, which you can see, but 6,000 of those concurrent transfers do not fit one 1 Gb/s NIC. This step changes the path, not an App timeout from 21 ms to 25 ms.</p>
-      </div>
-    </div>
-    <h3><span class="lang-zh">为什么图片不能算进 API 的出口</span><span class="lang-en">Why image bytes are not the API’s egress</span></h3>
-    <div class="bilingual">
-      <div class="lang-zh"><p class="col-kicker">中文</p>
-        <p>App 的 10 台实例是按 6,000 QPS 的请求数买的，不是按 24 Gb/s 买的。若把 500 KB 也从 App 返回，每台在峰值要分到 24 Gb/s / 10 = 2.4 Gb/s，外加组 JSON 的 CPU。请求数那一笔的 1,000 QPS 舒适假设立刻失效，因为瓶颈变成了网卡。拆开之后，App 每台分到的 API 带宽大约是 960 Mb/s / 10 = 96 Mb/s，和 1,000 QPS 的 JSON 服务是匹配的。对象存储和 CDN 按字节和命中率扩，和 App 的实例数分开算。</p>
-        <p>平均带宽也不能代替峰值。图片若按平均 2,000 QPS 估算，2,000 × 500 KB = 1 GB/s = 8 Gb/s，仍然必须离开 App，但链路会在 3 GB/s 的峰值上不够。和 QPS 一样，容量看峰值那一秒，存储才看一天的积分。</p>
-      </div>
-      <div class="lang-en"><p class="col-kicker">English</p>
-        <p>The 10 App instances were bought for 6,000 QPS of requests, not for 24 Gb/s. If the 500 KB also returned from App, each box would take 24 Gb/s / 10 = 2.4 Gb/s at the peak, plus the CPU to build JSON. The 1,000 QPS comfortable assumption from the request step dies immediately, because the NIC is the bottleneck. After the split, each App’s share of API bandwidth is about 960 Mb/s / 10 = 96 Mb/s, which matches a JSON service at 1,000 QPS. Object storage and the CDN scale on bytes and hit rate, separate from the App instance count.</p>
-        <p>Average bandwidth is not a substitute for peak. Estimating images at the average 2,000 QPS gives 2,000 × 500 KB = 1 GB/s = 8 Gb/s, which still must leave App, but the link would be short at the 3 GB/s peak. Same rule as QPS: capacity watches the busy second, and storage watches the daily integral.</p>
-      </div>
-    </div>
-    <h3><span class="lang-zh">替代：把图缩小到可以内联</span><span class="lang-en">Alternative: shrink the image until it can ride along</span></h3>
-    <div class="bilingual">
-      <div class="lang-zh"><p class="col-kicker">中文</p>
-        <p>拆路径是 500 KB 这个假设逼出来的。若产品只要 2 KB 的缩略图，峰值媒体 = 6,000 × 2 KB = 12 MB/s = 96 Mb/s，和 120 MB/s 的 JSON 加在一起大约 132 MB/s = 1.06 Gb/s，可以先走 API 回程，图上不必为了带宽再画一条 CDN。CDN 仍可能为了跨地域延迟而存在，但那是延迟那一笔的理由，不是 24 Gb/s 的理由。若上传时压成 80 KB，6,000 × 80 KB = 480 MB/s = 3.84 Gb/s，API 仍然不该扛，CDN 的账单会小一截。你改的是字节假设，然后重画那条真正扛字节的线。</p>
-      </div>
-      <div class="lang-en"><p class="col-kicker">English</p>
-        <p>The split is forced by the 500 KB assumption. If the product only needs a 2 KB thumbnail, peak media = 6,000 × 2 KB = 12 MB/s = 96 Mb/s. Added to 120 MB/s of JSON that is about 132 MB/s = 1.06 Gb/s, which can stay on the API return. You would not draw a CDN just for bandwidth. A CDN can still exist for cross-region latency, and that reason belongs to the latency step, not to 24 Gb/s. If upload compresses the image to 80 KB, 6,000 × 80 KB = 480 MB/s = 3.84 Gb/s. App still should not carry it, and the CDN bill gets smaller. Change the byte assumption, then redraw the line that actually carries the bytes.</p>
-      </div>
-    </div>
-    <h3><span class="lang-zh">常见错误：把页面字节算到 API 头上</span><span class="lang-en">Common mistake: charging page bytes to the API</span></h3>
-    <div class="bilingual">
-      <div class="lang-zh"><p class="col-kicker">中文</p>
-        <p>一种算法是「用户打开的是一整页，所以 API 按 500 KB 出站」。那样峰值变成 3 GB/s，10 台 App 会被画成带宽集群。实际出站的 JSON 只有 20 KB，HTML 外壳若由边缘或静态托管返回，也不等于 feed 服务在拼图片。另一种是把 MB 和 Mb 看反：960 Mb/s 若被读成 960 MB/s，就变成 960 × 8 = 7,680 Mb/s = 7.68 Gb/s，API 会被多估 8 倍。单位写在箭头上：MB/s 是字节率，Mb/s 是链路。后面短链那一笔会把同一个错误再做一次：跳转服务返回的是一个很小的 302，不是目标网页。</p>
-      </div>
-      <div class="lang-en"><p class="col-kicker">English</p>
-        <p>One version of the arithmetic says “the user opens a whole page, so the API egress is 500 KB.” Peak then becomes 3 GB/s, and the 10 App boxes get drawn as a bandwidth cluster. The JSON that actually leaves is 20 KB. If an HTML shell is served by the edge or by static hosting, that still does not mean the feed service is assembling images. Another version swaps MB and Mb: reading 960 Mb/s as 960 MB/s turns it into 960 × 8 = 7,680 Mb/s = 7.68 Gb/s, an 8× overestimate. Write the unit on the arrow. MB/s is the byte rate, Mb/s is the link. The short-link pass later repeats the same mistake: the redirect service returns a small 302, not the destination page.</p>
-      </div>
-    </div>
-  </section>
-
-  <section>
-    <h2><span class="lang-zh">存储：记录乘天数再乘副本</span><span class="lang-en">Storage: record times days times replicas</span></h2>
-    <figure class="deck">
+    </figure><div class="bilingual"><div class="lang-zh"><p><strong>边界：</strong>上述是响应体净荷，尚未加入HTTP/TLS开销、重试、复制、写请求和流量偏斜。960 Mb/s接近1 Gb/s标称链路，并不等于还有足够余量；精确读负载净荷已约1.111 Gb/s。串行传20 KB到1 Gb/s链路的理想时间是20,000×8/10⁹=0.16 ms，仅是发送时间，不是RTT或整次请求延迟。</p></div><div class="lang-en"><p><strong>Boundary:</strong> these are response-body payloads, excluding HTTP/TLS, retries, replication, writes, and skew. 960 Mb/s near a nominal 1 Gb/s link is not comfortable headroom; exact read payload alone is about 1.111 Gb/s. Serializing 20 KB on 1 Gb/s ideally takes 20,000×8/10⁹=0.16 ms, not an RTT or a full-request latency.</p></div></div><div class="bilingual"><div class="lang-zh"><p>命中率要问分母：若90%的小对象请求命中、10%的大对象未命中，字节命中率可能远低于90%。本图明确假设90%字节命中；回源带宽=媒体出口×(1−字节命中率)。缓存全冷时回源可接近媒体出口全量，需要限流或预热后的容量验证。</p></div><div class="lang-en"><p>Ask what the hit-rate denominator counts. Hitting 90% of small requests while missing large objects can yield far below 90% byte hits. This diagram assumes a 90% byte hit rate: origin bandwidth=media egress×(1−byte hit rate). A cold cache can push nearly all media traffic to origin; validate capacity with admission control or warming.</p></div></div>
+</section>
+<section><h2><span class="lang-zh">5 · 存储：日新增量乘留存，再算物理开销</span><span class="lang-en">5 · Storage: daily growth, retention, then physical overhead</span></h2>
+<figure class="deck">
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d3s1t d3s1d">
           <title id="d3s1t">A post writes one 1 KB metadata row to Primary</title>
@@ -483,7 +323,7 @@
             <path d="M378 109 L310 109" class="wire reply"/><polygon points="300,109 310,104 310,114" class="head reply"/><text x="334" y="125" text-anchor="middle" class="tiny">ack</text>
           </g>
         </svg>
-        <figcaption><span class="lang-zh">存储从写路径上的一条记录开始：POST 进 App，App 往 Primary 插一条 1 KB 的元数据行，ack 回 App，201 回 Client。这根圆柱里只有行，没有图片字节。</span><span class="lang-en">Storage starts from one record on the write path: POST reaches App, App inserts a 1 KB metadata row into Primary, the ack returns to App, and 201 returns to the client. This cylinder holds rows, not image bytes.</span></figcaption>
+        <figcaption><span class="lang-zh">每次写新增一行 1 KB；本图只估字节。Primary 返回 ack 并不说明副本已持久化。</span><span class="lang-en">Each write adds one 1 KB row. This diagram estimates bytes only; Primary’s acknowledgement does not establish replica durability.</span></figcaption>
       </div>
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d3s2t d3s2d">
@@ -502,7 +342,7 @@
             <text x="740" y="60" class="sub">10M/day × 1 KB = 10 GB/day</text>
           </g>
         </svg>
-        <figcaption><span class="lang-zh">每天 1000 万次写 × 1 KB = 10 GB/天。这里乘的是一天的写次数，不是峰值 QPS：峰值只改变这 10 GB 在一天里怎么分布。</span><span class="lang-en">10 million writes a day × 1 KB = 10 GB/day. This multiplies the daily write count, not peak QPS; the peak only changes how those 10 GB spread through the day.</span></figcaption>
+        <figcaption><span class="lang-zh">10M 新行/天 × 1,000 B = 10 GB/天。更新原行、删除、压缩和索引需另建模型；不能一律按新增行算。</span><span class="lang-en">10M new rows/day × 1,000 B = 10 GB/day. Updates, deletion, compression, and indexes need their own model; not every write appends a row.</span></figcaption>
       </div>
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d3s3t d3s3d">
@@ -522,7 +362,7 @@
             <text x="740" y="82" class="sub">× 365 = 3.65 TB · 1 copy</text>
           </g>
         </svg>
-        <figcaption><span class="lang-zh">留存 365 天：10 GB × 365 = 3.65 TB，是 Primary 上的一份逻辑数据。还没乘副本，所以不是要放下去的盘。</span><span class="lang-en">365 days of retention: 10 GB × 365 = 3.65 TB, one logical copy on Primary. Replicas are not in yet, so this is not the disk you place.</span></figcaption>
+        <figcaption><span class="lang-zh">恒定写入、365 天留存：10 GB/天 × 365 = 3.65 TB 单份逻辑数据。峰值倍数不再乘一次。</span><span class="lang-en">Constant writes and 365-day retention give 10 GB/day × 365 = 3.65 TB of logical data. Do not multiply by the peak factor again.</span></figcaption>
       </div>
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d3s4t d3s4d">
@@ -547,7 +387,7 @@
             <text x="740" y="104" class="sub">× 3 copies = 10.95 ≈ 11 TB</text>
           </g>
         </svg>
-        <figcaption><span class="lang-zh">Primary 把复制日志同时发给 Replica A 和 Replica B（虚线），不是 A 再传给 B 的接力。三份 × 3.65 TB = 10.95 TB，约 11 TB。App 收到的 ack 只来自 Primary；同步还是异步复制，改的是写延迟和丢写窗口，不改字节数。</span><span class="lang-en">Primary sends its replication log to Replica A and Replica B at once (dashed), not a relay from A to B. Three copies × 3.65 TB = 10.95 TB, about 11 TB. The ack App receives comes from Primary only; sync versus async replication changes write latency and the loss window, not the bytes.</span></figcaption>
+        <figcaption><span class="lang-zh">三份总副本（含主库）共 10.95 TB。图是异步复制示意；行数据副本数相同不代表日志、备份、暂存空间或故障切换保证相同。</span><span class="lang-en">Three total copies including Primary occupy 10.95 TB. Replication is illustrated as asynchronous; equal row-copy counts imply neither equal log/backup space nor equal failover guarantees.</span></figcaption>
       </div>
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d3s5t d3s5d">
@@ -584,58 +424,12 @@
             <text x="850" y="346" text-anchor="middle" class="tiny">estimate separately</text>
           </g>
         </svg>
-        <figcaption><span class="lang-zh">完整图：11 TB 只装元数据行的三份。图片由 Client 凭签名 URL 直传对象存储，每天 2 TB，一年 730 TB，冗余由对象存储自己决定，不套数据库的 ×3。CDN 是可淘汰的拷贝。日志异步落到别处，还没估，就写「未估算」。</span><span class="lang-en">The complete picture: the 11 TB holds only three copies of the metadata rows. Images go from the client straight to the object store with a signed URL, 2 TB a day and 730 TB a year, with the object store’s own redundancy, not the database’s ×3. The CDN is an evictable copy. Logs land elsewhere asynchronously and are marked “not estimated.”</span></figcaption>
+        <figcaption><span class="lang-zh">另假设每次写上传 200 KB 图片：2 TB/天，365 天单份逻辑量 730 TB。对象存储冗余单独估；CDN 可淘汰副本、访问日志不在元数据的 10.95 TB 中。</span><span class="lang-en">Separately assume 200 KB uploaded per write: 2 TB/day and 730 TB logical data over 365 days. Object-store redundancy, evictable CDN copies, and access logs are outside the 10.95 TB metadata total.</span></figcaption>
       </div>
-    </figure>
-    <h3><span class="lang-zh">正常路径：从一条记录乘到三份盘</span><span class="lang-en">Walkthrough: from one row to three disk copies</span></h3>
-    <div class="bilingual">
-      <div class="lang-zh"><p class="col-kicker">中文</p>
-        <p>元数据记录假设 1 KB = 10<sup>3</sup> 字节，里面是 id、作者、时间戳和一截文本，不含图片。每天写次数是 DAU 乘人均写：10,000,000 × 1 = 10,000,000，不是峰值 QPS。日增量 = 10,000,000 × 1,000 = 10<sup>10</sup> 字节 = 10 GB/天。留存假设 365 天，而且假设每天新增保持 10 GB，不先加增长率。一年行数据 = 10 × 365 = 3,650 GB = 3.65 TB。这 3.65 TB 是一份逻辑数据，放在 Primary 上。</p>
-        <p>副本数假设为 3：一份 Primary，加上 Replica A 和 Replica B，用来在丢掉一份时还留着可读的拷贝。要买的行拷贝 = 3.65 × 3 = 10.95 TB，口算约 11 TB。复制是 Primary 同时发给两份副本的日志，图上是两条虚线，不是 Primary → A → B 的接力；App 收到的 ack 只来自 Primary。复制是同步还是异步，决定写延迟和主库宕机时会不会丢已确认的写（<a class="chip" href="ch02.html">Ch02</a>），不改这里的字节数。索引、压缩后的膨胀、备份窗口都还没算。11 TB 是行拷贝的下限。在量到索引之前，不要把 11 TB 说成采购单。</p>
-        <p>图片是另一条写。假设每条帖子另存一张 200 KB 的原图，200 KB = 2 × 10<sup>5</sup> 字节。每天图片 = 10,000,000 × 200,000 = 2 × 10<sup>12</sup> 字节 = 2 TB/天。一年原图 = 2 × 365 = 730 TB。这 730 TB 画在边界外面的对象存储圆柱上。上传也不经过 App：Client 用 App 签发的签名 URL 直接 PUT 到对象存储。按白板分母，上传平均 2 TB / 10<sup>5</sup> 秒 = 20 MB/s，×3 峰值 = 60 MB/s = 480 Mb/s，相当于 API 出口的一半；让它穿过 App，就把带宽那一笔拆开的两条线又并了回去。数据库的 ×3 不要套到它上面。对象存储用什么冗余，是另一组参数；本章没有测量值，就不编一个纠删码系数。CDN 上的拷贝可以淘汰，命中率再高也不会把 Primary 的 3.65 TB 变小。日志的量还没估，所以日志框上写的是「未估算」，而不是一个假装的 TB。</p>
-      </div>
-      <div class="lang-en"><p class="col-kicker">English</p>
-        <p>Assume a metadata row of 1 KB = 10<sup>3</sup> bytes: ids, author, timestamps, and a short text, with no image bytes. Writes per day are DAU times writes per user, 10,000,000 × 1 = 10,000,000, not peak QPS. Daily growth = 10,000,000 × 1,000 = 10<sup>10</sup> bytes = 10 GB/day. Retention is 365 days, and the assumption is that new data stays at 10 GB a day, with no growth rate yet. One year of rows = 10 × 365 = 3,650 GB = 3.65 TB. That 3.65 TB is one logical copy, sitting on Primary.</p>
-        <p>The replica count is an assumption of 3: Primary, Replica A, and Replica B, so one loss still leaves a readable copy. Row copies you place = 3.65 × 3 = 10.95 TB, about 11 TB out loud. Replication is a log Primary sends to both replicas at once, drawn as two dashed arrows, not a relay from Primary to A to B; the ack App receives comes from Primary only. Whether replication is sync or async decides write latency and whether acknowledged writes can be lost when the primary dies (<a class="chip" href="ch02.html">Ch02</a>). It does not change the bytes here. Indexes, amplification, and the backup window are not in the product. 11 TB is a floor on row copies. Until you measure indexes, do not call 11 TB a purchase order.</p>
-        <p>Images are a different write. Assume each post also stores one 200 KB original, and 200 KB = 2 × 10<sup>5</sup> bytes. Image bytes per day = 10,000,000 × 200,000 = 2 × 10<sup>12</sup> bytes = 2 TB/day. Originals per year = 2 × 365 = 730 TB. Those 730 TB sit on the object-store cylinder outside the metadata boundary. Uploads skip App too: the client PUTs straight to the object store with a signed URL that App issues. With the board denominator, uploads average 2 TB / 10<sup>5</sup> s = 20 MB/s, and the 3× peak is 60 MB/s = 480 Mb/s, half the API egress. Routing that through App would merge the two lines the bandwidth step just split. Do not apply the database’s ×3 to them. Object storage has its own redundancy parameters; this chapter has no measurement, so it does not invent an erasure-coding factor. A CDN copy can be evicted. A high hit rate does not shrink the 3.65 TB on Primary. Log volume is not estimated, so the logs box says “not estimated” instead of a pretended terabyte.</p>
-      </div>
-    </div>
-    <h3><span class="lang-zh">为什么副本和留存会改图，而峰值 QPS 不改这一笔</span><span class="lang-en">Why replicas and retention change the drawing, and peak QPS does not</span></h3>
-    <div class="bilingual">
-      <div class="lang-zh"><p class="col-kicker">中文</p>
-        <p>3 倍峰值描述的是同一天 1000 万次写在一天里怎么分布。一天的字节积分仍然是 10 GB。若把峰值写 QPS 当成全天都在发生，白板峰值 300 × 86,400 × 1 KB = 25,920,000 KB = 25.92 GB/天，大约是真实 10 GB 的 2.6 倍，而且把「忙的那一秒」铺成了 24 小时。存储图上的圆柱按 10 GB/天长，机器图上的 10 台按 6,000 QPS 长，两张图用的不是同一个数。</p>
-        <p>分母也不能混。白板写 QPS 100 是 10,000,000 / 10<sup>5</sup>。乘回 10<sup>5</sup> 得到 100 × 100,000 = 10,000,000，回到假设。若拿这个 100 去乘 86,400，得到 8,640,000 次写 = 8.64 GB/天，比真实的 10 GB 小，只因为两个分母混用了。未舍入的商再乘 86,400，按构造回到 10,000,000。10,000,000 / 86,400 = 115.74。若只留 115.7，则 115.7 × 86,400 = 9,996,480，差在舍入。口算时成对使用：除以 10<sup>5</sup> 的数，乘回也用 10<sup>5</sup>；要用 86,400，就从每天的次数出发，不要从已经近似过的 QPS 出发。</p>
-      </div>
-      <div class="lang-en"><p class="col-kicker">English</p>
-        <p>The 3× peak is how the same 10 million writes spread through the day. The daily byte integral is still 10 GB. Treating peak write QPS as if it ran all day does 300 × 86,400 × 1 KB = 25,920,000 KB = 25.92 GB/day on the board peak, about 2.6× the real 10 GB, and it stretches the busy second across 24 hours. The cylinders grow from 10 GB/day. The 10 boxes grow from 6,000 QPS. Those drawings do not share a number.</p>
-        <p>Denominators do not mix either. The board’s 100 write QPS is 10,000,000 / 10<sup>5</sup>. Multiply back by 10<sup>5</sup> and 100 × 100,000 = 10,000,000, which is the assumption again. Multiply that 100 by 86,400 and you get 8,640,000 writes = 8.64 GB/day, short of the real 10 GB only because the denominators were mixed. The unrounded quotient times 86,400 returns 10,000,000 by construction. 10,000,000 / 86,400 = 115.74. Keeping only 115.7 gives 115.7 × 86,400 = 9,996,480, and the gap is rounding. Keep pairs: a number divided by 10<sup>5</sup> is multiplied by 10<sup>5</sup>. If you want 86,400, start from the daily count, not from a QPS you already approximated.</p>
-      </div>
-    </div>
-    <h3><span class="lang-zh">替代：两副本，或三年后的增长</span><span class="lang-en">Alternative: two replicas, or growth over three years</span></h3>
-    <div class="bilingual">
-      <div class="lang-zh"><p class="col-kicker">中文</p>
-        <p>若可用性目标允许一份拷贝承担重建窗口，可以把副本改成 2。盘变成 3.65 × 2 = 7.3 TB。丢掉一份之后只剩一份，重建期间没有第二份热拷贝。3 份的图是「坏一份仍有一份 Primary 和一份存活副本」这个假设画出来的，不是数据库自带的出厂设置。把 3 改成 2，圆柱少画一根，数字从约 11 TB 改成 7.3 TB。</p>
-        <p>三年、且每年新增仍是 3.65 TB 行数据时，逻辑行 = 3.65 × 3 = 10.95 TB，再乘副本 ≈ 33 TB。若每年翻倍，三年的新增是 3.65、7.3、14.6 TB，和为 3.65 × (1 + 2 + 4) = 3.65 × 7 = 25.55 TB 行数据，×3 副本 ≈ 77 TB。只把今天的 11 TB 乘 3，会漏掉翻倍。增长问题先问清曲线，再乘。</p>
-      </div>
-      <div class="lang-en"><p class="col-kicker">English</p>
-        <p>If the availability target allows one copy to cover the rebuild window, change replicas to 2. Disk becomes 3.65 × 2 = 7.3 TB. After one loss, a single copy remains, with no second hot copy during rebuild. The three-cylinder drawing is the assumption “lose one and still have Primary plus a survivor,” not a factory setting that comes with a database. Change 3 to 2, erase one cylinder, and the number moves from about 11 TB to 7.3 TB.</p>
-        <p>Over three years, if each year still adds 3.65 TB of rows, logical rows = 3.65 × 3 = 10.95 TB, and replicas bring that to about 33 TB. If the data doubles every year, the three yearly additions are 3.65, 7.3, and 14.6 TB. The sum is 3.65 × (1 + 2 + 4) = 3.65 × 7 = 25.55 TB of rows, times 3 replicas ≈ 77 TB. Multiplying today’s 11 TB by 3 misses the doubling. Ask for the growth curve, then multiply.</p>
-      </div>
-    </div>
-    <h3><span class="lang-zh">常见错误：忘了副本，或把缓存当成耐久数据</span><span class="lang-en">Common mistake: dropping replicas, or treating cache as durable</span></h3>
-    <div class="bilingual">
-      <div class="lang-zh"><p class="col-kicker">中文</p>
-        <p>只报 3.65 TB，等于假设副本数是 1。盘少算 10.95 / 3.65 = 3 倍。故障窗口是 Primary 损坏的那一段：没有 Replica A 和 Replica B，读路径和恢复都没有第二份。另一种错误是把 CDN 里的热点图片加进 11 TB，或因为「95% 的读打在缓存上」就把存储砍到 5%。缓存命中改变的是打到 Primary 的读 QPS，不改变已经写下来的字节。日志若按请求打、留得比帖子久，体积可以超过 11 TB；在你做完同样的「大小 × 条数 × 天数 × 副本」之前，它就不能加进元数据的总数，也不能被假装成零。</p>
-      </div>
-      <div class="lang-en"><p class="col-kicker">English</p>
-        <p>Quoting only 3.65 TB is the assumption that the replica count is 1. Disk is short by 10.95 / 3.65 = 3×. The failure window is the interval when Primary is damaged: without Replica A and Replica B, both the read path and recovery lack a second copy. Another mistake adds hot images on the CDN into the 11 TB, or cuts storage to 5% because “95% of reads hit cache.” Hit rate changes how many reads reach Primary. It does not change bytes already written. If logs are emitted per request and kept longer than posts, they can exceed 11 TB. Until you run the same product of size × count × days × replicas, they cannot be added into the metadata total, and they cannot be pretended to be zero.</p>
-      </div>
-    </div>
-  </section>
-
-  <section>
-    <h2><span class="lang-zh">一条请求上的延迟预算</span><span class="lang-en">A latency budget along one request</span></h2>
-    <figure class="deck">
+    </figure><div class="bilingual"><div class="lang-zh"><p><strong>主算式：</strong>10M新增行/天×1,000 B×365×3=10.95 TB，仅为三份行数据。若再假设索引/格式等合计放大1.5倍、磁盘计划填充率70%，则需10.95×1.5/0.7≈23.46 TB的合计可配置空间。1.5和70%仍是教学参数；备份、WAL、重建临时空间和故障期间可放置性另算，不能把全局空闲当成每个分片都可用。</p></div><div class="lang-en"><p><strong>Main calculation:</strong> 10M new rows/day×1,000 B×365×3=10.95 TB for three row copies. If indexes/format add a hypothetical 1.5× factor and planned disk fill is 70%, aggregate provisioned space is 10.95×1.5/0.7≈23.46 TB. Both factors are assumptions. Backups, WAL, rebuild workspace, and failure-time placement are separate; global free space is not necessarily usable by every shard.</p></div></div><div class="bilingual"><div class="lang-zh"><p>留存365天不等于无限增长：恒定写入且及时删除时，满一年后逻辑量趋于稳定；若每日写入增长，则对留存窗口内每日新增字节求和。复制三份说明字节数，不说明可以无损切主；图中异步副本可能落后。单主ACK、同步提交与恢复承诺见<a href="ch41.html">Ch41</a>。</p></div><div class="lang-en"><p>A 365-day retention window is not unbounded growth: constant writes with timely expiration stabilize after a year. With growth, sum daily bytes inside the retention window. Three copies specify bytes, not lossless failover; the illustrated asynchronous replicas may lag. See <a href="ch41.html">Ch41</a> for acknowledgement, synchronous commit, and recovery guarantees.</p></div></div>
+</section>
+<section><h2><span class="lang-zh">6 · 延迟：只加关键路径，不把历史常数当 SLO</span><span class="lang-en">6 · Latency: add the critical path, not an assumed SLO</span></h2>
+<div class="bilingual"><div class="lang-zh"><p>下面采用Dean 2009演讲中的历史数量级：内存访问100 ns、同机房RTT 0.5 ms、机械盘寻道10 ms、CA→NL→CA往返150 ms。它们用来区分量级，不能预测现代SSD、网络或本系统p99。来源：<a href="https://www.cs.cornell.edu/projects/ladis2009/talks/dean-keynote-ladis2009.pdf">LADIS 2009原始幻灯片，“Numbers Everyone Should Know”</a>。20 ms接入延迟是本章自设。</p></div><div class="lang-en"><p>The animation uses historical scales from Dean’s 2009 talk: 100 ns memory access, 0.5 ms datacenter RTT, 10 ms mechanical seek, and 150 ms CA→NL→CA RTT. These distinguish magnitudes, not modern SSD/network performance or our p99. Source: <a href="https://www.cs.cornell.edu/projects/ladis2009/talks/dean-keynote-ladis2009.pdf">original LADIS 2009 slides, “Numbers Everyone Should Know”</a>. The 20 ms access RTT is our assumption.</p></div></div><figure class="deck">
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d4s1t d4s1d">
           <title id="d4s1t">Client to a nearby edge: an assumed 20 ms round trip</title>
@@ -652,7 +446,7 @@
             <text x="166" y="366" class="clock">cum 20 ms</text>
           </g>
         </svg>
-        <figcaption><span class="lang-zh">20 ms 是「用户离 Edge 不远」的往返假设，不是 Dean 表里的数，也不是 SLO。它先占住预算，后面机房内的每一跳都拿来和它比。</span><span class="lang-en">20 ms is an assumed round trip for a user near the edge. It is not from Dean’s table and not an SLO. It takes the budget first, and every in-datacenter hop is compared with it.</span></figcaption>
+        <figcaption><span class="lang-zh">20 ms 是附近用户到 Edge 的教学 RTT 假设。它已含往返，绿色返回线不再加一次。</span><span class="lang-en">20 ms is an assumed nearby-client RTT. It already includes the return; do not add the green arrow twice.</span></figcaption>
       </div>
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d4s2t d4s2d">
@@ -674,7 +468,7 @@
             <text x="166" y="366" class="clock">cum 20 + 0.5 = 20.5 ms</text>
           </g>
         </svg>
-        <figcaption><span class="lang-zh">Edge 到 App 是一次同机房往返，Dean 的数量级是 0.5 ms，前提是两者真在同一机房。20 + 0.5 = 20.5 ms，预算几乎没动。</span><span class="lang-en">Edge to App is one same-datacenter round trip, 0.5 ms in Dean’s orders of magnitude, if they really share a datacenter. 20 + 0.5 = 20.5 ms; the budget barely moves.</span></figcaption>
+        <figcaption><span class="lang-zh">串行增加一次同机房 RTT 0.5 ms，累计 20.5 ms。0.5 ms 来自 Dean 2009 历史数量级，不是今日部署的测量值。</span><span class="lang-en">Add one serial datacenter RTT of 0.5 ms: 20.5 ms total. The 0.5 ms is Dean’s historical 2009 scale, not a measurement of this deployment.</span></figcaption>
       </div>
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d4s3t d4s3d">
@@ -700,7 +494,7 @@
             <text x="790" y="156" class="clock">hit ≈ 21 ms</text>
           </g>
         </svg>
-        <figcaption><span class="lang-zh">App 查远程 Cache，再加一次 0.5 ms 往返；缓存里 100 ns 的主存引用在毫秒账里看不见。命中沿 Cache → App → Edge → Client 回来，合计约 21 ms。回程已含在往返里，不再加一遍。</span><span class="lang-en">App asks the remote Cache, one more 0.5 ms round trip; the 100 ns memory reference inside it does not show in a millisecond sum. The hit returns Cache → App → Edge → Client, about 21 ms in total. The return is already inside each round trip; do not add it again.</span></figcaption>
+        <figcaption><span class="lang-zh">再加 Cache RPC 的 0.5 ms，命中约 21 ms。100 ns 是一次内存访问，不是整个缓存服务的处理耗时；排队、CPU 和序列化仍需测量。</span><span class="lang-en">Add a 0.5 ms Cache RPC: about 21 ms on a hit. 100 ns describes one memory reference, not a complete cache request; measure queueing, CPU, and serialization.</span></figcaption>
       </div>
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d4s4t d4s4d">
@@ -731,7 +525,7 @@
             <text x="790" y="308" class="clock">miss ≈ 32 ms</text>
           </g>
         </svg>
-        <figcaption><span class="lang-zh">未命中时 App 回 Primary 读：再加 0.5 ms 往返和 10 ms 寻道，21 + 0.5 + 10 = 31.5，约 32 ms。一次寻道约等于 20 次同机房往返，所以命中和未命中是两条线。</span><span class="lang-en">On a miss App reads Primary: another 0.5 ms round trip plus a 10 ms seek, 21 + 0.5 + 10 = 31.5, about 32 ms. One seek is about 20 same-datacenter round trips, so the hit and the miss are two different lines.</span></figcaption>
+        <figcaption><span class="lang-zh">未命中再加 0.5 ms RTT 与历史机械盘 10 ms 寻道：31.5 ms，图中约 32 ms。闪存、数据库缓存和并发 I/O 需换实际数据。</span><span class="lang-en">A miss adds a 0.5 ms RTT and a historical 10 ms mechanical seek: 31.5 ms, shown as about 32. Substitute actual flash, database-cache, and concurrent-I/O behavior.</span></figcaption>
       </div>
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d4s5t d4s5d">
@@ -766,7 +560,7 @@
             <text x="462" y="376" text-anchor="start" class="tiny">cache down → 6,000 seeks/s ÷ ~100 per disk ≈ 60 disks · rejected</text>
           </g>
         </svg>
-        <figcaption><span class="lang-zh">按 95% 命中（假设），峰值 6,000 里 5,700 留在 Cache，300 次/秒回 Primary，按每盘约 100 次寻道是 3 块盘。红虚线是被拒绝的方案：缓存一挂、6,000 次全寻道，约 60 块盘。峰值必须留在 Cache 上。</span><span class="lang-en">At an assumed 95% hit rate, 5,700 of the 6,000 peak reads stay on Cache and 300/s reach Primary, about 3 disks at roughly 100 seeks each. The red dashed path is the rejected plan: with the cache down, 6,000 seeks/s is about 60 disks. The peak has to stay on Cache.</span></figcaption>
+        <figcaption><span class="lang-zh">95% 命中时白板回源 300/s；每次串行寻道 10 ms 的理想上限是 100/s/盘，因此 3 盘只是 100% 忙的下界。全量回源 6,000/s 对应 60 盘下界，均未含写与利用率余量。</span><span class="lang-en">A 95% hit rate leaves 300/s. A serial 10 ms seek implies an ideal 100/s per disk, so three disks are a fully busy lower bound. Full fallback at 6,000/s implies 60, excluding writes and headroom.</span></figcaption>
       </div>
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d4s6t d4s6d">
@@ -805,64 +599,16 @@
             <text x="270" y="90" class="tiny">fix: a hit path (Edge · App · Cache) in a region near EU users · a faster disk cannot remove 150 ms</text>
           </g>
         </svg>
-        <figcaption><span class="lang-zh">另一个洲的用户，把 20 ms 换成 Dean 表上的 150 ms：命中约 151 ms，10 ms 寻道只占约 7%。要回到约 21 ms，得在用户附近的区域放一套命中路径（Edge、App、Cache）；只把 TLS 终结点挪近，取数据仍要跨洲回源，换更快的盘也没用。</span><span class="lang-en">For a user on another continent, replace 20 ms with Dean’s 150 ms: the hit is about 151 ms, and the 10 ms seek is about 7% of it. Getting back near 21 ms takes a hit path (Edge, App, Cache) in a region near that user. Moving only the TLS terminator closer still crosses the ocean for the data, and a faster disk does not help.</span></figcaption>
+        <figcaption><span class="lang-zh">把历史 CA→NL→CA 的 150 ms 替代 20 ms 后，命中约 151 ms。不是所有跨洲链路都恰好 150 ms；真正要靠近用户的是完整命中路径。</span><span class="lang-en">Replacing 20 ms with the historical CA→NL→CA 150 ms gives about 151 ms. Intercontinental paths are not universally 150 ms; place the entire hit path near users.</span></figcaption>
       </div>
-    </figure>
-    <h3><span class="lang-zh">正常路径：把数量级加在同一条请求上</span><span class="lang-en">Walkthrough: add the orders of magnitude on one request</span></h3>
-    <div class="bilingual">
-      <div class="lang-zh"><p class="col-kicker">中文</p>
-        <p>这条预算只描述一次 feed 读。Client 到附近 Edge 的往返假设为 20 ms，写在板上，标明不是出处里的数。Edge 到 App、App 到 Cache 各用一次同机房往返。两份 Dean 幻灯片都把这个往返印成 500,000 ns，也就是 0.5 ms [1][2]，本章只把它当数量级，而且只在这两跳真的还在同一个机房时使用。主存引用两份材料都是 100 ns。一次缓存查找即使做上千次内存访问，100 ns × 1,000 = 100 微秒 = 0.1 ms，在 20 ms 旁边仍然看不见，所以命中累计写成 20 + 0.5 + 0.5 = 21 ms。绿箭头是响应已经包含在往返里的那一段，不再加一次。</p>
-        <p>未命中要再访问 Primary：再加 0.5 ms 往返，加上寻道。两份幻灯片都把磁盘寻道印成 10,000,000 ns = 10 ms。21 + 0.5 + 10 = 31.5 ms，图上写成约 32 ms。10 ms / 0.5 ms = 20，一次寻道大约相当于 20 次同机房往返。10 ms / 100 ns = 100,000，寻道大约是主存引用的十万倍。这些除法说明命中和未命中不是同一条线，也说明它们都还比不上一趟 150 ms 的跨洲包。</p>
-        <p>峰值时有多少请求走未命中这条线，由命中率决定。按 95% 命中（假设），6,000 × 0.05 = 300 次/秒回 Primary。按每次未命中一次寻道、每块盘约 1 / 0.010 秒 = 100 次/秒，是 3 块盘的量。命中率掉到 90%，未命中翻倍到 600 次/秒，约 6 块盘。命中率不是锦上添花的监控指标，它直接决定 Primary 要几块盘；也因此缓存整层故障时，不能让 6,000 次/秒原样落到 Primary 上。</p>
-      </div>
-      <div class="lang-en"><p class="col-kicker">English</p>
-        <p>This budget describes one feed read. The client-to-nearby-edge round trip is assumed at 20 ms and labeled as not from the source. Edge to App, and App to Cache, each take one same-datacenter round trip. Both of Dean’s slide decks print that round trip as 500,000 ns, which is 0.5 ms [1][2]. This chapter uses it only as an order of magnitude, and only while those hops really stay in one datacenter. Both sources print a main-memory reference as 100 ns. Even a thousand memory touches inside a cache lookup are 100 ns × 1,000 = 100 microseconds = 0.1 ms, still invisible next to 20 ms, so the hit cumulative is 20 + 0.5 + 0.5 = 21 ms. The green arrow is the return already inside the round trip. It is not added a second time.</p>
-        <p>A miss visits Primary: another 0.5 ms round trip, plus the seek. Both slide decks print a disk seek as 10,000,000 ns = 10 ms. 21 + 0.5 + 10 = 31.5 ms, drawn as about 32 ms. 10 ms / 0.5 ms = 20, so one seek is about 20 same-datacenter round trips. 10 ms / 100 ns = 100,000, so a seek is about one hundred thousand memory references. Those divisions are why the hit and the miss are different lines, and why both are still smaller than one 150 ms intercontinental packet.</p>
-        <p>How many requests take the miss line at the peak is set by the hit rate. At an assumed 95% hit rate, 6,000 × 0.05 = 300 reads/s reach Primary. At one seek per miss and about 1 / 0.010 s = 100 seeks/s per disk, that is 3 disks’ worth. If the hit rate falls to 90%, misses double to 600/s, about 6 disks. The hit rate is not a nice-to-have dashboard number; it decides how many disks Primary needs. It is also why a whole-cache failure cannot drop 6,000 reads/s onto Primary unchanged.</p>
-      </div>
-    </div>
-    <h3><span class="lang-zh">这些数从哪来，以及它们不是 SLO</span><span class="lang-en">Where the numbers come from, and why they are not an SLO</span></h3>
-    <div class="bilingual">
-      <div class="lang-zh"><p class="col-kicker">中文</p>
-        <p>机房内的数量级引自 Jeff Dean 的两份演讲幻灯片，不引自某家公司的延迟目标。<a href="https://static.googleusercontent.com/media/research.google.com/en/us/people/jeff/stanford-295-talk.pdf">Stanford CS295 幻灯片</a> [1] 的标题是 <em>Software Engineering Advice from Building Large-Scale Distributed Systems</em>。<a href="https://www.cs.cornell.edu/projects/ladis2009/talks/dean-keynote-ladis2009.pdf">LADIS 2009 主题演讲</a> [2] 的标题是 <em>Designs, Lessons and Advice from Building Large Distributed Systems</em>。两份「Numbers Everyone Should Know」里一致、本章会拿来用的是：主存引用 100 ns，同机房往返 0.5 ms，磁盘寻道 10 ms，加州到荷兰再回加州的包 150 ms，1 Gb/s 上发送 2 KB 约 20 微秒。互斥锁、Zippy 压缩 1 KB、顺序读 1 MB 磁盘，两份印刷不一样（例如寻道之外的顺序读，一份是 30 ms，一份是 20 ms）。那些不一致的格子本章不用，避免把两个版本拼成一张假表。</p>
-        <p>两份幻灯片里 Dean 都用 10 ms 改了一次设计 [1][2]：30 张缩略图串行读，30 × 10 ms = 300 ms 的寻道，再加上 30 × 256 KB / 30 MB/s = 256 ms 的传输，合计他写成约 560 ms。改成并行之后，寻道变成一次 10 ms，传输 256 KB / 30 MB/s ≈ 8.5 ms，合计约 18 ms。他紧接着写，这忽略了方差，实际更像 30–60 ms。所以 100 次寻道/秒只是 1 / 0.010 秒的乐观除法。6,000 / 100 = 60 块盘是「若峰值每次都寻道」的数量级，不是采购清单。方差只会让这个数更难看。设计决定是峰值走 Cache 的绿箭头，红虚线那条全寻道路径不作为容量方案。</p>
-        <p>150 ms 是同一份表里的跨洲往返数量级。若用户不在边缘附近，把假设的 20 ms 换成 150 ms，命中累计变成 150 + 0.5 + 0.5 = 151 ms。寻道那 10 ms 只占 151 ms 的大约 7%。要把命中拉回约 21 ms，得在用户附近的区域放一套命中路径（Edge、App、Cache）。只把 TLS 终结点挪近，省下的是握手那几次长途往返，取数据仍要跨洲回源；把磁盘换成更快的介质，也改不了这 150 ms。10 ms 那一行在两份幻灯片上都叫 disk seek。它是当时演讲里的数量级。若机器是闪存，用那台设备的测量替换 10 ms，不要把这一行改名成今天的磁盘，也不要把它写成 feed 的 p99 目标。</p>
-      </div>
-      <div class="lang-en"><p class="col-kicker">English</p>
-        <p>The in-datacenter orders of magnitude come from two of Jeff Dean’s slide decks, not from a company’s latency target. The <a href="https://static.googleusercontent.com/media/research.google.com/en/us/people/jeff/stanford-295-talk.pdf">Stanford CS295 slides</a> [1] are titled <em>Software Engineering Advice from Building Large-Scale Distributed Systems</em>. The <a href="https://www.cs.cornell.edu/projects/ladis2009/talks/dean-keynote-ladis2009.pdf">LADIS 2009 keynote</a> [2] is titled <em>Designs, Lessons and Advice from Building Large Distributed Systems</em>. The figures both “Numbers Everyone Should Know” pages agree on, and the ones this chapter uses, are a 100 ns main-memory reference, a 0.5 ms same-datacenter round trip, a 10 ms disk seek, a 150 ms California–Netherlands–California packet, and about 20 microseconds to send 2 KB at 1 Gb/s. Mutex, Zippy on 1 KB, and a sequential 1 MB disk read differ between the printings (the sequential read is 30 ms on one and 20 ms on the other). This chapter does not use the cells that disagree, so the two versions are not merged into a fake table.</p>
-        <p>On both slide decks Dean uses the 10 ms seek to change a design [1][2]. Thirty thumbnails read serially are 30 × 10 ms = 300 ms of seeks, plus 30 × 256 KB / 30 MB/s = 256 ms of transfer, which he writes as about 560 ms. In parallel, the seek collapses to one 10 ms and the transfer is 256 KB / 30 MB/s ≈ 8.5 ms, about 18 ms together. He immediately says this ignores variance and is really more like 30–60 ms. So 100 seeks/s is only the optimistic division 1 / 0.010 s. 6,000 / 100 = 60 disks is the order of magnitude if every peak request seeks, not a purchase list. Variance makes that number worse. The decision is that peak follows the green arrow through Cache. The red dashed all-seek path is not the capacity plan.</p>
-        <p>150 ms is the intercontinental round-trip order of magnitude on the same table. If the user is not near the edge, replace the assumed 20 ms with 150 ms and the hit cumulative becomes 150 + 0.5 + 0.5 = 151 ms. The 10 ms seek is about 7% of 151 ms. Getting the hit back near 21 ms takes a hit path (Edge, App, Cache) in a region near that user. Moving only the TLS terminator closer saves the long handshake round trips, but the data still crosses the ocean to the origin, and a faster disk does not change the 150 ms either. Both slide decks label the 10 ms line a disk seek. It is an order of magnitude from that talk. If the box is flash, replace 10 ms with a measurement of that device. Do not rename the line as today’s disk, and do not write it down as the feed’s p99 target.</p>
-      </div>
-    </div>
-    <h3><span class="lang-zh">替代：进程内缓存，或必须碰盘时改成并行</span><span class="lang-en">Alternative: an in-process cache, or parallel reads when disk is unavoidable</span></h3>
-    <div class="bilingual">
-      <div class="lang-zh"><p class="col-kicker">中文</p>
-        <p>若热点放在 App 进程内，而不是画出来的那台远程 Cache，就可以拿掉 App 到 Cache 的 0.5 ms。命中变成 20 + 0.5 = 20.5 ms。这值得做，但它不改变 150 ms 的放置决定，也不改变「6,000 次寻道要约 60 块盘」这件事。远程 Cache 仍在图上，是因为 10 台 App 需要一份可以共享的热数据；进程内缓存每台各有一份，失效要逐台做。10 台 × 一份本地缓存，是用内存换那 0.5 ms，并换来更难的失效。</p>
-        <p>若产品要求这次读必须看盘，沿用 Dean 的并行而不是 30 次串行。串行 10 次寻道是 10 × 10 ms = 100 ms，再加传输，已经盖过 21 ms 的命中。并行把寻道重叠成大约一次 10 ms 的数量级，再按他的提醒把方差说成可能到几十毫秒。feed 的峰值仍然不要设计成「每次打开都寻道」。</p>
-      </div>
-      <div class="lang-en"><p class="col-kicker">English</p>
-        <p>If the hot row lives in the App process instead of the remote Cache drawn here, drop the 0.5 ms from App to Cache. The hit becomes 20 + 0.5 = 20.5 ms. That is worth doing. It does not change the 150 ms placement decision, and it does not change “6,000 seeks want about 60 disks.” The remote Cache stays on the drawing because 10 App instances need a hot copy they can share. An in-process cache is a copy per box, and invalidation visits each box. 10 boxes times a local cache trades memory for that 0.5 ms, and makes invalidation harder.</p>
-        <p>If the product requires this read to touch disk, follow Dean’s parallel version rather than 30 serial seeks. Ten serial seeks are 10 × 10 ms = 100 ms, plus transfer, which already swamps the 21 ms hit. Parallel overlaps the seeks into about one 10 ms order of magnitude, and his variance note still says it may be tens of milliseconds. Do not design the feed peak as “every open seeks.”</p>
-      </div>
-    </div>
-    <h3><span class="lang-zh">故障窗口：串行 RPC 和寻道叠在同一条关键路径上</span><span class="lang-en">Failure window: serial RPCs and seeks stacked on one critical path</span></h3>
-    <div class="bilingual">
-      <div class="lang-zh"><p class="col-kicker">中文</p>
-        <p>同机房 10 次串行往返是 10 × 0.5 ms = 5 ms。相对 20 ms 的接入，5 ms 开始能看见；相对 150 ms，它仍然很小。窗口出在你把这 10 次 RPC 再叠上跨洲，或者叠上寻道的时候。一次未命中若在应用里串行做 10 次寻道，仅寻道就是 100 ms，用户看到的就不再是 32 ms。峰值若因为缓存故障整批掉进这条路径，6,000 次寻道/秒对着大约 100 次/秒的单盘，差了 60 倍。所以缓存故障不能等于「全部改读盘」。下一节的可用性图会把这条退路加上限流。</p>
-      </div>
-      <div class="lang-en"><p class="col-kicker">English</p>
-        <p>Ten serial same-datacenter round trips are 10 × 0.5 ms = 5 ms. Next to a 20 ms access hop, 5 ms is visible. Next to 150 ms, it is still small. The window opens when those 10 RPCs are stacked on an intercontinental hop, or stacked on seeks. A miss that does 10 serial seeks inside the app spends 100 ms on seeks alone, and the user no longer sees 32 ms. If a cache failure dumps the peak onto that path, 6,000 seeks/s against about 100 seeks/s per disk is a factor of 60. A cache failure cannot mean “read disk for everyone.” The availability drawing adds a limit on that fallback.</p>
-      </div>
-    </div>
-  </section>
-
-  <section>
-    <h2><span class="lang-zh">可用性：一条依赖的错误率会吃掉预算</span><span class="lang-en">Availability: one dependency’s error rate spends the budget</span></h2>
-    <figure class="deck">
+    </figure><div class="bilingual"><div class="lang-zh"><p>串行路径可按同一口径加预算；并行分支取等待的最慢分支，再加合并成本。各服务p99不能直接相加当端到端p99，缓存95%命中也不能推出整体p99就是命中延迟。队列、抖动和尾部要用端到端分布验证。若每次miss都寻道，300/s在60%单盘预算下至少ceil(300/(100×0.6))=5盘；这仍忽略写入与故障冗余，不能当采购表。</p></div><div class="lang-en"><p>Add like-for-like budgets along serial paths; parallel branches contribute the slowest awaited branch plus merge cost. Adding service p99s does not give an end-to-end p99, and 95% cache hits do not make p99 a hit latency. Validate queueing, variance, and tails end to end. If every miss seeks, 300/s at 60% of 100/s per disk requires at least ceil(300/60)=5 disks, still excluding writes and failure reserves.</p></div></div>
+</section>
+<section><h2><span class="lang-zh">7 · 可用性：请求预算与故障回源一起算</span><span class="lang-en">7 · Availability: count failures and fallback demand</span></h2>
+<div class="bilingual"><div class="lang-zh"><p>先定SLI、窗口与成功条件。本例采用一天内合格Feed读请求的成功比例≥99.9%；SLO是目标，SLA还包含约定后果。时间可用率与请求成功率是两种指标，流量不均时不能互换。依据 <a href="https://sre.google/sre-book/service-level-objectives/">Google SRE：Service Level Objectives</a>。</p></div><div class="lang-en"><p>Define the SLI, window, and success condition first. Here the target is ≥99.9% successful eligible Feed reads per day. An SLO is a target; an SLA includes contractual consequences. Time availability and request success are distinct, especially with uneven traffic. See <a href="https://sre.google/sre-book/service-level-objectives/">Google SRE: Service Level Objectives</a>.</p></div></div><figure class="deck">
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s1t d5s1d">
           <title id="d5s1t">A 99.9 percent working target on the hit path</title>
-          <desc id="d5s1d">A feed read goes from the client through Edge and App to Cache, and the hit returns hop by hop. The ledger above the region states 99.9 percent as an assumed working SLO: 200 million reads per day times 0.001 allows 200,000 failures per day, or 8.76 hours per year in the time form.</desc>
+          <desc id="d5s1d">A feed read goes from the client through Edge and App to Cache, and the hit returns hop by hop. The ledger states an assumed daily request SLO of 99.9 percent: 200 million reads per day times 0.001 allows 200,000 failures per day. Separately, a time-based SLI at 99.9 percent permits 8.76 hours per 365-day year; request failures do not imply that downtime.</desc>
           <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
           <rect x="150" y="112" width="794" height="270" rx="18" class="boundary"/><text x="928" y="130" text-anchor="end" class="tiny">ONE REGION · feed read</text>
           <circle cx="44" cy="212" r="12" class="box"/><path d="M24 258 Q44 226 64 258" class="wire"/><text x="44" y="280" text-anchor="middle" class="label">Client</text>
@@ -876,10 +622,10 @@
             <rect x="647" y="135" width="120" height="48" rx="8" class="cache"/><rect x="640" y="128" width="120" height="48" rx="8" class="cache"/><text x="700" y="149" text-anchor="middle" class="label">Cache</text><text x="700" y="168" text-anchor="middle" class="sub">hit</text>
             <path d="M520 214 L572 214 Q580 214 580 206 L580 151 Q580 143 588 143 L630 143" class="wire"/><polygon points="640,143 630,148 630,138" class="head"/>
             <path d="M640 161 L604 161 Q596 161 596 169 L596 218 Q596 226 588 226 L530 226" class="wire reply"/><polygon points="520,226 530,221 530,231" class="head reply"/>
-            <text x="150" y="48" class="sub">working SLO 99.9% (assumed): 200M reads/day × 0.001 = 200,000 failures/day · 8.76 h/yr</text>
+            <text x="150" y="48" class="sub">request SLO 99.9%: 200M reads/day × 0.001 = 200,000 failures/day · separate time SLI: 8.76 h/yr</text>
           </g>
         </svg>
-        <figcaption><span class="lang-zh">99.9% 是为了继续设计写下的工作 SLO，不是承诺。按请求算：每天 2 亿次读 × 0.001 = 20 万次允许失败；按时间算是一年 8.76 小时。图上先只有成功的命中回程。</span><span class="lang-en">99.9% is a working SLO written so the design can continue, not a promise. By requests: 200 million reads a day × 0.001 = 200,000 allowed failures. By time: 8.76 hours a year. So far only the successful hit returns.</span></figcaption>
+        <figcaption><span class="lang-zh">按日请求 SLO：200M × (1−99.9%)=200,000 次失败/天。图中 8.76 h/yr 是另一个按时间定义的年度预算，不能从请求失败比例直接换成实际停机时长。</span><span class="lang-en">A daily request SLO allows 200M × (1−99.9%)=200,000 failures/day. The 8.76 h/year is a separate time-based annual budget, not actual downtime inferred from request failures.</span></figcaption>
       </div>
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s2t d5s2d">
@@ -897,13 +643,13 @@
           <rect x="647" y="135" width="120" height="48" rx="8" class="cache"/><rect x="640" y="128" width="120" height="48" rx="8" class="cache"/><text x="700" y="149" text-anchor="middle" class="label">Cache</text><text x="700" y="168" text-anchor="middle" class="sub">hit</text>
           <path d="M520 214 L572 214 Q580 214 580 206 L580 151 Q580 143 588 143 L630 143" class="wire"/><polygon points="640,143 630,148 630,138" class="head"/>
           <path d="M640 161 L604 161 Q596 161 596 169 L596 218 Q596 226 588 226 L530 226" class="wire reply"/><polygon points="520,226 530,221 530,231" class="head reply"/>
-          <text x="150" y="48" class="sub">working SLO 99.9% (assumed): 200M reads/day × 0.001 = 200,000 failures/day · 8.76 h/yr</text>
+          <text x="150" y="48" class="sub">request SLO 99.9%: 200M reads/day × 0.001 = 200,000 failures/day · separate time SLI: 8.76 h/yr</text>
           <g class="is-new">
             <path d="M660 183 L660 192 Q660 200 652 200 L620 200 Q612 200 612 208 L612 228 Q612 236 604 236 L530 236" class="wire fail"/><polygon points="520,236 530,231 530,241" class="head fail"/><text x="668" y="212" text-anchor="start" class="tiny">0.1% of calls fail</text>
             <text x="150" y="70" class="sub">cache errors 0.1% × 200M = 200,000/day = the whole budget · at the peak 6,000 × 0.001 = 6/s</text>
           </g>
         </svg>
-        <figcaption><span class="lang-zh">Cache 的 0.1% 调用失败：2 亿 × 0.001 = 20 万次/天，正好等于整个预算。换成峰值速率是 6,000 × 0.001 = 6 次/秒。红线先停在 App，接下来看 App 怎么处理。</span><span class="lang-en">0.1% of cache calls fail: 200 million × 0.001 = 200,000 a day, exactly the whole budget. As a peak rate that is 6,000 × 0.001 = 6 per second. The red line stops at App for now; what App does next decides the rest.</span></figcaption>
+        <figcaption><span class="lang-zh">假设每次读恰好调用 Cache 一次，0.1% 调用失败即 200,000 次/天，白板峰值下约 6/s。没有重试或降级的成功抵消时，才会原样计入用户错误。</span><span class="lang-en">Assume one Cache call per read: 0.1% means 200,000/day, about 6/s at the shortcut peak. These become user failures only if no successful retry or fallback masks them.</span></figcaption>
       </div>
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s3t d5s3d">
@@ -922,19 +668,19 @@
           <path d="M520 214 L572 214 Q580 214 580 206 L580 151 Q580 143 588 143 L630 143" class="wire"/><polygon points="640,143 630,148 630,138" class="head"/>
           <path d="M640 161 L604 161 Q596 161 596 169 L596 218 Q596 226 588 226 L530 226" class="wire reply"/><polygon points="520,226 530,221 530,231" class="head reply"/>
           <path d="M660 183 L660 192 Q660 200 652 200 L620 200 Q612 200 612 208 L612 228 Q612 236 604 236 L530 236" class="wire fail"/><polygon points="520,236 530,231 530,241" class="head fail"/><text x="668" y="212" text-anchor="start" class="tiny">0.1% of calls fail</text>
-          <text x="150" y="48" class="sub">working SLO 99.9% (assumed): 200M reads/day × 0.001 = 200,000 failures/day · 8.76 h/yr</text>
+          <text x="150" y="48" class="sub">request SLO 99.9%: 200M reads/day × 0.001 = 200,000 failures/day · separate time SLI: 8.76 h/yr</text>
           <text x="150" y="70" class="sub">cache errors 0.1% × 200M = 200,000/day = the whole budget · at the peak 6,000 × 0.001 = 6/s</text>
           <g class="is-new">
             <path d="M380 258 L291 258" class="wire fail"/><polygon points="281,258 291,253 291,263" class="head fail"/><path d="M199 258 L82 258" class="wire fail"/><polygon points="72,258 82,253 82,263" class="head fail"/><text x="330" y="290" text-anchor="middle" class="tiny">5xx to the user</text>
             <text x="150" y="92" class="sub">fail closed → user sees 0.1% · four nines allow 20,000/day → 10× over</text>
           </g>
         </svg>
-        <figcaption><span class="lang-zh">失败关闭：App 把 Cache 的错误原样往外传，红虚线经 Edge 一直到 Client。用户可见错误率就是这一跳的 0.1%。若目标是四个 9，每天只许 2 万次，20 万是它的 10 倍。</span><span class="lang-en">Fail closed: App passes the cache error straight out, and the red dashed line runs through Edge to the client. The user-visible error rate is that hop’s 0.1%. At four nines only 20,000 a day are allowed; 200,000 is 10× that.</span></figcaption>
+        <figcaption><span class="lang-zh">失败直接传出，Cache 一跳就耗尽三个 9 的请求预算；四个 9 只有 20,000 次/天，是十倍超支。其他错误还要累加。</span><span class="lang-en">Passing the failure through exhausts the three-nines request budget. Four nines allow 20,000/day, so this is ten times the allowance, before other errors.</span></figcaption>
       </div>
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s4t d5s4d">
           <title id="d5s4t">Fall through to Primary: the error stops at App</title>
-          <desc id="d5s4d">On a cache error App reads Primary instead, and the green reply returns from Primary through App and Edge to the client. The red path ends at App. At 0.1 percent of the 6,000 peak this bypass is about 6 reads per second, far under the roughly 100 seeks per second one disk can serve.</desc>
+          <desc id="d5s4d">On a cache error App reads Primary instead, and the green reply returns from Primary through App and Edge to the client. The red path ends at App. This bypass adds about six reads per second to roughly 300 ordinary misses per second. Check total origin demand, writes, retries, and spare capacity before admission; success is conditional.</desc>
           <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
           <rect x="150" y="112" width="794" height="270" rx="18" class="boundary"/><text x="928" y="130" text-anchor="end" class="tiny">ONE REGION · feed read</text>
           <circle cx="44" cy="212" r="12" class="box"/><path d="M24 258 Q44 226 64 258" class="wire"/><text x="44" y="280" text-anchor="middle" class="label">Client</text>
@@ -948,17 +694,17 @@
           <path d="M520 214 L572 214 Q580 214 580 206 L580 151 Q580 143 588 143 L630 143" class="wire"/><polygon points="640,143 630,148 630,138" class="head"/>
           <path d="M640 161 L604 161 Q596 161 596 169 L596 218 Q596 226 588 226 L530 226" class="wire reply"/><polygon points="520,226 530,221 530,231" class="head reply"/>
           <path d="M660 183 L660 192 Q660 200 652 200 L620 200 Q612 200 612 208 L612 228 Q612 236 604 236 L530 236" class="wire fail"/><polygon points="520,236 530,231 530,241" class="head fail"/><text x="668" y="212" text-anchor="start" class="tiny">0.1% of calls fail</text>
-          <text x="150" y="48" class="sub">working SLO 99.9% (assumed): 200M reads/day × 0.001 = 200,000 failures/day · 8.76 h/yr</text>
+          <text x="150" y="48" class="sub">request SLO 99.9%: 200M reads/day × 0.001 = 200,000 failures/day · separate time SLI: 8.76 h/yr</text>
           <text x="150" y="70" class="sub">cache errors 0.1% × 200M = 200,000/day = the whole budget · at the peak 6,000 × 0.001 = 6/s</text>
           <g class="is-new">
             <path d="M645 282 V328 A60 12 0 0 0 765 328 V282" class="store"/><ellipse cx="705" cy="282" rx="60" ry="12" class="store"/><text x="705" y="315" text-anchor="middle" class="label">Primary</text><text x="705" y="333" text-anchor="middle" class="sub">bypass read</text>
             <path d="M520 246 L588 246 Q596 246 596 254 L596 289 Q596 297 604 297 L635 297" class="wire"/><polygon points="645,297 635,302 635,292" class="head"/>
             <path d="M645 315 L568 315 Q560 315 560 307 L560 266 Q560 258 552 258 L530 258" class="wire reply"/><polygon points="520,258 530,253 530,263" class="head reply"/>
             <text x="604" y="262" text-anchor="start" class="tiny">on cache error</text>
-            <text x="150" y="92" class="sub">bypass → 6 reads/s reach Primary, far under ~100 seeks/s · the error stops at App</text>
+            <text x="150" y="92" class="sub">bypass adds 6 reads/s · check spare origin capacity before admitting</text>
           </g>
         </svg>
-        <figcaption><span class="lang-zh">绕路：Cache 出错时 App 改读 Primary，成功沿 Primary → App → Edge → Client 回来，红线停在 App。0.1% × 6,000 = 6 次/秒，远低于一块盘约 100 次/秒的寻道，这条退路扛得住。</span><span class="lang-en">Bypass: on a cache error App reads Primary instead, success returns Primary → App → Edge → Client, and the red line stops at App. 0.1% × 6,000 = 6 reads/s, far below the roughly 100 seeks/s of one disk, so this fallback holds.</span></figcaption>
+        <figcaption><span class="lang-zh">回源新增约 6/s；正常 5% miss 已约 300/s，保守合计约 306/s，另加写与重试。只有 Primary 尚有余量并成功响应，红线才止于 App；不能仅拿 6 和单盘 100 比。</span><span class="lang-en">Fallback adds about 6/s to roughly 300/s of ordinary misses: conservatively about 306/s, plus writes and retries. The error stops at App only with spare Primary capacity and a successful response.</span></figcaption>
       </div>
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s5t d5s5d">
@@ -975,7 +721,7 @@
           <path d="M645 282 V328 A60 12 0 0 0 765 328 V282" class="store"/><ellipse cx="705" cy="282" rx="60" ry="12" class="store"/><text x="705" y="315" text-anchor="middle" class="label">Primary</text><text x="705" y="333" text-anchor="middle" class="sub">bypass read</text>
           <path d="M520 246 L588 246 Q596 246 596 254 L596 289 Q596 297 604 297 L635 297" class="wire"/><polygon points="645,297 635,302 635,292" class="head"/>
           <path d="M645 315 L568 315 Q560 315 560 307 L560 266 Q560 258 552 258 L530 258" class="wire reply"/><polygon points="520,258 530,253 530,263" class="head reply"/>
-          <text x="150" y="48" class="sub">working SLO 99.9% (assumed): 200M reads/day × 0.001 = 200,000 failures/day · 8.76 h/yr</text>
+          <text x="150" y="48" class="sub">request SLO 99.9%: 200M reads/day × 0.001 = 200,000 failures/day · separate time SLI: 8.76 h/yr</text>
           <text x="150" y="70" class="sub">cache errors 0.1% × 200M = 200,000/day = the whole budget · at the peak 6,000 × 0.001 = 6/s</text>
           <g class="is-new">
             <rect x="380" y="200" width="140" height="72" rx="12" class="box"/><text x="450" y="233" text-anchor="middle" class="label">App</text><text x="450" y="252" text-anchor="middle" class="sub">bypass cap ~100/s</text>
@@ -988,207 +734,16 @@
             <text x="150" y="92" class="sub">cache down → ~5,900/s beyond the cap · 200,000 ÷ 5,900 ≈ 34 s of peak spends the day</text>
           </g>
         </svg>
-        <figcaption><span class="lang-zh">完整图：整层 Cache 宕机，6,000 次/秒都想绕到 Primary。绕路封顶约 100 次/秒；剩下约 5,900 次/秒，产品允许就给 30 秒内的旧值，不允许就沿红线回 503。按 5,900 次/秒失败，一天 20 万的预算约 34 秒就花完。</span><span class="lang-en">The complete picture: the whole Cache is down and 6,000/s want Primary. The bypass is capped near 100/s. The other ~5,900/s get a copy under 30 seconds old if the product allows it, or a 503 along the red line. At 5,900 failures/s, the day’s 200,000 budget is gone in about 34 seconds.</span></figcaption>
+        <figcaption><span class="lang-zh">整层宕机时，100/s 是另设的聚合回源上限，不是已证明的单盘容量。没有合格旧值且每个获准回源都成功时，其余 5,900/s 返回503，约34秒耗尽日预算；若回源也失败会更快。</span><span class="lang-en">During total outage, 100/s is an assumed aggregate origin cap, not proven single-disk capacity. With no eligible stale values and all admitted reads succeeding, 5,900/s fail and exhaust the daily budget in about 34 seconds; origin errors exhaust it faster.</span></figcaption>
       </div>
-    </figure>
-    <h3><span class="lang-zh">正常路径：先写定义，再让一条依赖去对账</span><span class="lang-en">Walkthrough: write the definition, then bill one dependency</span></h3>
-    <div class="bilingual">
-      <div class="lang-zh"><p class="col-kicker">中文</p>
-        <p>Google SRE 书的 <a href="https://sre.google/sre-book/embracing-risk/">Embracing Risk</a> [3] 把四个 9 的例子写成：99.99% 的目标在一年里最多大约 52.56 分钟不可用。这个数等于 0.0001 × 365 × 24 × 60 = 0.0001 × 525,600 = 52.56 分钟。同一套定义往下乘：99.9% 是 0.001 × 8,760 小时 = 8.76 小时/年；99.999% 是 0.00001 × 525,600 = 5.256 分钟/年，约 5.26 分钟；99% 是 0.01 × 365 = 3.65 天/年。这些是定义算出来的允许窗口，不是 feed 已经达到的运行数据，也不是对外合同。</p>
-        <p>同一章更常用请求成功率，而不是「全站黑了多久」，因为全球服务往往还在部分可用。书里的例子是：一天 250 万次请求、日目标 99.99%，允许的错误是 2,500,000 × 0.0001 = 250 次。<a href="https://sre.google/sre-book/service-level-objectives/">Service Level Objectives</a> [4] 把可用性说成服务可用时间的比例，也常定义成格式正确的请求里成功的比例，称为 yield。没有明确后果的目标是 SLO，不是 SLA。本章的 99.9% 是工作 SLO：请面试官改。它不是「我们承诺 99.9%」。</p>
-        <p>把它用到 feed 的白板读量上。每天 200,000,000 次读 × 0.001 = 200,000 次允许失败。Cache 若有 0.1% 的调用失败，而且失败对用户可见，失败次数同样是 200,000,000 × 0.001 = 200,000。这一跳花掉 100% 的三个 9 预算，Edge 和 App 的发布、自己的缺陷都没有余额。若工作目标改成四个 9，允许次数是 200,000,000 × 0.0001 = 20,000/天。200,000 / 20,000 = 10，Cache 的错误是这个预算的 10 倍。书里错误预算的算法是同一类除法：目标 99.999% 时失败率预算是 0.001%，一次造成 0.0002% 失败的问题花掉 0.0002 / 0.001 = 20% 的季度预算。我们只是把被除数换成了 Cache 的错误率。</p>
-      </div>
-      <div class="lang-en"><p class="col-kicker">English</p>
-        <p>The <a href="https://sre.google/sre-book/embracing-risk/">Embracing Risk</a> chapter [3] of Google’s SRE book states the four-nines example as: a 99.99% target may be unavailable for up to 52.56 minutes in a year. That figure is 0.0001 × 365 × 24 × 60 = 0.0001 × 525,600 = 52.56 minutes. The same definition scales: 99.9% is 0.001 × 8,760 hours = 8.76 hours/year; 99.999% is 0.00001 × 525,600 = 5.256 minutes/year, about 5.26 minutes; 99% is 0.01 × 365 = 3.65 days/year. These are allowed windows from the definition. They are not measured feed uptime, and they are not a contract.</p>
-        <p>That chapter prefers request success rate over “how long was the whole site black,” because a global service is often partly up. Its example is 2.5 million requests in a day at a 99.99% daily target, which allows 2,500,000 × 0.0001 = 250 errors. <a href="https://sre.google/sre-book/service-level-objectives/">Service Level Objectives</a> [4] describes availability as the fraction of time a service is usable, and often as the fraction of well-formed requests that succeed, called yield. A target with no explicit consequence is an SLO, not an SLA. The 99.9% in this chapter is a working SLO: ask them to correct it. It is not “we promise 99.9%.”</p>
-        <p>Apply it to the feed’s board read volume. 200,000,000 reads/day × 0.001 = 200,000 allowed failures. If Cache fails 0.1% of calls and those failures are user-visible, the count is also 200,000,000 × 0.001 = 200,000. That hop spends 100% of a three-nines budget. Deploys of Edge and App, and their own defects, have nothing left. If the working target moves to four nines, the allowance is 200,000,000 × 0.0001 = 20,000/day. 200,000 / 20,000 = 10, so the cache errors are 10× that budget. The book’s error-budget division is the same kind of step: at a 99.999% target the failure-rate budget is 0.001%, and a problem that fails 0.0002% of queries spends 0.0002 / 0.001 = 20% of the quarterly budget. Here the numerator is the cache error rate.</p>
-      </div>
-    </div>
-    <h3><span class="lang-zh">为什么红线必须在用户面前停住</span><span class="lang-en">Why the red line has to stop before the user</span></h3>
-    <div class="bilingual">
-      <div class="lang-zh"><p class="col-kicker">中文</p>
-        <p>时间定义和请求定义回答的不是同一句人话。0.1% 的错误率在时间公式里对应 8.76 小时/年，但 Cache 的 0.1% 通常不是连续黑 8.76 小时，而是全年大约每 1,000 次读失败一次。SRE 书强调全球服务要用请求成功率，就是因为系统往往还部分活着。图上用的是 20 万次/天，时间上的 8.76 小时写在旁边，标明它是同一个 0.1% 的另一种写法。</p>
-        <p>失败关闭把 Cache 放进关键路径，用户可见错误率至少是这一跳的错误率。绕路把红虚线停在 App，成功响应改从 Primary 回来，Cache 就不再单独吃掉那 20 万。绕路要分清两种故障的量级。0.1% 的零星错误在峰值只是 6,000 × 0.001 = 6 次/秒，绕到 Primary 远低于一块盘约 100 次/秒的寻道，放心绕。整层 Cache 宕机是另一回事：6,000 次/秒全部想绕，正是上一节那约 60 块盘的缺口。所以绕路要封顶（这里约 100 次/秒）并按键合并，不能在 Cache 挂掉的那一秒把峰值原样打到 Primary。</p>
-        <p>封顶之外还剩约 5,900 次/秒。产品若允许 feed 旧 30 秒，就返回 App 本地还留着的、仍在这个窗口里的旧值，用户可见失败不增加；不允许，就回 503。回 503 的账很难看：200,000 ÷ 5,900 ≈ 34 秒，峰值下半分钟就花完一天的预算。这就是为什么缓存层本身也要按故障域拆开、要有副本，而不是只靠 App 里的一行 fallback。30 秒是产品假设，支付类的请求不能沿用这句。</p>
-      </div>
-      <div class="lang-en"><p class="col-kicker">English</p>
-        <p>The time definition and the request definition do not answer the same sentence. A 0.1% error rate matches 8.76 hours/year in the time formula, but a 0.1% cache error is usually not a continuous 8.76-hour blackout. It is about one failed read in 1,000 across the year. The SRE book prefers request success rate for global services because the system is often partly alive. The drawing uses 200,000/day. The 8.76 hours sit beside it as the other way to write the same 0.1%.</p>
-        <p>Fail-closed puts Cache on the critical path, so the user-visible error rate is at least that hop’s error rate. The bypass stops the red dashed line at App and returns success from Primary, so Cache alone no longer spends those 200,000. Tell the two failure sizes apart. Scattered 0.1% errors are only 6,000 × 0.001 = 6 reads/s at the peak, far under the roughly 100 seeks/s of one disk, so bypass them freely. A whole-cache outage is different: all 6,000/s want to bypass, which is the previous section’s gap of about 60 disks. So cap the bypass (about 100/s here) and coalesce by key. Do not drop the peak onto Primary in the second the cache dies.</p>
-        <p>About 5,900/s remain above the cap. If the product allows the feed to be 30 seconds stale, return the copy App still holds locally inside that window, and the user-visible failure does not grow. If not, return 503. The 503 bill is ugly: 200,000 ÷ 5,900 ≈ 34 seconds, so half a minute at the peak spends the whole day’s budget. That is why the cache tier itself needs separate failure domains and replicas, not just one fallback line in App. Thirty seconds is a product assumption. A payment request does not inherit that sentence.</p>
-      </div>
-    </div>
-    <h3><span class="lang-zh">替代：把多段可用性乘在一起时要停手</span><span class="lang-en">Alternative: stop when multiplying availabilities together</span></h3>
-    <div class="bilingual">
-      <div class="lang-zh"><p class="col-kicker">中文</p>
-        <p>若 Edge、App、Cache 各自成功 99.95%，并且失败关闭、失败互不重叠，粗算错误率约 0.05% × 3 = 0.15%。精确一点：0.9995 × 0.9995 = 0.99900025，再乘 0.9995 得 0.99850075，大约 99.85%。不可用比例约 0.001499。0.001499 × 8,760 小时 ≈ 13.1 小时/年，已经多于单个 99.9% 目标的 8.76 小时。0.001499 × 200,000,000 ≈ 30 万次失败/天。这个乘法只说明一条串行失败关闭的链会比其中最差的那一跳更差。</p>
-        <p><a href="https://sre.google/workbook/implementing-slos/">SRE workbook 的 Implementing SLOs</a> [5] 直接否定下一步幻想：单区域 99.9% 的服务，为了凑 99.95% 就再部署一个区域，并宣称两个区域独立所以变成 99.9999%。书里写明，这假设两边完全独立，而共享依赖、共享故障域和控制面几乎总会同时打到两边。本章不把 10 台 App 乘成更多的 9。10 台改变的是峰值 QPS 有没有地方去，不是把 99.9% 自动加成五个 9。</p>
-      </div>
-      <div class="lang-en"><p class="col-kicker">English</p>
-        <p>If Edge, App, and Cache each succeed 99.95% of the time, fail closed, and their failures do not overlap, a rough error rate is 0.05% × 3 = 0.15%. More tightly: 0.9995 × 0.9995 = 0.99900025, times 0.9995 is 0.99850075, about 99.85%. The unavailable fraction is about 0.001499. 0.001499 × 8,760 hours ≈ 13.1 hours/year, already more than the 8.76 hours of a single 99.9% target. 0.001499 × 200,000,000 ≈ 300,000 failed requests/day. The product only shows that a fail-closed serial chain is worse than its weakest hop.</p>
-        <p>The SRE workbook’s <a href="https://sre.google/workbook/implementing-slos/">Implementing SLOs</a> [5] rejects the next fantasy: a service at 99.9% in one zone, a second zone added to reach 99.95%, and a claim that independence turns two zones into 99.9999%. The workbook says this assumes the two are wholly independent, while shared dependencies, shared failure domains, and control planes almost always hit both. This chapter does not multiply 10 App boxes into more nines. 10 boxes mean the peak QPS has somewhere to go. They do not turn 99.9% into five nines.</p>
-      </div>
-    </div>
-    <h3><span class="lang-zh">常见错误：把定义说成已经达成的承诺</span><span class="lang-en">Common mistake: speaking the definition as a promise already kept</span></h3>
-    <div class="bilingual">
-      <div class="lang-zh"><p class="col-kicker">中文</p>
-        <p>「我们做到五个 9」和「五个 9 的定义是一年大约 5.26 分钟」不是同一句。前者要有测量窗口、成功的定义、排除项和后果；本章一个都没有。面试里先说工作目标 99.9%，再把 8.76 小时和每天 20 万次失败算出来，然后指出 Cache 的 0.1% 已经把它花完。全站五个 9 会把每一跳的错误率都压到远小于 0.001%，成本曲线在 SRE 书里就写了不是线性的。feed 读可以用三个 9 当工作目标，写路径和支付不要自动继承同一个数。</p>
-      </div>
-      <div class="lang-en"><p class="col-kicker">English</p>
-        <p>“We run at five nines” and “the definition of five nines is about 5.26 minutes a year” are different sentences. The first needs a measurement window, a definition of success, exclusions, and a consequence. This chapter has none of those. In the interview, state a working target of 99.9%, compute 8.76 hours and 200,000 failures a day, then show that a 0.1% cache error has already spent it. Site-wide five nines pushes every hop far below a 0.001% error rate, and the SRE book already says that cost curve is not linear. A feed read can use three nines as a working target. The write path and payments do not automatically inherit the same number.</p>
-      </div>
-    </div>
-  </section>
-
-  <section>
-    <h2><span class="lang-zh">同一套方法再走一遍短链</span><span class="lang-en">The same method, a second time, on a short link</span></h2>
-    <div class="bilingual">
-      <div class="lang-zh"><p class="col-kicker">中文</p>
-        <p>短链用 <a class="chip" href="ch09.html">Ch09</a> 已经公开的教学假设，不另起一套流量：每天创建 1,000,000 次，每次创建对应 100 次跳转，峰值倍数用那一章的 10 倍，而不是 feed 的 3 倍。记录按 0.5 KB = 500 字节，302 响应也按 0.5 KB。这些仍是假设。单机舒适 1,000 QPS、按 60% 使用得到 600，是本章的单机假设，Ch09 没有公布过实例数。下面每一笔都是同一套除法。</p>
-        <p>写请求/天 = 1,000,000。平均写 QPS = 1,000,000 / 86,400 = 11.57，取 11.6。峰值按 10 倍是 11.57 × 10 = 115.7，取 116 QPS。读请求/天 = 1,000,000 × 100 = 100,000,000。平均读 QPS = 100,000,000 / 86,400 = 1,157，取 1.16K。峰值读 = 1,157 × 10 = 11,570，取 11.6K。实例数按取整后的 11.6K 来除：11,600 / 600 = 19.33，未取整的 11,570 / 600 = 19.28，都向上到 20 台无状态跳转实例。116 / 20 = 5.8 次写/秒/台，不改变 N。和 feed 一样，读的峰值决定台数。20 台仍然是一小层，不是分片的理由；Ch09 把写路径的困难放在唯一和幂等上，和 116 QPS 这个量级一致。</p>
-        <p>带宽只算 302，不算目标页。11.6K × 0.5 KB = 11,600 × 500 字节 = 5,800,000 字节/秒 = 5.8 MB/s。×8 = 46.4 Mb/s。这条线是跳转服务回到浏览器的那一小段响应。若把目标页按 1 MB 算进短链出口，11,600 × 1 MB = 11.6 GB/s，×8 = 92.8 Gb/s。那是 feed 里「500 KB 图片穿过 App」的同一个错误：API 没有返回页面。页面字节在浏览器和目标站点之间，不在短链的 App 上。</p>
-        <p>存储用创建次数，不用跳转次数。一年行数 = 1,000,000 × 365 = 365,000,000。×500 字节 = 1.825 × 10<sup>11</sup> 字节 = 182.5 GB，约 183 GB 原始行。×3 副本 = 547.5 GB，约 0.55 TB。Ch09 把索引、放大和备份之后的规划区间写成大约 0.6–1 TB/年。0.55 TB 是原始行乘副本；0.6–1 TB 是在此之上留出来的规划范围，不是第三个测量值。跳转产生的访问日志、CDN 上的缓存，都不在这 183 GB 里。目标网页的图片更不在短链的盘上。</p>
-        <p>延迟和可用性沿用同一条链，不再换一套常数。命中缓存的跳转仍是一次接入往返加上机房内的 0.5 ms 数量级，10 ms 寻道不在命中路径上。若映射存储以失败关闭的方式放在跳转关键路径上，并且错误率是 0.1%，它会像 feed 的 Cache 一样吃掉一个 99.9% 的请求预算。所以读路径把存储留在未命中上，并且存储故障不能变成对用户可见的 0.1% 而无绕路或限流。这一遍没有新的公式，只是把 feed 上已经改过图的四笔，换成短链的假设再除一次。</p>
-      </div>
-      <div class="lang-en"><p class="col-kicker">English</p>
-        <p>The short link uses the teaching assumptions already published in <a class="chip" href="ch09.html">Ch09</a>, not a new traffic story: 1,000,000 creates per day, 100 redirects per create, and that chapter’s 10× peak rather than the feed’s 3×. The record is 0.5 KB = 500 bytes, and the 302 response is also 0.5 KB. Those are still assumptions. A comfortable 1,000 QPS per box, used at 60% to get 600, is this chapter’s per-box assumption. Ch09 does not publish an instance count. Each step below is the same division.</p>
-        <p>Writes/day = 1,000,000. Average write QPS = 1,000,000 / 86,400 = 11.57, taken as 11.6. A 10× peak is 11.57 × 10 = 115.7, taken as 116 QPS. Reads/day = 1,000,000 × 100 = 100,000,000. Average read QPS = 100,000,000 / 86,400 = 1,157, taken as 1.16K. Peak reads = 1,157 × 10 = 11,570, taken as 11.6K. Using the rounded 11.6K, instances = 11,600 / 600 = 19.33. The unrounded 11,570 / 600 = 19.28. Both round up to 20 stateless redirect instances. 116 / 20 = 5.8 writes/s/box, which does not change N. As with the feed, peak reads set the count. Twenty boxes are still a small tier, not a reason to shard. Ch09 puts the write-path difficulty on uniqueness and idempotency, which matches a 116 QPS order.</p>
-        <p>Bandwidth counts the 302, not the destination page. 11.6K × 0.5 KB = 11,600 × 500 bytes = 5,800,000 bytes/s = 5.8 MB/s. Times 8 is 46.4 Mb/s. That line is the small response from the redirect service back to the browser. Charging a 1 MB destination page to the shortener makes 11,600 × 1 MB = 11.6 GB/s, times 8 is 92.8 Gb/s. That is the same mistake as hauling the feed’s 500 KB images through App: the API does not return the page. Page bytes travel between the browser and the destination, not through the shortener’s App.</p>
-        <p>Storage uses creates, not redirects. Rows/year = 1,000,000 × 365 = 365,000,000. Times 500 bytes = 1.825 × 10<sup>11</sup> bytes = 182.5 GB, about 183 GB of raw rows. Times 3 replicas = 547.5 GB, about 0.55 TB. Ch09’s planning range after indexes, amplification, and backups is about 0.6–1 TB/year. 0.55 TB is raw rows times replicas. 0.6–1 TB is the planning range reserved on top of that, not a third measurement. Redirect access logs and CDN cache are not inside the 183 GB. The destination page’s images are not on the shortener’s disks.</p>
-        <p>Latency and availability reuse the same chain. A cache-hit redirect is still one access round trip plus in-datacenter 0.5 ms orders of magnitude. The 10 ms seek is not on the hit path. If the mapping store sits fail-closed on the redirect critical path at a 0.1% error rate, it spends a 99.9% request budget the way the feed Cache did. The read path keeps the store on the miss, and a store failure cannot become a user-visible 0.1% without a bypass or a limit. This pass adds no new formula. It divides the short-link assumptions through the same four steps that already changed the feed drawings.</p>
-      </div>
-    </div>
-  </section>
-
-  <section>
-    <h2><span class="lang-zh">追问怎么接</span><span class="lang-en">Follow-ups</span></h2>
-    <div class="bilingual">
-      <div class="lang-zh"><p class="col-kicker">1 · 「这个百万是 DAU 还是注册总量？」</p>
-        <p>只有 DAU 进 QPS。若 1000 万是注册总量，而日活是它的 10%，读请求变成 1,000,000 × 20 = 20,000,000/天，平均约 200 QPS，峰值 600，600 / 600 = 1 台量级。图从 10 台收成一两台。先问清单位，再除。</p>
-      </div>
-      <div class="lang-en"><p class="col-kicker">1 · “Is the million DAU or total signups?”</p>
-        <p>Only DAU enters QPS. If 10 million is total signups and daily actives are 10% of that, reads become 1,000,000 × 20 = 20,000,000/day, about 200 QPS average and 600 peak. 600 / 600 = 1 box of capacity. The drawing shrinks from 10 boxes to one or two. Ask the unit, then divide.</p>
-      </div>
-    </div>
-    <div class="bilingual">
-      <div class="lang-zh"><p class="col-kicker">2 · 「单机能到 5,000 QPS 呢？」</p>
-        <p>可用 = 5,000 × 0.6 = 3,000。feed 峰值 6,000 / 3,000 = 2，再加一台给发布，画 3 台。短链 11,600 / 3,000 ≈ 3.9，向上 4 台。结果随单机假设变，除法不变。</p>
-      </div>
-      <div class="lang-en"><p class="col-kicker">2 · “What if one box does 5,000 QPS?”</p>
-        <p>Usable = 5,000 × 0.6 = 3,000. Feed peak 6,000 / 3,000 = 2, plus one box for deploys, so draw 3. The short link is 11,600 / 3,000 ≈ 3.9, which rounds up to 4. The result follows the per-box assumption. The division does not change.</p>
-      </div>
-    </div>
-    <div class="bilingual">
-      <div class="lang-zh"><p class="col-kicker">3 · 「用户在另一个洲呢？」</p>
-        <p>把 20 ms 换成 Dean 表上的 150 ms，命中累计约 151 ms。11 TB 不变。变的是那个洲要有一套自己的命中路径（Edge、App、Cache），App 台数按各区域自己的峰值分别除。只把 TLS 终结点挪过去，取数据仍要跨洋。单机房承诺全球几十毫秒，和这 150 ms 对不上。</p>
-      </div>
-      <div class="lang-en"><p class="col-kicker">3 · “What if the user is on another continent?”</p>
-        <p>Replace 20 ms with the 150 ms on Dean’s table, and the hit cumulative is about 151 ms. The 11 TB stays. What changes is that the other continent needs its own hit path (Edge, App, Cache), and the App count is divided per region from that region’s peak. Moving only the TLS terminator there still sends the data across the ocean. A promise of global tens of milliseconds from one datacenter does not match that 150 ms.</p>
-      </div>
-    </div>
-    <div class="bilingual">
-      <div class="lang-zh"><p class="col-kicker">4 · 「三年后呢？」</p>
-        <p>流量若每年翻倍，今天的峰值读 6,000 到第三年是 6,000 × 4 = 24,000，实例 24,000 / 600 = 40 台。存储若行数据每年翻倍，三年行数据 25.55 TB，×3 ≈ 77 TB。先说曲线是假设，再乘。不要只把今天的 10 台和 11 TB 乘 3。</p>
-      </div>
-      <div class="lang-en"><p class="col-kicker">4 · “What about three years out?”</p>
-        <p>If traffic doubles every year, today’s peak of 6,000 reads is 6,000 × 4 = 24,000 in the third year, and instances are 24,000 / 600 = 40. If rows double every year, three years of rows are 25.55 TB, times 3 ≈ 77 TB. Say the curve is an assumption, then multiply. Do not only multiply today’s 10 boxes and 11 TB by 3.</p>
-      </div>
-    </div>
-    <div class="bilingual">
-      <div class="lang-zh"><p class="col-kicker">5 · 「99.99% 是承诺吗？」</p>
-        <p>不是。52.56 分钟是四个 9 的定义。工作目标要单独说，并说明没有合同后果就是 SLO。Cache 0.1% 对四个 9 是 10 倍预算，所以要么拿掉这条硬依赖，要么把目标改回三个 9。</p>
-      </div>
-      <div class="lang-en"><p class="col-kicker">5 · “Is 99.99% a promise?”</p>
-        <p>No. 52.56 minutes is the definition of four nines. A working target is stated separately, and without a contractual consequence it is an SLO. A 0.1% cache error is 10× a four-nines budget, so either remove that hard dependency or move the target back to three nines.</p>
-      </div>
-    </div>
-    <h3><span class="lang-zh">六个常见翻车点</span><span class="lang-en">Six ways the estimate goes wrong</span></h3>
-    <table>
-      <thead>
-        <tr>
-          <th><span class="lang-zh">翻车说法</span><span class="lang-en">Weak answer</span></th>
-          <th><span class="lang-zh">错在哪一步</span><span class="lang-en">Which step breaks</span></th>
-          <th><span class="lang-zh">改成什么</span><span class="lang-en">What to say instead</span></th>
-        </tr>
-      </thead>
-      <tbody>
-        <tr>
-          <td><span class="lang-zh">「平均 2,000 QPS，4 台就够」</span><span class="lang-en">“2,000 QPS average, so 4 boxes”</span></td>
-          <td><span class="lang-zh">4 × 600 = 2,400，接不住 6,000</span><span class="lang-en">4 × 600 = 2,400, short of 6,000</span></td>
-          <td><span class="lang-zh">6,000 / 600 = 10，再用 86,400 复核约 12</span><span class="lang-en">6,000 / 600 = 10, and the 86,400 check is about 12</span></td>
-        </tr>
-        <tr>
-          <td><span class="lang-zh">「一年 3.65 TB」</span><span class="lang-en">“3.65 TB a year”</span></td>
-          <td><span class="lang-zh">副本数被当成 1，盘少 3 倍</span><span class="lang-en">Replica count was left at 1, disk short by 3×</span></td>
-          <td><span class="lang-zh">3.65 × 3 = 10.95 TB，约 11 TB 行拷贝</span><span class="lang-en">3.65 × 3 = 10.95 TB, about 11 TB of row copies</span></td>
-        </tr>
-        <tr>
-          <td><span class="lang-zh">「API 按整页或整图出站」</span><span class="lang-en">“The API egresses the page or the images”</span></td>
-          <td><span class="lang-zh">feed 会变成 24 Gb/s；短链会变成 92.8 Gb/s</span><span class="lang-en">The feed becomes 24 Gb/s; the short link becomes 92.8 Gb/s</span></td>
-          <td><span class="lang-zh">JSON 960 Mb/s，302 是 46.4 Mb/s，大字节走自己的回程</span><span class="lang-en">JSON is 960 Mb/s, the 302 is 46.4 Mb/s, large bytes take their own return</span></td>
-        </tr>
-        <tr>
-          <td><span class="lang-zh">「磁盘就是 10 ms，这是我们的 SLO」</span><span class="lang-en">“Disk is 10 ms, and that is our SLO”</span></td>
-          <td><span class="lang-zh">10 ms 是演讲里的寻道数量级</span><span class="lang-en">10 ms is a seek order of magnitude from the talk</span></td>
-          <td><span class="lang-zh">标明出处和数量级；闪存要换测量，跨洲仍是 150 ms</span><span class="lang-en">Name the source and the order of magnitude; flash needs a measurement; intercontinental is still 150 ms</span></td>
-        </tr>
-        <tr>
-          <td><span class="lang-zh">「两个 99.9% 的区域就是六个 9」</span><span class="lang-en">“Two 99.9% zones make six nines”</span></td>
-          <td><span class="lang-zh">把共享故障域当成独立</span><span class="lang-en">Treats shared fate as independence</span></td>
-          <td><span class="lang-zh">先算单跳是否吃光预算；不要把台数乘成更多的 9</span><span class="lang-en">Bill one hop against the budget first; do not multiply boxes into more nines</span></td>
-        </tr>
-        <tr>
-          <td><span class="lang-zh">「Cache 挂了就直接查库」</span><span class="lang-en">“If the cache dies, just read the database”</span></td>
-          <td><span class="lang-zh">6,000 次/秒对每盘约 100 次寻道，差约 60 倍</span><span class="lang-en">6,000/s against about 100 seeks per disk, about 60× short</span></td>
-          <td><span class="lang-zh">零星 0.1% 可以绕（6 次/秒）；整层宕机要封顶，再给旧值或 503</span><span class="lang-en">Bypass scattered 0.1% errors (6/s); a whole outage needs a cap, then stale data or 503</span></td>
-        </tr>
-      </tbody>
-    </table>
-  </section>
-
-  <section>
-    <h2><span class="lang-zh">收尾：四笔都要改到图上</span><span class="lang-en">Close: all four numbers have to change the drawing</span></h2>
-    <div class="bilingual">
-      <div class="lang-zh"><p class="col-kicker">中文</p>
-        <p class="say">feed 的白板：10M DAU × 20 / 10<sup>5</sup> = 2,000，×3 = 6,000，再除以 600 得到 10 台。API 峰值 960 Mb/s，图片 24 Gb/s 走 CDN，90% 命中时回源 2.4 Gb/s。元数据 3.65 TB × 3 ≈ 11 TB，图片、CDN、日志不在里面。命中约 21 ms，未命中约 32 ms；95% 命中时 Primary 只扛 300 次寻道/秒，跨洲 150 ms 要靠就近的命中路径解决。99.9% 允许每天 20 万次失败，Cache 的 0.1% 会把它花完，所以红线不能画到用户；整层 Cache 宕机时绕路要封顶。短链用同一套除法：11.6K 峰值读得到约 20 台，302 只有 5.8 MB/s，原始行约 183 GB。</p>
-        <p>下一章做构件时，限流阈值就从这里的峰值来。<a class="chip" href="ch04.html">Ch04</a> 问的是超过 6,000 之后拒绝谁。<a class="chip" href="ch09.html">Ch09</a> 把短链的 11.6 和 11.6K 接成读写路径。可用性的机制、SLO 和错误预算的操作，留到 <a class="chip" href="ch36.html">Ch36</a> 的权衡章，本章只把定义和一笔算术算清。</p>
-      </div>
-      <div class="lang-en"><p class="col-kicker">English</p>
-        <p class="say">Feed board: 10M DAU × 20 / 10<sup>5</sup> = 2,000, times 3 is 6,000, divided by 600 is 10 boxes. API peak is 960 Mb/s. Images at 24 Gb/s go through the CDN, and at 90% hits origin sees 2.4 Gb/s. Metadata is 3.65 TB × 3 ≈ 11 TB, and images, the CDN, and logs are outside it. A hit is about 21 ms and a miss about 32 ms; at 95% hits Primary absorbs only 300 seeks/s, and the 150 ms intercontinental hop needs a hit path near the user. 99.9% allows 200,000 failures a day, a 0.1% cache error spends that, and the red line must not reach the user; a whole-cache outage needs a capped bypass. The short link uses the same division: 11.6K peak reads are about 20 boxes, the 302 is only 5.8 MB/s, and raw rows are about 183 GB.</p>
-        <p>When the next chapters build components, the rate-limit threshold comes from this peak. <a class="chip" href="ch04.html">Ch04</a> asks who is rejected above 6,000. <a class="chip" href="ch09.html">Ch09</a> turns the short link’s 11.6 and 11.6K into read and write paths. The machinery of availability, SLOs, and operating an error budget waits for the trade-off chapter, <a class="chip" href="ch36.html">Ch36</a>. Here the definition and one arithmetic step are enough.</p>
-      </div>
-    </div>
-  </section>
-
-  <section>
-    <h2><span class="lang-zh">引用</span><span class="lang-en">References</span></h2>
-    <ol class="references">
-      <li>[1] Jeff Dean, <a href="https://static.googleusercontent.com/media/research.google.com/en/us/people/jeff/stanford-295-talk.pdf"><em>Software Engineering Advice from Building Large-Scale Distributed Systems</em></a>, Stanford CS295 slides, Google-hosted PDF. “Numbers Everyone Should Know,” and the serial-versus-parallel thumbnail estimate (about 560 ms versus about 18 ms, variance noted as 30–60 ms).</li>
-      <li>[2] Jeff Dean, <a href="https://www.cs.cornell.edu/projects/ladis2009/talks/dean-keynote-ladis2009.pdf"><em>Designs, Lessons and Advice from Building Large Distributed Systems</em></a>, LADIS 2009 keynote slides. Same stable orders of magnitude; mutex, Zippy, and sequential disk differ from [1] and are not used here.</li>
-      <li>[3] Marc Alvidrez, “Embracing Risk,” in Beyer, Jones, Petoff, and Murphy, eds., <a href="https://sre.google/sre-book/embracing-risk/"><em>Site Reliability Engineering</em></a>, 2016. 99.99% as 52.56 minutes/year; request success rate; 2.5 million requests/day at 99.99% allows 250 errors; error budgets.</li>
-      <li>[4] Chris Jones, John Wilkes, and Niall Murphy, with Cody Smith, “Service Level Objectives,” <a href="https://sre.google/sre-book/service-level-objectives/">same book</a>. Availability as time fraction and as yield; SLO versus SLA.</li>
-      <li>[5] <a href="https://sre.google/workbook/implementing-slos/">Implementing SLOs</a>, <em>The Site Reliability Workbook</em>. Extra nines have diminishing user value; multiplying two zones into 99.9999% assumes independence the workbook says you do not have.</li>
-      <li>[6] NIST, <a href="https://physics.nist.gov/cuu/Units/binary.html"><em>Prefixes for binary multiples</em></a>, Reference on Constants, Units, and Uncertainty. IEC binary prefixes (KiB = 2<sup>10</sup> bytes, GiB = 2<sup>30</sup>, TiB = 2<sup>40</sup>) versus SI decimal prefixes (KB = 10<sup>3</sup> bytes).</li>
-    </ol>
-    <p class="cite"><span class="lang-zh">站内延伸：</span><span class="lang-en">Course follow-ups:</span> <a class="chip" href="ch01.html">Ch01</a> <a class="chip" href="ch04.html">Ch04</a> <a class="chip" href="ch09.html">Ch09</a> <a class="chip" href="ch36.html">Ch36</a></p>
-  </section>
-
-  <section>
-    <h2><span class="lang-zh">闪卡</span><span class="lang-en">Flashcards</span></h2>
-    <p class="cite"><span class="lang-zh">点一下翻面。要能把除法说出来。</span><span class="lang-en">Click to flip. You need to be able to say the division.</span></p>
-    <div class="cards-grid">
-      <button type="button" class="flip"><span class="q"><span class="lang-zh">10M DAU、每人 20 次读，白板平均 QPS 是多少？</span><span class="lang-en">10M DAU, 20 reads each. What is the board’s average QPS?</span></span><span class="a"><span class="lang-zh">200,000,000 / 10<sup>5</sup> = 2,000。用 86,400 复核是 2,314.8。</span><span class="lang-en">200,000,000 / 10<sup>5</sup> = 2,000. The 86,400 check is 2,314.8.</span></span></button>
-      <button type="button" class="flip"><span class="q"><span class="lang-zh">为什么是 10 台而不是 4 台？</span><span class="lang-en">Why 10 boxes rather than 4?</span></span><span class="a"><span class="lang-zh">峰值 6,000 / (1,000 × 0.6) = 10。按平均 2,000 / 600 得到约 4 台，计划容量只有 2,400 QPS。</span><span class="lang-en">Peak 6,000 / (1,000 × 0.6) = 10. Using the average, 2,000 / 600 is about 4 boxes, and planned capacity is only 2,400 QPS.</span></span></button>
-      <button type="button" class="flip"><span class="q"><span class="lang-zh">API 和图片的峰值带宽各是多少？</span><span class="lang-en">What are the peak bandwidths for the API and for images?</span></span><span class="a"><span class="lang-zh">6,000 × 20 KB = 120 MB/s = 960 Mb/s。6,000 × 500 KB = 3 GB/s = 24 Gb/s，走 CDN，不走 App。</span><span class="lang-en">6,000 × 20 KB = 120 MB/s = 960 Mb/s. 6,000 × 500 KB = 3 GB/s = 24 Gb/s, through the CDN, not through App.</span></span></button>
-      <button type="button" class="flip"><span class="q"><span class="lang-zh">CDN 命中 90% 时，对象存储的峰值出口是多少？</span><span class="lang-en">At a 90% CDN hit rate, what is the object store’s peak egress?</span></span><span class="a"><span class="lang-zh">3 GB/s × 10% = 300 MB/s = 2.4 Gb/s。CDN 边缘仍是 24 Gb/s；命中率掉到 80%，回源翻倍。</span><span class="lang-en">3 GB/s × 10% = 300 MB/s = 2.4 Gb/s. The CDN edge is still 24 Gb/s; at 80% hits, origin doubles.</span></span></button>
-      <button type="button" class="flip"><span class="q"><span class="lang-zh">11 TB 里面有什么？</span><span class="lang-en">What is inside the 11 TB?</span></span><span class="a"><span class="lang-zh">10 GB/天 × 365 = 3.65 TB 行数据，×3 副本 = 10.95 TB。CDN、日志、每天 2 TB 的新图都不在里面。</span><span class="lang-en">10 GB/day × 365 = 3.65 TB of rows, times 3 replicas = 10.95 TB. The CDN, logs, and 2 TB/day of new images are outside it.</span></span></button>
-      <button type="button" class="flip"><span class="q"><span class="lang-zh">10 ms 寻道可以当成 SLO 吗？</span><span class="lang-en">Can the 10 ms seek be an SLO?</span></span><span class="a"><span class="lang-zh">不能。它是 Dean 两份幻灯片一致的寻道数量级。命中预算约 21 ms；跨洲往返是 150 ms。</span><span class="lang-en">No. It is the seek order of magnitude both of Dean’s slide decks agree on. The hit budget is about 21 ms. The intercontinental round trip is 150 ms.</span></span></button>
-      <button type="button" class="flip"><span class="q"><span class="lang-zh">Cache 错误率 0.1% 对 99.9% 意味着什么？</span><span class="lang-en">What does a 0.1% cache error rate mean for 99.9%?</span></span><span class="a"><span class="lang-zh">200M × 0.001 = 200,000 次/天，花完整个预算。四个 9 只允许 20,000 次，这是 10 倍。</span><span class="lang-en">200M × 0.001 = 200,000/day, the entire budget. Four nines allow 20,000. This is 10× that.</span></span></button>
-      <button type="button" class="flip"><span class="q"><span class="lang-zh">0.1% 的 Cache 错误能绕到 Primary，整层宕机为什么不行？</span><span class="lang-en">Scattered 0.1% cache errors can bypass to Primary. Why not a whole-cache outage?</span></span><span class="a"><span class="lang-zh">0.1% × 6,000 = 6 次/秒，远低于每盘约 100 次寻道。整层宕机是 6,000 次/秒，约 60 块盘的量，只能封顶，再给旧值或 503。</span><span class="lang-en">0.1% × 6,000 = 6/s, far under about 100 seeks per disk. A whole outage is 6,000/s, about 60 disks’ worth, so cap it, then serve stale data or 503.</span></span></button>
-      <button type="button" class="flip"><span class="q"><span class="lang-zh">短链 1M 创建/天、100 次跳转/创建，峰值读 QPS？</span><span class="lang-en">Short link: 1M creates/day, 100 redirects each. Peak read QPS?</span></span><span class="a"><span class="lang-zh">100,000,000 / 86,400 = 1,157，约 1.16K，×10 ≈ 11.6K。再除以 600 得到约 20 台。</span><span class="lang-en">100,000,000 / 86,400 = 1,157, about 1.16K, times 10 ≈ 11.6K. Divide by 600 and you get about 20 boxes.</span></span></button>
-      <button type="button" class="flip"><span class="q"><span class="lang-zh">99.99% 的一年停机怎么算？</span><span class="lang-en">How do you compute one year of downtime at 99.99%?</span></span><span class="a"><span class="lang-zh">0.0001 × 365 × 24 × 60 = 52.56 分钟。这是定义，SRE 书里的例子，不是承诺。</span><span class="lang-en">0.0001 × 365 × 24 × 60 = 52.56 minutes. That is the definition, the example in the SRE book, not a promise.</span></span></button>
-    </div>
-  </section>
-
+    </figure><div class="bilingual"><div class="lang-zh"><p><strong>回源要算总量。</strong>95%命中留下300/s正常miss，Cache错误可能再添约6/s；重合部分应去重，独立失败时总量为6000×[0.001+0.999×0.05]=305.7/s。图中约306/s是保守口算，不能只拿6/s与100/s比较。故障100/s上限必须是整个App层共享的预算，并扣除仍存的写入和其他负载；每实例各放100/s会放大成N倍。</p></div><div class="lang-en"><p><strong>Budget total origin demand.</strong> A 95% hit rate leaves 300/s of normal misses and cache errors may add about 6/s. Avoid double-counting overlaps; with independent errors the total is 6000×[0.001+0.999×0.05]=305.7/s. About 306/s is a conservative shortcut, not a comparison of six with 100. The outage cap of 100/s must be shared across the App tier and account for writes/other work; 100 per instance multiplies it by N.</p></div></div><div class="bilingual"><div class="lang-zh"><p>全缓存不可用且没有合格旧值时，假设回源100/s均成功，白板剩5,900/s失败，200,000/5,900≈33.90秒花完日预算；用精确读峰值则200,000/(6,944.44−100)≈29.22秒。旧值最多30秒仅是产品假设，必须已存在且仍有效；限流、合并、旧值各自只能减少一部分压力，不能保证缓存宕机仍达标。</p></div><div class="lang-en"><p>With no cache or eligible stale value, assuming 100/s origin reads succeed, the shortcut leaves 5,900 failures/s and spends the daily budget in 200,000/5,900≈33.90 seconds. Exact reads give 200,000/(6,944.44−100)≈29.22 seconds. A 30-second stale allowance is a product assumption and requires an available, still-eligible copy; caps, coalescing, and stale data do not guarantee the SLO during cache outage.</p></div></div><div class="bilingual"><div class="lang-zh"><p>三个串行必需依赖各成功99.95%，只有在同一请求口径且失败<strong>独立</strong>时，才可乘得0.9995³≈99.850075%；“失败互不重叠”应相加错误率得99.85%，不是独立。共同故障域会破坏独立假设，增加副本或地域不自动增加几个9。见 <a href="https://sre.google/workbook/implementing-slos/">Implementing SLOs</a> 对依赖独立性的讨论。</p></div><div class="lang-en"><p>For three required serial dependencies each at 99.95%, multiplication gives 0.9995³≈99.850075% only with matching request scope and <strong>independent</strong> failures. Mutually exclusive failures instead sum to 99.85%; they are not independent. Shared failure domains break independence, so replicas or regions do not automatically add nines. See <a href="https://sre.google/workbook/implementing-slos/">Implementing SLOs</a>.</p></div></div><div class="bilingual"><div class="lang-zh"><p>若另用365天的时间可用率定义，99.99%允许0.0001×365×24×60=52.56分钟/年；99.9%是8.76小时/年。这只是该指标的预算，不是上图请求失败自动对应的停机记录。来源：<a href="https://sre.google/sre-book/availability-table/">SRE Availability Table</a>。</p></div><div class="lang-en"><p>Under a separate 365-day time-availability definition, 99.99% allows 0.0001×365×24×60=52.56 minutes/year; 99.9% allows 8.76 hours/year. These are time budgets, not measured downtime inferred from the request failures above. See the <a href="https://sre.google/sre-book/availability-table/">SRE Availability Table</a>.</p></div></div>
+</section>
+<section><h2><span class="lang-zh">8 · 迁移到短链，再做一次口述复盘</span><span class="lang-en">8 · Transfer to short links and rehearse</span></h2>
+<div class="bilingual"><div class="lang-zh"><p>对齐<a href="ch09.html">Ch09</a>：1M创建/天、100M跳转/天、峰值10倍。跳转读峰值100M/86,400×10≈11,574.07/s，取保守11,600；每台600预算，正常20台、同预算N−1需21台。若写与读等成本同池，加约115.74/s后仍为20/21台，但必须实际复算，不能把“小比例”当通则。</p></div><div class="lang-en"><p>Following <a href="ch09.html">Ch09</a>: 1M creates/day, 100M redirects/day, 10× peak. Redirect peak=100M/86,400×10≈11,574.07/s, conservatively 11,600. A 600/s budget gives 20 instances normally, 21 for N−1. Equal-cost shared writes add about 115.74/s and still give 20/21, but recompute rather than assuming a small fraction never matters.</p></div></div><div class="bilingual"><div class="lang-zh"><p>500 B响应按11,600/s为5.8 MB/s=46.4 Mb/s；目标网页不经过短链服务。500 B记录×1M/天×365=182.5 GB，三份547.5 GB；索引、备份、日志另计。这三笔分别落到跳转实例、出口链路、映射存储。</p></div><div class="lang-en"><p>At 11,600/s, 500 B responses give 5.8 MB/s=46.4 Mb/s; destination pages do not traverse the short-link service. 500 B×1M/day×365=182.5 GB, or 547.5 GB for three copies, before indexes, backups, and logs. The three numbers size redirect instances, egress, and mapping storage.</p></div></div><div class="bilingual"><div class="lang-zh"><p><strong>面试口述：</strong>“我先列假设和单位。按日请求除86,400、乘峰值，按成本加总，除以单机预算向上取整；再验证少一台。带宽按实际字节路径，存储按日新增乘留存和物理开销。最后用缓存全失效反推回源与错误预算，指出哪些数据需要压测才能定稿。”</p></div><div class="lang-en"><p><strong>Interview recap:</strong> “I state assumptions and units, divide daily requests by 86,400, apply peak and cost weights, then round up against the instance budget and check one failure. I charge bandwidth to actual byte paths and size storage from retained daily growth plus overhead. Finally, a full-cache-outage scenario tests origin and error budgets and identifies what needs measurement.”</p></div></div>
+</section>
+<section><h2><span class="lang-zh">闪卡</span><span class="lang-en">Flashcards</span></h2>
+<div class="cards-grid"><button type="button" class="flip"><span class="q"><span class="lang-zh">一天取10⁵秒是否保守？</span><span class="lang-en">Is 10⁵ seconds/day conservative?</span></span><span class="a"><span class="lang-zh">不是；所得速率为精确值0.864倍，低估13.6%。台数复核用86,400。</span><span class="lang-en">No; it gives 0.864 of the exact rate, an underestimate of 13.6%. Recheck sizing with 86,400.</span></span></button><button type="button" class="flip"><span class="q"><span class="lang-zh">本例共享读写需要几台？</span><span class="lang-en">How many boxes for shared reads/writes?</span></span><span class="a"><span class="lang-zh">等成本峰值7,291.67/s，每台600：正常13，保持60%预算的N−1需14。</span><span class="lang-en">At equal-cost peak 7,291.67/s and 600 per box: 13 normally, 14 for N−1 at 60%.</span></span></button><button type="button" class="flip"><span class="q"><span class="lang-zh">10台故障后67%说明什么？</span><span class="lang-en">What does 67% after a loss mean?</span></span><span class="a"><span class="lang-zh">白板仅读6,000/(9×1,000)≈67%；超过正常60%，不是同预算N−1。</span><span class="lang-en">Shortcut reads: 6,000/(9×1,000)≈67%, exceeding 60%; not N−1 at the same budget.</span></span></button><button type="button" class="flip"><span class="q"><span class="lang-zh">CDN 90%命中就只有10%回源字节？</span><span class="lang-en">Do 90% CDN hits mean 10% origin bytes?</span></span><span class="a"><span class="lang-zh">仅当是字节命中率，或请求对象等大；大小偏斜时不能直接相乘。</span><span class="lang-en">Only for byte hit rate or equal-sized objects; size skew invalidates request-hit multiplication.</span></span></button><button type="button" class="flip"><span class="q"><span class="lang-zh">10.95 TB能直接采购？</span><span class="lang-en">Can we provision exactly 10.95 TB?</span></span><span class="a"><span class="lang-zh">那只是三份行数据；索引、日志、备份、填充率、重建空间与可放置性另算。</span><span class="lang-en">It covers three row copies only; add indexes, logs, backups, fill limits, rebuild space, and placement constraints.</span></span></button><button type="button" class="flip"><span class="q"><span class="lang-zh">6/s故障回源一定安全吗？</span><span class="lang-en">Are six fallback reads/s safe?</span></span><span class="a"><span class="lang-zh">不一定，正常miss约300/s；总回源还含写与重试，必须检查剩余预算。</span><span class="lang-en">Not necessarily: normal misses are already about 300/s; count writes/retries and check spare capacity.</span></span></button><button type="button" class="flip"><span class="q"><span class="lang-zh">99.9%请求成功率等于一年停8.76小时？</span><span class="lang-en">Does 99.9% request success mean 8.76 hours of downtime?</span></span><span class="a"><span class="lang-zh">不能直接换算。8.76小时属于365天时间指标；请求预算按合格请求数算。</span><span class="lang-en">No. 8.76 hours belongs to a 365-day time metric; request budgets use eligible request counts.</span></span></button><button type="button" class="flip"><span class="q"><span class="lang-zh">短链正常20台能否同预算N−1？</span><span class="lang-en">Do twenty short-link boxes meet N−1 at the same budget?</span></span><span class="a"><span class="lang-zh">不能。19×600=11,400，小于11,600；需21台，故障剩20×600=12,000。</span><span class="lang-en">No. 19×600=11,400 is below 11,600. Deploy 21 to leave 20×600=12,000.</span></span></button></div>
+</section>
   <p><button type="button" class="read-toggle"><span class="when-off"><span class="lang-zh">我已学完本章</span><span class="lang-en">Mark this chapter done</span></span><span class="when-on"><span class="lang-zh">已学完本章</span><span class="lang-en">Completed</span></span></button></p>
   <p class="cite"><span class="lang-zh">进度存在这台浏览器里。</span><span class="lang-en">Saved in this browser only.</span></p>
 </article>

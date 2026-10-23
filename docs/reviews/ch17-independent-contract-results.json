@@ -1,0 +1,87 @@
+{
+  "kind": "reviewer arithmetic, exact-rational bucket model and manual adapter traces",
+  "htmlSha256": "213c360c3a126a8fc2ccc75b2879e7ac7c7ff126279e9256d80817cc7b9f3b0c",
+  "checks": 511,
+  "numbers": {
+    "gateways": 4,
+    "n_minus_1_capacity": 12000,
+    "normal_original_utilization": 0.625,
+    "n_minus_1_original_utilization": 0.8333333333333334,
+    "n_minus_1_steady_retry_utilization": 0.875,
+    "aggregate_body_bytes_per_direction": 60000000,
+    "aggregate_body_bits_per_direction": 480000000,
+    "normal_bits_per_direction_per_instance": 120000000.0,
+    "n_minus_1_bits_per_direction_per_instance": 160000000.0,
+    "signature_cores": 2.0,
+    "nominal_two_copy_bucket_bytes": 200000000,
+    "limiter_inflight_at_2ms": 20.0,
+    "same_user_wrong_four_buckets_rate": 80,
+    "same_user_wrong_four_buckets_burst": 160,
+    "BFF_serial_ms": 260,
+    "BFF_parallel_ms": 140,
+    "uniform_cohort_v2_qps": 1000.0,
+    "two_attempt_path_ms": 200,
+    "steady_retry_earning_per_second": 500.0,
+    "fixed_pool_credit_storage": 500,
+    "slow_upstream_work_at_240ms": 2400.0,
+    "normal_slow_streams_per_instance": 600.0,
+    "n_minus_1_slow_streams_per_instance": 800.0,
+    "full_request_work_at_300ms": 3000.0,
+    "log_bytes_per_second": 3000000,
+    "one_hour_log_bytes": 10800000000
+  },
+  "traces": [
+    {
+      "case": "normal",
+      "steps": [
+        "pin v42, validate trusted issuer/audience/scopes",
+        "derive t1/alice route context, ignore forged inbound headers",
+        "Redis definite ALLOW, check fixed local expiry",
+        "one stream + breaker ticket, Orders ownership check, hop-by-hop response"
+      ]
+    },
+    {
+      "case": "unknown-after-debit",
+      "steps": [
+        "Redis decrements at +2ms",
+        "waiter chooses UNKNOWN at +5ms",
+        "risky route sends 503 without refund or forward",
+        "late ALLOW at +10ms must not change terminal decision"
+      ]
+    },
+    {
+      "case": "safe-unknown",
+      "steps": [
+        "Redis result unknown",
+        "policy permits public safe read and controller confirms fixed owner",
+        "one emergency token selects one degraded forward",
+        "late Redis ALLOW/DENY does not create another dispatch"
+      ]
+    },
+    {
+      "case": "proxy-replay",
+      "steps": [
+        "GET/HEAD only; body replayable; no client response begun",
+        "one prior local stream must actually terminate",
+        "backoff then recheck fixed expiry and cancellation",
+        "consume earned credit, acquire slot, breaker, recheck before dispatch",
+        "POST business key never bypasses this gateway retry rule"
+      ]
+    },
+    {
+      "case": "context-publication",
+      "steps": [
+        "request captures v42 once",
+        "publisher installs v43 while validation/quota is pending",
+        "current request keeps v42 audience/scopes/route/cohort and backend version",
+        "a subsequent request gets v43; services still check object ownership"
+      ]
+    }
+  ],
+  "passed": true,
+  "limitations": [
+    "No cryptographic JWT/mTLS/HTTP parser/Redis call or real deployment is exercised.",
+    "500 interval checks are one model experiment, not 500 independent infrastructure guarantees.",
+    "In-flight estimates condition on stated rate and all-slow duration; they do not prove capacity."
+  ]
+}

@@ -1,0 +1,31 @@
+complete(owner, video_id, upload_id, physical_version):
+  u = primary.read_upload(video_id, upload_id)
+  require u != null  # Missing upload: 404; a failed read: 503.
+  require u.owner == owner and physical_version not in {null, "null"}
+  if u.bound_version != null:
+    return u.receipt if u.bound_version == physical_version else 409
+  # Upload rows protect their server-assigned key from GC until retired.
+  p = HEAD(u.bucket, u.key, versionId=physical_version, checksumMode=ENABLED)
+  require p.size == u.expected_size
+  require p.checksum.algorithm == CRC32 and p.checksum.type == FULL_OBJECT
+  require p.checksum == u.expected_full_object_checksum
+  BEGIN
+    v = SELECT Video WHERE id = video_id FOR UPDATE
+    u = SELECT Upload WHERE id = upload_id FOR UPDATE
+    require u.owner == owner
+    if u.bound_version != null:
+      ROLLBACK
+      return u.receipt if u.bound_version == physical_version else 409
+    require u.state == UPLOADING and u.expires_at > db_clock()
+    require v.active_upload == upload_id and v.visibility != REMOVED
+    source = (video_id, u.source_version, u.bucket, u.key, physical_version,
+              p.size, p.checksum)
+    INSERT SourceBinding(source)  # unique (video_id, source_version)
+    UPDATE Upload SET state = UPLOADED, bound_version = physical_version,
+                      receipt = source WHERE id = upload_id
+    J = (video_id, u.source_version, v.target_recipe)
+    UPDATE Video SET target = J WHERE id = video_id
+    INSERT Job(J, state=QUEUED, epoch=0, attempts=0, next_at=db_clock())
+      ON CONFLICT (video_id, source_version, recipe_version) DO NOTHING
+  COMMIT
+  return 202 with source  # Stored source receipt; not a playback promise.

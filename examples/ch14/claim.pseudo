@@ -1,0 +1,25 @@
+claim(J):
+  BEGIN  # One PostgreSQL primary; the same lock order for publish and GC.
+    v = SELECT Video WHERE id = J.video_id FOR UPDATE
+    j = SELECT Job WHERE key = J FOR UPDATE
+    if j.state in {DONE, FAILED, OBSOLETE}:
+      COMMIT; return TERMINAL
+    if v.target != J or v.visibility == REMOVED:
+      UPDATE Job SET state = OBSOLETE WHERE key = J
+      COMMIT; return TERMINAL
+    now = db_clock()  # Evaluate after obtaining row locks.
+    due = (j.state in {QUEUED, RETRY_WAIT} and j.next_at <= now)
+          or (j.state == RUNNING and j.lease_until <= now)
+    if not due:
+      COMMIT; return NO_CLAIM
+    if j.attempts >= 3:
+      UPDATE Job SET state = FAILED, error = "attempt budget exhausted"
+        WHERE key = J
+      COMMIT; return TERMINAL
+    epoch = j.epoch + 1
+    UPDATE Job SET state = RUNNING, epoch = epoch,
+                   attempts = attempts + 1, lease_until = now + 120s
+      WHERE key = J
+    INSERT Build(J, epoch, state=BUILDING, prefix="outputs/J/epoch/")
+  COMMIT
+  return (J, epoch, source_binding(J), immutable_recipe(J))

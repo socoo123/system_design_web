@@ -1,0 +1,35 @@
+create(owner, key, request):
+  p = validateSyntaxAndCanonicalize(request) // HTTP(S), alias, expiry shape
+  h = SHA256(canonicalBytes(p))         // all creation fields
+  for attempt in 1..5:
+    old = PRIMARY SELECT * FROM Idempotency WHERE owner_id=:owner AND key=:key
+    if old exists: return old.request_hash == h ? (old.response_status, old.response_body) : 409
+    if p.expiry exists and p.expiry <= now(): return 400
+    initialStatus = trustedRiskAdmission(p) // active/pending; denial=403, error=503
+    code = p.alias ?? nextCandidate()   // segment OR uniform random
+    response = {code, short_url: BASE_URL + code, version: 1, status: initialStatus}
+    BEGIN ISOLATION LEVEL READ COMMITTED
+    try:
+      // SQL values below are bound parameters, never string interpolation.
+      INSERT INTO Link(code, owner_id, target_url, status, expires_at, version)
+        VALUES(code, owner, p.url, initialStatus, p.expiry, 1)
+      INSERT INTO Idempotency(owner_id,key,request_hash,code,response_status,
+                              response_body,retain_until)
+        VALUES(owner,key,h,code,201,response,db_now()+24h)
+      COMMIT                           // only confirmed commit permits 201
+      return 201 with response
+    catch unique_violation(constraint):
+      ROLLBACK                         // before ANY new SQL
+      winner = PRIMARY SELECT * FROM Idempotency WHERE owner_id=:owner AND key=:key
+      if winner exists:
+        return winner.request_hash == h ? (winner.response_status, winner.response_body) : 409
+      if constraint == 'link_pkey' and p.alias exists: return 409
+      if constraint not in {'link_pkey','idempotency_pkey'}: return 503
+      continue                         // generated collision: fresh candidate
+    catch commit_outcome_unknown:
+      discard_connection()             // ROLLBACK cannot undo a commit
+      return 503 {retry_with_same_key:true, outcome:'unknown'}
+    catch database_error:
+      ROLLBACK if connection is usable
+      return 503 {retry_with_same_key:true}
+  return 503 {retry_with_same_key:true}  // never loop without a bound

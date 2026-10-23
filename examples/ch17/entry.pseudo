@@ -1,0 +1,28 @@
+# Pseudocode: one HTTP request; adapters below are part of the contract.
+handle(raw, transport):
+  deadline = local_deadline_at_receipt(300_ms)
+  snap = snapshots.get()                 # one immutable local reference
+  if snap is absent or snap.security_expired(): return 503
+  req = parse_once_and_canonicalize(raw, snap.normalization)
+  route = snap.match(req.host, req.method, req.path)
+  if route is absent: return 404
+  client_ip = transport.original_peer_from_trusted_LB_listener()
+  # Ignore public Forwarded/X-Forwarded-*; trust no arbitrary chain prefix.
+  headers = req.headers.remove_reserved_identity_forwarding_and_canary()
+  token = req.require_single_bearer_token()
+  try:
+    auth = verify_access(token, snap.allowed_issuers, route.audience)
+    # Trusted JWKS only; alg/typ/signature/iss/aud/exp/nbf + tenant mapping.
+  catch InvalidCredential: return 401_with_bearer_challenge
+  catch ValidationDependencyUnavailable: return 503
+  if not auth.scopes.contains_all(route.scopes): return 403
+  target = route.choose(auth.tenant, auth.subject, snap.rollout_salt)
+  ctx = InternalContext(auth.tenant, auth.subject, route.id, snap.version)
+  # Local object, never reconstructed from an inbound identity header.
+  admission = admit_once(ctx, route, deadline.remaining())
+  if admission.denied: return admission.http_error
+  if deadline.expired(): return 504          # ALLOW cannot extend time
+  # Pin snap, route, target version and ctx for the whole request/retry.
+  return proxy(req, target, headers, ctx, deadline)
+  # Only Gateway-authenticated mTLS reaches the internal listener.
+  # BFF preserves ctx over another authenticated hop; Orders checks ownership.

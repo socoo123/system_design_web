@@ -1,0 +1,35 @@
+play_grant(viewer, video_id, key, renew_grant_id = NONE):
+  intent = canonical(viewer, video_id, renew_grant_id)
+  BEGIN
+    v = SELECT Video WHERE id = video_id FOR UPDATE
+    require current_playback_policy(viewer, v) and v.visibility != REMOVED
+    prior = PlaybackGrant[viewer, key]
+    require prior is absent or prior.intent == intent else KEY_REUSED
+    if prior exists: chosen = prior.build
+    else if renew_grant_id != NONE:
+      old = owned_grant(viewer, video_id, renew_grant_id)
+      require old.expires_at > db_clock() else EXPIRED
+      chosen = old.build
+    else: chosen = v.ready_version  # Re-read under lock, never a cached pointer.
+    require chosen != NONE else PROCESSING
+    j = SELECT Job WHERE key = chosen.J FOR UPDATE
+    b = SELECT Build WHERE key = chosen FOR UPDATE
+    require b.belongs_to(video_id) and b.state == PUBLISHED
+    if prior exists:
+      require prior.expires_at > db_clock() else EXPIRED
+      g = prior  # Replay never extends an already committed deadline.
+    else:
+      expires = db_clock() + 300s
+      protected_until = expires + clock_skew_bound + read_drain_bound + manifest_window
+      g = Grant(viewer, key, intent, chosen, b.root, expires, protected_until)
+      INSERT PlaybackGrant(g)  # Unique (viewer, key); fixed root and expiry.
+      UPDATE Build SET gc_not_before = max(gc_not_before, protected_until)
+        WHERE key = chosen
+  COMMIT
+  # Unknown COMMIT: reconnect and recover this same viewer/key; do not sign yet.
+  g = primary.read_committed_grant(viewer, key)
+  require g != NONE else RETRY_SAME_KEY
+  require g.intent == intent else KEY_REUSED
+  require trusted_now() < g.expires_at else EXPIRED
+  return sign(g.root, g.build_prefix, expires_at=g.expires_at)
+  # The signer cannot replace the root or restart the 300s TTL.

@@ -1,0 +1,29 @@
+submit(auth, request_key, post, parent, body):
+  intent = canonical(post, parent, body, attachments, policy_version)
+  transaction on ONE post-shard authority:
+    lock pre-created post guard; authorize(auth, post)
+    old = receipt(post, auth.user, request_key)  # unique within this post
+    if old: require old.intent == intent; return old.result
+    target = resolve_parent_in_this_post(parent)
+    require target is null OR (target.visible AND target.root.ever_public)
+    comment_id = fresh_unique_id()  # never reused
+    root = target.root_id if target else comment_id
+    insert pending(comment_id, post, parent, root, body, digest(body), version=1)
+    insert audit_outbox(comment_id, version=1, immutable_body_digest)
+    insert receipt(post, auth.user, request_key, intent, comment_id)
+  return 202 pending  # unknown commit: retry original key and intent
+
+apply_decision(trusted_event, approved):
+  transaction on the SAME authority:
+    lock post guard  # edit/delete/approval all use this guard
+    c = comment(trusted_event.post, trusted_event.comment)
+    if c.version != trusted_event.version OR c.status != pending: return NOOP
+    require c.body_digest == trusted_event.reviewed_digest
+    c.status = visible if approved else rejected
+    if approved: c.ever_public = true
+    save(c)
+    insert visibility_outbox(trusted_event.event_id, c.id, c.version, c.status)
+  ACK event only after commit; duplicate decision sees non-pending -> NOOP
+# Edit/delete increments content version, changes status, emits outbox together.
+# Deleted: clear body, profile and quote payloads; retain structural ids only.
+# Visibility-count consumers persist (event_id, effect) with increment together.

@@ -1,0 +1,90 @@
+{
+  "passed": true,
+  "checks": [
+    {
+      "command": [
+        "/Library/Java/JavaVirtualMachines/jdk-17.0.10.jdk/Contents/Home/bin/java",
+        "-version"
+      ],
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "java version \"17.0.10\" 2024-01-16 LTS\nJava(TM) SE Runtime Environment (build 17.0.10+11-LTS-240)\nJava HotSpot(TM) 64-Bit Server VM (build 17.0.10+11-LTS-240, mixed mode, sharing)\n"
+    },
+    {
+      "command": [
+        "/Library/Java/JavaVirtualMachines/jdk-17.0.10.jdk/Contents/Home/bin/javac",
+        "--release",
+        "17",
+        "-d",
+        "/var/folders/5k/y6qh6sfd2g30js0v0qrv4mfr0000gn/T/sd-c-first-wave-java17-0730j8ri",
+        "examples/ch02/ReadPath.java",
+        "examples/ch03/CapacityEstimate.java",
+        "examples/ch05/ConsistentRing.java",
+        "examples/ch05/ConsistentRingTest.java"
+      ],
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "command": [
+        "/Library/Java/JavaVirtualMachines/jdk-17.0.10.jdk/Contents/Home/bin/java",
+        "-cp",
+        "/var/folders/5k/y6qh6sfd2g30js0v0qrv4mfr0000gn/T/sd-c-first-wave-java17-0730j8ri",
+        "ReadPath"
+      ],
+      "exit_code": 0,
+      "stdout": "PASS: miss/hit, strong bypass, no downgrade, failover histories, authority, outage budget, TTL, DB failure, different clocks, slow fill\n",
+      "stderr": ""
+    },
+    {
+      "command": [
+        "/Library/Java/JavaVirtualMachines/jdk-17.0.10.jdk/Contents/Home/bin/java",
+        "-cp",
+        "/var/folders/5k/y6qh6sfd2g30js0v0qrv4mfr0000gn/T/sd-c-first-wave-java17-0730j8ri",
+        "CapacityEstimate"
+      ],
+      "exit_code": 0,
+      "stdout": "PASS: 10 valid cases, 7 rejected inputs, N-1 counterexample\nFeed peak=7291.666667; normal=13; N-1=14; 13 deployed after failure=7200 < peak\n",
+      "stderr": ""
+    },
+    {
+      "command": [
+        "/Library/Java/JavaVirtualMachines/jdk-17.0.10.jdk/Contents/Home/bin/java",
+        "-cp",
+        "/var/folders/5k/y6qh6sfd2g30js0v0qrv4mfr0000gn/T/sd-c-first-wave-java17-0730j8ri",
+        "ConsistentRingTest"
+      ],
+      "exit_code": 0,
+      "stdout": "PASS endpoint 0\nPASS endpoint 10\nPASS endpoint 11\nPASS endpoint 25\nPASS endpoint 40\nPASS endpoint 41\nPASS endpoint 75\nPASS endpoint 76\nPASS endpoint 99\nPASS addition changes exactly (10,25], 15/100\nPASS removal S2 share 50/100\nPASS remove all physical-owner tokens: 45/55\nPASS empty ring rejected\nPASS token collision rejected\nPASS duplicate same-owner token rejected\nPASS negative epoch rejected\nPASS unsigned order and equality\nPASS unsigned wrap and single node\nPASS input list cannot mutate snapshot\nPASS UTF-8/SHA-256/big-endian vector\nPASS install then route one coherent snapshot\nPASS stale, rollback, same-epoch fork rejected\nPASS competing expected-epoch installs: exactly one winner\nPASS modulo full cycle 9/12\nPASS cold origin 1363.64/s; prewarm 62%\nPASS 25 checks; local algorithm only, not a network fault test\n",
+      "stderr": ""
+    },
+    {
+      "command": [
+        "python3",
+        "examples/ch05/check-handoff.py"
+      ],
+      "exit_code": 0,
+      "stdout": "PASS one durable plan wins range reservation\nPASS freeze barrier includes all pre-freeze writes and deletion\nPASS prechecked epoch cannot commit after freeze\nPASS frozen old owner rejects reads too\nPASS same-plan freeze replay keeps barrier\nPASS restart restores fence in durable-state model\nPASS catch-up transfers value, deletion and retry receipt\nPASS new owner rejects premature requests\nPASS different plan cannot commit prepared candidate\nPASS control commit binds epoch, plan and final barrier\nPASS commit-to-activate crash window keeps old owner fenced\nPASS normal migrated read returns concurrent v2\nPASS lost ACK retry uses transferred receipt, no second mutation\nPASS same operation with different payload rejected\nPASS old Router cannot read stale value after new write\nPASS refreshed Router reads new owner\nPASS unsafe post-freeze commit creates divergence: counterexample\nPASS 17 contract traces; serialization/durability assumed, no network fault injection\n",
+      "stderr": ""
+    },
+    {
+      "command": [
+        "python3",
+        "examples/ch05/check-source.py"
+      ],
+      "exit_code": 0,
+      "stdout": "PASS page Java regions and handoff pseudocode match their sources\n",
+      "stderr": ""
+    }
+  ],
+  "files": {
+    "examples/ch02/ReadPath.java": "d4da4a8f06f5315e9ef69a786e5550d6ba4c3d4a69e05dab7e28fa2993d11589",
+    "examples/ch03/CapacityEstimate.java": "6f78cbc169de40342fa5fb92b7835a16453cd9bed60ef0a204be0b60460c5c54",
+    "examples/ch05/handoff.pseudo": "6c02847c84ff4f40a9d6a9228bd73acb5b885ce85222f4599884e6da83a9b81e",
+    "examples/ch05/ConsistentRingTest.java": "2330813bab7be4c8f2a850f6ef74c8437e6982b924f05a349a1ca830662ea266",
+    "examples/ch05/check-source.py": "a57d68c80101d65124e0522a9dfbbad813fc9a784b1bab8ff719d78874dfea1a",
+    "examples/ch05/ConsistentRing.java": "e22e57eb86cdc8ae94ef3d43fee07550beb5d42fdf728c99ce522184889be2da",
+    "examples/ch05/check-handoff.py": "f4a541a0f8d46a77bdd31cb1a3a53d0ba0b61ac4c11c6d2dcb43631401291b95"
+  }
+}

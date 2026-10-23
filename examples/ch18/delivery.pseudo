@@ -1,0 +1,29 @@
+receive_webhook(raw, signature):
+  event = official_SDK.verify_raw_body_and_timestamp(raw,signature,endpoint_secret)
+  require event uses configured provider/account/environment and allowlisted type
+  BEGIN
+  inserted = INSERT PaymentInbox(scope,event.id,raw,verified_metadata,state=READY)
+             ON CONFLICT(scope,event.id) DO NOTHING
+  if not inserted: require persisted immutable event identity matches
+  COMMIT; return 2xx                      # Full input survives before ACK.
+  # Inbox workers fetch canonical evidence, call apply_capture, then mark DONE.
+  # Crash between those commits repeats apply_capture, not a new capture action.
+
+relay(event):
+  row = read COMMITTED Outbox(event.id)     # READY is durable, not an in-memory list.
+  broker.publish(row.event_id,row.payload)
+  if durable broker ACK observed:
+    UPDATE Outbox SET sent=true WHERE event_id=row.event_id
+  # Unknown ACK: retain row and resend SAME id. Never mark before publish.
+
+consume_fulfillment(event):
+  BEGIN IN FulfillmentDB
+  new = INSERT Inbox(consumer,event.id,event.digest)
+        ON CONFLICT(consumer,event.id) DO NOTHING
+  if new:
+    INSERT Job(shipment_id=stable(event.order_id),order_id=event.order_id,state=READY)
+      ON CONFLICT(order_id) DO NOTHING     # One task even if two event IDs describe it.
+  else: require persisted event.digest == event.digest
+  COMMIT; broker.ACK(event)                # Inbox and Job cannot split on crash.
+  # External warehouse/refund RPC is NOT in this transaction. Stable operation ID,
+  # unknown-result queries, durable retry state, and terminal evidence remain needed.

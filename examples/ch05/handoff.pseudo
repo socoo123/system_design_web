@@ -1,0 +1,30 @@
+# Teaching pseudocode; one range, durable state, unavailable on ambiguity.
+# Control record serializes plans for this range via linearizable CAS.
+handoff(plan, oldEpoch, newEpoch, oldOwner, newOwner):
+    require newEpoch > oldEpoch
+    require control.CAS(ACTIVE(oldEpoch), COPYING(plan))
+    newOwner.stage(plan, snapshotAndLogFrom(oldOwner))
+    # FROZEN is persisted in the SAME serialization order as old reads/writes.
+    barrier = oldOwner.freeze(plan, oldEpoch)
+    # freeze rejects later old I/O and waits for earlier admitted work to finish.
+    newOwner.replayThrough(plan, barrier)  # updates, deletes, retry receipts
+    require newOwner.verifyRangeAndBarrier(plan, barrier)
+    require control.CAS(COPYING(plan), COMMITTED(newEpoch, plan, barrier))
+    newOwner.activateOnlyIfCommitted(plan, newEpoch, barrier)
+    publishCommittedManifest(newEpoch)   # lagging Routers get RETRY_EPOCH
+    # Timeout: read durable plan state; never blindly unfreeze oldOwner.
+
+# Both serving and freeze lock the same durable range guard.
+serve(range, request):
+    transaction on the owning shard:
+        guard = lockRangeGuard(range)
+        if guard.state != ACTIVE or request.epoch != guard.epoch:
+            return RETRY_EPOCH  # applies to reads as well as writes
+        if request.isRead: return readFullKey(request.key)
+        receipt = lookupReceipt(request.operationId)
+        if receipt exists:
+            require receipt.payloadHash == request.payloadHash
+            return receipt.result
+        result = applyMutation(request.key, request.value)
+        saveReceipt(request.operationId, request.payloadHash, result)
+        commit mutation and receipt before returning result

@@ -1,0 +1,218 @@
+{
+  "checks": [
+    {
+      "label": "whole-site static check",
+      "command": [
+        "node",
+        "tools/check.mjs"
+      ],
+      "exitCode": 0,
+      "output": "STATS 45 chapters; 276 decks; 1411 frames; 79 code blocks (no count quotas)\nWARN 3 migration/review notes; run audit-chapter.mjs for chapter details\nPASS structure, local resources, accessibility, bilingual nesting, chapter entries and animation preservation\n"
+    },
+    {
+      "label": "ch16 audit",
+      "command": [
+        "node",
+        "tools/audit-chapter.mjs",
+        "ch16"
+      ],
+      "exitCode": 0,
+      "output": "\nch16 STATS {\"decks\":6,\"frames\":30,\"perDeck\":[5,5,5,5,5,5],\"staticImages\":0,\"code\":5,\"han\":4968,\"zh\":150,\"en\":150}\nPASS structural checks; content/translation/rendering require independent review\n"
+    },
+    {
+      "label": "ch17 audit",
+      "command": [
+        "node",
+        "tools/audit-chapter.mjs",
+        "ch17"
+      ],
+      "exitCode": 0,
+      "output": "\nch17 STATS {\"decks\":6,\"frames\":30,\"perDeck\":[5,5,5,5,5,5],\"staticImages\":0,\"code\":5,\"han\":6237,\"zh\":169,\"en\":169}\nPASS structural checks; content/translation/rendering require independent review\n"
+    },
+    {
+      "label": "ch18 audit",
+      "command": [
+        "node",
+        "tools/audit-chapter.mjs",
+        "ch18"
+      ],
+      "exitCode": 0,
+      "output": "\nch18 STATS {\"decks\":6,\"frames\":25,\"perDeck\":[4,4,5,4,4,4],\"staticImages\":0,\"code\":6,\"han\":5396,\"zh\":147,\"en\":147}\nPASS structural checks; content/translation/rendering require independent review\n"
+    },
+    {
+      "label": "shared player syntax",
+      "command": [
+        "node",
+        "--check",
+        "assets/js/slides.js"
+      ],
+      "exitCode": 0,
+      "output": ""
+    },
+    {
+      "label": "whitespace check",
+      "command": [
+        "git",
+        "diff",
+        "--check"
+      ],
+      "exitCode": 0,
+      "output": ""
+    },
+    {
+      "label": "ch16 page/source agreement",
+      "command": [
+        "python3",
+        "examples/ch16/sync.py",
+        "--check"
+      ],
+      "exitCode": 0,
+      "output": "5 source/page blocks identical\n"
+    },
+    {
+      "label": "ch17 page/source agreement",
+      "command": [
+        "python3",
+        "examples/ch17/sync.py",
+        "--check"
+      ],
+      "exitCode": 0,
+      "output": "PASS 5 source/page snippets\n"
+    },
+    {
+      "label": "ch18 page/source agreement",
+      "command": [
+        "node",
+        "examples/ch18/sync.mjs",
+        "--check"
+      ],
+      "exitCode": 0,
+      "output": "6 page snippets match chapter sources\n"
+    },
+    {
+      "label": "Java17 runtime",
+      "command": [
+        "/Library/Java/JavaVirtualMachines/jdk-17.0.10.jdk/Contents/Home/bin/java",
+        "-version"
+      ],
+      "exitCode": 0,
+      "output": "java version \"17.0.10\" 2024-01-16 LTS\nJava(TM) SE Runtime Environment (build 17.0.10+11-LTS-240)\nJava HotSpot(TM) 64-Bit Server VM (build 17.0.10+11-LTS-240, mixed mode, sharing)\n"
+    },
+    {
+      "label": "actual Java17 policy and probes compile",
+      "command": [
+        "/Library/Java/JavaVirtualMachines/jdk-17.0.10.jdk/Contents/Home/bin/javac",
+        "--release",
+        "17",
+        "-d",
+        "/var/folders/5k/y6qh6sfd2g30js0v0qrv4mfr0000gn/T/sd-c5-root-java-34mb5o_v",
+        "examples/ch17/GatewayPolicy.java",
+        "examples/ch17/GatewayPolicyTest.java",
+        "docs/reviews/ch16-ch17-ch18-root-gateway.java"
+      ],
+      "exitCode": 0,
+      "output": ""
+    },
+    {
+      "label": "author Java policy cases",
+      "command": [
+        "/Library/Java/JavaVirtualMachines/jdk-17.0.10.jdk/Contents/Home/bin/java",
+        "-cp",
+        "/var/folders/5k/y6qh6sfd2g30js0v0qrv4mfr0000gn/T/sd-c5-root-java-34mb5o_v",
+        "GatewayPolicyTest"
+      ],
+      "exitCode": 0,
+      "output": "PASS 50 Java policy checks; local core only\n"
+    },
+    {
+      "label": "root Java policy boundary cases",
+      "command": [
+        "/Library/Java/JavaVirtualMachines/jdk-17.0.10.jdk/Contents/Home/bin/java",
+        "-cp",
+        "/var/folders/5k/y6qh6sfd2g30js0v0qrv4mfr0000gn/T/sd-c5-root-java-34mb5o_v",
+        "RootGatewayProbe"
+      ],
+      "exitCode": 0,
+      "output": "RootGatewayProbe: 1035 checks passed (Java17 local policy only)\n"
+    },
+    {
+      "label": "ch16 actual isolated Redis and SQL/contracts",
+      "command": [
+        "python3",
+        "examples/ch16/verify.py"
+      ],
+      "exitCode": 0,
+      "output": "{\"passed\": true, \"checks\": 67, \"redis\": \"Redis server v=7.2.5 sha=00000000:0 malloc=libc bits=64 build=74ac85288e0be145\"}\n"
+    },
+    {
+      "label": "ch17 adapter contracts and arithmetic",
+      "command": [
+        "python3",
+        "examples/ch17/verify.py"
+      ],
+      "exitCode": 0,
+      "output": "PASS 5 source/page snippets\nPASS 41 contract/arithmetic checks; independent models only\n"
+    },
+    {
+      "label": "ch18 actual SQLite model contracts",
+      "command": [
+        "python3",
+        "examples/ch18/check.py"
+      ],
+      "exitCode": 0,
+      "output": "{\"passed\": true, \"assertions\": 99, \"concurrent_races\": [[\"paid\", \"ACCEPTED\", \"no_change\"], [\"paid\", \"ACCEPTED\", \"no_change\"], [\"closed\", \"REFUND_DUE\", \"closed\"], [\"paid\", \"ACCEPTED\", \"no_change\"], [\"closed\", \"REFUND_DUE\", \"closed\"], [\"paid\", \"ACCEPTED\", \"no_change\"], [\"closed\", \"REFUND_DUE\", \"closed\"], [\"paid\", \"ACCEPTED\", \"no_change\"], [\"closed\", \"REFUND_DUE\", \"closed\"], [\"paid\", \"ACCEPTED\", \"no_change\"]]}\n"
+    },
+    {
+      "label": "root new inputs against actual order model",
+      "command": [
+        "python3",
+        "docs/reviews/ch16-ch17-ch18-root-order-probes.py"
+      ],
+      "exitCode": 0,
+      "output": "{\"passed\": true, \"checks\": 28}\n"
+    }
+  ],
+  "files": {
+    "chapters/ch16.html": "51ab82ad45b71a1b4e8660d188fd5b52a7c34046c058770012c06af9eb179eed",
+    "examples/ch16/sync.py": "0ed2d92cb8c8d982408f7192f9b49b2d298e8d8b32fbdae68327eaab62c3bd0e",
+    "examples/ch16/flush.sql": "462dde9e9a643da151ace41e0a3a6e53818528d13412c98b47693a28e3e4bc66",
+    "examples/ch16/page.sql": "a335189a1e3b008d78217309e3ee8e342acbb76fa1169a10e72624f0fd475b6e",
+    "examples/ch16/rotate.lua": "218f2ea6cce20af0250dd9aeff60a7187a0108c93f8a21981b45b7c0cd09dc20",
+    "examples/ch16/moderate.pseudo": "ab6258b06b93de2d30e594460862ea2fb389087cba853eb6483e205cfb0ccf9c",
+    "examples/ch16/like.lua": "dd9699340be9c5caddb9f7535379dd34c0f2f447ec1658b5414ccc16d3d8d4d3",
+    "examples/ch16/README.md": "c70ee06fc0e3b7316194d476e170bb3ea5cf76c5f34db7f43a7ff8d0214a4d89",
+    "examples/ch16/ack.lua": "d1a1988c07d1d3c41dad76b95d4de08eae263c8334e0abe58792b9ea4fd76f81",
+    "examples/ch16/verify.py": "3d253d8222f181ba06a0ad9efb12776d77daab40cab95d6907fbab6e3ea902e7",
+    "examples/ch16/cache.pseudo": "65287362728e2aea591702bfbe9dab4869e043daf3d0dc61bc912536e6a89250",
+    "chapters/ch17.html": "213c360c3a126a8fc2ccc75b2879e7ac7c7ff126279e9256d80817cc7b9f3b0c",
+    "examples/ch17/sync.py": "14cd7db2c3b78ea7ab221f38db9ad5646c0cb846f17205f52da140b7f3756724",
+    "examples/ch17/check.py": "868a6261c5b8a5ce7461941370c20c8cf272b9fe3bbaa5b494939dfb0755c95e",
+    "examples/ch17/GatewayPolicyTest.java": "bd14fa9a7381bb5f28f8a5307c8950b563cb65debf95673270360a713615acf1",
+    "examples/ch17/README.md": "0db64a110f8e0d0fa11f2c120542fcc3f836a581a6b5eb4af813d9b1c4a95198",
+    "examples/ch17/GatewayPolicy.java": "68aa31ba7031a16e5db039acf931378e7d89a65b5a2778af5d412701ade7b6a4",
+    "examples/ch17/admission.pseudo": "6c329b719e01bbbc11fe3a04d144cb6f233e2d8b8c2049d06650ad51545d1a3a",
+    "examples/ch17/verify.py": "c99fc302dd8b6ce7540e7457f1bdb431dea1c8342d35859f9bd366d56451834a",
+    "examples/ch17/entry.pseudo": "39b1ad5cff62337d58886da3acb01290c065444d7c1135354f06433d7fd34577",
+    "chapters/ch18.html": "12d726880da511952ab0cb4cd66ff35bc2a4a55911ee30b13c8d680159add2bb",
+    "examples/ch18/sync.mjs": "884be514d771079b7e10a24f6cde022eeb908571d45a3cb3d7b832161caf0965",
+    "examples/ch18/check.py": "3de811dd37be9f232b329fa77e0f32ef6f2d1699c4b88c370e36e21f8de416fc",
+    "examples/ch18/checkout.pseudo": "54f8ea3d8ad1b1f8f85d7510f10f3817a481479333fdb50f6e455fa39d786e4d",
+    "examples/ch18/schema.sql": "fd274f3029521146801bf557d4ea02c43715a3bbb50cb6305bde91e61fde8a37",
+    "examples/ch18/scan.pseudo": "d6b17404b5e5880988a906481a917ebec94be7d79a38bf0235d6cb70720be8b4",
+    "examples/ch18/model.py": "232364f0bb36b93b20f7e057bdf8e348fba274a70b9f9b161098451525d5895b",
+    "examples/ch18/README.md": "85538e91935cf3ae188fc2e25362cb66e1762b7d282e59a9efb76cb9b26bc8bf",
+    "examples/ch18/capture.pseudo": "9e0c56b75a85509874fa500bc7c424562c52533802cf57ee97ee8156402503ba",
+    "examples/ch18/attempt.pseudo": "1b9914e16a205f791154cdf38800bb8c47c342a7983e77fe391fbd0a5cbc2963",
+    "examples/ch18/holds.pseudo": "76d034da59d8afca0329335ee849432b7dfe0e62c97ca19ff1b6dc6e0c61bfe4",
+    "examples/ch18/delivery.pseudo": "bbd8aa88d81309ca810a42f71a7d290fb7ae6ee9f67024dfa843268576a4624a"
+  },
+  "passed": true,
+  "runs": [
+    {
+      "chapters": [
+        "ch17"
+      ],
+      "startedAt": "2026-10-23T13:15:38.483897+00:00"
+    }
+  ]
+}

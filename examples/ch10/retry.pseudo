@@ -1,0 +1,31 @@
+plan(d, outcome, now):
+  # Adapter bounds: FCM retryable failures >=10s; 429 uses Retry-After or 60s;
+  # APNs 5xx => 15min. Neither is capped by the ordinary-SMS local cap below.
+  if outcome == ACCEPTED: return provider_accepted
+  if outcome == SUPPRESSED: return suppressed
+  if now >= d.not_after: return expired
+  if outcome in {PERMANENT_REJECT, INVALID_TOKEN, REGISTRATION_RECHECK}: return failed
+  if outcome == DEFERRED: due = outcome.allowed_at  # no external call counted
+  else:
+    if d.uncertain and not d.allow_unknown_retry: return failed(unknown=true)
+    if d.send_count >= d.max_sends: return failed(reason=EXHAUSTED)
+    provider_floor = outcome.provider_not_before  # defaults to now for ordinary SMS
+    if outcome.provider == FCM and outcome.retryable_failure:
+      provider_floor = max(provider_floor, now + 10s)  # now is after the observed failure
+      if outcome.http_status == 429:
+        provider_floor = max(provider_floor, outcome.retry_after or now + 60s)
+        if outcome.quota_kind in {overall, topic}: provider_floor = max(provider_floor, now + 60s)
+    cap = min(60s, 1s * 2 ** max(0, d.send_count - 1))  # ordinary SMS policy
+    due = max(now + uniform(0, cap), provider_floor, d.not_before)
+  if due >= d.not_after: return expired(unknown=d.uncertain)
+  return retry_wait(due)
+
+repair_due_work():  # short primary-DB transaction; no network inside
+  BEGIN
+  now = DB_NOW()
+  rows = SELECT Delivery FOR UPDATE SKIP LOCKED
+         WHERE (queued_or_retry_due OR expired_lease) AND last_woken_at < now-30s
+  for d in rows:
+    INSERT Outbox(repair_wake, d.delivery_id, ready_at=now, unique_key=(repair,d.delivery_id,++d.wake_no))
+    UPDATE Delivery SET wake_no=d.wake_no, last_woken_at=now WHERE delivery_id=d.delivery_id
+  COMMIT  # relay later publishes; never reset a terminal status to queued

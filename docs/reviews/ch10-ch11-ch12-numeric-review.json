@@ -1,0 +1,108 @@
+{
+  "kind": "Independent arithmetic and explicit counterexample traces; not a distributed-system experiment",
+  "ch10": {
+    "endpoint_calls_day": 140000000,
+    "average_endpoint_s": 1620.3703703703704,
+    "peak_endpoint_s": 8101.851851851852,
+    "campaign_exclusive_seconds": 7000.0,
+    "campaign_shared_hours": 10.243902439024392,
+    "peak_10m_backlog": 3661111.1111111115,
+    "backlog_drain_hours": 2.678861788617887,
+    "state_30d_3copies_TB": 6.3,
+    "counterexample": {
+      "trace": [
+        "A claims generation 7",
+        "A sends; provider reply is delayed",
+        "lease expires; B claims generation 8",
+        "A records a late result"
+      ],
+      "local_guard": "UPDATE current state WHERE generation = 7 must affect zero rows after generation 8",
+      "limit": "This guard does not cancel the already sent provider request. Unknown acceptance remains possible."
+    }
+  },
+  "ch11": {
+    "posts_average_s": 11.574074074074074,
+    "fanout_average_rows_s": 2314.814814814815,
+    "fanout_peak_rows_s": 11574.074074074073,
+    "feed_peak_reads_s": 11574.074074074073,
+    "million_follower_task_seconds": 100.5,
+    "ordinary_25k_task_seconds": 3.0,
+    "fanout_utilization": 0.3858024691358024,
+    "origin_normal_with_author_reads_s": 3474.814814814815,
+    "origin_full_page_budget_s": 200.0,
+    "daily_error_budget": 200000.0,
+    "cache_outage_error_budget_seconds": 17.583848909150117,
+    "counterexample": {
+      "already_consumed_boundary": [
+        1000,
+        42
+      ],
+      "same_timestamp_next": [
+        1000,
+        41
+      ],
+      "late_fanout_candidate": [
+        1001,
+        43
+      ],
+      "same_timestamp_is_eligible": true,
+      "late_candidate_is_below_boundary": false,
+      "limit": "An exclusive tuple cursor stabilizes ordering. It cannot recover a late candidate above a boundary already crossed."
+    }
+  },
+  "ch12": {
+    "logical_messages_day": 100000000,
+    "peak_messages_s": 5787.0370370370365,
+    "sockets": 1800000.0,
+    "per_gateway_planned": 60000.0,
+    "normal_gateways": 30,
+    "same_budget_n_minus_1_gateways": 31,
+    "after_failure_30_gateways_utilization_of_100k": 0.6206896551724138,
+    "heartbeat_s": 60000.0,
+    "connections_payload_GB": 28.8,
+    "year_text_3copies_TB": 109.5,
+    "reconnect_per_s": 4000.0,
+    "one_page_reconnect_rows_s": 400000.0,
+    "small_group_refs_s": 4000,
+    "large_group_full_refs_s": 1000000,
+    "active_viewer_frames_s": 10000,
+    "counterexample": {
+      "durable_prefix": 105,
+      "first_received": 108,
+      "bad_max_cursor": 108,
+      "missing": [
+        106,
+        107
+      ],
+      "safe_cursor_before_gaps_fill": 105,
+      "safe_cursor_after_durable_106_107": 108,
+      "limit": "Only a durable contiguous prefix, including valid tombstones or authorized skip markers, justifies cursor advancement."
+    }
+  },
+  "sources_checked_by_root": [
+    {
+      "url": "https://www.postgresql.org/docs/18/transaction-iso.html",
+      "supports": "Serializable semantics, Read Committed rechecks after row conflicts, and nontransactional sequence changes"
+    },
+    {
+      "url": "https://www.postgresql.org/docs/18/functions-sequence.html",
+      "supports": "nextval can leave gaps; it is unsuitable as a gapless committed conversation counter"
+    },
+    {
+      "url": "https://www.postgresql.org/docs/18/functions-comparisons.html",
+      "supports": "Row tuple comparison is lexicographic; non-null fields and consistent ordering are required"
+    },
+    {
+      "url": "https://www.rfc-editor.org/rfc/rfc6455.html",
+      "supports": "WebSocket framing over TCP; application persistence and receipt semantics remain application contracts"
+    },
+    {
+      "url": "https://firebase.google.com/docs/cloud-messaging/error-codes",
+      "supports": "FCM 429 message/topic rate cases use at least one-minute initial delay; 503 honors Retry-After, UNREGISTERED is 404"
+    },
+    {
+      "url": "https://developer.apple.com/documentation/usernotifications/handling-notification-responses-from-apns",
+      "supports": "Direct-device APNs reason-specific 429 handling, 410 token/topic inactivity and millisecond-epoch timestamp; distinct from the broadcast-push error documentation"
+    }
+  ]
+}

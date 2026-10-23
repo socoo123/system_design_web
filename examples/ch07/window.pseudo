@@ -1,0 +1,29 @@
+# Registry transaction; timestamps are relative to one immutable epoch.
+# windows(worker PRIMARY KEY, generation, high_exclusive)
+# Preseed one row per worker 0..1023, generation=0, high_exclusive=1.
+# Checked integer arithmetic: reject overflow, never wrap a generation.
+# A fresh boot uses a NEW generation; it NEVER resumes a prior grant.
+BEGIN
+row = SELECT generation, high_exclusive FROM windows
+      WHERE worker = :worker FOR UPDATE
+lo = max(1, :observed_now, row.high_exclusive)
+hi = lo + 30_000
+REQUIRE hi <= 2^41
+UPDATE windows SET generation = row.generation + 1,
+                   high_exclusive = hi WHERE worker = :worker
+COMMIT  # must survive every permitted failover
+# Return only after confirmation; ambiguous commit => burn and reserve again.
+return Grant(worker, row.generation + 1, lo, hi)
+
+# One live generator may extend without losing last/sequence.
+BEGIN
+row = SELECT generation, high_exclusive FROM windows
+      WHERE worker = :worker FOR UPDATE
+REQUIRE row.generation == :my_generation
+REQUIRE row.high_exclusive == :my_hi
+new_hi = row.high_exclusive + 30_000
+REQUIRE new_hi <= 2^41
+UPDATE windows SET high_exclusive = new_hi WHERE worker = :worker
+COMMIT
+# Install hi under the SAME local lock; preserve last and sequence.
+# Ambiguous extension: halt; a fresh boot obtains a fresh window.

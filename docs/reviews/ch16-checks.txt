@@ -1,0 +1,31 @@
+$ python3 examples/ch16/sync.py --check
+5 source/page blocks identical
+exit=0
+
+$ python3 examples/ch16/verify.py
+{"passed": true, "checks": 67, "redis": "Redis server v=7.2.5 sha=00000000:0 malloc=libc bits=64 build=74ac85288e0be145"}
+exit=0
+
+$ node tools/audit-chapter.mjs ch16
+
+ch16 STATS {"decks":6,"frames":30,"perDeck":[5,5,5,5,5,5],"staticImages":0,"code":5,"han":4968,"zh":150,"en":150}
+PASS structural checks; content/translation/rendering require independent review
+exit=0
+
+$ node tools/check.mjs
+STATS 45 chapters; 276 decks; 1411 frames; 79 code blocks (no count quotas)
+WARN 3 migration/review notes; run audit-chapter.mjs for chapter details
+PASS structure, local resources, accessibility, bilingual nesting, chapter entries and animation preservation
+exit=0
+
+$ node --check docs/reviews/ch16-browser.mjs
+exit=0
+
+$ node --check docs/reviews/ch16-frames.mjs
+exit=0
+
+$ node --check docs/reviews/ch16-geometry.mjs
+exit=0
+
+$ git diff --check -- chapters/ch16.html examples/ch16
+exit=0

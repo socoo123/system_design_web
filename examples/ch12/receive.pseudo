@@ -1,0 +1,18 @@
+persist_batch(device, view, entries):
+  require authenticated server stream and matching conv + view_epoch
+  BEGIN local database write transaction
+  c = SELECT receive_cursor WHERE (device, view) FOR UPDATE
+  for entry in entries:
+    require entry.seq >= view.first_seq
+    require entry is MESSAGE, TOMBSTONE, or server-certified OMITTED
+    UPSERT LocalEntry(view, entry.seq, entry.revision, entry.content)
+      only if revision increases; reject conflicting equal revisions
+  while c < MAX_SEQ and LocalEntry(view, c + 1) exists:
+    c = checked_add(c, 1)
+  if gap_storage_exceeds_budget():
+    ROLLBACK; request a bounded fresh sync; return NO_ACK
+  UPDATE receive_cursor SET upto = c WHERE (device, view)
+  COMMIT using the local database's durable write option
+  send Delivered(view, c)  // A lost receipt ACK is safe to retry.
+on local_io_or_quota_failure:
+  ROLLBACK if still active; do not acknowledge unconfirmed storage

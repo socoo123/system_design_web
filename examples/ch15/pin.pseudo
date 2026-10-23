@@ -1,0 +1,31 @@
+verify_and_pin(auth, session_id, ordinal, proof):
+  // Session, attempt, source and generation reads all bind auth.tenant.
+  // Init froze ordered (digest,length), file, base, size and owner.
+  expected, attempt = authority.read_bound_attempt(auth, session_id, ordinal)
+  if proof.kind == UPLOAD:
+    // Grant issuance registered attempt + fresh generation + expiry first.
+    bytes = Object.GET(attempt.staging_key, version_id=proof.version_id)
+    require length(bytes) == expected.length and SHA256(bytes) == expected.digest
+    // Only the service writes final keys; a physical key is never reused.
+    final = Object.PUT_IF_ABSENT(attempt.final_key, bytes, checksum=expected.digest)
+    require confirmed_exact_final(final, expected) else RETRY_UNKNOWN_OR_FAIL
+    // This gate inspects a pre-existing key too; unknown never reaches READY.
+  begin Metadata transaction:
+    SELECT tenant_guard WHERE tenant_id=auth.tenant FOR UPDATE
+    s = require_owned_OPEN_session(auth, session_id, db_now())
+    require current_write_acl(auth, s.file_id)
+    require s.manifest[ordinal] == expected
+    if proof.kind == REUSE:
+      source = require_currently_readable_version(auth, proof.file, proof.version)
+      g = source.block_at(proof.ordinal)
+      require g.digest_length == expected and g.state == READY
+    else:
+      require proof.kind == UPLOAD and attempt.still_live_and_UPLOADING(db_now())
+      g = find_READY_generation(auth.tenant, expected)
+      if g is absent: g = promote_verified_attempt_to_READY(attempt)
+      else: mark_unused_attempt_ORPHAN(attempt)
+    UPSERT SessionBlock(auth.tenant, s.id, ordinal, g.generation, proof)
+    // A pin is active only while its owned session is OPEN and unexpired.
+    COMMIT
+  return VERIFIED_AND_PINNED(g.generation)
+  // Any failed requirement aborts: no pin and no file publication.

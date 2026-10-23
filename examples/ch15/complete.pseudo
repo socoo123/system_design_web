@@ -1,0 +1,39 @@
+complete(auth, session_id, request_key, manifest_digest):
+  // All helpers and logical row keys are scoped to authenticated auth.tenant.
+  intent = SHA256(canonical(auth.tenant, auth.user, session_id, manifest_digest))
+  begin Metadata transaction:
+    SELECT tenant_guard WHERE tenant_id=auth.tenant FOR UPDATE
+    prior = Receipt[auth.tenant, auth.user, request_key]
+    if prior exists:
+      require prior.intent_digest == intent else KEY_REUSED
+      return COMMIT_AND_REPLY(prior.minimal_status) // no manifest or URLs
+    s = require_owned_session(auth, session_id)
+    require s.manifest_digest == manifest_digest else INTENT_CHANGED
+    if s.result exists:
+      INSERT Receipt(auth.tenant, auth.user, request_key, intent, s.result)
+      return COMMIT_AND_REPLY(s.minimal_status)
+    require s.state == OPEN and s.expires_at > db_now() else EXPIRED
+    require current_write_acl(auth, s.file_id) and not File[auth.tenant,s.file_id].deleted
+    require all_REUSE_proofs_still_readable(auth, s)
+    require every ordinal has a pin to a READY matching generation else INCOMPLETE
+    require File[auth.tenant,s.file_id].head == s.base_version else PRECONDITION_FAILED_412
+    require used_bytes + s.size <= quota_bytes else QUOTA_EXCEEDED
+    v = checked_add(s.base_version, 1)
+    INSERT Version(auth.tenant, s.file_id, v, s.immutable_manifest)
+    INSERT VersionBlock(auth.tenant, s.file_id, v)
+      SELECT ordered generations FROM SessionBlock[auth.tenant,s.id]
+    UPDATE File SET head=v
+      WHERE tenant_id=auth.tenant AND id=s.file_id AND head=s.base_version
+    require affected_rows == 1
+    UPDATE tenant_guard SET used_bytes=used_bytes+s.size,
+                            change_head=checked_add(change_head,1)
+      WHERE tenant_id=auth.tenant
+    seq = TenantGuard[auth.tenant].change_head
+    INSERT Change(auth.tenant, seq, s.file_id, v); INSERT Outbox(auth.tenant, seq, hint_only)
+    INSERT Receipt(auth.tenant, auth.user, request_key, intent, s.file_id, v, seq)
+    UPDATE Session SET state=COMMITTED, result=(v,seq)
+      WHERE tenant_id=auth.tenant AND id=s.id
+    DELETE SessionBlock WHERE tenant_id=auth.tenant AND session=s.id
+    COMMIT
+  return SAVED(v, seq)
+  // All failures roll back; unknown COMMIT outcome retries the same key.

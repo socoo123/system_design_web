@@ -1,0 +1,36 @@
+# Pseudocode: one 200 ms request deadline; no shared cache for PIT sessions.
+page(request, auth):
+  deadline = monotonic_now() + 200ms
+  require 1 <= request.limit <= 20           # malformed => 400
+  ctx = canonical(request.query, request.filters + deleted_false, FIXED_SORT,
+                  request.limit, auth.tenant, auth.subject, auth.scope_version)
+  if request.cursor:
+    c = authenticated_open(request.cursor)   # forged => 400; expired => 410
+    require c.context_hash == hash(ctx)      # changed context => 400 restart
+    pit, after = c.latest_pit_id, c.last_scanned_sort
+  else:
+    pit = open_complete_pit(ctx, keep_alive=60s, deadline=deadline)
+    after = NONE                            # open must reject missing shards
+  out, scanned, exhausted = [], 0, false
+  while len(out) < request.limit and scanned < 100 and not exhausted:
+    n = min(request.limit - len(out), 100 - scanned)
+    pit_expiry = now() + 60s                 # conservative renewal start
+    r = search(pit, ctx, after, size=n, keep_alive=60s, deadline=deadline,
+               allow_partial_search_results=false)
+    if r.pit_missing: fail(410, "restart")  # never silently open a new PIT
+    if r.failed or r.timed_out or not r.all_required_shards:
+      fail(503, "incomplete")                # discard buffered hits and cursor
+    pit = r.latest_pit_id
+    for hit in r.hits:                       # ordered, fetched from the PIT
+      after = hit.all_sort_values           # advance even when access is denied
+      scanned += 1
+      decision = authority_check(hit.doc_id, auth, deadline)
+      if decision.unavailable: fail(503, "authority unavailable")
+      if decision.allowed_and_live: out.append(hit)
+    exhausted = len(r.hits) < n
+  if deadline_expired(deadline): fail(503, "deadline")
+  cursor = NONE if exhausted else authenticated_seal(
+      hash(ctx), pit, after, expires_at=pit_expiry)
+  if exhausted: close_pit_best_effort(pit)
+  return {hits: out, cursor: cursor, complete: true,
+          truncated: scanned == 100 and len(out) < request.limit and not exhausted}

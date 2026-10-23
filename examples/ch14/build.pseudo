@@ -1,0 +1,29 @@
+put_exact(prefix, name, bytes):
+  key = prefix + name
+  result = PUT(key, bytes, If-None-Match="*")
+  if result is 412 or result is UNKNOWN:
+    # A lost PUT response is not evidence of a failed write.
+    result = HEAD(key)  # A miss/error retries the conditional PUT later.
+  require result is SUCCESS and result.versionId not in {null, "null"}
+  ref = (bucket, key, result.versionId, len(bytes), SHA256(bytes))
+  actual = GET(ref.bucket, ref.key, versionId=ref.versionId)
+  require len(actual) == ref.size and SHA256(actual) == ref.sha256
+  return ref
+
+build(claim):
+  J, epoch, source, recipe = claim
+  prefix = "outputs/J/epoch/"  # Different claim epochs never share keys.
+  source_bytes = GET(source.bucket, source.key, versionId=source.versionId)
+  require len(source_bytes) == source.size
+  require full_object_checksum(source_bytes) == source.checksum
+  refs = {}
+  # Heartbeat every 30s: renew only the same RUNNING epoch before expiry.
+  # A failed/unknown renewal stops publication; it cannot undo old I/O.
+  for output in encode_and_package(source_bytes, recipe):
+    refs[output.name] = put_exact(prefix, output.name, output.bytes)
+  require media_rungs(refs) == recipe.required_rungs
+  for playlist in recipe.playlists_in_leaf_to_root_order:
+    # Every child/init/media URI explicitly carries its own versionId.
+    bytes = render_playlist(playlist, versioned_cdn_uris(refs))
+    refs[playlist.name] = put_exact(prefix, playlist.name, bytes)
+  return Bundle(J, epoch, refs[recipe.root_playlist], refs)

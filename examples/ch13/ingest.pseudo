@@ -1,0 +1,32 @@
+# Pseudocode: full immutable source events; concrete index generation g.
+apply(event, g):
+  require event.version > 0 and canonical_digest(event) == event.digest
+  body = {source_digest: event.digest, deleted: event.op == DELETE}
+  if not body.deleted: body.fields = analyze(event.full_document, g.analyzer)
+  # DELETE is also an INDEX of this same ID, with no old content retained.
+  result = ES.index(g.index, event.doc_id, body,
+                    version=event.version, version_type="external")
+  if result.transport_unknown or result.retryable_error:
+    return RETRY_SAME_EVENT                 # applied state may already exist
+  if result.status == 409:
+    current = ES.get(g.index, event.doc_id, realtime=true)
+    if current.unavailable: return RETRY_SAME_EVENT
+    if not current.found or current.version < event.version:
+      return STOP_PARTITION_AND_ALERT       # violated retained-state contract
+    if current.version == event.version and current.source_digest != event.digest:
+      return STOP_PARTITION_AND_ALERT       # one version, two different events
+    return ACKABLE                         # identical replay or superseded
+  if not result.success:
+    return STOP_PARTITION_AND_ALERT         # mapping/auth errors are not ACKs
+  return ACKABLE
+
+consume_source_partition(events, g):
+  for event in events:                      # per-partition sequential example
+    while true:
+      decision = apply(event, g)
+      if decision == ACKABLE: break
+      if decision == STOP_PARTITION_AND_ALERT: halt_without_committing()
+      bounded_backoff()                     # retry the same event, not the next
+    commit_source_offset(event.offset)      # after confirmed durable apply only
+  # Lost checkpoint => safe replay. Never skip a failed offset.
+  # Do not physically delete tombstones; rebuild g with retained versions too.

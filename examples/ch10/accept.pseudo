@@ -1,0 +1,36 @@
+accept(authenticated_tenant, key, request_bytes):
+  request = parse_and_authorize(authenticated_tenant, request_bytes)
+  tenant = authenticated_tenant
+  digest = hash(canonical_business_fields(request))
+  saved = PRIMARY.SELECT Notification WHERE (tenant_id, idempotency_key) = (tenant,key)
+  if saved: return saved.body_hash == digest ? saved.receipt_202 : HTTP_409
+  template_version = validate_new_request(request)  # expiry, allowed template / priority
+  endpoints = freeze_small_recipient_snapshot(request)
+  payload = encrypt(request.data)  # persisted in the same DB below
+  not_before = request.not_before or DB_NOW()
+  not_after = request.not_after
+  receipt = immutable_202(new_notification_id(), request.channels)
+  BEGIN READ COMMITTED
+  try:
+    INSERT Notification(receipt.notification_id, tenant, key, digest, receipt,
+                        endpoints, payload, template_version, not_before, not_after)
+    for endpoint in endpoints:
+      delivery_id = new_delivery_id()
+      INSERT Delivery(delivery_id, receipt.notification_id, endpoint, not_before, not_after,
+                      status=queued, lease_epoch=0, next_attempt_at=not_before,
+                      policy_for(endpoint.channel, request), last_woken_at=DB_NOW())
+      INSERT Outbox(delivery_ready, delivery_id, ready_at=not_before,
+                    unique_key=(ready,delivery_id))
+    COMMIT
+    return receipt
+  on UNIQUE_VIOLATION(tenant_id, idempotency_key):
+    ROLLBACK
+    saved = new_PRIMARY_SELECT(tenant, key)  # a new statement / snapshot
+    if not saved: return HTTP_503_RETRY_SAME_KEY
+    return saved.body_hash == digest ? saved.receipt_202 : HTTP_409
+  on COMMIT_OUTCOME_UNKNOWN:
+    discard_connection()  # a rollback cannot prove the commit did not happen
+    return HTTP_503_RETRY_SAME_KEY
+  on other_storage_error:
+    ROLLBACK_if_possible
+    return HTTP_503_RETRY_SAME_KEY

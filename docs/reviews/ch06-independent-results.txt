@@ -1,0 +1,85 @@
+{
+  "value_bytes": 100000000000,
+  "replicated_bytes": 300000000000,
+  "planned_capacity_bytes": 750000000000.0,
+  "write_destinations_bytes_per_s": 30000000,
+  "read_replica_bytes_per_s": 100000000,
+  "fixed_hot_replica_reads_per_s": 18000.0,
+  "balanced_hot_replica_reads_per_s": 14666.666666666668,
+  "sst_output_bytes_per_s": 300000000,
+  "extra_bloom_probes": 0.1,
+  "any_false_positive": 0.09561792499119559,
+  "bloom_bytes_three_replicas": 375000000.0,
+  "tombstone_days": 10.0,
+  "retention_margin": 4
+}
+PASS: strict/sloppy overlap; normal/failed-write reads; ACK identity and deduplication; tombstone resurrection; independent arithmetic
+Same observed context, different client writes, shared B counter: Version[clock={B=1, A=1}, value=client-one] / Version[clock={B=2, A=1}, value=client-two]
+siblings=[Version[clock={B=2, A=1}, value=client-two]]
+FIXED contract: distinct causal writers preserve both intents
+ORIGINAL APPLY order: winner rejects, but WAL already contains conflicting version
+FIXED APPLY order: rejected conflicting record never enters WAL
+GC counterexample: repair all replicas, purge all markers, then late client PUT200 resurrects
+PASS completed write read from intersection
+PASS same mutation retry idempotent
+PASS tombstone beats older value
+PASS old hint keeps original timestamp
+PASS retimestamping old hint resurrects value
+PASS purging tombstone permits resurrection
+PASS old client retry resurrects after ALL repaired replicas purge tombstones
+PASS clock skew defeats later real-time write
+PASS equal timestamp has deterministic tie-break
+PASS equal version conflicting content rejected
+PASS invalid mutation is rejected before WAL append
+PASS concurrent read-modify-write loses increment
+PASS failed write plus async repair allows read regression
+PASS sloppy AD write can be absent from BC read
+PASS 64 LWW regroupings converge
+PASS incomparable vectors retain concurrent intent
+PASS siblings deduplicate retry and retain conflict
+PASS context join plus new event dominates both siblings
+PASS merged write replaces observed ancestors
+PASS unseen concurrent update survives reconciliation
+PASS reserved counter must exceed returned context
+PASS INVALID shared actor plus stale context falsely implies ancestry
+PASS distinct causal writers preserve unseen concurrent updates
+PASS 23 scenarios; pure model only, no network or disk guarantees
+Same observed context, different client writes, shared B counter: Version[clock={B=1, A=1}, value=client-one] / Version[clock={B=2, A=1}, value=client-two]
+siblings=[Version[clock={B=2, A=1}, value=client-two]]
+FIXED contract: distinct causal writers preserve both intents
+ORIGINAL APPLY order: winner rejects, but WAL already contains conflicting version
+FIXED APPLY order: rejected conflicting record never enters WAL
+GC counterexample: repair all replicas, purge all markers, then late client PUT200 resurrects
+{
+  "source_parity_blocks": 4,
+  "numbers": {
+    "raw_GB": 100.0,
+    "replicated_GB": 300,
+    "SST_GB": 600,
+    "capacity_GB": 750.0,
+    "write_MBps": 10.0,
+    "replica_MBps": 30.0,
+    "replica_Mbps": 240,
+    "client_read_MBps": 50.0,
+    "replica_read_MBps": 100.0,
+    "uniform_replica_reads": 10000.0,
+    "hot_fixed_reads": 18000.0,
+    "hot_balanced_reads": 14666.666666666668,
+    "hot_over_budget": 0.5,
+    "SST_write_MBps": 300,
+    "WAL_plus_SST_MBps": 330,
+    "bloom_extra_files": 0.1,
+    "bloom_any_false_positive": 0.09561792499119559,
+    "bloom_MB": 125.0,
+    "three_bloom_MB": 375.0,
+    "grace_days": 10.0,
+    "repair_margin_days": 4,
+    "quorum_overlap": 1
+  },
+  "strict_pairs_checked": 9,
+  "sloppy_overlap": 0
+}
+PASS 7 coordinator event traces: duplicate, fallback, epoch, identity, durability, ACK loss
+
+ch06 STATS {"decks":6,"frames":30,"perDeck":[5,5,5,4,6,5],"staticImages":0,"code":4,"han":7019,"zh":198,"en":198}
+PASS structural checks; content/translation/rendering require independent review

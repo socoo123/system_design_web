@@ -1,0 +1,414 @@
+[
+  {
+    "id": "d1s1",
+    "theme": "parchment",
+    "title": "Start at the trusted gateway",
+    "textCollisions": [
+      [
+        "Gateway",
+        "authenticate + decide"
+      ]
+    ]
+  },
+  {
+    "id": "d1s2",
+    "theme": "parchment",
+    "title": "Ask Redis for one atomic decision",
+    "textCollisions": [
+      [
+        "Gateway",
+        "authenticate + decide"
+      ],
+      [
+        "Redis",
+        "tokens + timestamp"
+      ]
+    ]
+  },
+  {
+    "id": "d1s3",
+    "theme": "parchment",
+    "title": "Only an allowed request reaches Service",
+    "textCollisions": [
+      [
+        "Gateway",
+        "authenticate + decide"
+      ],
+      [
+        "Redis",
+        "tokens + timestamp"
+      ],
+      [
+        "Service",
+        "admitted work only"
+      ]
+    ]
+  },
+  {
+    "id": "d1s4",
+    "theme": "parchment",
+    "title": "Reject at Gateway",
+    "textCollisions": [
+      [
+        "Gateway",
+        "authenticate + decide"
+      ],
+      [
+        "Redis",
+        "tokens + timestamp"
+      ],
+      [
+        "Service",
+        "admitted work only"
+      ]
+    ]
+  },
+  {
+    "id": "d1s5",
+    "theme": "parchment",
+    "title": "Keep policy updates off the request path",
+    "textCollisions": [
+      [
+        "Gateway",
+        "authenticate + decide"
+      ],
+      [
+        "Redis",
+        "tokens + timestamp"
+      ],
+      [
+        "Service",
+        "admitted work only"
+      ],
+      [
+        "Policy",
+        "versioned rules"
+      ]
+    ]
+  },
+  {
+    "id": "d2s1",
+    "theme": "parchment",
+    "title": "A full bucket at time zero",
+    "textCollisions": [
+      [
+        "t = 0 s",
+        "tokens = 4"
+      ]
+    ]
+  },
+  {
+    "id": "d2s2",
+    "theme": "parchment",
+    "title": "Three requests arrive at ten seconds",
+    "textCollisions": [
+      [
+        "t = 0 s",
+        "tokens = 4"
+      ],
+      [
+        "t = 10 s",
+        "3 allow; tokens = 1"
+      ]
+    ]
+  },
+  {
+    "id": "d2s3",
+    "theme": "parchment",
+    "title": "One of two requests is rejected at twenty seconds",
+    "textCollisions": [
+      [
+        "t = 0 s",
+        "tokens = 4"
+      ],
+      [
+        "t = 10 s",
+        "3 allow; tokens = 1"
+      ],
+      [
+        "t = 20 s",
+        "1 allow; tokens = 2/3"
+      ]
+    ]
+  },
+  {
+    "id": "d2s4",
+    "theme": "parchment",
+    "title": "A retry at twenty-five seconds consumes the refill",
+    "textCollisions": [
+      [
+        "t = 0 s",
+        "tokens = 4"
+      ],
+      [
+        "t = 10 s",
+        "3 allow; tokens = 1"
+      ],
+      [
+        "t = 20 s",
+        "1 allow; tokens = 2/3"
+      ],
+      [
+        "t = 25 s",
+        "1 allow; tokens = 0"
+      ]
+    ]
+  },
+  {
+    "id": "d2s5",
+    "theme": "parchment",
+    "title": "Burst plus refill is the contract",
+    "textCollisions": [
+      [
+        "t = 0 s",
+        "tokens = 4"
+      ],
+      [
+        "t = 10 s",
+        "3 allow; tokens = 1"
+      ],
+      [
+        "t = 20 s",
+        "1 allow; tokens = 2/3"
+      ],
+      [
+        "t = 25 s",
+        "1 allow; tokens = 0"
+      ]
+    ]
+  },
+  {
+    "id": "d3s1",
+    "theme": "parchment",
+    "title": "Two gateways share one token",
+    "textCollisions": [
+      [
+        "Gateway A",
+        "same quota key"
+      ],
+      [
+        "Redis",
+        "tokens = 1 initially"
+      ],
+      [
+        "Gateway B",
+        "same quota key"
+      ]
+    ]
+  },
+  {
+    "id": "d3s2",
+    "theme": "parchment",
+    "title": "A commits the debit before allow",
+    "textCollisions": [
+      [
+        "Gateway A",
+        "same quota key"
+      ],
+      [
+        "Redis",
+        "tokens = 1 initially"
+      ],
+      [
+        "Gateway B",
+        "same quota key"
+      ]
+    ]
+  },
+  {
+    "id": "d3s3",
+    "theme": "parchment",
+    "title": "B must observe the committed state",
+    "textCollisions": [
+      [
+        "Gateway A",
+        "same quota key"
+      ],
+      [
+        "Redis",
+        "tokens = 1 initially"
+      ],
+      [
+        "Gateway B",
+        "same quota key"
+      ]
+    ]
+  },
+  {
+    "id": "d3s4",
+    "theme": "parchment",
+    "title": "Only one request can be admitted",
+    "textCollisions": [
+      [
+        "Gateway A",
+        "same quota key"
+      ],
+      [
+        "Redis",
+        "tokens = 1 initially"
+      ],
+      [
+        "Gateway B",
+        "same quota key"
+      ]
+    ]
+  },
+  {
+    "id": "d3s5",
+    "theme": "parchment",
+    "title": "Reject the read-check-write race",
+    "textCollisions": [
+      [
+        "Gateway A",
+        "same quota key"
+      ],
+      [
+        "Redis",
+        "tokens = 1 initially"
+      ],
+      [
+        "Gateway B",
+        "same quota key"
+      ]
+    ]
+  },
+  {
+    "id": "d4s1",
+    "theme": "parchment",
+    "title": "A rolling contract needs an arrival timeline",
+    "textCollisions": []
+  },
+  {
+    "id": "d4s2",
+    "theme": "parchment",
+    "title": "Concentrate the previous seven near the boundary",
+    "textCollisions": []
+  },
+  {
+    "id": "d4s3",
+    "theme": "parchment",
+    "title": "Try one new request at ninety seconds",
+    "textCollisions": []
+  },
+  {
+    "id": "d4s4",
+    "theme": "parchment",
+    "title": "The weighted counter admits the candidate",
+    "textCollisions": [
+      [
+        "Estimated: 0 + 7 x 0.5 + 1",
+        "4.5 <= 7 -> allow"
+      ]
+    ]
+  },
+  {
+    "id": "d4s5",
+    "theme": "parchment",
+    "title": "The exact rolling log would reject",
+    "textCollisions": [
+      [
+        "Estimated: 0 + 7 x 0.5 + 1",
+        "4.5 <= 7 -> allow"
+      ],
+      [
+        "Actual: 7 + 1 = 8 > 7",
+        "rolling (30, 90] -> deny"
+      ]
+    ]
+  },
+  {
+    "id": "d5s1",
+    "theme": "parchment",
+    "title": "Start from the healthy decision path",
+    "textCollisions": [
+      [
+        "Gateway",
+        "local safety guard"
+      ],
+      [
+        "Redis",
+        "quota authority"
+      ],
+      [
+        "Service",
+        "safe plan: 6,000/s"
+      ]
+    ]
+  },
+  {
+    "id": "d5s2",
+    "theme": "parchment",
+    "title": "Bound the emergency local budget",
+    "textCollisions": [
+      [
+        "Gateway",
+        "local safety guard"
+      ],
+      [
+        "Redis",
+        "quota authority"
+      ],
+      [
+        "Service",
+        "safe plan: 6,000/s"
+      ]
+    ]
+  },
+  {
+    "id": "d5s3",
+    "theme": "parchment",
+    "title": "A timeout is an unknown decision",
+    "textCollisions": [
+      [
+        "Gateway",
+        "local safety guard"
+      ],
+      [
+        "Redis",
+        "quota authority"
+      ],
+      [
+        "Service",
+        "safe plan: 6,000/s"
+      ]
+    ]
+  },
+  {
+    "id": "d5s4",
+    "theme": "parchment",
+    "title": "Sensitive APIs stop at Gateway",
+    "textCollisions": [
+      [
+        "Gateway",
+        "local safety guard"
+      ],
+      [
+        "Redis",
+        "quota authority"
+      ],
+      [
+        "Service",
+        "safe plan: 6,000/s"
+      ]
+    ]
+  },
+  {
+    "id": "d5s5",
+    "theme": "parchment",
+    "title": "Bounded reads and closed sensitive APIs",
+    "textCollisions": [
+      [
+        "Gateway",
+        "local safety guard"
+      ],
+      [
+        "Redis",
+        "quota authority"
+      ],
+      [
+        "Service",
+        "safe plan: 6,000/s"
+      ]
+    ]
+  }
+]

@@ -1,0 +1,12 @@
+owner = freshRandomOwner()                  // never reuse after release/expiry
+sent = monotonicNow()
+reply = SET key owner NX PX 10000           // OK, busy, or unknown/error
+if reply != OK:
+    ownerCheckedCleanup(key, owner)         // best effort; no business work
+    return NOT_ACQUIRED
+remaining = 10000ms - (monotonicNow() - sent) - 200ms
+if remaining <= 0:
+    ownerCheckedCleanup(key, owner)
+    return EXPIRED_LOCALLY
+runWithDeadline(min(8000ms, remaining))      // dispatch budget, not remote rollback
+finally ownerCheckedCleanup(key, owner)     // Lua below; never bare DEL

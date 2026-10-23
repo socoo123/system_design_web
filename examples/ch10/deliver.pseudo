@@ -1,0 +1,46 @@
+deliver(wake):
+  d = claim_using_claim_sql(wake.delivery_id)
+  if d == NO_CLAIM: ACK(wake); return  # durable work / repair scan remains
+  ctx = pre_send_gates(d)  # evidence, expiry, consent, quota; resolved send context
+  decision = ctx.decision
+  attempt = NONE
+  if decision == ALLOW:
+    BEGIN
+    current = SELECT Delivery FOR UPDATE WHERE delivery_id = d.delivery_id
+    if current.lease_epoch != d.lease_epoch or current.status != leased
+       or current.lease_until <= DB_NOW(): ROLLBACK; return
+    if DB_NOW() >= current.not_after: decision = EXPIRED
+    else if current.send_count >= current.max_sends:
+      decision = EXHAUSTED
+    else:
+      UPDATE Delivery SET send_count = send_count + 1 WHERE delivery_id = d.delivery_id
+      attempt = INSERT Attempt(new_id(), d.delivery_id, d.lease_epoch, outcome=started,
+                 provider=ctx.provider, attempted_token_version=ctx.token_version,
+                 registration_at=ctx.registration_at, started_at=DB_NOW())
+    COMMIT  # unknown / failed commit => no call and no ACK
+    if attempt != NONE:
+      if local_remaining_budget() < HTTP_TIMEOUT + RESULT_BUDGET:
+        decision = NOT_SENT  # definitely no call started by this worker
+      else:
+        decision = ctx.provider.send(ctx.message, timeout=10s)  # timeout => TIMEOUT_UNKNOWN
+        # APNs 410 => INVALID_TOKEN only if registration_at + clock_error <= timestamp;
+        # otherwise REGISTRATION_RECHECK. Every re-registration increments version.
+  BEGIN
+  current = SELECT Delivery FOR UPDATE WHERE delivery_id = d.delivery_id
+  if attempt != NONE:
+    UPDATE Attempt SET outcome=decision, provider_message_id=decision.message_id,
+      finished_at=DB_NOW() WHERE attempt_id=attempt.attempt_id
+    if decision == INVALID_TOKEN:
+      UPDATE Device SET status=inactive WHERE endpoint_id=d.endpoint_id
+        AND token_version=attempt.attempted_token_version
+  if current.lease_epoch == d.lease_epoch and current.status == leased:
+    current.uncertain |= (decision == TIMEOUT_UNKNOWN)
+    next = plan(current, decision, DB_NOW())
+    UPDATE Delivery SET status=next.status, next_attempt_at=next.due,
+                        uncertain=current.uncertain WHERE delivery_id=d.delivery_id
+    if next.status == retry_wait:
+      INSERT Outbox(retry_ready, d.delivery_id, ready_at=next.due, unique_key=(retry,d.delivery_id,d.lease_epoch))
+    if next.reason == EXHAUSTED: INSERT Outbox(dlq, d.delivery_id, ready_at=DB_NOW(),
+                                            unique_key=(dlq,d.delivery_id,d.lease_epoch))
+  COMMIT  # failure => no ACK; a stale epoch may record only its own Attempt
+  ACK(wake)

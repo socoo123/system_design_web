@@ -1,0 +1,27 @@
+import java.util.*;
+public class Ch05Independent {
+  public static void main(String[] args) {
+    Random random=new Random(5022); int checks=0;
+    for(int round=0;round<100;round++) {
+      var set=new HashSet<Long>(); var tokens=new ArrayList<ConsistentRing.Token>();
+      while(tokens.size()<50) {long p=random.nextLong();if(set.add(p))tokens.add(new ConsistentRing.Token(p,"S"+tokens.size()));}
+      var ring=new ConsistentRing.Ring(7,tokens);
+      for(int j=0;j<150;j++) {
+        long key=j<50?tokens.get(j).position():random.nextLong();
+        var sorted=tokens.stream().sorted((a,b)->Long.compareUnsigned(a.position(),b.position())).toList();
+        var expected=sorted.stream().filter(t->Long.compareUnsigned(t.position(),key)>=0).findFirst().orElse(sorted.get(0));
+        if(!ring.owner(key).equals(expected.owner()))throw new AssertionError("lookup");
+        checks++;
+      }
+      long p;do {p=random.nextLong();}while(set.contains(p));
+      var newTokens=new ArrayList<>(tokens);newTokens.add(new ConsistentRing.Token(p,"NEW"));
+      var next=new ConsistentRing.Ring(8,newTokens);
+      for(int j=0;j<1000;j++) {
+        long key=random.nextLong();String prior=ring.owner(key),post=next.owner(key);
+        if(!prior.equals(post)&&!post.equals("NEW"))throw new AssertionError("old-to-old move");
+        checks++;
+      }
+    }
+    System.out.println("PASS independent unsigned/equality/wrap oracle + add-only locality: "+checks+" checks, seed 5022");
+  }
+}

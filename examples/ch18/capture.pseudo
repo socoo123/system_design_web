@@ -1,0 +1,40 @@
+apply_capture(e):                         # Verified canonical captured evidence.
+  # Trusted adapter: raw-body signature + timestamp; configured account/environment;
+  # allowlisted event type; authenticated provider query. No browser success input.
+  a0 = SELECT Attempt WHERE provider=e.provider AND account=e.account
+       AND merchant_attempt_id=e.attempt_id
+  BEGIN
+  if a0 exists: o = SELECT Order WHERE id=a0.order_id FOR UPDATE
+  a = SELECT Attempt WHERE id=a0.id if a0 exists else NULL
+  new = INSERT Capture(e.capture_key,e.immutable_fields,outcome=UNDECIDED)
+        ON CONFLICT(provider,account,capture_id) DO NOTHING
+  if not new:
+    old = SELECT Capture WHERE capture_key=e.capture_key # New statement snapshot.
+    require old.immutable_fields == e.immutable_fields
+    COMMIT; return old.outcome             # Its obligation co-committed, still retryable.
+  valid = a exists AND e.account_environment == a.account_environment
+          AND e.server_set_attempt_marker == a.id AND e.amount == a.amount
+          AND e.currency == a.currency AND e.server_set_owner == o.owner
+  if valid AND a.provider_binding IS NULL:
+    UPDATE Attempt SET provider_binding=e.object_id WHERE id=a.id AND provider_binding IS NULL
+    require affected_rows == 1; a.provider_binding = e.object_id
+  if not valid OR e.object_id != a.provider_binding:
+    outcome = REVIEW; INSERT ReviewTask(e.capture_key,full_evidence=e)
+    INSERT Outbox(event_id,kind=review,capture_key=e.capture_key)
+  else if o.status == pending_pay AND o.accepted_capture IS NULL:
+    UPDATE Order SET status=paid,accepted_capture=e.capture_key,version=version+1
+      WHERE id=o.id AND status=pending_pay; require affected_rows == 1
+    finish_holds_locked(o, COMMITTED)
+    outcome = ACCEPTED
+    INSERT Outbox(event_id,kind=fulfill,order_id=o.id,version=o.version+1)
+  else:
+    outcome = REFUND_DUE                  # Closed/cancelled OR another capture won.
+    INSERT RefundDue(e.capture_key,amount=e.amount,currency=e.currency,state=READY)
+    INSERT Outbox(event_id,kind=refund,capture_key=e.capture_key)
+  UPDATE Capture SET outcome=:outcome WHERE capture_key=e.capture_key
+  if a exists AND outcome != REVIEW: UPDATE Attempt SET state=CAPTURED WHERE id=a.id
+  if a exists AND outcome == REVIEW: UPDATE Attempt SET state=OBSERVED_REVIEW
+                                    WHERE id=a.id AND state != CAPTURED
+  COMMIT                                 # Capture + responsibility + event together.
+  # Normal close conflict chooses REFUND_DUE; it does NOT abort capture evidence.
+  # Actual SQL/invariant failure rolls back; never ACK it as completed work.

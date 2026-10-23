@@ -1,0 +1,34 @@
+publish(bundle):
+  J, epoch = bundle.J, bundle.epoch
+  # Trusted verifier walks actual playlists, not just the worker's list.
+  refs = parse_transitive_references_by_exact_GET(bundle.root)
+  require refs union {bundle.root} == set(bundle.refs.values())
+  for ref in refs union {bundle.root}:
+    require ref.key starts_with "outputs/J/epoch/"
+    require ref.versionId not in {null, "null"}
+    bytes = GET(ref.bucket, ref.key, versionId=ref.versionId)
+    require len(bytes) == ref.size and SHA256(bytes) == ref.sha256
+  require validate_rungs_timeline_and_decode(refs, immutable_recipe(J))
+  BEGIN
+    v = SELECT Video WHERE id = J.video_id FOR UPDATE
+    j = SELECT Job WHERE key = J FOR UPDATE
+    b = SELECT Build WHERE key = (J, epoch) FOR UPDATE
+    if j.state == DONE:
+      COMMIT; return ALREADY_DONE  # Never republish an old pointer.
+    require v.target == J and v.visibility != REMOVED
+    require j.state == RUNNING and j.epoch == epoch
+    require j.lease_until > db_clock() and b.state == BUILDING
+    UPDATE Build SET state = PUBLISHED, root = bundle.root,
+                     inventory = refs union {bundle.root}, published_at = db_clock()
+      WHERE key = (J, epoch)
+    UPDATE Video SET ready_version = (J, epoch), ready_root = bundle.root
+      WHERE id = J.video_id
+    UPDATE Job SET state = DONE, result = (J, epoch) WHERE key = J
+  COMMIT
+  return PUBLISHED
+
+on_wakeup(J):
+  c = claim(J)
+  if c in {TERMINAL, NO_CLAIM}: ACK; return
+  publish(build(c))  # On error: do not report success; persist retry/failure.
+  ACK  # Unknown COMMIT => reconnect and read Job.result before ACK.

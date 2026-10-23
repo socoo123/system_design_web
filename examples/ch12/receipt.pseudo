@@ -1,0 +1,21 @@
+record_receipt(auth, view, delivered_candidate, read_candidate):
+  require current authorized device identity; validate integer bounds
+  BEGIN serializable transaction on the shared conversation/receipt authority
+  m = SELECT current membership WHERE (auth.user, view.conv) FOR SHARE
+  require m.active and m.view_epoch == view.epoch
+  base = m.first_seq - 1
+  tail = read current committed conversation head
+  require base <= delivered_candidate <= tail
+  ensure DeviceReceipt(user, device, conv, view_epoch) row via INSERT
+    ON CONFLICT DO NOTHING, initialized to base
+  d = SELECT DeviceReceipt WHERE (auth.user, auth.device, view) FOR UPDATE
+  next_d = max(d.delivered_upto, delivered_candidate)
+  require base <= read_candidate <= next_d
+  UPDATE DeviceReceipt SET delivered_upto = next_d
+  UPSERT PrivateRead(user, conv, view_epoch) using max(old, read_candidate)
+  if current user preference permits public read receipts:
+    UPSERT PublicRead(user, conv, view_epoch) using max(old, read_candidate)
+  COMMIT and wait for durable confirmation
+  return ACK(next_d)  // The sender can fetch authoritative state later.
+on abort_or_unknown:
+  retry the same watermarks; never regress a stored column
