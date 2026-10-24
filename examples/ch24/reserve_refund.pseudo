@@ -1,0 +1,20 @@
+reserveRefund(merchantScope, key, payNo, amount, currency):
+  require amount is a positive integer minor-unit amount
+  digest = canonicalHash(payNo, amount, currency)
+  begin transaction
+    p = lockPaymentOwnedBy(merchantScope, payNo)
+    old = findRequest(merchantScope, "REFUND", key)
+    if old exists:
+      require old.digest == digest else CONFLICT
+      commit; return accepted(old.refundId)
+    require currency == p.currency
+    require amount <= p.captured - p.refunded - p.reserved
+    r1 = insertRefund(p, amount, currency, state=RESERVED)
+    p.reserved += amount
+    insertRequest(merchantScope, "REFUND", key, digest, r1)
+    insertOutbox("refund-command:" + r1, frozenRefundCommand(r1))
+  commit
+  return 202(r1)
+on relevant UNIQUE conflict: rollback; restart and compare winner
+// Every refund entry point uses this same DB aggregate lock/bound.
+// A crash after commit preserves both reservation and dispatch intent.

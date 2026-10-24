@@ -1,0 +1,29 @@
+finishOrRelease(orderId, attemptId, generation, action, authenticatedActor, verifiedEvidence):
+  require action in {PICKUP, DELIVER, CANCEL, REASSIGN} else INVALID
+  begin transaction
+    o = SELECT order FOR UPDATE
+    a = SELECT attempt WHERE id = attemptId
+    require a binds (orderId, generation) else CONFLICT
+    require authorizedActorAndEvidence(action, authenticatedActor, o, a, verifiedEvidence) else FORBIDDEN
+    if storedReceipt(action, a) exists:
+      require same evidence binding else CONFLICT
+      commit; return storedReceipt, currentSnapshot(o)
+    require o.currentAttempt == a.id and o.generation == generation else STALE
+    if action == PICKUP:
+      require o.state == assigned else CONFLICT
+      UPDATE order, attempt SET state/result = picked_up
+    else:
+      if action == DELIVER: require o.state == picked_up and deliveryProof else CONFLICT
+      if action == CANCEL: require o.state == offered else CONTROLLED_HANDOFF_REQUIRED
+      if action == REASSIGN:
+        require o.state in {assigned, picked_up} and verifiedCustodyClear else REVIEW
+      c = SELECT courier_capacity WHERE id = a.courier FOR UPDATE
+      DELETE active_slot WHERE attempt_id = a.id         // require one deleted row
+      UPDATE courier_capacity SET occupied = occupied - 1 WHERE id = a.courier
+      UPDATE attempt SET result = terminalResult(action)
+      next = action == REASSIGN ? pending_match : terminalResult(action)
+      UPDATE order SET state = next, currentAttempt = null, generation = generation + 1
+    INSERT operation_receipt(action, a.id, evidenceBinding, fixedReceipt)
+    INSERT outbox(fixedEventKey(action, a.id), stateOrRematchIntent)
+  commit; return fixedReceipt, currentSnapshot(o)
+  // Verified custody evidence is a trusted operations dependency, never stale GPS.

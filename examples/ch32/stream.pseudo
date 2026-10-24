@@ -1,0 +1,41 @@
+# Pseudocode. Awaited writes propagate backpressure; no SDK prefetch.
+# Bounded parser/read/encoded-event payloads each <=16 KiB; total budget <=64 KiB.
+for event in bounded_utf8_sse(upstream, read_cap=16KiB, event_cap=16KiB):
+    require absolute_deadline_not_expired and idle_read_deadline_not_expired
+    normalized = Adapter.translate(event, encoded_cap=16KiB)
+    if normalized.final_usage:
+        require usage_source_matches(attempt, upstream_request_id, served_model)
+        Ledger.settle(attempt, authenticated_usage)     # survives old-attempt arrival
+    if normalized.error: raise trusted_Adapter_classification(normalized)
+    if normalized.success_terminal:
+        require validated_complete_output
+    if normalized.public_output:
+        if not locally_committed:
+            won = Ledger.claim_commit(rid, attempt.number, attempt.owner)
+            if not won: abort_upstream(); stop         # stale/unknown ACK: never send
+            locally_committed = true
+            Edge.begin_headers()                      # Edge sends no earlier heartbeat
+        await Edge.write_all(normalized, blocked_write_limit=10s)
+require valid_protocol_terminal and validated_complete_output
+Ledger.close_if_selected(rid, attempt.number, attempt.owner)
+AnswerCache.publish_if_reuse_authorized(complete_answer)
+
+on timeout, disconnect, oversized_event, parse_error, classified_upstream_failure:
+    abort_upstream_best_effort()
+    Ledger.mark_failure(attempt, UNKNOWN_unless_proven_otherwise)
+    if locally_committed:
+        send_declared_error_if_writable_or_close_EOF()   # no success DONE, no fallback
+        Ledger.close_if_selected(rid, attempt.number, attempt.owner)
+    else if failure_class in {RATE_TRANSIENT, SERVER_TRANSIENT, DISPATCH_TIMEOUT}
+            and policy_allows_extra_cost and deadline_remains:
+        acquire_backup_rate_and_concurrency_permit()
+        created = Ledger.reserve_fallback(rid, failed_owner, backup, new_bound, new_owner)
+        # Same request-row transaction excludes commitment; UNKNOWN a1 stays held.
+        if created: dispatch_a2_once()                # <=2 total; no deadline reset
+        else: stop_and_recover_status()                # denial/unknown ACK never dispatches
+    else:
+        Ledger.close_if_selected(rid, attempt.number, attempt.owner)
+        return_precommit_error()
+# Local socket closure does not prove remote work stopped: retain UNKNOWN usage/slot.
+# Cost uncertainty is separate from failure_class. Never fallback on disconnect,
+# blocked write, parser/oversize/schema failure, access denial or safety refusal.

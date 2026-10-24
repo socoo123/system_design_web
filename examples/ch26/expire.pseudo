@@ -1,0 +1,16 @@
+close(packet):
+  BEGIN                                      // same Packet DB and lock as claim
+  p = SELECT packets(packet) FOR UPDATE
+  if p.state in {EXPIRING, EXPIRED}: COMMIT; return original refund result
+  if p.state not in {INITIALIZING, OPEN, RECOVERING}: ROLLBACK; return NOT_FUNDED
+  if SELECT clock_timestamp() < p.expire_at: ROLLBACK; return TOO_EARLY
+  amount = p.remaining_cents; count = p.remaining_n
+  UPDATE packets SET ready=false, remaining_cents=0, remaining_n=0,
+    closed_unclaimed_n=count, refund_pending=amount,
+    state=(amount>0 ? EXPIRING : EXPIRED)
+  if amount>0:
+    INSERT outbox(refund:packet, packet, sender, currency, amount)
+  COMMIT                                     // snapshot and intent survive together
+  disable Redis projection for this epoch    // best effort; DB already rejects
+  // A matching verified APPLIED result moves pending -> applied, then EXPIRED.
+  // An unknown result leaves EXPIRING; confirmed recipient credits still run.

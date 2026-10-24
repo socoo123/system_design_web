@@ -1,0 +1,23 @@
+rebuild(packet):
+  BEGIN
+  p = SELECT packets(packet) FOR UPDATE
+  if p.state not in {OPEN, RECOVERING, INITIALIZING}: abort
+  if p.expire_at exists and actual DB time >= p.expire_at: abort; run close
+  epoch = p.epoch + 1; persist state=RECOVERING, ready=false, epoch
+  snapshot = immutable plan MINUS committed share IDs
+  require snapshot.count=p.remaining_n and snapshot.sum=p.remaining_cents
+  persist token = digest(packet, epoch, plan_version, ordered snapshot, deadline)
+  COMMIT                                      // old confirmations are now fenced
+  install into pkt:{packet}:e:epoch:{meta,list,amounts,users}
+    // One Lua call, every key supplied in KEYS; at most 100 shares.
+    // Missing meta: validate all input/types, install snapshot with status=READY.
+    // Existing identical token: return its status without replacing any list.
+    // Existing different token: reject; never overwrite an ACTIVE generation.
+  BEGIN
+  p = SELECT packets(packet) FOR UPDATE
+  require p.epoch=epoch and p.token=token and p.state=RECOVERING
+  if actual DB time >= p.expire_at: ROLLBACK; run close; return
+  verify READY(epoch, token); persist state=OPEN, ready=true
+  COMMIT
+  activate Redis only if epoch/token match     // retry if crash follows DB commit
+  // Older installers use older namespaces; old API writes fail the DB epoch.

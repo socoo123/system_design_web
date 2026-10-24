@@ -1,0 +1,39 @@
+# Pseudocode: Order Adapter, after source authentication and binding validation.
+# One full capture per payment_id. All SQL below uses one Order DB TX.
+consume(message):
+  fact = strict_translate_v1(message)             # invalid => durable quarantine, then ACK
+  BEGIN
+  inserted = INSERT inbox(consumer, source, event_id, payload_hash, outcome=NULL)
+             ON CONFLICT (consumer, source, event_id) DO NOTHING
+  if not inserted:
+    saved = SELECT inbox WHERE (consumer, source, event_id) = delivery_identity
+    require saved.payload_hash == message.hash  # changed payload => ROLLBACK, quarantine
+    ROLLBACK; ACK; return saved.outcome           # prior committed decision
+  fresh = INSERT capture_result(tenant, payment_id, fact_hash, outcome=NULL)
+          ON CONFLICT (tenant, payment_id) DO NOTHING
+  if not fresh:
+    saved = SELECT capture_result WHERE (tenant, payment_id) = fact_identity
+    require saved.fact_hash == fact.hash         # mismatch => ROLLBACK, quarantine
+    outcome = saved.outcome                      # a different event can repeat this fact
+  else:
+    before = SELECT root + lines WHERE tenant=:tenant AND id=:order_id
+    decision = before.capture(fact)              # immutable candidate + domain events
+    if decision.next != before:
+      changed = UPDATE orders SET state='paid', accepted_payment=:payment_id,
+                                  version=:next_version
+                WHERE tenant=:tenant AND id=:order_id
+                  AND state='pending_pay' AND version=:before_version
+      require changed == 1                      # 0 => ROLLBACK, bounded reload/retry
+    for event in decision.events:
+      if event is RefundRequired:
+        work = INSERT refund_work(tenant, payment_id, refund_id, amount, state='pending')
+          # UNIQUE(tenant,payment_id); stable refund_id r17 bound to these parameters
+        public = RefundRequested(work.refund_id, event.payment_id, event.amount)
+      else: public = translate_OrderPaid(event)
+      INSERT outbox(event_id, public, state='pending')
+    outcome = decision.outcome
+    UPDATE capture_result SET outcome=:outcome WHERE identity=:fact_identity
+  UPDATE inbox SET outcome=:outcome WHERE identity=:delivery_identity
+  COMMIT; ACK                                    # no network calls inside this TX
+# Any failure before commit rolls back inbox, state, result, refund work and outbox.
+# Unknown commit => do not ACK; redelivery re-enters the same durable identities.

@@ -1,0 +1,962 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="parchment" data-locale="zh">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ch31 · 向量检索服务</title>
+  <link rel="icon" href="../favicon.ico" sizes="48x48">
+  <link rel="stylesheet" href="../assets/css/style.css">
+  <script src="../assets/js/boot.js"></script>
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="../index.html"><span class="brand-logo">SD</span><span class="lang-zh">系统设计面试</span><span class="lang-en">System Design Interview</span></a>
+  <span class="spacer"></span>
+  <a class="map-link" href="../index.html"><span class="lang-zh">课程地图</span><span class="lang-en">Map</span></a>
+  <div class="seg" role="group" aria-label="language">
+    <button type="button" data-locale-set="zh">中文</button>
+    <button type="button" data-locale-set="both"><span class="lang-zh">对照</span><span class="lang-en">Both</span></button>
+    <button type="button" data-locale-set="en">EN</button>
+  </div>
+  <div class="seg" role="group" aria-label="theme">
+    <button type="button" data-theme-set="parchment"><span class="lang-zh">护眼</span><span class="lang-en">Paper</span></button>
+    <button type="button" data-theme-set="dracula"><span class="lang-zh">深色</span><span class="lang-en">Dark</span></button>
+  </div>
+</header>
+<main class="wrap">
+<article class="chapter" id="ch31" data-ch="ch31">
+  <header>
+    <div class="ch-kicker"><span class="lang-zh">CHAPTER 31 · 大模型与 Agent 基建</span><span class="lang-en">CHAPTER 31 · LLM / Agent</span></div>
+    <h1><span class="lang-zh">向量检索服务</span><span class="lang-en">Vector search service</span></h1>
+    <p class="ch-meta-line"><span class="lang-zh">约 40 分钟 · 前置：Ch03、Ch30 · 6 组 / 33 帧渐进白板图</span><span class="lang-en">~40 min · after Ch03, Ch30 · 6 decks / 33 progressive frames</span></p>
+  </header>
+
+<section class="goal"><h2><span class="lang-zh">这一章结束你能做什么</span> <span class="lang-en">What you can do after this chapter</span></h2>
+<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
+<p>把一次向量查询画成完整闭环，讲清 HNSW 导航、IVF list 扫描、PQ 短码与原向量重算各自省掉哪份工作。</p>
+<p>把亿级向量换算成字节、每片内存和复制成本；用带过滤的精确 ground truth 比较 Recall 与尾延迟，不背厂商吞吐。</p>
+<p>走通严过滤断路、WAL 已确认但尚不可搜、旧版本与删除、重建发布、缺一片和副本追不上的故障窗口。</p>
+</div><div class="lang-en"><p class="col-kicker">English</p>
+<p>Draw a complete query loop and explain the work saved by HNSW navigation, IVF-list probing, PQ codes, and full-vector rescoring.</p>
+<p>Compute raw bytes, per-shard memory, and replication costs; compare recall and tail latency against filtered exact ground truth.</p>
+<p>Walk predicate disconnection, durable-but-not-searchable writes, versions/deletes, rebuild publication, missing shards, and replica lag.</p>
+</div></div></section>
+
+  <section>
+<h2><span class="lang-zh">30 秒开场：先定搜索的契约</span> <span class="lang-en">Opening: define the search contract</span></h2>
+<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
+<p>我设计一套给 RAG 后端调用的向量检索服务。调用方已经算好 embedding；本服务接收向量、k 与 metadata filter，返回 id、version、score 和检索状态。先按原向量、图边与复制预算决定单片结构：热数据放得下就比较 HNSW，内存紧则比较 IVF-PQ 或按 SSD 设计的图索引。过滤由 planner 按允许集规模选路；写入先持久 WAL，能搜到的位点另算。最后用分片切容量、副本撑读与故障，任何候选都带同一模型和权限边界。</p>
+<p>澄清七件事：N 与维度、距离/模型版本、峰值与 p95、过滤通过率及向量相关性、流式写与删除频率、写后是否立刻读、租户隔离要求。要求“向量越近越好”还不够：内积越大越好，L2 距离越小越好，cosine 需要一致归一化。返回分数要声明单位与排序方向，否则 coordinator 会把不同片的结果排反。</p>
+<p>本章只打开 Ch30 调用的存储引擎，切分、query embedding、BM25 融合、语义 rerank 与答案生成仍由 <a class="chip" href="ch30.html">Ch30</a> 负责。原向量 rescore 是重新计算同一个向量距离，不是让 CrossEncoder 判断文字相关性。算法库能做索引，但在线服务还要承担认证、版本、日志、恢复与查询契约；选一个产品名并不会自动回答这些窗口。</p>
+</div><div class="lang-en"><p class="col-kicker">English</p>
+<p>This service accepts already-computed vectors from RAG and returns IDs, versions, scores, and search status. Size raw vectors, graph links, and copies before comparing hot-memory HNSW with IVF-PQ or SSD-oriented graphs. A filter planner selects by allowed-set size; WAL durability and search visibility have separate watermarks. Shards divide data, replicas supply reads/failover, and all candidates share model and access scope.</p>
+<p>Clarify count/dimension, metric/model revision, peak/p95, predicate acceptance and vector correlation, update/delete rates, read-after-write needs, and tenant isolation. Inner products rank high first, L2 low first, and cosine needs consistent normalization. Define score units/direction before distributed merging.</p>
+<p><a class="chip" href="ch30.html">Ch30</a> owns chunking, query embeddings, lexical fusion, semantic reranking, and generation. Vector rescoring recomputes the same vector metric rather than CrossEncoder relevance. An indexing library still needs authentication, versions, logging, recovery, and query contracts.</p>
+</div></div></section>
+
+  <section>
+<h2><span class="lang-zh">先写假设，再让数字改图</span> <span class="lang-en">Write assumptions before adding components</span></h2>
+<table><thead><tr><th><span class="lang-zh">编号与约束</span> <span class="lang-en">ID and constraint</span></th><th><span class="lang-zh">本章 assumption</span> <span class="lang-en">Assumption</span></th><th><span class="lang-zh">它改变的决定</span> <span class="lang-en">Design consequence</span></th></tr>
+</thead><tbody><tr><td><span class="lang-zh">A1 · 数据</span> <span class="lang-en">A1 · data</span></td><td><span class="lang-zh">1 亿条，768 维，float32；一份原向量</span> <span class="lang-en">100M vectors, 768 dimensions, float32; one raw copy</span></td><td><span class="lang-zh">307.2 GB；不包含图、payload、WAL 与副本</span> <span class="lang-en">307.2 GB before graph, payload, WAL, and copies</span></td></tr>
+<tr><td><span class="lang-zh">A2 · 请求</span> <span class="lang-en">A2 · requests</span></td><td><span class="lang-zh">峰值 200/s，k=10，目标完整查询 p95≤50 ms</span> <span class="lang-en">Peak 200/s, k=10, complete-search p95 target ≤50 ms</span></td><td><span class="lang-zh">全库精确扫不是默认；超时报告失败</span> <span class="lang-en">Reject default corpus-wide exact scans; report timeout</span></td></tr>
+<tr><td><span class="lang-zh">A3 · 布局</span> <span class="lang-en">A3 · layout</span></td><td><span class="lang-zh">4 个 hash(id) 分片；每片 2 个查询副本；128 GiB/台</span> <span class="lang-en">Four hash(id) shards, two query replicas each, 128 GiB/node</span></td><td><span class="lang-zh">数据均匀假设，每片 2,500 万条；副本 8 份分片</span> <span class="lang-en">Uniform data assumption: 25M/shard and eight shard copies</span></td></tr>
+<tr><td><span class="lang-zh">A4 · HNSW 实验</span> <span class="lang-en">A4 · HNSW trial</span></td><td><span class="lang-zh">M=16、ef_construction=128、ef_search 从 64 起；玩具距离 0.8/0.3/0.1</span> <span class="lang-en">M=16, ef_construction=128, ef_search starts at 64; toy distances 0.8/0.3/0.1</span></td><td><span class="lang-zh">区分建图内存、建图 CPU 和查询宽度</span> <span class="lang-en">Separate graph memory, build CPU, and query width</span></td></tr>
+<tr><td><span class="lang-zh">A5 · IVF-PQ 实验</span> <span class="lang-en">A5 · IVF-PQ trial</span></td><td><span class="lang-zh">每片 nlist=4,096，nprobe=16；m=96、nbits=8；ID 8 B</span> <span class="lang-en">Per shard: nlist=4,096, nprobe=16; m=96, nbits=8, eight-byte IDs</span></td><td><span class="lang-zh">96 B code，10.4 GB code+ID；均匀 list 估扫描量</span> <span class="lang-en">96-B codes, 10.4 GB codes/IDs; uniform-list scan estimate</span></td></tr>
+<tr><td><span class="lang-zh">A6 · 重算</span> <span class="lang-en">A6 · rescoring</span></td><td><span class="lang-zh">每片最多 100 候选取原向量；同一 metric</span> <span class="lang-en">Fetch at most 100 raw candidates per shard; identical metric</span></td><td><span class="lang-zh">每查询四片最多 1.2288 MB；不补漏探 list</span> <span class="lang-en">At most 1.2288 MB across four shards/query; no recovery of unprobed lists</span></td></tr>
+<tr><td><span class="lang-zh">A7 · 过滤</span> <span class="lang-en">A7 · filtering</span></td><td><span class="lang-zh">小允许集门槛试 5,000；严过滤例 s=0.001</span> <span class="lang-en">Trial exact-scan threshold 5,000; restrictive example s=0.001</span></td><td><span class="lang-zh">k/s 仅独立均匀期望；planner 阈值要测</span> <span class="lang-en">k/s is only an independent/uniform expectation; benchmark threshold</span></td></tr>
+<tr><td><span class="lang-zh">A8 · 读容量</span> <span class="lang-en">A8 · read capacity</span></td><td><span class="lang-zh">教学预算每副本 120/s；故障幸存者需要测得≥200/s</span> <span class="lang-en">Illustrative 120/s per replica; survivor must benchmark ≥200/s</span></td><td><span class="lang-zh">两副本稳态够，不保证坏一份仍够</span> <span class="lang-en">Two fit steady state but may fail after one loss</span></td></tr>
+<tr><td><span class="lang-zh">A9 · 写</span> <span class="lang-en">A9 · writes</span></td><td><span class="lang-zh">峰值 100 upsert/s；每条向量和 metadata 合计 4,096 B</span> <span class="lang-en">Peak 100 upserts/s; 4,096 B/vector plus metadata record</span></td><td><span class="lang-zh">每逻辑日志 0.4096 MB/s；长期按积分计</span> <span class="lang-en">0.4096 MB/s/logical log; retention integrates real rates</span></td></tr>
+<tr><td><span class="lang-zh">A10 · 可见与持久</span> <span class="lang-en">A10 · visibility and durability</span></td><td><span class="lang-zh">每片有序复制 WAL；默认读最多旧 2 s；最少位点可等待</span> <span class="lang-en">Ordered replicated WAL per shard; default reads at most two seconds stale; minimum positions may wait</span></td><td><span class="lang-zh">位点证明失效或追不上则拒绝，不伪装 bounded</span> <span class="lang-en">Reject unavailable/lagging proofs rather than pretend bounded freshness</span></td></tr>
+<tr><td><span class="lang-zh">A11 · 内存</span> <span class="lang-en">A11 · memory</span></td><td><span class="lang-zh">每台热数据预算 70% RAM，其余留给构建/缓存/运行态</span> <span class="lang-en">Hot data budget 70% RAM; remainder for builds/cache/runtime</span></td><td><span class="lang-zh">容量是预算而非测量；重建峰值另验</span> <span class="lang-en">Budget is not a measurement; separately validate rebuild peaks</span></td></tr>
+<tr><td><span class="lang-zh">A12 · 验收</span> <span class="lang-en">A12 · evaluation</span></td><td><span class="lang-zh">500 个冻结查询；分过滤/冷热切片，Recall@10目标≥0.95</span> <span class="lang-en">500 frozen queries; predicate/hot-cold slices, Recall@10 target ≥0.95</span></td><td><span class="lang-zh">独立回归集，同时测空集、删除、超时</span> <span class="lang-en">Held-out regression includes empty sets, deletes, and timeouts</span></td></tr>
+</tbody></table><div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
+<p>以上条数、参数、时延和吞吐都不是厂商性能数据。容量用十进制 GB，内存设备用 GiB：1 GiB=2³⁰ B。HNSW 没有“过了五千万就不能用”的算法法则；是否留下它，取决于本题维度、图大小、过滤形状和机器预算。面试官把维度减半，先重算字节再讨论索引，而不是继续坚持旧的规模门槛。</p>
+</div><div class="lang-en"><p class="col-kicker">English</p>
+<p>Counts, parameters, times, and throughput are assumptions rather than vendor benchmarks. Use decimal GB and GiB=2³⁰ B for machine memory. HNSW has no universal fifty-million-vector cutoff: dimension, graph footprint, predicates, and hardware decide. Recompute bytes when dimensions change.</p>
+</div></div></section>
+
+  <section>
+<h2><span class="lang-zh">查询闭环：先把谁返回给谁画准</span> <span class="lang-en">Query loop: return through the owner</span></h2>
+<figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d1s1t d1s1d">
+          <title id="d1s1t">Validate before searching</title>
+          <desc id="d1s1d">Caller sends the computed vector to Query svc; Query svc returns a response. No embedding computation is drawn.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <g class="is-new">
+            <rect x="120" y="24" width="824" height="360" rx="18" class="boundary"/><text x="136" y="46" class="tiny">VECTOR SEARCH · trusted collection / model / metric</text><circle cx="44" cy="176" r="12" class="box"/><path d="M24 222 Q44 190 64 222" class="wire"/><text x="44" y="244" text-anchor="middle" class="label">Caller</text>
+            <rect x="155" y="165" width="160" height="70" rx="12" class="box"/><text x="235" y="197" text-anchor="middle" class="label">Query svc</text><text x="235" y="216" text-anchor="middle" class="sub">auth + deadline</text>
+            <path d="M70 191 L145 191" class="wire"/><polygon points="155,191 145,196 145,186" class="head"/><text x="110" y="183" text-anchor="middle" class="tiny">vector</text>
+            <path d="M155 209 L80 209" class="wire reply"/><polygon points="70,209 80,204 80,214" class="head reply"/><text x="110" y="228" text-anchor="middle" class="tiny">ids + score</text>
+            <text x="155" y="310" class="tiny">Validate: 768 dims, finite values, model=m1, normalized cosine</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">第一笔先闭合 API：调用方送已算好的向量；维度、model 与 metric 不匹配先拒绝，不能让索引替两套坐标系凑分数。</span><span class="lang-en">Close the API first: validate dimension, model, and metric before index work; the caller computes embeddings.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d1s2t d1s2d">
+          <title id="d1s2t">A stateful replica serves search</title>
+          <desc id="d1s2d">Query svc calls Index replica with k and mandatory filter; local top-k returns through Query svc to Caller.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="24" width="824" height="360" rx="18" class="boundary"/><text x="136" y="46" class="tiny">VECTOR SEARCH · trusted collection / model / metric</text><circle cx="44" cy="176" r="12" class="box"/><path d="M24 222 Q44 190 64 222" class="wire"/><text x="44" y="244" text-anchor="middle" class="label">Caller</text>
+          <rect x="155" y="165" width="160" height="70" rx="12" class="box"/><text x="235" y="197" text-anchor="middle" class="label">Query svc</text><text x="235" y="216" text-anchor="middle" class="sub">auth + deadline</text>
+          <path d="M70 191 L145 191" class="wire"/><polygon points="155,191 145,196 145,186" class="head"/><text x="110" y="183" text-anchor="middle" class="tiny">vector</text>
+          <path d="M155 209 L80 209" class="wire reply"/><polygon points="70,209 80,204 80,214" class="head reply"/><text x="110" y="228" text-anchor="middle" class="tiny">ids + score</text>
+          <text x="155" y="310" class="tiny">Validate: 768 dims, finite values, model=m1, normalized cosine</text>
+          <g class="is-new">
+            <rect x="450" y="150" width="190" height="100" rx="12" class="box"/><text x="545" y="197" text-anchor="middle" class="label">Index replica</text><text x="545" y="216" text-anchor="middle" class="sub">local search snapshot</text>
+            <path d="M315 191 L440 191" class="wire"/><polygon points="450,191 440,196 440,186" class="head"/><text x="382" y="183" text-anchor="middle" class="tiny">k=10 + filter</text>
+            <path d="M450 209 L325 209" class="wire reply"/><polygon points="315,209 325,204 325,214" class="head reply"/><text x="382" y="228" text-anchor="middle" class="tiny">local top-k</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">检索状态放到 Index replica，回程走 Replica → Query svc → Caller。A2 的 k=10 是最终结果数，内部候选数可以更大。</span><span class="lang-en">Index replica owns search state; results return replica → Query svc → Caller. A2 k=10 is the final count, not the internal candidate width.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d1s3t d1s3d">
+          <title id="d1s3t">Rescore a bounded shortlist</title>
+          <desc id="d1s3d">Index replica fetches full vectors from Vector Store for shortlist rescoring; vectors return to replica, local top-k to Query svc, results to Caller.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="24" width="824" height="360" rx="18" class="boundary"/><text x="136" y="46" class="tiny">VECTOR SEARCH · trusted collection / model / metric</text><circle cx="44" cy="176" r="12" class="box"/><path d="M24 222 Q44 190 64 222" class="wire"/><text x="44" y="244" text-anchor="middle" class="label">Caller</text>
+          <rect x="155" y="165" width="160" height="70" rx="12" class="box"/><text x="235" y="197" text-anchor="middle" class="label">Query svc</text><text x="235" y="216" text-anchor="middle" class="sub">auth + deadline</text>
+          <path d="M70 191 L145 191" class="wire"/><polygon points="155,191 145,196 145,186" class="head"/><text x="110" y="183" text-anchor="middle" class="tiny">vector</text>
+          <path d="M155 209 L80 209" class="wire reply"/><polygon points="70,209 80,204 80,214" class="head reply"/><text x="110" y="228" text-anchor="middle" class="tiny">ids + score</text>
+          <text x="155" y="310" class="tiny">Validate: 768 dims, finite values, model=m1, normalized cosine</text>
+          <rect x="450" y="150" width="190" height="100" rx="12" class="box"/><text x="545" y="197" text-anchor="middle" class="label">Index replica</text><text x="545" y="216" text-anchor="middle" class="sub">local search snapshot</text>
+          <path d="M315 191 L440 191" class="wire"/><polygon points="450,191 440,196 440,186" class="head"/><text x="382" y="183" text-anchor="middle" class="tiny">k=10 + filter</text>
+          <path d="M450 209 L325 209" class="wire reply"/><polygon points="315,209 325,204 325,214" class="head reply"/><text x="382" y="228" text-anchor="middle" class="tiny">local top-k</text>
+          <g class="is-new">
+            <path d="M730 160 V230 A85 12 0 0 0 900 230 V160" class="store"/><ellipse cx="815" cy="160" rx="85" ry="12" class="store"/><text x="815" y="205" text-anchor="middle" class="label">Vector Store</text><text x="815" y="223" text-anchor="middle" class="sub">id + version + float32</text>
+            <path d="M640 191 L720 191" class="wire"/><polygon points="730,191 720,196 720,186" class="head"/><text x="685" y="182" text-anchor="middle" class="tiny">rescore</text>
+            <path d="M730 209 L650 209" class="wire reply"/><polygon points="640,209 650,204 650,214" class="head reply"/><text x="685" y="230" text-anchor="middle" class="tiny">vectors</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">压缩粗搜后可取原向量重算距离；A6 短名单上限 100 只让这条线搬 100×768×4=307,200 B，找漏的近邻仍回不来。</span><span class="lang-en">After compressed search, fetch full vectors for rescoring. A6 caps this at 100×768×4=307,200 B; rescoring cannot recover omitted neighbors.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d1s4t d1s4d">
+          <title id="d1s4t">Size bytes on the data path</title>
+          <desc id="d1s4d">The same request and response loop is annotated with 100 million vectors, 768 dimensions, 307.2 GB of raw data, before graph and replication.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="24" width="824" height="360" rx="18" class="boundary"/><text x="136" y="46" class="tiny">VECTOR SEARCH · trusted collection / model / metric</text><circle cx="44" cy="176" r="12" class="box"/><path d="M24 222 Q44 190 64 222" class="wire"/><text x="44" y="244" text-anchor="middle" class="label">Caller</text>
+          <rect x="155" y="165" width="160" height="70" rx="12" class="box"/><text x="235" y="197" text-anchor="middle" class="label">Query svc</text><text x="235" y="216" text-anchor="middle" class="sub">auth + deadline</text>
+          <path d="M70 191 L145 191" class="wire"/><polygon points="155,191 145,196 145,186" class="head"/><text x="110" y="183" text-anchor="middle" class="tiny">vector</text>
+          <path d="M155 209 L80 209" class="wire reply"/><polygon points="70,209 80,204 80,214" class="head reply"/><text x="110" y="228" text-anchor="middle" class="tiny">ids + score</text>
+          <text x="155" y="310" class="tiny">Validate: 768 dims, finite values, model=m1, normalized cosine</text>
+          <rect x="450" y="150" width="190" height="100" rx="12" class="box"/><text x="545" y="197" text-anchor="middle" class="label">Index replica</text><text x="545" y="216" text-anchor="middle" class="sub">local search snapshot</text>
+          <path d="M315 191 L440 191" class="wire"/><polygon points="450,191 440,196 440,186" class="head"/><text x="382" y="183" text-anchor="middle" class="tiny">k=10 + filter</text>
+          <path d="M450 209 L325 209" class="wire reply"/><polygon points="315,209 325,204 325,214" class="head reply"/><text x="382" y="228" text-anchor="middle" class="tiny">local top-k</text>
+          <path d="M730 160 V230 A85 12 0 0 0 900 230 V160" class="store"/><ellipse cx="815" cy="160" rx="85" ry="12" class="store"/><text x="815" y="205" text-anchor="middle" class="label">Vector Store</text><text x="815" y="223" text-anchor="middle" class="sub">id + version + float32</text>
+          <path d="M640 191 L720 191" class="wire"/><polygon points="730,191 720,196 720,186" class="head"/><text x="685" y="182" text-anchor="middle" class="tiny">rescore</text>
+          <path d="M730 209 L650 209" class="wire reply"/><polygon points="640,209 650,204 650,214" class="head reply"/><text x="685" y="230" text-anchor="middle" class="tiny">vectors</text>
+          <g class="is-new">
+            <rect x="700" y="80" width="218" height="20" rx="10" class="badge"/><text x="809" y="94" text-anchor="middle" class="badge-text">A1: 100M x 768 x 4 B</text>
+            <text x="700" y="114" class="clock">307.2 GB = 286.1 GiB</text>
+            <text x="155" y="340" class="tiny">Raw bytes exclude graph, IDs, payload indexes, WAL and replicas.</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">100,000,000×768×4=307,200,000,000 B=307.2 GB≈286.1 GiB。裸向量已逼近内存预算，图边、倒排和重建空间不能当零。</span><span class="lang-en">100,000,000×768×4=307.2 GB≈286.1 GiB. Raw vectors already pressure memory; graph, scalar indexes, and rebuild space are extra.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d1s5t d1s5d">
+          <title id="d1s5t">Reject a full scan at the peak</title>
+          <desc id="d1s5d">A red rejected full-scan request goes from Index replica to Vector Store alongside the valid bounded rescore loop. Caller still receives results via Query svc.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="24" width="824" height="360" rx="18" class="boundary"/><text x="136" y="46" class="tiny">VECTOR SEARCH · trusted collection / model / metric</text><circle cx="44" cy="176" r="12" class="box"/><path d="M24 222 Q44 190 64 222" class="wire"/><text x="44" y="244" text-anchor="middle" class="label">Caller</text>
+          <rect x="155" y="165" width="160" height="70" rx="12" class="box"/><text x="235" y="197" text-anchor="middle" class="label">Query svc</text><text x="235" y="216" text-anchor="middle" class="sub">auth + deadline</text>
+          <path d="M70 191 L145 191" class="wire"/><polygon points="155,191 145,196 145,186" class="head"/><text x="110" y="183" text-anchor="middle" class="tiny">vector</text>
+          <path d="M155 209 L80 209" class="wire reply"/><polygon points="70,209 80,204 80,214" class="head reply"/><text x="110" y="228" text-anchor="middle" class="tiny">ids + score</text>
+          <text x="155" y="310" class="tiny">Validate: 768 dims, finite values, model=m1, normalized cosine</text>
+          <rect x="450" y="150" width="190" height="100" rx="12" class="box"/><text x="545" y="197" text-anchor="middle" class="label">Index replica</text><text x="545" y="216" text-anchor="middle" class="sub">local search snapshot</text>
+          <path d="M315 191 L440 191" class="wire"/><polygon points="450,191 440,196 440,186" class="head"/><text x="382" y="183" text-anchor="middle" class="tiny">k=10 + filter</text>
+          <path d="M450 209 L325 209" class="wire reply"/><polygon points="315,209 325,204 325,214" class="head reply"/><text x="382" y="228" text-anchor="middle" class="tiny">local top-k</text>
+          <path d="M730 160 V230 A85 12 0 0 0 900 230 V160" class="store"/><ellipse cx="815" cy="160" rx="85" ry="12" class="store"/><text x="815" y="205" text-anchor="middle" class="label">Vector Store</text><text x="815" y="223" text-anchor="middle" class="sub">id + version + float32</text>
+          <path d="M640 191 L720 191" class="wire"/><polygon points="730,191 720,196 720,186" class="head"/><text x="685" y="182" text-anchor="middle" class="tiny">rescore</text>
+          <path d="M730 209 L650 209" class="wire reply"/><polygon points="640,209 650,204 650,214" class="head reply"/><text x="685" y="230" text-anchor="middle" class="tiny">vectors</text>
+          <rect x="700" y="80" width="218" height="20" rx="10" class="badge"/><text x="809" y="94" text-anchor="middle" class="badge-text">A1: 100M x 768 x 4 B</text>
+          <text x="700" y="114" class="clock">307.2 GB = 286.1 GiB</text>
+          <text x="155" y="340" class="tiny">Raw bytes exclude graph, IDs, payload indexes, WAL and replicas.</text>
+          <g class="is-new">
+            <path d="M640 235 L672 235 Q680 235 680 243 L680 272 Q680 280 688 280 L807 280 Q815 280 815 272 L815 252" class="wire fail"/><polygon points="815,242 820,252 810,252" class="head fail"/>
+            <text x="660" y="302" class="tiny">reject: scan 307.2 GB/query</text>
+            <text x="155" y="365" class="tiny">A2: 200/s x 307.2 GB = 61.44 TB/s of logical reads</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">若每次精确扫全库，200×307.2 GB=61.44 TB/s 的逻辑读取；这不是实测吞吐。拒绝全库扫描，把精确距离留给小允许集或短名单。</span><span class="lang-en">A full scan at 200/s implies 61.44 TB/s of logical reads, not measured throughput. Use exact distances for small allowed sets or shortlists.</span></figcaption>
+      </div>
+    </figure><h3><span class="lang-zh">正常路径与接口边界</span> <span class="lang-en">Normal path and API boundary</span></h3>
+<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
+<p>一次 <code>POST /v1/vectors/search</code> 由 Query svc 认证身份、限定 collection，验证 vector 的维度、有限数值、model_id 与 metric；用户 filter 与服务端 tenant 条件取交集。响应包含 id/version/score、index generation、覆盖分片与 complete 标志，便于上游区分“真没近邻”和“搜索失败”。A2 的 50 ms 包括服务排队、内部网络、搜索与归并，不含上游 embedding；不能只量引擎内循环就宣布达标。</p>
+<p>Index replica 搜索自己 pin 的 growing 与 sealed 状态，检查候选的最新可见版本和谓词，必要时取 Vector Store 的原向量重算，然后回 Query svc，再回 Caller。原向量键用 collection/model/id/version，不能用裸 id 取到另一版本的向量。所有片使用一致的距离约定；Faiss 的 L2 返回平方距离，cosine 可映射到归一化后的内积 [2]。对零向量要拒绝或定义专门行为，不能除以零后把 NaN 排进候选。</p>
+<p>先看字节：一条 768×4=3,072 B。1M 是 3.072 GB，10M 是 30.72 GB，100M 是 307.2 GB；后者除以 2³⁰ 约 286.1 GiB。按四片均匀切开，每片裸向量 76.8 GB≈71.53 GiB；128 GiB×70%=89.6 GiB，只剩约 18.07 GiB 放图、ID、payload 倒排与其他热态。这个余量是否够，要测对象开销和构建峰值，不能把“裸向量放得下”说成“一台索引副本放得下”。</p>
+<p>二副本让原向量热拷贝至少 307.2×2=614.4 GB≈572.2 GiB，不是把数据集扩成两亿条。备份、日志保留、immutable 文件和临时重建不在这个乘法里。相反，如果原向量冷放 SSD，RAM 预算只计热结构与页缓存，就要把查询随机 I/O 放进延迟实验；把 RAM 变小同时继续承诺全热 HNSW 的时延，是把两个方案的好处拼在一起。</p>
+<p>为什么要 ANN：假设每次独立读取整份原向量，200×307.2=61,440 GB/s=61.44 TB/s 的逻辑读取。实际批量 GPU 精确距离可共享读取，允许集很小也可以精确扫，所以这不是“精确 kNN 永远不行”的证明；它否决的是本题未经批处理与硬件验证就默认全库扫描。入口还要限制 k、并发与每租户候选预算，避免一个大 k 请求消耗整片的搜索时间。</p>
+</div><div class="lang-en"><p class="col-kicker">English</p>
+<p>Query svc authenticates <code>POST /v1/vectors/search</code>, constrains collection, and validates dimension, finite values, model, and metric. Intersect user filters with trusted tenant scope. Return ID/version/score, generation, covered shards, and complete status so upstream separates empty matches from failures. A2’s fifty milliseconds includes queuing, internal networking, search, and merging, but excludes embedding.</p>
+<p>Each Index replica searches pinned growing/sealed state, checks latest visible versions and predicates, optionally fetches original vectors, and returns through Query svc to Caller. Fetch keys include collection/model/ID/version. Shards agree on scoring: Faiss L2 reports squared distance; normalized inner product supports cosine [2]. Reject or explicitly handle zero vectors instead of producing NaN.</p>
+<p>Each vector uses 3,072 B. 1M, 10M, and 100M require 3.072, 30.72, and 307.2 GB respectively; the latter is 286.1 GiB. Four uniform shards need 76.8 GB≈71.53 GiB raw each. A 70% budget on 128 GiB gives 89.6 GiB, leaving about 18.07 GiB for graph, IDs, scalar indexes, and other hot state. Measure object/build overhead before claiming a replica fits.</p>
+<p>Two raw copies require at least 614.4 GB≈572.2 GiB rather than doubling logical points. Backups, retained logs, immutable artifacts, and rebuild workspace are additional. Keeping raw vectors on SSD reduces RAM but adds random-I/O latency; validate that alternative separately from a fully hot index.</p>
+<p>At independent full scans, 200×307.2 GB=61.44 TB/s logical reads. Batched GPU exact search may share reads, and small allowed sets can be scanned exactly; the calculation rejects an unvalidated default full scan rather than exact kNN in all settings. Cap k, concurrency, and per-tenant candidate work.</p>
+</div></div></section>
+
+  <section>
+<h2><span class="lang-zh">HNSW：上层导航，底层保留候选</span> <span class="lang-en">HNSW: navigate above, explore below</span></h2>
+<figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d2s1t d2s1d">
+          <title id="d2s1t">Enter the hierarchy</title>
+          <desc id="d2s1d">Search worker reads E at level 1 inside one replica. This is algorithm traversal, not RPC fan-out.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <g class="is-new">
+            <rect x="22" y="24" width="922" height="360" rx="18" class="boundary"/><text x="38" y="46" class="tiny">HNSW · traversal inside one Index replica; arrows are reads / expansion</text>
+            <rect x="65" y="170" width="160" height="80" rx="12" class="box"/><text x="145" y="207" text-anchor="middle" class="label">Search worker</text><text x="145" y="226" text-anchor="middle" class="sub">q, k=10</text>
+            <rect x="350" y="75" width="130" height="50" rx="12" class="box"/><text x="415" y="97" text-anchor="middle" class="label">E · level 1</text><text x="415" y="116" text-anchor="middle" class="sub">distance 0.8</text>
+            <path d="M225 191 L262 191 Q270 191 270 183 L270 108 Q270 100 278 100 L340 100" class="wire"/><polygon points="350,100 340,105 340,95" class="head"/><text x="300" y="92" text-anchor="middle" class="tiny">entry</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">先从稀疏上层入口 E 进入；所有点都在同一副本内，箭头表示邻接/距离读取，不是把每个向量部署成服务。</span><span class="lang-en">Enter at sparse upper-layer E. All points are inside one replica; arrows denote adjacency/distance reads rather than vector microservices.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d2s2t d2s2d">
+          <title id="d2s2t">Navigate the sparse layer</title>
+          <desc id="d2s2d">Search worker enters E; upper-layer traversal improves from E to F.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="22" y="24" width="922" height="360" rx="18" class="boundary"/><text x="38" y="46" class="tiny">HNSW · traversal inside one Index replica; arrows are reads / expansion</text>
+          <rect x="65" y="170" width="160" height="80" rx="12" class="box"/><text x="145" y="207" text-anchor="middle" class="label">Search worker</text><text x="145" y="226" text-anchor="middle" class="sub">q, k=10</text>
+          <rect x="350" y="75" width="130" height="50" rx="12" class="box"/><text x="415" y="97" text-anchor="middle" class="label">E · level 1</text><text x="415" y="116" text-anchor="middle" class="sub">distance 0.8</text>
+          <path d="M225 191 L262 191 Q270 191 270 183 L270 108 Q270 100 278 100 L340 100" class="wire"/><polygon points="350,100 340,105 340,95" class="head"/><text x="300" y="92" text-anchor="middle" class="tiny">entry</text>
+          <g class="is-new">
+            <rect x="680" y="75" width="130" height="50" rx="12" class="box"/><text x="745" y="97" text-anchor="middle" class="label">F · level 1</text><text x="745" y="116" text-anchor="middle" class="sub">distance 0.3</text>
+            <path d="M480 100 L670 100" class="wire"/><polygon points="680,100 670,105 670,95" class="head"/><text x="580" y="91" text-anchor="middle" class="tiny">greedy improvement</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">从 E 到更接近 q 的 F，减少到底层后要试的区域。上层不是粗质心分类，它仍是向量点组成的图 [3]。</span><span class="lang-en">Move E → F toward q before local exploration. The upper layer contains vector nodes, not IVF centroids [3].</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d2s3t d2s3d">
+          <title id="d2s3t">Descend with the same ID</title>
+          <desc id="d2s3d">The traversal is Search worker to upper E, upper F, then the same F at level 0.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="22" y="24" width="922" height="360" rx="18" class="boundary"/><text x="38" y="46" class="tiny">HNSW · traversal inside one Index replica; arrows are reads / expansion</text>
+          <rect x="65" y="170" width="160" height="80" rx="12" class="box"/><text x="145" y="207" text-anchor="middle" class="label">Search worker</text><text x="145" y="226" text-anchor="middle" class="sub">q, k=10</text>
+          <rect x="350" y="75" width="130" height="50" rx="12" class="box"/><text x="415" y="97" text-anchor="middle" class="label">E · level 1</text><text x="415" y="116" text-anchor="middle" class="sub">distance 0.8</text>
+          <path d="M225 191 L262 191 Q270 191 270 183 L270 108 Q270 100 278 100 L340 100" class="wire"/><polygon points="350,100 340,105 340,95" class="head"/><text x="300" y="92" text-anchor="middle" class="tiny">entry</text>
+          <rect x="680" y="75" width="130" height="50" rx="12" class="box"/><text x="745" y="97" text-anchor="middle" class="label">F · level 1</text><text x="745" y="116" text-anchor="middle" class="sub">distance 0.3</text>
+          <path d="M480 100 L670 100" class="wire"/><polygon points="680,100 670,105 670,95" class="head"/><text x="580" y="91" text-anchor="middle" class="tiny">greedy improvement</text>
+          <g class="is-new">
+            <rect x="680" y="220" width="130" height="50" rx="12" class="box"/><text x="745" y="242" text-anchor="middle" class="label">F · level 0</text><text x="745" y="261" text-anchor="middle" class="sub">same vector ID</text>
+            <path d="M745 125 L745 210" class="wire"/><polygon points="745,220 740,210 750,210" class="head"/><text x="756" y="175" class="tiny">descend</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">F 在上下层是同一 ID；降低层号后从 F 的底层邻居继续，不重新随机选一个入口。</span><span class="lang-en">F has the same ID at both layers. Descend and continue from F’s level-zero neighbors.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d2s4t d2s4d">
+          <title id="d2s4t">Broaden the bottom-layer search</title>
+          <desc id="d2s4d">At level 0 F expands C; C contributes to a bounded candidate frontier, which returns top-10 IDs to Search worker.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="22" y="24" width="922" height="360" rx="18" class="boundary"/><text x="38" y="46" class="tiny">HNSW · traversal inside one Index replica; arrows are reads / expansion</text>
+          <rect x="65" y="170" width="160" height="80" rx="12" class="box"/><text x="145" y="207" text-anchor="middle" class="label">Search worker</text><text x="145" y="226" text-anchor="middle" class="sub">q, k=10</text>
+          <rect x="350" y="75" width="130" height="50" rx="12" class="box"/><text x="415" y="97" text-anchor="middle" class="label">E · level 1</text><text x="415" y="116" text-anchor="middle" class="sub">distance 0.8</text>
+          <path d="M225 191 L262 191 Q270 191 270 183 L270 108 Q270 100 278 100 L340 100" class="wire"/><polygon points="350,100 340,105 340,95" class="head"/><text x="300" y="92" text-anchor="middle" class="tiny">entry</text>
+          <rect x="680" y="75" width="130" height="50" rx="12" class="box"/><text x="745" y="97" text-anchor="middle" class="label">F · level 1</text><text x="745" y="116" text-anchor="middle" class="sub">distance 0.3</text>
+          <path d="M480 100 L670 100" class="wire"/><polygon points="680,100 670,105 670,95" class="head"/><text x="580" y="91" text-anchor="middle" class="tiny">greedy improvement</text>
+          <rect x="680" y="220" width="130" height="50" rx="12" class="box"/><text x="745" y="242" text-anchor="middle" class="label">F · level 0</text><text x="745" y="261" text-anchor="middle" class="sub">same vector ID</text>
+          <path d="M745 125 L745 210" class="wire"/><polygon points="745,220 740,210 750,210" class="head"/><text x="756" y="175" class="tiny">descend</text>
+          <g class="is-new">
+            <rect x="440" y="220" width="130" height="50" rx="12" class="box"/><text x="505" y="242" text-anchor="middle" class="label">C · level 0</text><text x="505" y="261" text-anchor="middle" class="sub">distance 0.1</text>
+            <path d="M680 245 L580 245" class="wire"/><polygon points="570,245 580,240 580,250" class="head"/><text x="625" y="235" text-anchor="middle" class="tiny">expand</text>
+            <rect x="440" y="320" width="230" height="44" rx="12" class="box"/><text x="555" y="339" text-anchor="middle" class="label">Candidate frontier</text><text x="555" y="358" text-anchor="middle" class="sub">ef_search = 64 (A4)</text>
+            <path d="M505 270 L505 310" class="wire"/><polygon points="505,320 500,310 510,310" class="head"/><text x="516" y="302" class="tiny">retain + rank</text>
+            <path d="M440 342 L153 342 Q145 342 145 334 L145 260" class="wire reply"/><polygon points="145,250 150,260 140,260" class="head reply"/><text x="260" y="332" text-anchor="middle" class="tiny">top-10 candidate IDs</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">底层用候选队列探索，A4 的 ef_search=64 与 k=10 分开；64 不是保证只访问 64 个节点。候选先回 Search worker，再由上一组完整回程返回。</span><span class="lang-en">Explore level zero with a candidate frontier. A4 ef_search=64 differs from k=10 and does not cap visits at sixty-four. Return candidates to Search worker, then follow the API loop.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d2s5t d2s5d">
+          <title id="d2s5t">Budget construction separately</title>
+          <desc id="d2s5d">The completed traversal returns candidates to Search worker. M and ef_construction are construction controls; ef_search is a query control.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="22" y="24" width="922" height="360" rx="18" class="boundary"/><text x="38" y="46" class="tiny">HNSW · traversal inside one Index replica; arrows are reads / expansion</text>
+          <rect x="65" y="170" width="160" height="80" rx="12" class="box"/><text x="145" y="207" text-anchor="middle" class="label">Search worker</text><text x="145" y="226" text-anchor="middle" class="sub">q, k=10</text>
+          <rect x="350" y="75" width="130" height="50" rx="12" class="box"/><text x="415" y="97" text-anchor="middle" class="label">E · level 1</text><text x="415" y="116" text-anchor="middle" class="sub">distance 0.8</text>
+          <path d="M225 191 L262 191 Q270 191 270 183 L270 108 Q270 100 278 100 L340 100" class="wire"/><polygon points="350,100 340,105 340,95" class="head"/><text x="300" y="92" text-anchor="middle" class="tiny">entry</text>
+          <rect x="680" y="75" width="130" height="50" rx="12" class="box"/><text x="745" y="97" text-anchor="middle" class="label">F · level 1</text><text x="745" y="116" text-anchor="middle" class="sub">distance 0.3</text>
+          <path d="M480 100 L670 100" class="wire"/><polygon points="680,100 670,105 670,95" class="head"/><text x="580" y="91" text-anchor="middle" class="tiny">greedy improvement</text>
+          <rect x="680" y="220" width="130" height="50" rx="12" class="box"/><text x="745" y="242" text-anchor="middle" class="label">F · level 0</text><text x="745" y="261" text-anchor="middle" class="sub">same vector ID</text>
+          <path d="M745 125 L745 210" class="wire"/><polygon points="745,220 740,210 750,210" class="head"/><text x="756" y="175" class="tiny">descend</text>
+          <rect x="440" y="220" width="130" height="50" rx="12" class="box"/><text x="505" y="242" text-anchor="middle" class="label">C · level 0</text><text x="505" y="261" text-anchor="middle" class="sub">distance 0.1</text>
+          <path d="M680 245 L580 245" class="wire"/><polygon points="570,245 580,240 580,250" class="head"/><text x="625" y="235" text-anchor="middle" class="tiny">expand</text>
+          <rect x="440" y="320" width="230" height="44" rx="12" class="box"/><text x="555" y="339" text-anchor="middle" class="label">Candidate frontier</text><text x="555" y="358" text-anchor="middle" class="sub">ef_search = 64 (A4)</text>
+          <path d="M505 270 L505 310" class="wire"/><polygon points="505,320 500,310 510,310" class="head"/><text x="516" y="302" class="tiny">retain + rank</text>
+          <path d="M440 342 L153 342 Q145 342 145 334 L145 260" class="wire reply"/><polygon points="145,250 150,260 140,260" class="head reply"/><text x="260" y="332" text-anchor="middle" class="tiny">top-10 candidate IDs</text>
+          <g class="is-new">
+            <text x="65" y="82" class="clock">A4: M16 / efC128</text>
+            <text x="65" y="107" class="tiny">Build-time choices</text>
+            <text x="300" y="170" class="tiny">Measure recall + p95</text>
+            <text x="300" y="192" class="tiny">ef_search is no guarantee</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">M=16 与 ef_construction=128 是本章实验起点，改变建图内存和工作量；查询先调 ef_search，再用带过滤的 ground truth 验收，不把参数当召回保证。</span><span class="lang-en">M=16 and ef_construction=128 are assumed starting points for build memory/work. Tune ef_search, then verify against filtered ground truth; parameters do not guarantee recall.</span></figcaption>
+      </div>
+    </figure><h3><span class="lang-zh">正常路径：图内访问不是跨服务请求</span> <span class="lang-en">Normal path: graph visits stay inside the replica</span></h3>
+<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
+<p>第二组是第一组 Index replica 内的算法示意，Search worker 是其执行逻辑。HNSW 把一部分向量放在高层，节点出现在哪一层由随机层级决定，越高越稀疏；查询从入口沿更近的点走，逐层下降，底层扩大候选探索 [3]。图中的 F 在两个层级都表示同一向量，0.8/0.3/0.1 是说明距离下降的玩具值，没有业务阈值含义。上层少走几步并不证明底层一定找到真最近邻。</p>
+<p>A4 把 M 定为 16，是邻接规模的起点；ef_construction=128 控制插入时探索候选，ef_search=64 控制查询时保留的搜索候选宽度。k=10 是输出数量。ef_search 一般不应小于 k，但它不等于固定访问次数，更不等于召回百分比；过滤、图质量与距离分布都会改变实际访问量。提高它往往增加工作以改善召回，收益必须在同一负载和截止时间内比较。</p>
+<p>邻接预算也要算。用简化的底层最多 2M 个、每 ID 4 B 的槽位模型，每点 2×16×4=128 B，1 亿点约 12.8 GB，每片约 3.2 GB。这只是槽位预算，不含高层边、邻接容器、锁、对齐、版本表和存储引擎的对象开销；Faiss 文档也把图项写成带实现系数的估算 [1]。ID 若需 8 B，该槽位账就翻倍，不能把 12.8 GB 当所有 HNSW 实现的实测占用。</p>
+<p>HNSW 能增量插点，仍要定义版本更新：有的库不支持物理删除图节点，Faiss HNSW 就明确限制删除 [1]。在线层可以先把旧版本置为不可返回，再异步重建或压实；旧点当导航桥时只能读邻接，不能进入结果。不同引擎的墓碑与图修复方法不一样，不能把“算法支持增量插入”扩写成“修改删除均免费且没有图退化”。</p>
+<p>选择它的代价是大量不连续访问。热图和热向量都在 RAM 时可以少算距离；冷页被换到盘上，同样几十次导航会变成多次随机 I/O。替代方案包括 scalar quantization 减向量热字节、分片减每台状态，或使用专为 SSD 安排搜索访问的图。每次换结构，都重新量 filtered Recall、冷热 p95、建图时间与删除后退化，而不是把 HNSW 的延迟标签复制到下一种索引。</p>
+</div><div class="lang-en"><p class="col-kicker">English</p>
+<p>The second deck opens Index replica internals; Search worker is execution logic. HNSW uses randomly assigned sparse upper layers, navigates toward closer points, descends, and broadens bottom-layer exploration [3]. F denotes the same vector at both layers. Toy distances 0.8/0.3/0.1 illustrate improvement rather than business cutoffs; reaching a good entry does not prove exact nearest neighbors.</p>
+<p>A4 starts M at sixteen, ef_construction at 128, and ef_search at sixty-four. M budgets adjacency; construction width and query frontier width differ from output k=10. ef_search should generally cover k, but neither fixes visits nor guarantees recall. Predicates, graph quality, and geometry affect work. Evaluate increased width under identical load and deadlines.</p>
+<p>A simplified base-layer slot budget of 2M four-byte IDs gives 128 B/point, 12.8 GB/100M, and 3.2 GB/shard. This excludes upper layers, containers, locks, alignment, versions, and engine objects. Faiss uses an implementation-dependent graph coefficient [1]. Eight-byte IDs double the slot budget; the estimate is not a universal measured footprint.</p>
+<p>Incremental insertion still needs version handling. Faiss HNSW does not support physical vector removal [1]; a service may exclude old versions before rebuilding. Old graph nodes may provide adjacency without becoming results. Tombstones and repair differ across engines; insertion support does not make updates/deletes free or prevent degradation.</p>
+<p>Graph exploration makes nonsequential reads. Hot RAM limits distance work; cold pages turn navigation into random I/O. Compare scalar quantization, smaller shards, or SSD-designed graphs, then remeasure filtered recall, hot/cold p95, build time, and deletion degradation.</p>
+</div></div></section>
+
+  <section>
+<h2><span class="lang-zh">IVF-PQ：少探 list，距离先在短码上算</span> <span class="lang-en">IVF-PQ: probe fewer lists and score codes</span></h2>
+<figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d3s1t d3s1d">
+          <title id="d3s1t">Start the IVF search loop</title>
+          <desc id="d3s1d">Caller queries Query svc, which calls Search worker; replies return through Query svc to Caller.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <g class="is-new">
+            <rect x="120" y="24" width="824" height="360" rx="18" class="boundary"/><text x="136" y="46" class="tiny">IVF-PQ · one Index replica; choose lists, scan codes, rescore</text><circle cx="44" cy="176" r="12" class="box"/><path d="M24 222 Q44 190 64 222" class="wire"/><text x="44" y="244" text-anchor="middle" class="label">Caller</text>
+            <rect x="140" y="165" width="150" height="70" rx="12" class="box"/><text x="215" y="197" text-anchor="middle" class="label">Query svc</text><text x="215" y="216" text-anchor="middle" class="sub">q + predicate</text>
+            <path d="M70 191 L130 191" class="wire"/><polygon points="140,191 130,196 130,186" class="head"/><path d="M140 209 L80 209" class="wire reply"/><polygon points="70,209 80,204 80,214" class="head reply"/>
+            <rect x="380" y="155" width="160" height="100" rx="12" class="box"/><text x="460" y="202" text-anchor="middle" class="label">Search worker</text><text x="460" y="221" text-anchor="middle" class="sub">merge + live-version</text>
+            <path d="M290 191 L370 191" class="wire"/><polygon points="380,191 370,196 370,186" class="head"/><path d="M380 209 L300 209" class="wire reply"/><polygon points="290,209 300,204 300,214" class="head reply"/>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">IVF-PQ 替换副本内的搜索结构，外部 API 不变。Search worker 拥有过滤、版本与候选归并，不把短码扫描结果直接发给调用方。</span><span class="lang-en">IVF-PQ changes the replica’s search structure while preserving the API. Search worker owns filtering, versions, and merging before the caller receives results.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d3s2t d3s2d">
+          <title id="d3s2t">Select coarse lists</title>
+          <desc id="d3s2d">Search worker reads Centroids and receives nearest-list IDs; the normal API loop remains.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="24" width="824" height="360" rx="18" class="boundary"/><text x="136" y="46" class="tiny">IVF-PQ · one Index replica; choose lists, scan codes, rescore</text><circle cx="44" cy="176" r="12" class="box"/><path d="M24 222 Q44 190 64 222" class="wire"/><text x="44" y="244" text-anchor="middle" class="label">Caller</text>
+          <rect x="140" y="165" width="150" height="70" rx="12" class="box"/><text x="215" y="197" text-anchor="middle" class="label">Query svc</text><text x="215" y="216" text-anchor="middle" class="sub">q + predicate</text>
+          <path d="M70 191 L130 191" class="wire"/><polygon points="140,191 130,196 130,186" class="head"/><path d="M140 209 L80 209" class="wire reply"/><polygon points="70,209 80,204 80,214" class="head reply"/>
+          <rect x="380" y="155" width="160" height="100" rx="12" class="box"/><text x="460" y="202" text-anchor="middle" class="label">Search worker</text><text x="460" y="221" text-anchor="middle" class="sub">merge + live-version</text>
+          <path d="M290 191 L370 191" class="wire"/><polygon points="380,191 370,196 370,186" class="head"/><path d="M380 209 L300 209" class="wire reply"/><polygon points="290,209 300,204 300,214" class="head reply"/>
+          <g class="is-new">
+            <rect x="395" y="65" width="140" height="44" rx="12" class="box"/><text x="465" y="84" text-anchor="middle" class="label">Centroids</text><text x="465" y="103" text-anchor="middle" class="sub">nlist = 4,096</text>
+            <path d="M430 155 L430 119" class="wire"/><polygon points="430,109 435,119 425,119" class="head"/><path d="M490 109 L490 145" class="wire reply"/><polygon points="490,155 485,145 495,145" class="head reply"/>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">先比较质心选 list。A5 的 nlist=4,096 是建索引配置，查询探多少个由 nprobe 决定，两者不是同一个旋钮。</span><span class="lang-en">Read centroids to choose lists. A5 nlist=4,096 is a build choice; nprobe controls query-time probing.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d3s3t d3s3d">
+          <title id="d3s3t">Scan only probed PQ lists</title>
+          <desc id="d3s3d">Search worker scans PQ Lists selected by nprobe=16, receives IDs and approximate distances, and merges them.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="24" width="824" height="360" rx="18" class="boundary"/><text x="136" y="46" class="tiny">IVF-PQ · one Index replica; choose lists, scan codes, rescore</text><circle cx="44" cy="176" r="12" class="box"/><path d="M24 222 Q44 190 64 222" class="wire"/><text x="44" y="244" text-anchor="middle" class="label">Caller</text>
+          <rect x="140" y="165" width="150" height="70" rx="12" class="box"/><text x="215" y="197" text-anchor="middle" class="label">Query svc</text><text x="215" y="216" text-anchor="middle" class="sub">q + predicate</text>
+          <path d="M70 191 L130 191" class="wire"/><polygon points="140,191 130,196 130,186" class="head"/><path d="M140 209 L80 209" class="wire reply"/><polygon points="70,209 80,204 80,214" class="head reply"/>
+          <rect x="380" y="155" width="160" height="100" rx="12" class="box"/><text x="460" y="202" text-anchor="middle" class="label">Search worker</text><text x="460" y="221" text-anchor="middle" class="sub">merge + live-version</text>
+          <path d="M290 191 L370 191" class="wire"/><polygon points="380,191 370,196 370,186" class="head"/><path d="M380 209 L300 209" class="wire reply"/><polygon points="290,209 300,204 300,214" class="head reply"/>
+          <rect x="395" y="65" width="140" height="44" rx="12" class="box"/><text x="465" y="84" text-anchor="middle" class="label">Centroids</text><text x="465" y="103" text-anchor="middle" class="sub">nlist = 4,096</text>
+          <path d="M430 155 L430 119" class="wire"/><polygon points="430,109 435,119 425,119" class="head"/><path d="M490 109 L490 145" class="wire reply"/><polygon points="490,155 485,145 495,145" class="head reply"/>
+          <g class="is-new">
+            <path d="M680 135 V200 A85 12 0 0 0 850 200 V135" class="store"/><ellipse cx="765" cy="135" rx="85" ry="12" class="store"/><text x="765" y="177.5" text-anchor="middle" class="label">PQ Lists</text><text x="765" y="195.5" text-anchor="middle" class="sub">96 B code + 8 B ID</text>
+            <path d="M540 180 L670 180" class="wire"/><polygon points="680,180 670,185 670,175" class="head"/><text x="610" y="170" text-anchor="middle" class="tiny">nprobe = 16</text><path d="M680 195 L550 195" class="wire reply"/><polygon points="540,195 550,190 550,200" class="head reply"/><text x="610" y="215" text-anchor="middle" class="tiny">IDs + PQ distance</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">均匀 list 的假设下，一片 2,500 万条探 16/4,096，约扫 97,656 个短码；真实 list 不均会放大这笔工作。</span><span class="lang-en">With assumed uniform lists, a 25M-vector shard probes 16/4,096 and scans about 97,656 codes. Skew increases that work.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d3s4t d3s4d">
+          <title id="d3s4t">Turn a vector into a code budget</title>
+          <desc id="d3s4d">The existing IVF-PQ loop is annotated with m=96 subspaces, eight dimensions per subspace, and eight-bit codes.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="24" width="824" height="360" rx="18" class="boundary"/><text x="136" y="46" class="tiny">IVF-PQ · one Index replica; choose lists, scan codes, rescore</text><circle cx="44" cy="176" r="12" class="box"/><path d="M24 222 Q44 190 64 222" class="wire"/><text x="44" y="244" text-anchor="middle" class="label">Caller</text>
+          <rect x="140" y="165" width="150" height="70" rx="12" class="box"/><text x="215" y="197" text-anchor="middle" class="label">Query svc</text><text x="215" y="216" text-anchor="middle" class="sub">q + predicate</text>
+          <path d="M70 191 L130 191" class="wire"/><polygon points="140,191 130,196 130,186" class="head"/><path d="M140 209 L80 209" class="wire reply"/><polygon points="70,209 80,204 80,214" class="head reply"/>
+          <rect x="380" y="155" width="160" height="100" rx="12" class="box"/><text x="460" y="202" text-anchor="middle" class="label">Search worker</text><text x="460" y="221" text-anchor="middle" class="sub">merge + live-version</text>
+          <path d="M290 191 L370 191" class="wire"/><polygon points="380,191 370,196 370,186" class="head"/><path d="M380 209 L300 209" class="wire reply"/><polygon points="290,209 300,204 300,214" class="head reply"/>
+          <rect x="395" y="65" width="140" height="44" rx="12" class="box"/><text x="465" y="84" text-anchor="middle" class="label">Centroids</text><text x="465" y="103" text-anchor="middle" class="sub">nlist = 4,096</text>
+          <path d="M430 155 L430 119" class="wire"/><polygon points="430,109 435,119 425,119" class="head"/><path d="M490 109 L490 145" class="wire reply"/><polygon points="490,155 485,145 495,145" class="head reply"/>
+          <path d="M680 135 V200 A85 12 0 0 0 850 200 V135" class="store"/><ellipse cx="765" cy="135" rx="85" ry="12" class="store"/><text x="765" y="177.5" text-anchor="middle" class="label">PQ Lists</text><text x="765" y="195.5" text-anchor="middle" class="sub">96 B code + 8 B ID</text>
+          <path d="M540 180 L670 180" class="wire"/><polygon points="680,180 670,185 670,175" class="head"/><text x="610" y="170" text-anchor="middle" class="tiny">nprobe = 16</text><path d="M680 195 L550 195" class="wire reply"/><polygon points="540,195 550,190 550,200" class="head reply"/><text x="610" y="215" text-anchor="middle" class="tiny">IDs + PQ distance</text>
+          <g class="is-new">
+            <text x="155" y="285" class="tiny">A5: 768 / m96 = 8 dimensions/subspace</text>
+            <text x="155" y="307" class="tiny">96 x 8 bits = 768 bits = 96 B/code</text>
+            <text x="155" y="331" class="tiny">100M x (96 + 8) B = 10.4 GB; no raw vectors</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">768 维切 96 段，每段 8 维、8 bit code，得到 96 B；加 8 B ID，1 亿条是 10.4 GB。短码与 ID 不含保留的 307.2 GB 原向量。</span><span class="lang-en">Split 768 dimensions into 96 eight-dimensional subspaces with eight-bit codes: 96 B/vector. With eight-byte IDs, 100M occupy 10.4 GB, excluding retained raw vectors.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d3s5t d3s5d">
+          <title id="d3s5t">Rescore before final output</title>
+          <desc id="d3s5d">Search worker fetches at most 100 candidates from Vector Store; full vectors return to Search worker, results to Query svc, then Caller.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="24" width="824" height="360" rx="18" class="boundary"/><text x="136" y="46" class="tiny">IVF-PQ · one Index replica; choose lists, scan codes, rescore</text><circle cx="44" cy="176" r="12" class="box"/><path d="M24 222 Q44 190 64 222" class="wire"/><text x="44" y="244" text-anchor="middle" class="label">Caller</text>
+          <rect x="140" y="165" width="150" height="70" rx="12" class="box"/><text x="215" y="197" text-anchor="middle" class="label">Query svc</text><text x="215" y="216" text-anchor="middle" class="sub">q + predicate</text>
+          <path d="M70 191 L130 191" class="wire"/><polygon points="140,191 130,196 130,186" class="head"/><path d="M140 209 L80 209" class="wire reply"/><polygon points="70,209 80,204 80,214" class="head reply"/>
+          <rect x="380" y="155" width="160" height="100" rx="12" class="box"/><text x="460" y="202" text-anchor="middle" class="label">Search worker</text><text x="460" y="221" text-anchor="middle" class="sub">merge + live-version</text>
+          <path d="M290 191 L370 191" class="wire"/><polygon points="380,191 370,196 370,186" class="head"/><path d="M380 209 L300 209" class="wire reply"/><polygon points="290,209 300,204 300,214" class="head reply"/>
+          <rect x="395" y="65" width="140" height="44" rx="12" class="box"/><text x="465" y="84" text-anchor="middle" class="label">Centroids</text><text x="465" y="103" text-anchor="middle" class="sub">nlist = 4,096</text>
+          <path d="M430 155 L430 119" class="wire"/><polygon points="430,109 435,119 425,119" class="head"/><path d="M490 109 L490 145" class="wire reply"/><polygon points="490,155 485,145 495,145" class="head reply"/>
+          <path d="M680 135 V200 A85 12 0 0 0 850 200 V135" class="store"/><ellipse cx="765" cy="135" rx="85" ry="12" class="store"/><text x="765" y="177.5" text-anchor="middle" class="label">PQ Lists</text><text x="765" y="195.5" text-anchor="middle" class="sub">96 B code + 8 B ID</text>
+          <path d="M540 180 L670 180" class="wire"/><polygon points="680,180 670,185 670,175" class="head"/><text x="610" y="170" text-anchor="middle" class="tiny">nprobe = 16</text><path d="M680 195 L550 195" class="wire reply"/><polygon points="540,195 550,190 550,200" class="head reply"/><text x="610" y="215" text-anchor="middle" class="tiny">IDs + PQ distance</text>
+          <text x="155" y="285" class="tiny">A5: 768 / m96 = 8 dimensions/subspace</text>
+          <text x="155" y="307" class="tiny">96 x 8 bits = 768 bits = 96 B/code</text>
+          <text x="155" y="331" class="tiny">100M x (96 + 8) B = 10.4 GB; no raw vectors</text>
+          <g class="is-new">
+            <path d="M680 290 V350 A85 12 0 0 0 850 350 V290" class="store"/><ellipse cx="765" cy="290" rx="85" ry="12" class="store"/><text x="765" y="330" text-anchor="middle" class="label">Vector Store</text><text x="765" y="348" text-anchor="middle" class="sub">full vectors + version</text>
+            <path d="M540 225 L582 225 Q590 225 590 233 L590 309 Q590 317 598 317 L670 317" class="wire"/><polygon points="680,317 670,322 670,312" class="head"/><text x="633" y="309" text-anchor="middle" class="tiny">top-100</text><path d="M680 337 L573 337 Q565 337 565 329 L565 245.5 Q565 238 557.5 238 L550 238" class="wire reply"/><polygon points="540,238 550,233 550,243" class="head reply"/>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">每片取最多 100 个原向量重算同一距离，再返回 local top-k。重算能纠正候选间排序，不能救回从未探到的 list。</span><span class="lang-en">Rescore at most 100 candidates per shard under the same metric. This corrects shortlist ordering but cannot recover unprobed lists.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d3s6t d3s6d">
+          <title id="d3s6t">Keep training and drift explicit</title>
+          <desc id="d3s6d">The complete IVF-PQ/rescore path remains. Notes require centroid/codebook training, drift evaluation, and snapshot publication for rebuilds.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="24" width="824" height="360" rx="18" class="boundary"/><text x="136" y="46" class="tiny">IVF-PQ · one Index replica; choose lists, scan codes, rescore</text><circle cx="44" cy="176" r="12" class="box"/><path d="M24 222 Q44 190 64 222" class="wire"/><text x="44" y="244" text-anchor="middle" class="label">Caller</text>
+          <rect x="140" y="165" width="150" height="70" rx="12" class="box"/><text x="215" y="197" text-anchor="middle" class="label">Query svc</text><text x="215" y="216" text-anchor="middle" class="sub">q + predicate</text>
+          <path d="M70 191 L130 191" class="wire"/><polygon points="140,191 130,196 130,186" class="head"/><path d="M140 209 L80 209" class="wire reply"/><polygon points="70,209 80,204 80,214" class="head reply"/>
+          <rect x="380" y="155" width="160" height="100" rx="12" class="box"/><text x="460" y="202" text-anchor="middle" class="label">Search worker</text><text x="460" y="221" text-anchor="middle" class="sub">merge + live-version</text>
+          <path d="M290 191 L370 191" class="wire"/><polygon points="380,191 370,196 370,186" class="head"/><path d="M380 209 L300 209" class="wire reply"/><polygon points="290,209 300,204 300,214" class="head reply"/>
+          <rect x="395" y="65" width="140" height="44" rx="12" class="box"/><text x="465" y="84" text-anchor="middle" class="label">Centroids</text><text x="465" y="103" text-anchor="middle" class="sub">nlist = 4,096</text>
+          <path d="M430 155 L430 119" class="wire"/><polygon points="430,109 435,119 425,119" class="head"/><path d="M490 109 L490 145" class="wire reply"/><polygon points="490,155 485,145 495,145" class="head reply"/>
+          <path d="M680 135 V200 A85 12 0 0 0 850 200 V135" class="store"/><ellipse cx="765" cy="135" rx="85" ry="12" class="store"/><text x="765" y="177.5" text-anchor="middle" class="label">PQ Lists</text><text x="765" y="195.5" text-anchor="middle" class="sub">96 B code + 8 B ID</text>
+          <path d="M540 180 L670 180" class="wire"/><polygon points="680,180 670,185 670,175" class="head"/><text x="610" y="170" text-anchor="middle" class="tiny">nprobe = 16</text><path d="M680 195 L550 195" class="wire reply"/><polygon points="540,195 550,190 550,200" class="head reply"/><text x="610" y="215" text-anchor="middle" class="tiny">IDs + PQ distance</text>
+          <text x="155" y="285" class="tiny">A5: 768 / m96 = 8 dimensions/subspace</text>
+          <text x="155" y="307" class="tiny">96 x 8 bits = 768 bits = 96 B/code</text>
+          <text x="155" y="331" class="tiny">100M x (96 + 8) B = 10.4 GB; no raw vectors</text>
+          <path d="M680 290 V350 A85 12 0 0 0 850 350 V290" class="store"/><ellipse cx="765" cy="290" rx="85" ry="12" class="store"/><text x="765" y="330" text-anchor="middle" class="label">Vector Store</text><text x="765" y="348" text-anchor="middle" class="sub">full vectors + version</text>
+          <path d="M540 225 L582 225 Q590 225 590 233 L590 309 Q590 317 598 317 L670 317" class="wire"/><polygon points="680,317 670,322 670,312" class="head"/><text x="633" y="309" text-anchor="middle" class="tiny">top-100</text><path d="M680 337 L573 337 Q565 337 565 329 L565 245.5 Q565 238 557.5 238 L550 238" class="wire reply"/><polygon points="540,238 550,233 550,243" class="head reply"/>
+          <g class="is-new">
+            <text x="155" y="366" class="tiny">Train centroids + codebook; measure drift; publish rebuild by manifest.</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">训练集要覆盖本题租户、语言与更新分布；质心漂移时先测 Recall，再重建并发布完整快照。改 codebook 不能就地把旧短码解释成新向量。</span><span class="lang-en">Train on representative tenants/languages/updates; evaluate drift before rebuilding and publishing a complete snapshot. A new codebook must not reinterpret old codes.</span></figcaption>
+      </div>
+    </figure><h3><span class="lang-zh">正常路径与编码账</span> <span class="lang-en">Normal path and encoding budget</span></h3>
+<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
+<p>IVF 先用训练过的质心把向量分入 list。查询选择最近的 nprobe 个质心，只在这些 list 中找候选；IVF-Flat 在 list 内比较原向量，IVF-PQ 则比较压缩短码。PQ 把每条向量分成子空间，每段训练 codebook，查询对各 code 算查表距离；在 residual IVF-PQ 中编码的是相对粗质心的残差 [1][4]。这两层分别减少候选数量与候选字节，不能把只压短码的 flat PQ 误称为非全量扫描。</p>
+<p>A5 选 m=96，768/96=8 维一段；nbits=8 给每段 256 个 codeword 的表示空间。一条 code 占 96×8/8=96 B，裸向量对短码为 3,072/96=32 倍。再加每点 8 B ID，100M×104=10.4 GB；质心、codebook、list 容器和标量索引另算 [1]。训练共享的 codebook 不是每向量再复制一份；只有把 byte 账按真正的存储布局算，32 倍才不会变成整服务的压缩宣传。</p>
+<p>四片均匀时每片 25M 条，平均每 list 为 25,000,000/4,096≈6,103.5 条。探 16 个约扫 97,656.25 个 code，code+ID 约 10.15625 MB/片/查询；四片约 40.625 MB，峰值 200/s 对应约 8.125 GB/s 逻辑短码读取。该估算假设 list 均匀、无过滤剪减，尚未加入质心距离、缓存复用和查表 CPU。一个热点 list 装下远多于平均的向量，会让 nprobe 相同的两次查询耗时完全不同。</p>
+<p>粗搜取每片最多 100 个候选，读取 100×3,072=307,200 B 原向量，四片最多 1,228,800 B；200/s 约 245.76 MB/s 的逻辑原向量读取。这仍有离散随机 I/O，不能用顺序带宽证明 p95。读取时匹配 version，重新按原始精度算距离并排序；候选已缺失或过期则按预算补召回。准确 rescore 可以消掉量化后的排序误差，不能补回 nprobe 从没到过的桶。</p>
+<p>SQ8 是每维约一字节，100M×768=76.8 GB 原向量编码，约为 float32 的四分之一 [1]；图边并没有随之缩四倍。它的召回损失也不能保证小于某个数字，应和 PQ、原始精度一同测。OPQ 可在 PQ 前学习变换；DiskANN 2019 的设计把压缩导航信息留 RAM、图与高精度访问放 SSD，FreshDiskANN 2021 讨论流式更新 [6][7]。这是不同设计选项，论文的机器配置和语料成绩不能直接换成本题 768 维且带 ACL 的容量承诺。</p>
+<p>IVF 的质心与 PQ codebook 依赖训练分布。新语料集中到一个区域时可能出现 list 失衡、量化误差和召回漂移；先按新数据切片测，不是每 insert 都重做 k-means。需要重建时冻结一份训练/数据快照，回放后续 upsert 和 delete，再切 manifest；旧 short code 不能配新 codebook。同一维度但不同 embedding 模型也不是同一空间，要用另一 collection/model generation。</p>
+</div><div class="lang-en"><p class="col-kicker">English</p>
+<p>IVF assigns vectors to trained coarse lists and probes the nearest nprobe lists. IVF-Flat compares full vectors; IVF-PQ scores compressed subspace codes, often coding residuals to coarse centroids [1][4]. IVF reduces candidate count, PQ reduces bytes. Flat PQ still scans all codes.</p>
+<p>A5 splits 768 dimensions into 96 eight-dimensional subspaces. Eight bits represent 256 codewords/subspace; codes use 96 B. Raw/code ratio is 3,072/96=32. Eight-byte IDs bring 100M to 10.4 GB before centroids, shared codebooks, lists, and scalar indexes [1]. Do not repeat shared codebook bytes per point or claim a thirty-twofold whole-service reduction.</p>
+<p>At uniform 25M/shard and 4,096 lists, the average is 6,103.5 points/list. Sixteen probes scan about 97,656.25 codes or 10.15625 MB codes/IDs per shard/query. Four shards imply 40.625 MB/query and 8.125 GB/s at 200/s. This logical-read estimate excludes filter savings, centroid scoring, cache reuse, and CPU. List skew changes latency at identical nprobe.</p>
+<p>At most 100 raw candidates/shard require 307,200 B; four shards need at most 1,228,800 B/query or 245.76 MB/s at 200/s. Random I/O still matters. Fetch matching versions, recompute exact distances, and refill missing/stale candidates within budget. Rescoring fixes ordering error within the shortlist but cannot retrieve an unprobed list.</p>
+<p>SQ8 uses about one byte/dimension: 76.8 GB for 100M, one-quarter of float32 [1]. Graph memory is unchanged and recall losses require measurement. OPQ learns a pre-PQ transform. DiskANN 2019 combines compressed RAM navigation with SSD graph/high-precision access; FreshDiskANN 2021 studies streaming updates [6][7]. Their datasets and machines do not prove this filtered 768-dimensional workload.</p>
+<p>New distributions may cause list skew, quantization error, and recall drift. Measure changed slices before rebuilding; insertion does not require rerunning k-means each time. Rebuild a snapshot, replay later upserts/deletes, and publish a manifest. Never mix new codebooks with old codes or same-dimensional embeddings from different models.</p>
+</div></div></section>
+
+  <section>
+<h2><span class="lang-zh">过滤：允许返回和允许导航要分清</span> <span class="lang-en">Filtering: eligibility differs from navigation</span></h2>
+<figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d4s1t d4s1d">
+          <title id="d4s1t">Make the predicate authoritative</title>
+          <desc id="d4s1d">Query svc sends a trusted predicate to Filter planner; filtered results return to Query svc. Tenant scope is mandatory.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <g class="is-new">
+            <rect x="22" y="24" width="922" height="360" rx="18" class="boundary"/><text x="38" y="46" class="tiny">FILTERED SEARCH · mandatory tenant scope is never relaxed</text>
+            <rect x="50" y="160" width="150" height="70" rx="12" class="box"/><text x="125" y="192" text-anchor="middle" class="label">Query svc</text><text x="125" y="211" text-anchor="middle" class="sub">trusted predicate</text>
+            <rect x="310" y="155" width="170" height="80" rx="12" class="box"/><text x="395" y="192" text-anchor="middle" class="label">Filter planner</text><text x="395" y="211" text-anchor="middle" class="sub">cardinality + budget</text>
+            <path d="M200 191 L300 191" class="wire"/><polygon points="310,191 300,196 300,186" class="head"/><path d="M310 209 L210 209" class="wire reply"/><polygon points="200,209 210,204 210,214" class="head reply"/><text x="250" y="228" text-anchor="middle" class="tiny">allowed IDs only</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">tenant 条件来自身份，用户 filter 只能缩小范围；最终返回的 ID 必须匹配完整谓词。召回不足时不能删掉 tenant 条件。</span><span class="lang-en">Derive tenant scope from identity. User filters only narrow it; every returned ID must match the full predicate. Never relax tenant scope to fill k.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d4s2t d4s2d">
+          <title id="d4s2t">Estimate the allowed set</title>
+          <desc id="d4s2d">Filter planner reads Allowed Set from scalar and live-version indexes; count and bitset return to the planner.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="22" y="24" width="922" height="360" rx="18" class="boundary"/><text x="38" y="46" class="tiny">FILTERED SEARCH · mandatory tenant scope is never relaxed</text>
+          <rect x="50" y="160" width="150" height="70" rx="12" class="box"/><text x="125" y="192" text-anchor="middle" class="label">Query svc</text><text x="125" y="211" text-anchor="middle" class="sub">trusted predicate</text>
+          <rect x="310" y="155" width="170" height="80" rx="12" class="box"/><text x="395" y="192" text-anchor="middle" class="label">Filter planner</text><text x="395" y="211" text-anchor="middle" class="sub">cardinality + budget</text>
+          <path d="M200 191 L300 191" class="wire"/><polygon points="310,191 300,196 300,186" class="head"/><path d="M310 209 L210 209" class="wire reply"/><polygon points="200,209 210,204 210,214" class="head reply"/><text x="250" y="228" text-anchor="middle" class="tiny">allowed IDs only</text>
+          <g class="is-new">
+            <path d="M630 70 V125 A90 12 0 0 0 810 125 V70" class="store"/><ellipse cx="720" cy="70" rx="90" ry="12" class="store"/><text x="720" y="107.5" text-anchor="middle" class="label">Allowed Set</text><text x="720" y="125.5" text-anchor="middle" class="sub">scalar index + live mask</text>
+            <path d="M480 173 L542 173 Q550 173 550 165 L550 108 Q550 100 558 100 L620 100" class="wire"/><polygon points="630,100 620,105 620,95" class="head"/><text x="575" y="84" text-anchor="middle" class="tiny">bitset</text><path d="M630 120 L538 120 Q530 120 530 128 L530 175 Q530 183 522 183 L490 183" class="wire reply"/><polygon points="480,183 490,178 490,188" class="head reply"/>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">先用标量索引和 live mask 得到允许集及基数；统计会过时，所以 planner 估算只负责选路，最终谓词/版本检查仍须成立。</span><span class="lang-en">Use scalar indexes and a live mask to estimate allowed-set size. Stale statistics may alter planning but cannot replace final predicate/version checks.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d4s3t d4s3d">
+          <title id="d4s3t">Choose an exact small-set path</title>
+          <desc id="d4s3d">Filter planner may execute Exact subset scan on an allowed set of at most 5,000, then return filtered results to Query svc.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="22" y="24" width="922" height="360" rx="18" class="boundary"/><text x="38" y="46" class="tiny">FILTERED SEARCH · mandatory tenant scope is never relaxed</text>
+          <rect x="50" y="160" width="150" height="70" rx="12" class="box"/><text x="125" y="192" text-anchor="middle" class="label">Query svc</text><text x="125" y="211" text-anchor="middle" class="sub">trusted predicate</text>
+          <rect x="310" y="155" width="170" height="80" rx="12" class="box"/><text x="395" y="192" text-anchor="middle" class="label">Filter planner</text><text x="395" y="211" text-anchor="middle" class="sub">cardinality + budget</text>
+          <path d="M200 191 L300 191" class="wire"/><polygon points="310,191 300,196 300,186" class="head"/><path d="M310 209 L210 209" class="wire reply"/><polygon points="200,209 210,204 210,214" class="head reply"/><text x="250" y="228" text-anchor="middle" class="tiny">allowed IDs only</text>
+          <path d="M630 70 V125 A90 12 0 0 0 810 125 V70" class="store"/><ellipse cx="720" cy="70" rx="90" ry="12" class="store"/><text x="720" y="107.5" text-anchor="middle" class="label">Allowed Set</text><text x="720" y="125.5" text-anchor="middle" class="sub">scalar index + live mask</text>
+          <path d="M480 173 L542 173 Q550 173 550 165 L550 108 Q550 100 558 100 L620 100" class="wire"/><polygon points="630,100 620,105 620,95" class="head"/><text x="575" y="84" text-anchor="middle" class="tiny">bitset</text><path d="M630 120 L538 120 Q530 120 530 128 L530 175 Q530 183 522 183 L490 183" class="wire reply"/><polygon points="480,183 490,178 490,188" class="head reply"/>
+          <g class="is-new">
+            <rect x="650" y="180" width="210" height="55" rx="12" class="box"/><text x="755" y="204.5" text-anchor="middle" class="label">Exact subset scan</text><text x="755" y="223.5" text-anchor="middle" class="sub">small |allowed| only</text>
+            <path d="M480 203 L640 203" class="wire"/><polygon points="650,203 640,208 640,198" class="head"/><path d="M650 220 L490 220" class="wire reply"/><polygon points="480,220 490,215 490,225" class="head reply"/><text x="755" y="165" text-anchor="middle" class="tiny">if &lt;= 5,000 (A7)</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">允许集最多 5,000 时，原向量读取约 5,000×768×4=15.36 MB；A7 只给实验起点，阈值还看随机 I/O、并发和截止时间。</span><span class="lang-en">At 5,000 allowed vectors, raw reads total 15.36 MB. A7 is an experimental threshold depending on random I/O, concurrency, and deadline.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d4s4t d4s4d">
+          <title id="d4s4t">Reject naive graph pruning</title>
+          <desc id="d4s4d">For the larger-set graph path, planner enters allowed node A. A red rejected stop at denied X prevents reaching allowed B along the muted X-to-B adjacency. No graph result returns until the next frame restores connectivity.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="22" y="24" width="922" height="360" rx="18" class="boundary"/><text x="38" y="46" class="tiny">FILTERED SEARCH · mandatory tenant scope is never relaxed</text>
+          <rect x="50" y="160" width="150" height="70" rx="12" class="box"/><text x="125" y="192" text-anchor="middle" class="label">Query svc</text><text x="125" y="211" text-anchor="middle" class="sub">trusted predicate</text>
+          <rect x="310" y="155" width="170" height="80" rx="12" class="box"/><text x="395" y="192" text-anchor="middle" class="label">Filter planner</text><text x="395" y="211" text-anchor="middle" class="sub">cardinality + budget</text>
+          <path d="M200 191 L300 191" class="wire"/><polygon points="310,191 300,196 300,186" class="head"/><path d="M310 209 L210 209" class="wire reply"/><polygon points="200,209 210,204 210,214" class="head reply"/><text x="250" y="228" text-anchor="middle" class="tiny">allowed IDs only</text>
+          <path d="M630 70 V125 A90 12 0 0 0 810 125 V70" class="store"/><ellipse cx="720" cy="70" rx="90" ry="12" class="store"/><text x="720" y="107.5" text-anchor="middle" class="label">Allowed Set</text><text x="720" y="125.5" text-anchor="middle" class="sub">scalar index + live mask</text>
+          <path d="M480 173 L542 173 Q550 173 550 165 L550 108 Q550 100 558 100 L620 100" class="wire"/><polygon points="630,100 620,105 620,95" class="head"/><text x="575" y="84" text-anchor="middle" class="tiny">bitset</text><path d="M630 120 L538 120 Q530 120 530 128 L530 175 Q530 183 522 183 L490 183" class="wire reply"/><polygon points="480,183 490,178 490,188" class="head reply"/>
+          <rect x="650" y="180" width="210" height="55" rx="12" class="box"/><text x="755" y="204.5" text-anchor="middle" class="label">Exact subset scan</text><text x="755" y="223.5" text-anchor="middle" class="sub">small |allowed| only</text>
+          <path d="M480 203 L640 203" class="wire"/><polygon points="650,203 640,208 640,198" class="head"/><path d="M650 220 L490 220" class="wire reply"/><polygon points="480,220 490,215 490,225" class="head reply"/><text x="755" y="165" text-anchor="middle" class="tiny">if &lt;= 5,000 (A7)</text>
+          <g class="is-new">
+            <rect x="600" y="295" width="70" height="40" rx="12" class="box"/><text x="635" y="312" text-anchor="middle" class="label">A</text><text x="635" y="331" text-anchor="middle" class="sub">allowed</text>
+            <rect x="720" y="295" width="70" height="40" rx="12" class="box bad"/><text x="755" y="312" text-anchor="middle" class="label">X</text><text x="755" y="331" text-anchor="middle" class="sub">denied</text>
+            <rect x="840" y="295" width="70" height="40" rx="12" class="box"/><text x="875" y="312" text-anchor="middle" class="label">B</text><text x="875" y="331" text-anchor="middle" class="sub">allowed</text>
+            <path d="M440 235 L440 303 Q440 311 448 311 L590 311" class="wire"/><polygon points="600,311 590,316 590,306" class="head"/><text x="480" y="301" class="tiny">otherwise: graph</text>
+            <path d="M670 311 L710 311" class="wire fail"/><polygon points="720,311 710,316 710,306" class="head fail"/>
+            <path d="M790 311 L830 311" class="wire muted"/><polygon points="840,311 830,316 830,306" class="head muted"/>
+            <text x="670" y="347" class="tiny">reject: stop at X</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">较大集合走图，但若遇到 X 就停止扩邻居，允许的近邻 B 会被剪断。红线是被否决的剪枝；下一笔补好连通后才画 B 的结果回程。</span><span class="lang-en">For larger sets, naive pruning at denied X disconnects allowed neighbor B. The red stop is rejected; the result lane is added after connectivity is restored.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d4s5t d4s5d">
+          <title id="d4s5t">Inspect adjacency without returning X</title>
+          <desc id="d4s5d">The graph path expands A through X adjacency to B using a two-hop route. X is not returned. B returns to Filter planner, which replies to Query svc; exact fallback remains.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="22" y="24" width="922" height="360" rx="18" class="boundary"/><text x="38" y="46" class="tiny">FILTERED SEARCH · mandatory tenant scope is never relaxed</text>
+          <rect x="50" y="160" width="150" height="70" rx="12" class="box"/><text x="125" y="192" text-anchor="middle" class="label">Query svc</text><text x="125" y="211" text-anchor="middle" class="sub">trusted predicate</text>
+          <rect x="310" y="155" width="170" height="80" rx="12" class="box"/><text x="395" y="192" text-anchor="middle" class="label">Filter planner</text><text x="395" y="211" text-anchor="middle" class="sub">cardinality + budget</text>
+          <path d="M200 191 L300 191" class="wire"/><polygon points="310,191 300,196 300,186" class="head"/><path d="M310 209 L210 209" class="wire reply"/><polygon points="200,209 210,204 210,214" class="head reply"/><text x="250" y="228" text-anchor="middle" class="tiny">allowed IDs only</text>
+          <path d="M630 70 V125 A90 12 0 0 0 810 125 V70" class="store"/><ellipse cx="720" cy="70" rx="90" ry="12" class="store"/><text x="720" y="107.5" text-anchor="middle" class="label">Allowed Set</text><text x="720" y="125.5" text-anchor="middle" class="sub">scalar index + live mask</text>
+          <path d="M480 173 L542 173 Q550 173 550 165 L550 108 Q550 100 558 100 L620 100" class="wire"/><polygon points="630,100 620,105 620,95" class="head"/><text x="575" y="84" text-anchor="middle" class="tiny">bitset</text><path d="M630 120 L538 120 Q530 120 530 128 L530 175 Q530 183 522 183 L490 183" class="wire reply"/><polygon points="480,183 490,178 490,188" class="head reply"/>
+          <rect x="650" y="180" width="210" height="55" rx="12" class="box"/><text x="755" y="204.5" text-anchor="middle" class="label">Exact subset scan</text><text x="755" y="223.5" text-anchor="middle" class="sub">small |allowed| only</text>
+          <path d="M480 203 L640 203" class="wire"/><polygon points="650,203 640,208 640,198" class="head"/><path d="M650 220 L490 220" class="wire reply"/><polygon points="480,220 490,215 490,225" class="head reply"/><text x="755" y="165" text-anchor="middle" class="tiny">if &lt;= 5,000 (A7)</text>
+          <rect x="600" y="295" width="70" height="40" rx="12" class="box"/><text x="635" y="312" text-anchor="middle" class="label">A</text><text x="635" y="331" text-anchor="middle" class="sub">allowed</text>
+          <rect x="720" y="295" width="70" height="40" rx="12" class="box bad"/><text x="755" y="312" text-anchor="middle" class="label">X</text><text x="755" y="331" text-anchor="middle" class="sub">denied</text>
+          <rect x="840" y="295" width="70" height="40" rx="12" class="box"/><text x="875" y="312" text-anchor="middle" class="label">B</text><text x="875" y="331" text-anchor="middle" class="sub">allowed</text>
+          <path d="M440 235 L440 303 Q440 311 448 311 L590 311" class="wire"/><polygon points="600,311 590,316 590,306" class="head"/><text x="480" y="301" class="tiny">otherwise: graph</text>
+          <path d="M670 311 L710 311" class="wire fail"/><polygon points="720,311 710,316 710,306" class="head fail"/>
+          <path d="M790 311 L830 311" class="wire muted"/><polygon points="840,311 830,316 830,306" class="head muted"/>
+          <text x="670" y="347" class="tiny">reject: stop at X</text>
+          <g class="is-new">
+            <path d="M635 295 L635 273 Q635 265 643 265 L867 265 Q875 265 875 273 L875 285" class="wire"/><polygon points="875,295 870,285 880,285" class="head"/><text x="755" y="254" text-anchor="middle" class="tiny">read X adjacency; expand to B</text>
+            <path d="M875 335 L875 352 Q875 360 867 360 L428 360 Q420 360 420 352 L420 245" class="wire reply"/><polygon points="420,235 425,245 415,245" class="head reply"/><text x="38" y="342" class="tiny">X is excluded from results</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">补一条两跳扩邻居路线：读取 X 的邻接关系以发现 B，不把 X 加入结果。ACORN-1 提供此类扩展思路；该示意不承诺任意过滤后都连通 [5]。</span><span class="lang-en">Add a two-hop expansion via X adjacency to discover B while excluding X from results. ACORN-1 motivates this mechanism; the schematic does not guarantee connectivity for every predicate [5].</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d4s6t d4s6d">
+          <title id="d4s6t">Bound refill without weakening scope</title>
+          <desc id="d4s6d">The complete planner keeps exact small-set and graph paths plus two-hop expansion. Candidate refills are capped; a postfilter expectation is shown separately from any guarantee.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="22" y="24" width="922" height="360" rx="18" class="boundary"/><text x="38" y="46" class="tiny">FILTERED SEARCH · mandatory tenant scope is never relaxed</text>
+          <rect x="50" y="160" width="150" height="70" rx="12" class="box"/><text x="125" y="192" text-anchor="middle" class="label">Query svc</text><text x="125" y="211" text-anchor="middle" class="sub">trusted predicate</text>
+          <rect x="310" y="155" width="170" height="80" rx="12" class="box"/><text x="395" y="192" text-anchor="middle" class="label">Filter planner</text><text x="395" y="211" text-anchor="middle" class="sub">cardinality + budget</text>
+          <path d="M200 191 L300 191" class="wire"/><polygon points="310,191 300,196 300,186" class="head"/><path d="M310 209 L210 209" class="wire reply"/><polygon points="200,209 210,204 210,214" class="head reply"/><text x="250" y="228" text-anchor="middle" class="tiny">allowed IDs only</text>
+          <path d="M630 70 V125 A90 12 0 0 0 810 125 V70" class="store"/><ellipse cx="720" cy="70" rx="90" ry="12" class="store"/><text x="720" y="107.5" text-anchor="middle" class="label">Allowed Set</text><text x="720" y="125.5" text-anchor="middle" class="sub">scalar index + live mask</text>
+          <path d="M480 173 L542 173 Q550 173 550 165 L550 108 Q550 100 558 100 L620 100" class="wire"/><polygon points="630,100 620,105 620,95" class="head"/><text x="575" y="84" text-anchor="middle" class="tiny">bitset</text><path d="M630 120 L538 120 Q530 120 530 128 L530 175 Q530 183 522 183 L490 183" class="wire reply"/><polygon points="480,183 490,178 490,188" class="head reply"/>
+          <rect x="650" y="180" width="210" height="55" rx="12" class="box"/><text x="755" y="204.5" text-anchor="middle" class="label">Exact subset scan</text><text x="755" y="223.5" text-anchor="middle" class="sub">small |allowed| only</text>
+          <path d="M480 203 L640 203" class="wire"/><polygon points="650,203 640,208 640,198" class="head"/><path d="M650 220 L490 220" class="wire reply"/><polygon points="480,220 490,215 490,225" class="head reply"/><text x="755" y="165" text-anchor="middle" class="tiny">if &lt;= 5,000 (A7)</text>
+          <rect x="600" y="295" width="70" height="40" rx="12" class="box"/><text x="635" y="312" text-anchor="middle" class="label">A</text><text x="635" y="331" text-anchor="middle" class="sub">allowed</text>
+          <rect x="720" y="295" width="70" height="40" rx="12" class="box bad"/><text x="755" y="312" text-anchor="middle" class="label">X</text><text x="755" y="331" text-anchor="middle" class="sub">denied</text>
+          <rect x="840" y="295" width="70" height="40" rx="12" class="box"/><text x="875" y="312" text-anchor="middle" class="label">B</text><text x="875" y="331" text-anchor="middle" class="sub">allowed</text>
+          <path d="M440 235 L440 303 Q440 311 448 311 L590 311" class="wire"/><polygon points="600,311 590,316 590,306" class="head"/><text x="480" y="301" class="tiny">otherwise: graph</text>
+          <path d="M670 311 L710 311" class="wire fail"/><polygon points="720,311 710,316 710,306" class="head fail"/>
+          <path d="M790 311 L830 311" class="wire muted"/><polygon points="840,311 830,316 830,306" class="head muted"/>
+          <text x="670" y="347" class="tiny">reject: stop at X</text>
+          <path d="M635 295 L635 273 Q635 265 643 265 L867 265 Q875 265 875 273 L875 285" class="wire"/><polygon points="875,295 870,285 880,285" class="head"/><text x="755" y="254" text-anchor="middle" class="tiny">read X adjacency; expand to B</text>
+          <path d="M875 335 L875 352 Q875 360 867 360 L428 360 Q420 360 420 352 L420 245" class="wire reply"/><polygon points="420,235 425,245 415,245" class="head reply"/><text x="38" y="342" class="tiny">X is excluded from results</text>
+          <g class="is-new">
+            <text x="38" y="85" class="tiny">A7: pass s=0.001; k/s=10,000 is an expectation, not a guarantee</text>
+            <text x="38" y="109" class="tiny">Budget exhausted: return fewer with status; never weaken tenant scope.</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">若独立均匀通过率只有 0.1%，为凑 k=10 期望看 10/0.001=10,000 候选；相关性会破坏此估算。达到预算就明确返回不足，权限始终不放宽。</span><span class="lang-en">At independently uniform 0.1% acceptance, k=10 needs 10,000 candidates in expectation; correlations break this estimate. Exhausted budgets return an explicit shortfall while retaining access scope.</span></figcaption>
+      </div>
+    </figure><h3><span class="lang-zh">从允许集到两条搜索路线</span> <span class="lang-en">From the allowed set to two search paths</span></h3>
+<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
+<p>谓词通过率 s 表示集合中符合条件的比例，s 越小，过滤越严。Filter planner 用 payload 倒排、范围索引与 live mask 估允许集，选择精确子集扫或约束图搜索。它必须观察本地片的基数：全局 0.1% 不代表每片相同。统计可能过时，最终候选仍要用同一可读状态的谓词和版本复查；过滤误估只可以造成慢或少，不能变成越租户输出。</p>
+<p>pre-filter 不必等于精确扫：先构造 bitset 后也可以把它传给 ANN 搜索。本章把小集合精确扫作为一条明确的路线，A7 的门槛 5,000 对应 15.36 MB 原向量；若在 SSD 上随机读 5,000 条，工作可能比热图更贵。过了这个门槛也不是必选 HNSW：大允许集、相似性很弱的集合，可以换其他 filter-aware 结构，planner 由实际成本与查询截止时间决定。</p>
+<p>post-filter 的危险在于候选不足。全库 top-100 若只过 0.1%，独立均匀假设下期望剩 100×0.001=0.1 条；为了期望拿到 10 条，L≈10/0.001=10,000。恰好期望 10 不代表高概率有 10，更不代表 Recall@10 达标。若允许点在向量空间离 query 很远，命中与谓词强相关，这个 k/s 公式也会失效；不能固定把 k 乘十就承诺严过滤召回。</p>
+<p>图上 A 与 B 符合谓词，X 不符合。直接把 X 的邻接扩展也砍掉，A 就发现不了 B；结果资格和导航资格不是一件事。有的过滤图实现允许经过不合格点寻找邻居，有的扩充连接或在查询时检查两跳。ACORN-1 的邻居扩展提供一种思路，论文也保留非常小集合的 pre-filter fallback [5]。读取 X 邻接只是内部导航，X 的 ID、payload 与 score 不进入对外结果；该示意既不是任意连通性证明，也不是完整算法实现。</p>
+<p>候选集不足可以增加 ef_search/nprobe 或继续扫描，但每次都要尊重租户、live 版本、访问次数和截止时间。pgvector v0.8.0 的迭代扫描展示了搜索后过滤不足时继续扫描以及设置上限的做法 [8]；本服务的 planner 是设计选择，不是宣称 pgvector 用了 ACORN。允许集只有三条时，k=10 可以返回三条并声明集合已尽；预算用尽但允许集更大则声明近似短缺，两者不能都标成“没有更多”。</p>
+<p>多租户隔离是返回正确性，不是平均召回指标。身份决定 mandatory tenant 范围，客户端不能自报另一个 tenant；Query svc 和 replica 都检查这项契约。若威胁模型不允许跨租户邻接读取的侧信道，就把租户拆物理索引/collection，代价是小索引数量、运维与碎片。引擎 filter 只处理索引中的权限投影；文档 ACL 变更若另有权威来源，上游仍按 Ch30 复查，不能让一个滞后的 metadata 字符串代替实时授权。</p>
+</div><div class="lang-en"><p class="col-kicker">English</p>
+<p>Acceptance s is the fraction matching the predicate; smaller s means stronger filtering. Planner estimates local allowed-set cardinality from scalar indexes and live masks, then selects exact subset or constrained graph search. Global selectivity need not hold per shard. Final predicates/versions use coherent readable state; stale statistics may hurt cost/recall but cannot authorize cross-tenant output.</p>
+<p>Prefiltering can construct a bitset for ANN rather than force brute force. This design explicitly scans small sets: 5,000 vectors cost 15.36 MB raw, but 5,000 SSD random reads may exceed hot-graph cost. Larger sets need workload-specific filter-aware alternatives and deadline-aware planning.</p>
+<p>At independent uniform s=0.001, postfiltering one hundred candidates yields 0.1 match in expectation; expecting ten requires about 10,000 candidates. Expectation is neither high-probability fill nor Recall@10. Correlations between predicates and vector geometry invalidate k/s, so a fixed tenfold oversample cannot guarantee restrictive-query recall.</p>
+<p>A/B pass while X fails. Pruning X adjacency prevents discovering B; result eligibility differs from navigation. Implementations can navigate through rejected points, densify links, or inspect two-hop neighbors. ACORN-1 motivates expansion and retains small-set fallback [5]. Reading X adjacency does not expose its ID/payload/score. The schematic is not a universal connectivity proof or complete algorithm.</p>
+<p>Refill may raise ef_search/nprobe or continue scanning under unchanged tenant/live constraints and work/deadline caps. pgvector v0.8.0 illustrates capped iterative scans after post-scan filtering [8], not ACORN. If only three allowed points exist, k=10 may return three with exhaustion status; budget-limited shortfalls from larger sets need a distinct status.</p>
+<p>Authentication controls mandatory tenant scope, verified by Query svc and replicas. If cross-tenant adjacency side channels are outside the isolation contract, separate physical indexes/collections at the cost of fragmentation and operations. Index-projected ACLs do not replace authoritative permission checks for independently changing documents; Ch30 retains those checks.</p>
+</div></div></section>
+
+  <section>
+<h2><span class="lang-zh">写入：持久确认、可搜位点、段发布三件事</span> <span class="lang-en">Writes: durable ack, searchable position, segment publication</span></h2>
+<figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s1t d5s1d">
+          <title id="d5s1t">Accept a write durably</title>
+          <desc id="d5s1d">Writer sends a stable operation ID to Ingest svc, which appends to the replicated Shard WAL. Durable acknowledgement returns WAL to Ingest svc to Writer with a token.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <g class="is-new">
+            <rect x="120" y="24" width="824" height="360" rx="18" class="boundary"/><text x="136" y="46" class="tiny">INGEST · one shard; ordered versioned writes; searchable != durable</text><circle cx="44" cy="106" r="12" class="box"/><path d="M24 152 Q44 120 64 152" class="wire"/><text x="44" y="174" text-anchor="middle" class="label">Writer</text>
+            <rect x="150" y="100" width="150" height="60" rx="12" class="box"/><text x="225" y="127" text-anchor="middle" class="label">Ingest svc</text><text x="225" y="146" text-anchor="middle" class="sub">stable operation ID</text>
+            <path d="M70 121 L140 121" class="wire"/><polygon points="150,121 140,126 140,116" class="head"/><path d="M150 139 L80 139" class="wire reply"/><polygon points="70,139 80,134 80,144" class="head reply"/><text x="111" y="157" text-anchor="middle" class="tiny">202 + token</text>
+            <path d="M355 90 V150 A75 12 0 0 0 505 150 V90" class="store"/><ellipse cx="430" cy="90" rx="75" ry="12" class="store"/><text x="430" y="130" text-anchor="middle" class="label">Shard WAL</text><text x="430" y="148" text-anchor="middle" class="sub">replicated durable log</text>
+            <path d="M300 121 L345 121" class="wire"/><polygon points="355,121 345,126 345,116" class="head"/><path d="M355 139 L310 139" class="wire reply"/><polygon points="300,139 310,134 310,144" class="head reply"/>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">先把稳定 operation_id、id、version、向量与 metadata 记进复制 WAL，再沿 WAL → Ingest → Writer 确认。返回的 shard/LSN token 证明持久接收，不证明可搜。</span><span class="lang-en">Record operation ID, ID/version, vector, and metadata in replicated WAL before acknowledgement. The shard/LSN token proves durable acceptance rather than search visibility.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s2t d5s2d">
+          <title id="d5s2t">Replay into coherent query state</title>
+          <desc id="d5s2d">Apply worker replays Shard WAL in order and atomically exposes coherent vector, payload, and live-version state in Growing.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="24" width="824" height="360" rx="18" class="boundary"/><text x="136" y="46" class="tiny">INGEST · one shard; ordered versioned writes; searchable != durable</text><circle cx="44" cy="106" r="12" class="box"/><path d="M24 152 Q44 120 64 152" class="wire"/><text x="44" y="174" text-anchor="middle" class="label">Writer</text>
+          <rect x="150" y="100" width="150" height="60" rx="12" class="box"/><text x="225" y="127" text-anchor="middle" class="label">Ingest svc</text><text x="225" y="146" text-anchor="middle" class="sub">stable operation ID</text>
+          <path d="M70 121 L140 121" class="wire"/><polygon points="150,121 140,126 140,116" class="head"/><path d="M150 139 L80 139" class="wire reply"/><polygon points="70,139 80,134 80,144" class="head reply"/><text x="111" y="157" text-anchor="middle" class="tiny">202 + token</text>
+          <path d="M355 90 V150 A75 12 0 0 0 505 150 V90" class="store"/><ellipse cx="430" cy="90" rx="75" ry="12" class="store"/><text x="430" y="130" text-anchor="middle" class="label">Shard WAL</text><text x="430" y="148" text-anchor="middle" class="sub">replicated durable log</text>
+          <path d="M300 121 L345 121" class="wire"/><polygon points="355,121 345,126 345,116" class="head"/><path d="M355 139 L310 139" class="wire reply"/><polygon points="300,139 310,134 310,144" class="head reply"/>
+          <g class="is-new">
+            <rect x="650" y="90" width="170" height="70" rx="12" class="box"/><text x="735" y="122" text-anchor="middle" class="label">Apply worker</text><text x="735" y="141" text-anchor="middle" class="sub">contiguous LSN</text>
+            <path d="M505 121 L640 121" class="wire async"/><polygon points="650,121 640,126 640,116" class="head async"/><text x="574" y="110" text-anchor="middle" class="tiny">replay id / version</text>
+            <path d="M670 240 V300 A85 12 0 0 0 840 300 V240" class="store"/><ellipse cx="755" cy="240" rx="85" ry="12" class="store"/><text x="755" y="280" text-anchor="middle" class="label">Growing</text><text x="755" y="298" text-anchor="middle" class="sub">vectors + payload + live</text>
+            <path d="M755 160 L755 218" class="wire async"/><polygon points="755,228 750,218 760,218" class="head async"/><text x="770" y="197" class="tiny">coherent apply</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">Apply worker 连续回放后，把向量、payload 与 live 版本作为同一可读状态暴露；仅图已插入而 tenant 倒排未跟上，不推进 searchable LSN。</span><span class="lang-en">Replay in order and expose vectors, payload, and live versions coherently. Graph insertion alone cannot advance searchable LSN while scalar indexes lag.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s3t d5s3d">
+          <title id="d5s3t">Freeze a build cut</title>
+          <desc id="d5s3d">Growing gives Index Builder a frozen build cut b. New writes remain in a later Growing delta while the builder works.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="24" width="824" height="360" rx="18" class="boundary"/><text x="136" y="46" class="tiny">INGEST · one shard; ordered versioned writes; searchable != durable</text><circle cx="44" cy="106" r="12" class="box"/><path d="M24 152 Q44 120 64 152" class="wire"/><text x="44" y="174" text-anchor="middle" class="label">Writer</text>
+          <rect x="150" y="100" width="150" height="60" rx="12" class="box"/><text x="225" y="127" text-anchor="middle" class="label">Ingest svc</text><text x="225" y="146" text-anchor="middle" class="sub">stable operation ID</text>
+          <path d="M70 121 L140 121" class="wire"/><polygon points="150,121 140,126 140,116" class="head"/><path d="M150 139 L80 139" class="wire reply"/><polygon points="70,139 80,134 80,144" class="head reply"/><text x="111" y="157" text-anchor="middle" class="tiny">202 + token</text>
+          <path d="M355 90 V150 A75 12 0 0 0 505 150 V90" class="store"/><ellipse cx="430" cy="90" rx="75" ry="12" class="store"/><text x="430" y="130" text-anchor="middle" class="label">Shard WAL</text><text x="430" y="148" text-anchor="middle" class="sub">replicated durable log</text>
+          <path d="M300 121 L345 121" class="wire"/><polygon points="355,121 345,126 345,116" class="head"/><path d="M355 139 L310 139" class="wire reply"/><polygon points="300,139 310,134 310,144" class="head reply"/>
+          <rect x="650" y="90" width="170" height="70" rx="12" class="box"/><text x="735" y="122" text-anchor="middle" class="label">Apply worker</text><text x="735" y="141" text-anchor="middle" class="sub">contiguous LSN</text>
+          <path d="M505 121 L640 121" class="wire async"/><polygon points="650,121 640,126 640,116" class="head async"/><text x="574" y="110" text-anchor="middle" class="tiny">replay id / version</text>
+          <path d="M670 240 V300 A85 12 0 0 0 840 300 V240" class="store"/><ellipse cx="755" cy="240" rx="85" ry="12" class="store"/><text x="755" y="280" text-anchor="middle" class="label">Growing</text><text x="755" y="298" text-anchor="middle" class="sub">vectors + payload + live</text>
+          <path d="M755 160 L755 218" class="wire async"/><polygon points="755,228 750,218 760,218" class="head async"/><text x="770" y="197" class="tiny">coherent apply</text>
+          <g class="is-new">
+            <rect x="450" y="250" width="150" height="60" rx="12" class="box"/><text x="525" y="277" text-anchor="middle" class="label">Index Builder</text><text x="525" y="296" text-anchor="middle" class="sub">freeze at LSN b</text>
+            <path d="M670 277 L610 277" class="wire async"/><polygon points="600,277 610,272 610,282" class="head async"/>
+            <text x="150" y="210" class="tiny">Build at b; new writes stay in Growing delta &gt; b</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">冻结到 b 的数据给 Builder；b 之后的新写仍留在 growing delta 并可查询，不能为了建图把在线写入丢掉或暂停数小时。</span><span class="lang-en">Freeze a build cut at b while later writes remain searchable in Growing delta; do not drop ongoing ingestion during the build.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s4t d5s4d">
+          <title id="d5s4t">Verify the immutable artifact</title>
+          <desc id="d5s4d">Index Builder writes Sealed Segments; the segment store returns verified artifact readiness to the builder.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="24" width="824" height="360" rx="18" class="boundary"/><text x="136" y="46" class="tiny">INGEST · one shard; ordered versioned writes; searchable != durable</text><circle cx="44" cy="106" r="12" class="box"/><path d="M24 152 Q44 120 64 152" class="wire"/><text x="44" y="174" text-anchor="middle" class="label">Writer</text>
+          <rect x="150" y="100" width="150" height="60" rx="12" class="box"/><text x="225" y="127" text-anchor="middle" class="label">Ingest svc</text><text x="225" y="146" text-anchor="middle" class="sub">stable operation ID</text>
+          <path d="M70 121 L140 121" class="wire"/><polygon points="150,121 140,126 140,116" class="head"/><path d="M150 139 L80 139" class="wire reply"/><polygon points="70,139 80,134 80,144" class="head reply"/><text x="111" y="157" text-anchor="middle" class="tiny">202 + token</text>
+          <path d="M355 90 V150 A75 12 0 0 0 505 150 V90" class="store"/><ellipse cx="430" cy="90" rx="75" ry="12" class="store"/><text x="430" y="130" text-anchor="middle" class="label">Shard WAL</text><text x="430" y="148" text-anchor="middle" class="sub">replicated durable log</text>
+          <path d="M300 121 L345 121" class="wire"/><polygon points="355,121 345,126 345,116" class="head"/><path d="M355 139 L310 139" class="wire reply"/><polygon points="300,139 310,134 310,144" class="head reply"/>
+          <rect x="650" y="90" width="170" height="70" rx="12" class="box"/><text x="735" y="122" text-anchor="middle" class="label">Apply worker</text><text x="735" y="141" text-anchor="middle" class="sub">contiguous LSN</text>
+          <path d="M505 121 L640 121" class="wire async"/><polygon points="650,121 640,126 640,116" class="head async"/><text x="574" y="110" text-anchor="middle" class="tiny">replay id / version</text>
+          <path d="M670 240 V300 A85 12 0 0 0 840 300 V240" class="store"/><ellipse cx="755" cy="240" rx="85" ry="12" class="store"/><text x="755" y="280" text-anchor="middle" class="label">Growing</text><text x="755" y="298" text-anchor="middle" class="sub">vectors + payload + live</text>
+          <path d="M755 160 L755 218" class="wire async"/><polygon points="755,228 750,218 760,218" class="head async"/><text x="770" y="197" class="tiny">coherent apply</text>
+          <rect x="450" y="250" width="150" height="60" rx="12" class="box"/><text x="525" y="277" text-anchor="middle" class="label">Index Builder</text><text x="525" y="296" text-anchor="middle" class="sub">freeze at LSN b</text>
+          <path d="M670 277 L610 277" class="wire async"/><polygon points="600,277 610,272 610,282" class="head async"/>
+          <text x="150" y="210" class="tiny">Build at b; new writes stay in Growing delta &gt; b</text>
+          <g class="is-new">
+            <path d="M165 250 V310 A80 12 0 0 0 325 310 V250" class="store"/><ellipse cx="245" cy="250" rx="80" ry="12" class="store"/><text x="245" y="290" text-anchor="middle" class="label">Sealed Segments</text><text x="245" y="308" text-anchor="middle" class="sub">immutable + checksum</text>
+            <path d="M450 277 L335 277" class="wire async"/><polygon points="325,277 335,272 335,282" class="head async"/><path d="M325 297 L440 297" class="wire reply"/><polygon points="450,297 440,302 440,292" class="head reply"/>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">Builder 产出不可变段，校验文件与依赖后收到 ready 回执；sealed 只是冻结/落盘状态，不能在尚未加载可读时抢先取代 growing。</span><span class="lang-en">Build immutable segments and verify readiness. Sealing does not imply a ready search index; keep the growing representation until the replacement is loadable.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s5t d5s5d">
+          <title id="d5s5t">Publish one pinned manifest</title>
+          <desc id="d5s5d">Index Builder CAS-publishes Manifest after Sealed Segments are ready and receives publication acknowledgement. Manifest names the cut, immutable segments, and delta.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="24" width="824" height="360" rx="18" class="boundary"/><text x="136" y="46" class="tiny">INGEST · one shard; ordered versioned writes; searchable != durable</text><circle cx="44" cy="106" r="12" class="box"/><path d="M24 152 Q44 120 64 152" class="wire"/><text x="44" y="174" text-anchor="middle" class="label">Writer</text>
+          <rect x="150" y="100" width="150" height="60" rx="12" class="box"/><text x="225" y="127" text-anchor="middle" class="label">Ingest svc</text><text x="225" y="146" text-anchor="middle" class="sub">stable operation ID</text>
+          <path d="M70 121 L140 121" class="wire"/><polygon points="150,121 140,126 140,116" class="head"/><path d="M150 139 L80 139" class="wire reply"/><polygon points="70,139 80,134 80,144" class="head reply"/><text x="111" y="157" text-anchor="middle" class="tiny">202 + token</text>
+          <path d="M355 90 V150 A75 12 0 0 0 505 150 V90" class="store"/><ellipse cx="430" cy="90" rx="75" ry="12" class="store"/><text x="430" y="130" text-anchor="middle" class="label">Shard WAL</text><text x="430" y="148" text-anchor="middle" class="sub">replicated durable log</text>
+          <path d="M300 121 L345 121" class="wire"/><polygon points="355,121 345,126 345,116" class="head"/><path d="M355 139 L310 139" class="wire reply"/><polygon points="300,139 310,134 310,144" class="head reply"/>
+          <rect x="650" y="90" width="170" height="70" rx="12" class="box"/><text x="735" y="122" text-anchor="middle" class="label">Apply worker</text><text x="735" y="141" text-anchor="middle" class="sub">contiguous LSN</text>
+          <path d="M505 121 L640 121" class="wire async"/><polygon points="650,121 640,126 640,116" class="head async"/><text x="574" y="110" text-anchor="middle" class="tiny">replay id / version</text>
+          <path d="M670 240 V300 A85 12 0 0 0 840 300 V240" class="store"/><ellipse cx="755" cy="240" rx="85" ry="12" class="store"/><text x="755" y="280" text-anchor="middle" class="label">Growing</text><text x="755" y="298" text-anchor="middle" class="sub">vectors + payload + live</text>
+          <path d="M755 160 L755 218" class="wire async"/><polygon points="755,228 750,218 760,218" class="head async"/><text x="770" y="197" class="tiny">coherent apply</text>
+          <rect x="450" y="250" width="150" height="60" rx="12" class="box"/><text x="525" y="277" text-anchor="middle" class="label">Index Builder</text><text x="525" y="296" text-anchor="middle" class="sub">freeze at LSN b</text>
+          <path d="M670 277 L610 277" class="wire async"/><polygon points="600,277 610,272 610,282" class="head async"/>
+          <text x="150" y="210" class="tiny">Build at b; new writes stay in Growing delta &gt; b</text>
+          <path d="M165 250 V310 A80 12 0 0 0 325 310 V250" class="store"/><ellipse cx="245" cy="250" rx="80" ry="12" class="store"/><text x="245" y="290" text-anchor="middle" class="label">Sealed Segments</text><text x="245" y="308" text-anchor="middle" class="sub">immutable + checksum</text>
+          <path d="M450 277 L335 277" class="wire async"/><polygon points="325,277 335,272 335,282" class="head async"/><path d="M325 297 L440 297" class="wire reply"/><polygon points="450,297 440,302 440,292" class="head reply"/>
+          <g class="is-new">
+            <path d="M375 330 V356 A75 12 0 0 0 525 356 V330" class="store"/><ellipse cx="450" cy="330" rx="75" ry="12" class="store"/><text x="450" y="361" text-anchor="middle" class="label">Manifest</text>
+            <path d="M540 310 L540 340.5 Q540 343 537.5 343 L535 343" class="wire"/><polygon points="525,343 535,338 535,348" class="head"/><path d="M525 353 L557 353 Q565 353 565 345 L565 320" class="wire reply"/><polygon points="565,310 570,320 560,320" class="head reply"/>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">CAS 发布 manifest，绑定 sealed≤b 与 delta&gt;b；查询 pin 一代快照。旧查询 drain 后再回收旧段，防止中途读到半个新索引。</span><span class="lang-en">CAS-publish a manifest binding sealed≤b and delta&gt;b. Queries pin one generation; retire old segments after readers drain.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s6t d5s6d">
+          <title id="d5s6t">Keep deletes and crash replay in the same order</title>
+          <desc id="d5s6d">The durable write, replay, build, and manifest paths remain. Delete and upsert versions share the log and contiguous searchable LSN; latest tombstones exclude old segment vectors before compaction.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="24" width="824" height="360" rx="18" class="boundary"/><text x="136" y="46" class="tiny">INGEST · one shard; ordered versioned writes; searchable != durable</text><circle cx="44" cy="106" r="12" class="box"/><path d="M24 152 Q44 120 64 152" class="wire"/><text x="44" y="174" text-anchor="middle" class="label">Writer</text>
+          <rect x="150" y="100" width="150" height="60" rx="12" class="box"/><text x="225" y="127" text-anchor="middle" class="label">Ingest svc</text><text x="225" y="146" text-anchor="middle" class="sub">stable operation ID</text>
+          <path d="M70 121 L140 121" class="wire"/><polygon points="150,121 140,126 140,116" class="head"/><path d="M150 139 L80 139" class="wire reply"/><polygon points="70,139 80,134 80,144" class="head reply"/><text x="111" y="157" text-anchor="middle" class="tiny">202 + token</text>
+          <path d="M355 90 V150 A75 12 0 0 0 505 150 V90" class="store"/><ellipse cx="430" cy="90" rx="75" ry="12" class="store"/><text x="430" y="130" text-anchor="middle" class="label">Shard WAL</text><text x="430" y="148" text-anchor="middle" class="sub">replicated durable log</text>
+          <path d="M300 121 L345 121" class="wire"/><polygon points="355,121 345,126 345,116" class="head"/><path d="M355 139 L310 139" class="wire reply"/><polygon points="300,139 310,134 310,144" class="head reply"/>
+          <rect x="650" y="90" width="170" height="70" rx="12" class="box"/><text x="735" y="122" text-anchor="middle" class="label">Apply worker</text><text x="735" y="141" text-anchor="middle" class="sub">contiguous LSN</text>
+          <path d="M505 121 L640 121" class="wire async"/><polygon points="650,121 640,126 640,116" class="head async"/><text x="574" y="110" text-anchor="middle" class="tiny">replay id / version</text>
+          <path d="M670 240 V300 A85 12 0 0 0 840 300 V240" class="store"/><ellipse cx="755" cy="240" rx="85" ry="12" class="store"/><text x="755" y="280" text-anchor="middle" class="label">Growing</text><text x="755" y="298" text-anchor="middle" class="sub">vectors + payload + live</text>
+          <path d="M755 160 L755 218" class="wire async"/><polygon points="755,228 750,218 760,218" class="head async"/><text x="770" y="197" class="tiny">coherent apply</text>
+          <rect x="450" y="250" width="150" height="60" rx="12" class="box"/><text x="525" y="277" text-anchor="middle" class="label">Index Builder</text><text x="525" y="296" text-anchor="middle" class="sub">freeze at LSN b</text>
+          <path d="M670 277 L610 277" class="wire async"/><polygon points="600,277 610,272 610,282" class="head async"/>
+          <text x="150" y="210" class="tiny">Build at b; new writes stay in Growing delta &gt; b</text>
+          <path d="M165 250 V310 A80 12 0 0 0 325 310 V250" class="store"/><ellipse cx="245" cy="250" rx="80" ry="12" class="store"/><text x="245" y="290" text-anchor="middle" class="label">Sealed Segments</text><text x="245" y="308" text-anchor="middle" class="sub">immutable + checksum</text>
+          <path d="M450 277 L335 277" class="wire async"/><polygon points="325,277 335,272 335,282" class="head async"/><path d="M325 297 L440 297" class="wire reply"/><polygon points="450,297 440,302 440,292" class="head reply"/>
+          <path d="M375 330 V356 A75 12 0 0 0 525 356 V330" class="store"/><ellipse cx="450" cy="330" rx="75" ry="12" class="store"/><text x="450" y="361" text-anchor="middle" class="label">Manifest</text>
+          <path d="M540 310 L540 340.5 Q540 343 537.5 343 L535 343" class="wire"/><polygon points="525,343 535,338 535,348" class="head"/><path d="M525 353 L557 353 Q565 353 565 345 L565 320" class="wire reply"/><polygon points="565,310 570,320 560,320" class="head reply"/>
+          <g class="is-new">
+            <text x="150" y="186" class="tiny">Delete / upsert: versioned WAL; tombstone hides old segment IDs</text>
+            <text x="150" y="232" class="tiny">Crash: replay from checkpoint; do not ack before durable commit</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">删除也是同序 WAL 写，最新 tombstone 先让旧段 ID 不再返回，compact 才回收字节。崩溃从 checkpoint 重放，同一 operation_id 重试得到同一写入结果。</span><span class="lang-en">Delete shares the versioned WAL: latest tombstones hide old IDs before compaction reclaims bytes. Recover from checkpoints; stable operation IDs preserve retry outcomes.</span></figcaption>
+      </div>
+    </figure><h3><span class="lang-zh">正常路径：WAL 不直接等于搜索结果</span> <span class="lang-en">Normal path: WAL is not a search result</span></h3>
+<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
+<p>写请求带 operation_id、collection/model、id、version、vector 和 metadata。Ingest svc 验证后路由到该 id 所在片，以单片有序复制日志记录整条变化；图把日志复制封装为 Shard WAL 的持久提交契约，节点故障不丢确认写的承诺依赖复制协议与故障模型。不能先写本地文件就当可抵御整盘丢失，也不能把元数据 Raft 误当所有 point 写都走共识；不同产品在这些边界上有不同选择 [11]。</p>
+<p>先达到持久提交，再给 Writer 返回 202 和 shard/epoch/LSN token。响应丢失后用同一 operation_id 重试，日志或其持久幂等结果返回原位点，不能为一次重试生成另一个较新版本。重放按 id 的版本应用，旧 upsert 不覆盖新 delete；版本由可信上游顺序或服务端 CAS 决定，同版本不同正文当冲突。幂等结果保留期与上游重试期要匹配，超过保留期的请求不能继续宣称自动去重。</p>
+<p>Apply worker 连续推进 searchable LSN，表示截至此位置的所有 upsert/delete 都已进入可查询状态；它不是“某条最大 LSN 已处理”。一个洞还没补上，就不能跨过去。向量、payload、live-version 表与标量索引要通过一次原子 snapshot 发布或受同一可读版本约束，避免向量已在图里而 tenant 过滤还旧。对于未完成 ANN 建图的 growing，可以先精确搜索有限增量，所以可见不必等于高性能索引已建好。</p>
+<p>Milvus 文档把 growing、sealed 和历史查询的 handoff 分开，且新数据与历史段需要一起汇总 [9]；本图借用这个生命周期，用单片 WAL/Manifest 表达本章的设计，并非复制其整套实现。到 b 冻结的数据进入 Builder，b 之后仍留在 growing delta。Builder 写不可变 sealed artifact，检查 checksum、codebook/metric/model 与加载可读回执，随后 CAS 发布 manifest。发布前旧 growing 路线仍服务，失败的构建不会变成搜索空窗。</p>
+<p>查询 pin 的 manifest 命名 sealed≤b 与 delta&gt;b，或使用有重叠但按 id/version 去重的过渡形式；无论如何不能有空洞。发布是切引用，不是在活跃查询脚下替换文件。旧请求结束再回收旧段；Builder 若读到旧代次就 CAS 失败并重取，不能覆盖较新的 manifest。扩容搬片也要先复制快照、按位点追增量、验证目标可读，然后更新路由代次与 drain，不能仅改变 hash 模数就让半份数据消失。</p>
+<p>删除作为日志里的新版本 tombstone，在 live mask 中压掉同 id 的所有较旧段；搜索到旧候选后也必须检查它是否仍为该读取快照的有效版本。不能先把旧向量排进 local top-k、归并之后才删，否则 k 里会被墓碑占掉。即使最后过滤阻止错误返回，旧节点仍可能耗掉 ANN 的候选预算，所以要有界 refill，长期还要 compact/重建减少无效遍历。compact 是回收字节与修复性能，不是删除开始生效的时刻。默认旧读在可见边界内仍可能看到删前快照；需要确认删除后不再返回时，携带删除 token 或要求最新读取。权限撤销仍走上游权威检查。</p>
+<p>默认最多旧 2 s 是 A10 的 bounded 契约，不是 eventual 的同义词。服务用当前采样的日志屏障/时间水位求所需位点，屏障采样年龄加上时钟误差也要落在 2 s 以内，只有 replica 连续 searchable 位点达到它才读；没有可验证的新鲜度证明，或者证明过期，就等待、换合格副本或失败。Milvus Guarantee/Service timestamp 比较给出相似的“先追齐再搜”机制 [10]。超时不允许默默把 bounded 请求转为无限陈旧的 eventual 请求。</p>
+<p>写后读携带 token，只证明该片已纳入这条写及此前有序日志，仍返回近似 top-k；这条向量可能不在真 top-k 中，不能用 search 是否命中判断写是否丢失。读取最新时需要每片取一个当前屏障并追到该位点，原始 WAL 副本 ack 不能替代 search-ready。若要求跨片单一时间点的线性/事务快照，还要全局时间戳、MVCC 与协调协议；本章的每片位点向量只定义各片读界限，不把它冒充跨片原子快照。</p>
+</div><div class="lang-en"><p class="col-kicker">English</p>
+<p>Writes carry operation ID, collection/model, ID/version, vector, and metadata. Ingest validates and routes to an ordered replicated shard log. Shard WAL encapsulates a durable commit contract tied to replication and failure assumptions. Local file writes alone do not tolerate whole-disk loss, and metadata consensus does not imply all point writes use that protocol [11].</p>
+<p>After durable commit, return 202 with shard/epoch/LSN. Retries preserve the operation ID and committed position, not a new revision. Ordered version application prevents older upserts resurrecting newer deletes. Trusted upstream order or CAS governs versions; identical versions with different bodies conflict. Durable deduplication retention must cover the retry window; do not promise deduplication after expiry.</p>
+<p>Searchable LSN is a contiguous prefix including every prior upsert/delete, not the largest individually processed position. Publish vectors, payload, latest-version tables, and scalar indexes coherently via atomic snapshots or shared read versions. Small growing deltas can be searched exactly before ANN construction finishes, separating visibility from optimized indexing.</p>
+<p>Milvus separates growing/sealed lifecycle and historical handoff while aggregating both data classes [9]. This chapter uses that lifecycle with its own shard-WAL/Manifest design. Freeze at b while later writes stay growing. Verify immutable artifacts, checksum, codebook/metric/model, and load readiness, then CAS-publish the manifest. Keep the old query route during failed builds.</p>
+<p>Pinned manifests combine sealed≤b and delta&gt;b or an overlapping transition deduplicated by ID/version, always without gaps. Switch references rather than files under active readers; drain before retirement. Stale builders lose CAS and retry. Resharding similarly requires snapshot copy, replay, readiness, route-generation publication, and draining rather than changing the hash modulus immediately.</p>
+<p>A versioned tombstone hides all older segment versions. Check validity before local top-k so stale points do not consume final slots. They may still consume ANN exploration budget, requiring bounded refill and later compaction/rebuild. Compaction reclaims bytes and improves traversal; it does not define the start of delete visibility. Bounded stale reads may still see a pre-delete snapshot; carry the delete token or request fresh reads to require exclusion. Authoritative upstream checks still govern permission revocation.</p>
+<p>A10 bounded staleness of two seconds differs from eventual convergence. Obtain a current log/time barrier and keep barrier age plus clock uncertainty within two seconds and read only replicas whose contiguous searchable watermark covers the required cut; missing or expired proof causes waiting, eligible rerouting, or failure. Milvus compares Guarantee and Service timestamps similarly [10]. Do not silently downgrade bounded requests on timeout.</p>
+<p>A read-after-write token establishes one shard’s ordered prefix while search remains approximate; a written vector need not belong to true top-k. Fresh per-shard reads require current barriers and search-ready state, not WAL acknowledgements alone. A single cross-shard transactional/linearizable snapshot additionally needs global timestamps, MVCC, and coordination. This chapter’s per-shard cut vector does not claim cross-shard atomicity.</p>
+</div></div></section>
+
+  <section>
+<h2><span class="lang-zh">分片与副本：数据切开，请求仍会扇出</span> <span class="lang-en">Shards and replicas: divide bytes while queries fan out</span></h2>
+<figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d6s1t d6s1d">
+          <title id="d6s1t">Pin routing and the read contract</title>
+          <desc id="d6s1d">Caller queries Query svc, which pins shard-map generation and a read cut. Results return through Query svc.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <g class="is-new">
+            <rect x="120" y="24" width="824" height="360" rx="18" class="boundary"/><text x="136" y="46" class="tiny">SCATTER-GATHER · two of four shards shown; identical paths for 2 / 3</text><circle cx="44" cy="176" r="12" class="box"/><path d="M24 222 Q44 190 64 222" class="wire"/><text x="44" y="244" text-anchor="middle" class="label">Caller</text>
+            <rect x="170" y="165" width="170" height="70" rx="12" class="box"/><text x="255" y="197" text-anchor="middle" class="label">Query svc</text><text x="255" y="216" text-anchor="middle" class="sub">pin map + read cut</text>
+            <path d="M70 191 L160 191" class="wire"/><polygon points="170,191 160,196 160,186" class="head"/><path d="M170 209 L80 209" class="wire reply"/><polygon points="70,209 80,204 80,214" class="head reply"/>
+            <text x="155" y="84" class="tiny">A3: 4 hash shards; 2 replicas each</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">分片映射和 collection/model 代次绑定到单次查询，按 hash(id) 分成 4 片；图只画 S0/S1，两片省略的是重复路径，不是跳过搜索。</span><span class="lang-en">Pin shard map and collection/model generation per query. Hash IDs into four shards; S0/S1 illustrate paths repeated for S2/S3 rather than skipping their search.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d6s2t d6s2d">
+          <title id="d6s2t">Search the first shard</title>
+          <desc id="d6s2d">Query svc calls S0 Replica A with vector, filter, and read cut; local top-10 returns to Query svc.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="24" width="824" height="360" rx="18" class="boundary"/><text x="136" y="46" class="tiny">SCATTER-GATHER · two of four shards shown; identical paths for 2 / 3</text><circle cx="44" cy="176" r="12" class="box"/><path d="M24 222 Q44 190 64 222" class="wire"/><text x="44" y="244" text-anchor="middle" class="label">Caller</text>
+          <rect x="170" y="165" width="170" height="70" rx="12" class="box"/><text x="255" y="197" text-anchor="middle" class="label">Query svc</text><text x="255" y="216" text-anchor="middle" class="sub">pin map + read cut</text>
+          <path d="M70 191 L160 191" class="wire"/><polygon points="170,191 160,196 160,186" class="head"/><path d="M170 209 L80 209" class="wire reply"/><polygon points="70,209 80,204 80,214" class="head reply"/>
+          <text x="155" y="84" class="tiny">A3: 4 hash shards; 2 replicas each</text>
+          <g class="is-new">
+            <path d="M560 70 V125 A100 12 0 0 0 760 125 V70" class="store"/><ellipse cx="660" cy="70" rx="100" ry="12" class="store"/><text x="660" y="107.5" text-anchor="middle" class="label">S0 Replica A</text><text x="660" y="125.5" text-anchor="middle" class="sub">25M vectors · epoch e</text>
+            <path d="M340 183 L392 183 Q400 183 400 175 L400 108 Q400 100 408 100 L550 100" class="wire"/><polygon points="560,100 550,105 550,95" class="head"/><text x="465" y="89" text-anchor="middle" class="tiny">q + filter + cut</text>
+            <path d="M560 119 L428 119 Q420 119 420 127 L420 185 Q420 193 412 193 L350 193" class="wire reply"/><polygon points="340,193 350,188 350,198" class="head reply"/><text x="472" y="140" text-anchor="middle" class="tiny">local top-10</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">先展开 S0 的请求与回程。同一分片只选一个满足 read cut 的副本，不向两份相同数据都搜一次来冒充数据扩容。</span><span class="lang-en">Expand S0’s request and return. Select one replica meeting the read cut; searching two copies of identical data does not expand the corpus.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d6s3t d6s3d">
+          <title id="d6s3t">Scatter and merge</title>
+          <desc id="d6s3d">Query svc also calls S1 Replica A in parallel, receives local top-10, and merges results from every required shard before replying to Caller.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="24" width="824" height="360" rx="18" class="boundary"/><text x="136" y="46" class="tiny">SCATTER-GATHER · two of four shards shown; identical paths for 2 / 3</text><circle cx="44" cy="176" r="12" class="box"/><path d="M24 222 Q44 190 64 222" class="wire"/><text x="44" y="244" text-anchor="middle" class="label">Caller</text>
+          <rect x="170" y="165" width="170" height="70" rx="12" class="box"/><text x="255" y="197" text-anchor="middle" class="label">Query svc</text><text x="255" y="216" text-anchor="middle" class="sub">pin map + read cut</text>
+          <path d="M70 191 L160 191" class="wire"/><polygon points="170,191 160,196 160,186" class="head"/><path d="M170 209 L80 209" class="wire reply"/><polygon points="70,209 80,204 80,214" class="head reply"/>
+          <text x="155" y="84" class="tiny">A3: 4 hash shards; 2 replicas each</text>
+          <path d="M560 70 V125 A100 12 0 0 0 760 125 V70" class="store"/><ellipse cx="660" cy="70" rx="100" ry="12" class="store"/><text x="660" y="107.5" text-anchor="middle" class="label">S0 Replica A</text><text x="660" y="125.5" text-anchor="middle" class="sub">25M vectors · epoch e</text>
+          <path d="M340 183 L392 183 Q400 183 400 175 L400 108 Q400 100 408 100 L550 100" class="wire"/><polygon points="560,100 550,105 550,95" class="head"/><text x="465" y="89" text-anchor="middle" class="tiny">q + filter + cut</text>
+          <path d="M560 119 L428 119 Q420 119 420 127 L420 185 Q420 193 412 193 L350 193" class="wire reply"/><polygon points="340,193 350,188 350,198" class="head reply"/><text x="472" y="140" text-anchor="middle" class="tiny">local top-10</text>
+          <g class="is-new">
+            <path d="M560 215 V270 A100 12 0 0 0 760 270 V215" class="store"/><ellipse cx="660" cy="215" rx="100" ry="12" class="store"/><text x="660" y="252.5" text-anchor="middle" class="label">S1 Replica A</text><text x="660" y="270.5" text-anchor="middle" class="sub">25M vectors · epoch e</text>
+            <path d="M340 205 L442 205 Q450 205 450 213 L450 236 Q450 244 458 244 L550 244" class="wire"/><polygon points="560,244 550,249 550,239" class="head"/>
+            <path d="M560 262 L438 262 Q430 262 430 254 L430 226 Q430 218 422 218 L350 218" class="wire reply"/><polygon points="340,218 350,213 350,223" class="head reply"/><text x="490" y="280" text-anchor="middle" class="tiny">local top-10</text>
+            <text x="785" y="156" class="clock">4 x 10 = 40</text>
+            <text x="785" y="178" class="tiny">merge candidates</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">四片并行，各回 local top-10，coordinator 合并最多 4×10=40 项。若每片精确且过滤/评分一致，local top-k 足够；ANN 的漏项仍是近似误差。</span><span class="lang-en">Four shards return local top-10, so merge at most forty items. Exact local top-k suffices under consistent filtering/scoring; ANN omissions remain approximation error.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d6s4t d6s4d">
+          <title id="d6s4t">Reject a stale replica for a fresh read</title>
+          <desc id="d6s4d">S1 Replica A has searchable LSN below the cut and rejects the read to Query svc. Query svc may retry the same shard at eligible Replica B; its result returns to Query svc before Caller.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="24" width="824" height="360" rx="18" class="boundary"/><text x="136" y="46" class="tiny">SCATTER-GATHER · two of four shards shown; identical paths for 2 / 3</text><circle cx="44" cy="176" r="12" class="box"/><path d="M24 222 Q44 190 64 222" class="wire"/><text x="44" y="244" text-anchor="middle" class="label">Caller</text>
+          <rect x="170" y="165" width="170" height="70" rx="12" class="box"/><text x="255" y="197" text-anchor="middle" class="label">Query svc</text><text x="255" y="216" text-anchor="middle" class="sub">pin map + read cut</text>
+          <path d="M70 191 L160 191" class="wire"/><polygon points="170,191 160,196 160,186" class="head"/><path d="M170 209 L80 209" class="wire reply"/><polygon points="70,209 80,204 80,214" class="head reply"/>
+          <text x="155" y="84" class="tiny">A3: 4 hash shards; 2 replicas each</text>
+          <path d="M560 70 V125 A100 12 0 0 0 760 125 V70" class="store"/><ellipse cx="660" cy="70" rx="100" ry="12" class="store"/><text x="660" y="107.5" text-anchor="middle" class="label">S0 Replica A</text><text x="660" y="125.5" text-anchor="middle" class="sub">25M vectors · epoch e</text>
+          <path d="M340 183 L392 183 Q400 183 400 175 L400 108 Q400 100 408 100 L550 100" class="wire"/><polygon points="560,100 550,105 550,95" class="head"/><text x="465" y="89" text-anchor="middle" class="tiny">q + filter + cut</text>
+          <path d="M560 119 L428 119 Q420 119 420 127 L420 185 Q420 193 412 193 L350 193" class="wire reply"/><polygon points="340,193 350,188 350,198" class="head reply"/><text x="472" y="140" text-anchor="middle" class="tiny">local top-10</text>
+          <path d="M560 215 V270 A100 12 0 0 0 760 270 V215" class="store"/><ellipse cx="660" cy="215" rx="100" ry="12" class="store"/><text x="660" y="252.5" text-anchor="middle" class="label">S1 Replica A</text><text x="660" y="270.5" text-anchor="middle" class="sub">25M vectors · epoch e</text>
+          <path d="M340 205 L442 205 Q450 205 450 213 L450 236 Q450 244 458 244 L550 244" class="wire"/><polygon points="560,244 550,249 550,239" class="head"/>
+          <path d="M560 262 L438 262 Q430 262 430 254 L430 226 Q430 218 422 218 L350 218" class="wire reply"/><polygon points="340,218 350,213 350,223" class="head reply"/><text x="490" y="280" text-anchor="middle" class="tiny">local top-10</text>
+          <text x="785" y="156" class="clock">4 x 10 = 40</text>
+          <text x="785" y="178" class="tiny">merge candidates</text>
+          <g class="is-new">
+            <path d="M700 315 V365 A90 12 0 0 0 880 365 V315" class="store"/><ellipse cx="790" cy="315" rx="90" ry="12" class="store"/><text x="790" y="350" text-anchor="middle" class="label">S1 Replica B</text><text x="790" y="368" text-anchor="middle" class="sub">same shard / model / cut</text>
+            <path d="M270 235 L270 332 Q270 340 278 340 L690 340" class="wire"/><polygon points="700,340 690,345 690,335" class="head"/><text x="470" y="330" text-anchor="middle" class="tiny">eligible retry only</text>
+            <path d="M700 360 L258 360 Q250 360 250 352 L250 245" class="wire reply"/><polygon points="250,235 255,245 245,245" class="head reply"/><text x="790" y="292" text-anchor="middle" class="tiny">merge all required shards</text>
+            <path d="M660 282 L660 291 Q660 299 652 299 L398 299 Q390 299 390 291 L390 230 Q390 222 382 222 L350 222" class="wire fail"/><polygon points="340,222 350,217 350,227" class="head fail"/><text x="486" y="310" text-anchor="middle" class="tiny">reject: searchable LSN &lt; cut</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">A 副本低于要求位点，先拒绝；只重试同分片、同模型、同快照约束的 B。若 B 也追不上，到截止时间返回失败，不能拿缺一片的结果标成 complete。</span><span class="lang-en">Reject A below the required watermark; retry only the same shard/model/read contract on B. If B cannot catch up before deadline, fail rather than label a missing-shard result complete.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d6s5t d6s5d">
+          <title id="d6s5t">Separate memory and throughput budgets</title>
+          <desc id="d6s5d">The complete shard fan-out, local returns, stale rejection, and same-shard retry paths remain; memory and survivor-throughput assumptions are annotated.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="24" width="824" height="360" rx="18" class="boundary"/><text x="136" y="46" class="tiny">SCATTER-GATHER · two of four shards shown; identical paths for 2 / 3</text><circle cx="44" cy="176" r="12" class="box"/><path d="M24 222 Q44 190 64 222" class="wire"/><text x="44" y="244" text-anchor="middle" class="label">Caller</text>
+          <rect x="170" y="165" width="170" height="70" rx="12" class="box"/><text x="255" y="197" text-anchor="middle" class="label">Query svc</text><text x="255" y="216" text-anchor="middle" class="sub">pin map + read cut</text>
+          <path d="M70 191 L160 191" class="wire"/><polygon points="170,191 160,196 160,186" class="head"/><path d="M170 209 L80 209" class="wire reply"/><polygon points="70,209 80,204 80,214" class="head reply"/>
+          <text x="155" y="84" class="tiny">A3: 4 hash shards; 2 replicas each</text>
+          <path d="M560 70 V125 A100 12 0 0 0 760 125 V70" class="store"/><ellipse cx="660" cy="70" rx="100" ry="12" class="store"/><text x="660" y="107.5" text-anchor="middle" class="label">S0 Replica A</text><text x="660" y="125.5" text-anchor="middle" class="sub">25M vectors · epoch e</text>
+          <path d="M340 183 L392 183 Q400 183 400 175 L400 108 Q400 100 408 100 L550 100" class="wire"/><polygon points="560,100 550,105 550,95" class="head"/><text x="465" y="89" text-anchor="middle" class="tiny">q + filter + cut</text>
+          <path d="M560 119 L428 119 Q420 119 420 127 L420 185 Q420 193 412 193 L350 193" class="wire reply"/><polygon points="340,193 350,188 350,198" class="head reply"/><text x="472" y="140" text-anchor="middle" class="tiny">local top-10</text>
+          <path d="M560 215 V270 A100 12 0 0 0 760 270 V215" class="store"/><ellipse cx="660" cy="215" rx="100" ry="12" class="store"/><text x="660" y="252.5" text-anchor="middle" class="label">S1 Replica A</text><text x="660" y="270.5" text-anchor="middle" class="sub">25M vectors · epoch e</text>
+          <path d="M340 205 L442 205 Q450 205 450 213 L450 236 Q450 244 458 244 L550 244" class="wire"/><polygon points="560,244 550,249 550,239" class="head"/>
+          <path d="M560 262 L438 262 Q430 262 430 254 L430 226 Q430 218 422 218 L350 218" class="wire reply"/><polygon points="340,218 350,213 350,223" class="head reply"/><text x="490" y="280" text-anchor="middle" class="tiny">local top-10</text>
+          <text x="785" y="156" class="clock">4 x 10 = 40</text>
+          <text x="785" y="178" class="tiny">merge candidates</text>
+          <path d="M700 315 V365 A90 12 0 0 0 880 365 V315" class="store"/><ellipse cx="790" cy="315" rx="90" ry="12" class="store"/><text x="790" y="350" text-anchor="middle" class="label">S1 Replica B</text><text x="790" y="368" text-anchor="middle" class="sub">same shard / model / cut</text>
+          <path d="M270 235 L270 332 Q270 340 278 340 L690 340" class="wire"/><polygon points="700,340 690,345 690,335" class="head"/><text x="470" y="330" text-anchor="middle" class="tiny">eligible retry only</text>
+          <path d="M700 360 L258 360 Q250 360 250 352 L250 245" class="wire reply"/><polygon points="250,235 255,245 245,245" class="head reply"/><text x="790" y="292" text-anchor="middle" class="tiny">merge all required shards</text>
+          <path d="M660 282 L660 291 Q660 299 652 299 L398 299 Q390 299 390 291 L390 230 Q390 222 382 222 L350 222" class="wire fail"/><polygon points="340,222 350,217 350,227" class="head fail"/><text x="486" y="310" text-anchor="middle" class="tiny">reject: searchable LSN &lt; cut</text>
+          <g class="is-new">
+            <text x="155" y="112" class="tiny">A8: 200/s per shard</text>
+            <text x="155" y="132" class="tiny">2 x 120/s; survivor = 120/s</text>
+            <text x="155" y="152" class="tiny">Need &gt;= 200/s after one loss</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">4 片不会把每片请求降到 50/s：全局 200/s 仍打到每片 200/s。两副本各预算 120/s 时总计 240/s，但坏一份只剩 120，不能承诺故障时扛 200。</span><span class="lang-en">Four shards do not divide each shard’s request rate to fifty/s: each sees the global 200/s. Two 120/s replicas total 240/s, but one loss leaves 120/s and cannot sustain 200/s.</span></figcaption>
+      </div>
+    </figure><h3><span class="lang-zh">正常路径、故障预算与发布代次</span> <span class="lang-en">Normal path, failure capacity, and generations</span></h3>
+<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
+<p>按 hash(id) 分四片，各片都是同一模型空间中的子集。Query svc pin 路由代次，从每个相关片选一份满足读取条件的副本，并行带着同一 vector、filter、k 与片位点发出去。每片对自己的 growing/sealed 结果做版本/权限检查，得到 local top-k，回 Query svc 合并，再回 Caller。相关片集合必须有完备路由依据；任意语义/类目分片不是天然错误，但只探“看着像”的一个类目可能漏掉跨类近邻，要明确近似路由误差或搜索所有可能片。</p>
+<p>如果每片返回同一快照/谓词与评分规则下的精确 top-k，全局真 top-k 不可能在某片排到 k 之后：那片至少已有 k 个更好对象挡在它前面。因而四片每片十条，只需合并最多四十项。ANN 时这个论证只说明归并策略，不会消掉每片漏召回；量化片要先按同一 metric rescore 再比较，否则不同片的误差分布会把 PQ 分数错当可直接比较的精确距离。多段去重也要在片内完成，不能靠 coordinator 删除旧版本后硬凑 k。</p>
+<p>全局 200/s 查询广播四片，是每片 200/s、全体 800 次片搜索/s，不是每片 50/s。若两副本每份教学预算 120/s，稳态轮流各接 100/s，使用率 100/120≈83.3%；掉一份后另一份要接 200/s，超过预算 1.67 倍。要满足故障时不丢吞吐，每片幸存副本须在同 Recall/过滤/时延目标下测到至少 200/s，或增加副本、预留容量与限流降级。这个 120 是说明故障算术的假设，不是图索引性能常数。</p>
+<p>请求延迟由最慢相关片和归并决定，不能把四片各自 p95 当全局 p95。举个独立分布假设：某阈值每片 95% 都能赶上，四片同时赶上的概率 0.95⁴≈81.45%；现实片之间共享负载，独立性也可能不成立。增加 shard 会减每台内存，也会增加 fan-out、连接、候选工作与尾风险。所以先按体积与故障容量选片数，再实测完整查询，不用盲目加片代替副本吞吐规划。</p>
+<p>S1 Replica A 追不上要求位点时，它把拒绝沿回程送 Query svc；svc 只能重试同片、同 collection/model 与读取条件的 B。A 与 B 不能同时各占一个片结果，迟到回复要按请求/片/尝试身份丢弃。截止时缺一个相关片，本题默认 complete=false 并返回服务错误；若上游显式允许部分结果，可以带 covered_shards 与 partial 状态返回。空数组在完整查询下可能是合法空集，在缺片下不是“无匹配”。</p>
+<p>WAL 的 A9 工作量为 100×4,096=409,600 B/s=0.4096 MB/s 逻辑写；均匀四片每片 0.1024 MB/s，日志两份约 0.8192 MB/s 聚合。若这股速率整天持续，一天约 35.39 GB 一份日志；A9 是峰值，不能不问流量曲线就按峰值积一年。图插入、payload 倒排和 compact 的 CPU/I/O 不含在日志字节里。growing 积压即使写速率小也会拖垮查询，摄取要有 lag 告警和背压。</p>
+<p>索引改版时不是只换一个文件名。新 manifest 绑定 model/metric/normalization/codebook、快照截止与追齐位点；快照后持续回放包含删除的变化，核验计数、版本与过滤召回后发布。普通索引重建可以仍用原模型，换 embedding 则需要上游提供新模型向量并隔离 collection。回退旧索引时它也必须持续追写，或明确承认陈旧并阻断新鲜读取；“旧文件还在”不等于能够安全回退。</p>
+</div><div class="lang-en"><p class="col-kicker">English</p>
+<p>Hash IDs across four shards in the same model space. Query svc pins routing generation, selects one eligible replica per required shard, and sends the same vector/filter/k with per-shard cuts in parallel. Replicas validate versions/predicates and merge growing/sealed results before returning local top-k through Query svc to Caller. Semantic partitions are valid with complete routing; probing only a likely class may introduce extra routing recall error.</p>
+<p>With exact local rankings under consistent read/filter/scoring rules, a global top-k point cannot rank below k on its own shard: k better local points would already outrank it globally. Merge at most forty items from four local tens. ANN omissions remain; rescore compressed candidates under the same metric before comparing shard results. Deduplicate segment versions inside each shard rather than dropping them after global merging.</p>
+<p>At 200 global queries/s, each of four shards sees 200/s, totaling 800 shard searches/s. Two assumed 120/s replicas take 100/s each in steady state, 83.3% utilization. One loss demands 200/s on the survivor, 1.67× budget. Benchmark each survivor at ≥200/s under identical recall/filter/latency, or provision more replicas/capacity and explicit shedding. The 120/s value is illustrative rather than index performance data.</p>
+<p>Complete-query latency follows the slowest required shard plus merge, not individual shard p95. Under independence, four shards each meeting a threshold 95% of the time meet it together with probability 0.95⁴≈81.45%; shared load can invalidate independence. More shards reduce per-node memory but increase fan-out, connections, work, and tail exposure. Size by bytes/failure needs and benchmark the full query.</p>
+<p>A stale S1 Replica A rejects through Query svc; retry only an eligible B for the same shard/model/read contract. Late attempts cannot count twice; discard by request/shard/attempt identity. Missing required shards cause complete=false and an error by default. Explicitly allowed partial responses include coverage/partial status. An empty array from an incomplete search is not proof of no matches.</p>
+<p>A9 yields 100×4,096=409,600 B/s=0.4096 MB/s logical log writes; uniform shards each get 0.1024 MB/s and two log copies total 0.8192 MB/s. Sustained for a whole day, one logical log adds about 35.39 GB; peak assumptions cannot size annual retention without a traffic curve. Graph/payload/compaction work is additional. Alert and backpressure growing lag because small byte rates may still exhaust query work.</p>
+<p>New manifests bind model, metric, normalization, codebook, snapshot cut, and replay positions. Replay all changes including deletes, verify counts/versions/filtered recall, then publish. Index-only rebuilds can retain the model; embedding changes require newly supplied vectors in another collection. Keep the rollback index caught up or explicitly reject fresh reads on it; an old file is insufficient for safe rollback.</p>
+</div></div></section>
+
+  <section>
+<h2><span class="lang-zh">验收：召回、可见性和隔离分开量</span> <span class="lang-en">Evaluate recall, visibility, and isolation separately</span></h2>
+<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
+<p>A12 的 500 个查询带固定 collection/model、身份、filter 和数据快照；在满足同一 filter 的允许集上算精确距离得到 ground truth。若允许点少于 k，令 K=min(k,允许数)，Recall=|返回∩ground truth|/K；K=0 时按空集正确性统计，不把 0/0 写成召回 100%。九个真近邻进入十个目标，Recall@10=0.9；平均达到 0.95 不代表每个请求都达到 0.95，需列低分位与困难切片。</p>
+<p>至少分无/松/严过滤、predicate 与向量正/负相关、小租户和热点租户、growing 占比、删除比例与冷热页。固定同一数据与负载，分别改 ef_search、nprobe、量化和短名单上限，比较 Recall/完整查询 p95/超时率/CPU/随机 I/O。调参集与独立回归集分开，不能在同一套 query 上挑最佳参数再宣布它能泛化。压测包括持续写和重建，不只在静止热索引上跑单线程查找。</p>
+<p>可见性实验记录 durable LSN、searchable LSN、每次读取要求 cut、实际 manifest 与端到端 ingest lag；操作重试、崩溃回放、删除复活、build CAS 失败、缺片和读 token 追不上都要有可解释状态。隔离实验故意放一个很近的他租户向量，验证 ID/payload/score 零泄漏。ANN 有近似误差，不表示权限与版本也可以“近似正确”；只看返回十个条目的次数会同时掩盖这两类错误。</p>
+<p>最后一分钟，指着六组末帧收尾：307.2 GB 把全扫拿掉；HNSW 上层定位、底层候选，IVF 少探 list、PQ 少读字节；过滤保允许集与导航连通，WAL 先持久再可搜，manifest 发布完整读状态；分片按体积、副本按幸存容量。把每项代价和失败状态说完，面试官改维度、过滤或可见契约时，知道该重新算哪笔、改哪条线。</p>
+</div><div class="lang-en"><p class="col-kicker">English</p>
+<p>A12 freezes 500 queries with collection/model, identity, predicate, and data snapshot. Compute exact ground truth within that same allowed set. Use K=min(k,allowed count) and Recall=|returned∩truth|/K; K=0 belongs to empty-set correctness rather than 0/0=100%. Nine of ten yields 0.9. A 0.95 mean does not prove every request reaches 0.95; report difficult slices and lower quantiles.</p>
+<p>Slice predicates by acceptance/correlation, tenant size/hotspots, growing/deletion share, and hot/cold pages. At fixed data/load, compare ef_search, nprobe, quantization, and shortlist caps across recall, complete-query p95, timeouts, CPU, and random I/O. Keep tuning and held-out sets separate; include ongoing writes and rebuilds rather than only static hot single-thread searches.</p>
+<p>Visibility traces include durable/searchable LSN, required cuts, manifests, and ingest lag. Exercise retries, crash replay, delete resurrection, failed build CAS, missing shards, and unmet read tokens. Isolation injects a very close other-tenant point and requires zero ID/payload/score leakage. Approximate neighbors do not permit approximate permissions or versions; count-of-ten alone hides both.</p>
+<p>Close on the six final frames: 307.2 GB rejects the naive full scan; HNSW navigates then broadens, IVF probes lists and PQ reduces bytes; filters preserve eligibility/connectivity, durable WAL precedes visibility, manifests publish complete read state; shards follow bytes and replicas survivor capacity. Changed assumptions identify the calculation and path to revisit.</p>
+</div></div><h3><span class="lang-zh">八个翻车点</span> <span class="lang-en">Eight failure claims</span></h3>
+<table><thead><tr><th><span class="lang-zh">翻车说法</span> <span class="lang-en">Failure claim</span></th><th><span class="lang-zh">改成可以验收的边界</span> <span class="lang-en">Testable boundary</span></th></tr>
+</thead><tbody><tr><td><span class="lang-zh">一千万一定单机 HNSW</span> <span class="lang-en">10M always fits one HNSW node</span></td><td><span class="lang-zh">按维度、图、payload、重建与预算算；规模不是定律</span> <span class="lang-en">Size dimensions, graph, payload, rebuilds, and budget</span></td></tr>
+<tr><td><span class="lang-zh">PQ 让所有字节缩 32 倍</span> <span class="lang-en">PQ shrinks every byte 32×</span></td><td><span class="lang-zh">96 B 只是 code；ID、原向量和其他结构另计</span> <span class="lang-en">96 B is code only; IDs, raw vectors, and structures remain</span></td></tr>
+<tr><td><span class="lang-zh">ef_search=64 只访问 64 点</span> <span class="lang-en">ef_search=64 visits sixty-four points</span></td><td><span class="lang-zh">候选宽度不等于访问上限或 Recall 保证</span> <span class="lang-en">Frontier width is neither visit cap nor recall guarantee</span></td></tr>
+<tr><td><span class="lang-zh">k 乘十就能过滤后凑满</span> <span class="lang-en">10× oversampling always fills k</span></td><td><span class="lang-zh">k/s 仅独立均匀期望，相关性与预算影响召回</span> <span class="lang-en">k/s assumes independence/uniformity; correlation/budgets matter</span></td></tr>
+<tr><td><span class="lang-zh">WAL ack 或副本 ack 就可搜</span> <span class="lang-en">WAL/replica ack means searchable</span></td><td><span class="lang-zh">追齐连续 search-ready 位点与完整读状态</span> <span class="lang-en">Require contiguous searchable position and coherent state</span></td></tr>
+<tr><td><span class="lang-zh">compact 完才真正删掉</span> <span class="lang-en">Delete becomes effective after compaction</span></td><td><span class="lang-zh">tombstone 先阻止旧版本返回，再回收字节</span> <span class="lang-en">Tombstones hide old results before reclamation</span></td></tr>
+<tr><td><span class="lang-zh">四片把 QPS 各除以四</span> <span class="lang-en">Four shards divide QPS by four</span></td><td><span class="lang-zh">全局查询每片都做；副本按故障幸存容量买</span> <span class="lang-en">Each shard receives global queries; size survivor capacity</span></td></tr>
+<tr><td><span class="lang-zh">少一片也返回 complete</span> <span class="lang-en">Missing shards can return complete</span></td><td><span class="lang-zh">缺片失败或显式 partial；不能当合法空集</span> <span class="lang-en">Fail or explicitly return partial; not a legitimate empty set</span></td></tr>
+</tbody></table></section>
+
+  <section>
+<h2><span class="lang-zh">引用与延伸</span> <span class="lang-en">References and follow-ups</span></h2>
+<ol class="references"><li id="ref-1">[1] Faiss project, <a href="https://github.com/facebookresearch/faiss/wiki/Faiss-indexes"><em>Faiss indexes</em></a>, documentation, checked 2026-10-07. <span class="lang-zh">核对 float32、SQ8、PQ 与 IVF-PQ 的 byte 公式，HNSW 参数及删除限制；本章参数是假设。</span> <span class="lang-en">Encoding byte formulas, HNSW controls and removal limits; our parameters are assumptions.</span></li>
+<li id="ref-2">[2] Faiss project, <a href="https://github.com/facebookresearch/faiss/wiki/MetricType-and-distances"><em>MetricType and distances</em></a>, documentation, checked 2026-10-07. <span class="lang-zh">平方 L2、内积与 cosine 归一化；不引厂商 SLO。</span> <span class="lang-en">Squared L2 and normalized inner-product/cosine semantics; no vendor SLO.</span></li>
+<li id="ref-3">[3] Yu. A. Malkov, D. A. Yashunin, <a href="https://arxiv.org/abs/1603.09320v4"><em>Efficient and robust approximate nearest neighbor search using Hierarchical Navigable Small World graphs</em></a>, arXiv v4 (2018). <span class="lang-zh">多层图与上层导航/底层搜索；玩具距离由本章设定。</span> <span class="lang-en">Hierarchy and navigation/search; diagram distances are illustrative.</span></li>
+<li id="ref-4">[4] Faiss project, <a href="https://github.com/facebookresearch/faiss/wiki/Implementation-notes"><em>Implementation notes</em></a>, documentation, checked 2026-10-07. <span class="lang-zh">IVFPQ 查表距离与训练实现；扫描量由 A5 推导。</span> <span class="lang-en">IVFPQ lookup distances and training; A5 derives scan volumes.</span></li>
+<li id="ref-5">[5] Liana Patel, Peter Kraft, Carlos Guestrin, Matei Zaharia, <a href="https://arxiv.org/abs/2403.04871v1"><em>ACORN: Performant and Predicate-Agnostic Search Over Vector Embeddings and Structured Data</em></a>, arXiv v1 (2024). <span class="lang-zh">ACORN-1 查询时扩邻居、predicate 子图与小集合 fallback；不移植论文加速倍数。</span> <span class="lang-en">ACORN-1 expansion, predicate subgraphs and small-set fallback; no transferred speedup claim.</span></li>
+<li id="ref-6">[6] Suhas Jayaram Subramanya et al., <a href="https://papers.nips.cc/paper/2019/hash/09853c7fb1d3f8ee67a61b6bf4a7f8e6-Abstract.html"><em>DiskANN: Fast Accurate Billion-point Nearest Neighbor Search on a Single Node</em></a>, NeurIPS 2019. <span class="lang-zh">RAM 压缩导航与 SSD 图访问的设计；不使用其吞吐作本题承诺。</span> <span class="lang-en">Compressed RAM navigation and SSD graph access, without workload-throughput promises.</span></li>
+<li id="ref-7">[7] Aditi Singh, Suhas Jayaram Subramanya, Ravishankar Krishnaswamy, Harsha Vardhan Simhadri, <a href="https://arxiv.org/abs/2105.09613v1"><em>FreshDiskANN: A Fast and Accurate Graph-Based ANN Index for Streaming Similarity Search</em></a>, arXiv v1 (2021). <span class="lang-zh">图索引流式插入删除；本章未做相同语料压测。</span> <span class="lang-en">Streaming graph updates/deletes; no matching-dataset benchmark here.</span></li>
+<li id="ref-8">[8] pgvector project, <a href="https://github.com/pgvector/pgvector/blob/v0.8.0/README.md"><em>README · Filtering and Iterative Index Scans</em></a>, v0.8.0 (2024). <span class="lang-zh">近似扫描后过滤和有界迭代扫描；不证明统一规模门槛。</span> <span class="lang-en">Post-scan filtering and capped iterative scans; no universal scale cutoff.</span></li>
+<li id="ref-9">[9] Milvus project, <a href="https://milvus.io/docs/data_processing.md"><em>Data Processing</em></a>, v3.0.x documentation, checked 2026-10-07. <span class="lang-zh">WAL、growing/sealed 与 handoff；Manifest 是本章设计。</span> <span class="lang-en">WAL, growing/sealed and handoff; Manifest is our design.</span></li>
+<li id="ref-10">[10] Milvus project, <a href="https://milvus.io/docs/v2.6.x/timestamp.md"><em>Timestamp</em></a>, v2.6.x documentation, checked 2026-10-07. <span class="lang-zh">Service 与 Guarantee timestamp 比较；2 s 是本章 bounded 假设。</span> <span class="lang-en">Service/Guarantee watermark comparison; two seconds is our bound.</span></li>
+<li id="ref-11">[11] Qdrant project, <a href="https://qdrant.tech/documentation/scaling/consistency-guarantees/"><em>Consistency Guarantees</em></a>, documentation, checked 2026-10-07. <span class="lang-zh">副本确认数、写排序、读一致性是不同选择；不把本图当 Qdrant 实现。</span> <span class="lang-en">Separate replica acknowledgements, ordering and reads; this board is not Qdrant internals.</span></li>
+</ol><p class="cite"><span class="lang-zh">站内延伸：</span> <span class="lang-en">Course follow-ups:</span> <a class="chip" href="ch03.html">Ch03</a> <a class="chip" href="ch30.html">Ch30</a> <a class="chip" href="ch32.html"><span class="lang-zh">Ch32</span><span class="lang-en">Ch32</span></a> <a class="chip" href="ch37.html">Ch37</a> <a class="chip" href="ch38.html">Ch38</a> <a class="chip" href="ch41.html"><span class="lang-zh">Ch41</span><span class="lang-en">Ch41</span></a></p>
+</section>
+
+  <section>
+<h2><span class="lang-zh">闪卡</span> <span class="lang-en">Flashcards</span></h2>
+<p class="cite"><span class="lang-zh">点一下翻面；先说路径，再说算式与故障行为。</span> <span class="lang-en">Click to flip; state the path, calculation and failure behavior.</span></p>
+<div class="cards-grid"><button type="button" class="flip"><span class="q"><span class="lang-zh">100M×768 float32 多大？</span> <span class="lang-en">Raw 100M×768 float32 size?</span></span><span class="a"><span class="lang-zh">307.2 GB≈286.1 GiB；图、ID、payload、日志与副本另计。</span> <span class="lang-en">307.2 GB≈286.1 GiB; graph, IDs, payload, logs and copies extra.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">四片二副本怎么计？</span> <span class="lang-en">How to count four shards/two replicas?</span></span><span class="a"><span class="lang-zh">每片 25M，8 份分片；原向量总热拷贝 614.4 GB。</span> <span class="lang-en">25M/shard, eight shard copies; raw copies total 614.4 GB.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">ef_search 就是访问次数吗？</span> <span class="lang-en">Does ef_search count visits?</span></span><span class="a"><span class="lang-zh">候选宽度；不等于固定访问上限，更不保证召回。</span> <span class="lang-en">Frontier width, not a fixed visit cap or recall guarantee.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">PQ96×8 是多少字节？</span> <span class="lang-en">Bytes for PQ96×8?</span></span><span class="a"><span class="lang-zh">96×8/8=96 B；加8 B ID，100M为10.4 GB。</span> <span class="lang-en">96×8/8=96 B; with eight-byte IDs, 100M require 10.4 GB.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">nprobe 改的是哪笔？</span> <span class="lang-en">What does nprobe change?</span></span><span class="a"><span class="lang-zh">探的 list 数；均匀假设16/4096扫描97,656条/片。</span> <span class="lang-en">Probed lists; uniform 16/4096 scans about 97,656/shard.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">rescore 能补漏吗？</span> <span class="lang-en">Can rescoring recover misses?</span></span><span class="a"><span class="lang-zh">纠正候选排序，不补未探 list 或图中漏掉的点。</span> <span class="lang-en">Fixes candidate order, not unprobed lists or missed graph points.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">0.1%过滤，k=10需要什么？</span> <span class="lang-en">At 0.1% acceptance and k=10?</span></span><span class="a"><span class="lang-zh">独立均匀下期望10,000候选；不是保证凑满或召回。</span> <span class="lang-en">10,000 candidates in expectation under independence/uniformity; no fill/recall guarantee.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">不合格点一定不能导航吗？</span> <span class="lang-en">Must failed predicates block navigation?</span></span><span class="a"><span class="lang-zh">结果资格与邻接扩展分开；X不返回但可用于发现B。</span> <span class="lang-en">Separate result eligibility from adjacency expansion; X may expose B internally without returning.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">WAL确认为什么搜不到？</span> <span class="lang-en">Why not visible after WAL ack?</span></span><span class="a"><span class="lang-zh">连续searchable位点未追齐；vector/payload/live需一起可读。</span> <span class="lang-en">Contiguous searchable watermark lags; vector/payload/live state must be coherent.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">delete要等compact吗？</span> <span class="lang-en">Does delete wait for compaction?</span></span><span class="a"><span class="lang-zh">tombstone先隐藏旧版本，compact后回收字节和无效导航。</span> <span class="lang-en">Tombstones hide old versions first; compaction reclaims bytes and stale traversal.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">四片把200/s分成50/s吗？</span> <span class="lang-en">Do four shards turn 200/s into fifty/s?</span></span><span class="a"><span class="lang-zh">每片仍做200/s；二副本各120/s坏一份后不足。</span> <span class="lang-en">Each sees 200/s; two 120/s replicas cannot sustain one loss.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">一条token等于跨片强快照吗？</span> <span class="lang-en">Does one token give a strong cross-shard snapshot?</span></span><span class="a"><span class="lang-zh">只约束对应片的读位点；跨片原子快照需额外协调/MVCC。</span> <span class="lang-en">Constrains its shard position; atomic cross-shard snapshots need coordination/MVCC.</span></span></button>
+</div></section>
+
+  <p><button type="button" class="read-toggle"><span class="when-off"><span class="lang-zh">我已学完本章</span><span class="lang-en">Mark this chapter done</span></span><span class="when-on"><span class="lang-zh">已学完本章</span><span class="lang-en">Completed</span></span></button></p>
+  <p class="cite"><span class="lang-zh">进度存在这台浏览器里。</span><span class="lang-en">Saved in this browser only.</span></p>
+</article>
+</main>
+<script src="../assets/js/nav.js"></script>
+<script src="../assets/js/lang.js"></script>
+<script src="../assets/js/slides.js"></script>
+<script src="../assets/js/progress.js"></script>
+</body>
+</html>

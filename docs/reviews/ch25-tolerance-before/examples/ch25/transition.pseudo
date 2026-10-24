@@ -1,0 +1,33 @@
+transition(id, action, owner=null, gen=null, result=null):
+  BEGIN
+  r = SELECT * FROM run WHERE id=:id FOR UPDATE
+  t = SELECT clock_timestamp()             // read AFTER lock acquisition
+  if r is absent: ROLLBACK; return NOT_FOUND
+  if action == 'cancel':                    // authenticated management command
+    r.cancel_requested = true
+    if r.state == 'ready' and r.attempts == 0: r.state = 'cancelled'
+    if r.state == 'retry_wait': r.state = 'review'
+    // A running attempt can still report a confirmed effect; cancel is not undo.
+  else if action == 'reap':
+    if r.state != 'running' or r.lease_until > t: ROLLBACK; return NO_CHANGE
+    r.effect_unknown = true                 // expiry does not prove no effect
+    r.state = 'review' if r.cancel_requested or r.attempts == 5 else 'retry_wait'
+    r.retry_at = t + bounded_backoff(r.attempts) if r.state == 'retry_wait' else null
+  else:
+    if r.state != 'running' or r.owner != owner or r.generation != gen
+       or r.lease_until <= t: ROLLBACK; return STALE
+    if action == 'heartbeat': r.lease_until = t + 30s
+    else if action == 'complete':
+      require result is a durable, authenticated result for r.effect_key/payload
+      r.state = 'succeeded'; r.result = result; r.effect_unknown = false
+    else if action == 'timeout':
+      r.effect_unknown = true               // retain the SAME business key
+      r.state = 'review' if r.cancel_requested or r.attempts == 5 else 'retry_wait'
+      r.retry_at = t + bounded_backoff(r.attempts) if r.state == 'retry_wait' else null
+    else: ROLLBACK; return BAD_ACTION
+  if r.state != 'running': r.owner = null; r.lease_until = null
+  UPDATE run SET state=r.state, owner=r.owner, lease_until=r.lease_until,
+    retry_at=r.retry_at, cancel_requested=r.cancel_requested,
+    effect_unknown=r.effect_unknown, result=r.result WHERE id=:id
+  COMMIT
+  // Errors roll back. Lost ACK: read the saved state, never overwrite success.

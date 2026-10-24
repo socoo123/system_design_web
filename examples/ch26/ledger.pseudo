@@ -1,0 +1,24 @@
+apply(verifiedPacketCommand):                  // authenticated service, frozen grant
+  require positive integer cents, matching currency and canonical operation ID
+  BEGIN                                      // one Payment Ledger transaction
+  if kind == FUND: SELECT sender wallet(currency) FOR UPDATE
+  else: e = SELECT escrow(packet) FOR UPDATE  // credits and refund share this lock
+  old = SELECT inbox(operation_id)
+  if old exists:
+    require old.payload == command.payload   // mismatch is a conflict
+    COMMIT; return old.result
+  if kind == FUND:
+    require no escrow already exists for packet
+    debit sender available balance only if balance >= cents
+    INSERT escrow(packet, sender, currency, total=cents, available=cents)
+  else:
+    require command matches the committed claim or close grant
+    require credit recipient OR refund sender matches that grant
+    require escrow.available >= cents
+    UPDATE escrow SET available=available-cents
+    increment the bound recipient/sender balance
+  INSERT both balanced journal entries        // debit + credit sum to zero
+  INSERT inbox(operation_id, complete payload, APPLIED)
+  COMMIT; return APPLIED
+  // Any failure rolls back balances, entries and inbox together.
+  // Timeout at Relay: keep the obligation; query/replay the same operation ID.

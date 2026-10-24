@@ -1,0 +1,27 @@
+# Teaching pseudocode: Attempt + SettlementOutbox share one authoritative DB.
+reject_unstarted(owner, status, reason):
+  BEGIN; row = SELECT Attempt WHERE id=owner.attempt FOR UPDATE
+  if row.state == TERMINAL: COMMIT; return row.saved_http_result
+  if row.owner != owner or row.state != ASSIGNED: COMMIT; return PENDING
+  UPDATE Attempt SET state=TERMINAL, saved_http_result=(status, reason)
+    WHERE id=:attempt_id AND owner=:owner AND state=ASSIGNED
+  require affected_rows == 1
+  INSERT SettlementOutbox(attempt_id, command=RELEASE_UNSPENT)
+    # UNIQUE(attempt_id); immutable command for this unstarted terminal attempt
+  COMMIT                                    # unknown: query same attempt; do not re-enqueue
+  return saved_http_result                  # same-key retry returns this 429
+
+before_first_gpu_issue(owner):
+  UPDATE Attempt SET state=RUN_GRANTED WHERE id=owner.attempt
+    AND owner=:owner AND state=ASSIGNED
+  # One confirmed row / previously confirmed same grant authorizes this owner.
+  # Terminal denies launch. Unknown commit is queried before any GPU submission.
+
+settlement_relay(event):                     # durable retries, independent quota service
+  quota.release_unspent_once(event.attempt_id)
+  # Quota authority atomically changes RESERVED -> RELEASED once for that attempt.
+  # A lost reply / crash before ACK may repeat the same call without another refund.
+  mark_outbox_acked(event.attempt_id)
+# HTTP success/failure is not the cleanup trigger. Persist intent before replying.
+# During dependency outage settlement remains pending; healthy delivery retries drain it.
+# Do not promise a wall-clock refund bound during an unavailable quota authority.

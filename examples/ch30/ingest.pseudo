@@ -1,0 +1,42 @@
+accept(source_event):                         # trusted connector, monotone cursor
+  BEGIN Catalog
+  LOCK doc(tenant, doc_id)                    # same lock order in every writer
+  if event_key exists:
+    require stored canonical_event == source_event; return saved_job_ids
+  require source_event.cursor > doc.source_cursor  # older events cannot revive
+  UPDATE doc SET target_rev=event.rev, source_cursor=event.cursor
+  INSERT immutable_revision AND jobs_for_live_pools AND event_receipt
+  COMMIT                                     # only now send 202 + job IDs
+
+work(job_id, owner):
+  BEGIN Catalog; LOCK doc THEN job
+  t = database_clock_after_locks()
+  if job.done: COMMIT; return job.saved_result
+  require job.ready OR job.lease_until <= t
+  UPDATE job SET owner=owner, epoch=epoch+1, lease_until=t+lease
+  COMMIT                                     # lost ACK => reread this claim
+  expected = deterministic_split(job.source_bytes, job.splitter)
+  manifest = create_or_read_canonical_manifest(expected, job.encoder)
+  # Unique manifest key chooses persistent embedding bytes; retries reuse them.
+  for span in manifest.text:
+    id = (tenant, doc, rev, pool, splitter, span.offsets)
+    ChunkStore.put_if_absent_or_identical(id, span.bytes_and_metadata)
+    if span.is_child:
+      BM25.put_if_absent_or_identical(id, span.hash_and_terms)
+      Dense.put_if_absent_or_identical(id, span.hash_and_vector)
+  # Manifest.text covers children + parents; both index lanes cover child IDs.
+  # Outside Catalog locks: exact IDs/hashes, correct generation, both lanes.
+  receipts = verify_manifest_visibility(manifest, pool.search_reader_contract)
+  # A write ACK or a few successful canaries are insufficient receipts.
+  BEGIN Catalog; LOCK doc THEN job
+  t = database_clock_after_locks()
+  require owner/epoch still match AND job.lease_until > t
+  require NOT doc.tombstone AND doc.target_rev == job.rev
+  require text receipt == manifest.text IDs/hashes
+  require BM25 receipt == Dense receipt == manifest.children IDs/hashes
+  require receipts.pool == job.pool AND receipts.splitter == job.splitter
+  UPSERT published(tenant, doc, pool) SET current_rev=job.rev, manifest=receipts
+  UPDATE job SET done=true, saved_result=manifest_id  # same transaction
+  COMMIT                                     # unknown COMMIT => reread, no blind undo
+  # Old workers may finish identical staging writes, never publish after takeover.
+  # ACL authority is separate: publishing content cannot restore an old ACL.

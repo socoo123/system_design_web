@@ -1,0 +1,25 @@
+claim(authenticatedUser, packet, requestKey, internalCandidate):
+  authorize membership; never accept a browser-supplied share or amount
+  BEGIN READ COMMITTED                         // one Packet DB transaction
+  INSERT request(user, key, packet) ON CONFLICT(user, key) DO NOTHING
+  r = SELECT request(user, key) FOR UPDATE
+  if r.packet != packet: ROLLBACK; return KEY_CONFLICT
+  if r.claim_id exists: COMMIT; return its durable receipt
+  p = SELECT packets(packet) FOR UPDATE
+  c = SELECT claims WHERE packet_id=packet AND user_id=user
+  if c exists: bind request to c; COMMIT; return c
+  require p.state=OPEN and p.ready and p.epoch=internalCandidate.epoch
+  require SELECT clock_timestamp() < p.expire_at // after obtaining the lock
+  s = SELECT immutable shares(packet, internalCandidate.share_id, p.plan_version)
+  require s exists and no claim already uses s.id
+  INSERT claim(c7, packet, user, s.id, s.cents)
+    // NOT NULL + UNIQUE(packet,user) + UNIQUE(packet,share)
+  UPDATE packets SET remaining_n=remaining_n-1,
+    remaining_cents=remaining_cents-s.cents
+    WHERE packet_id=packet AND remaining_n>0 AND remaining_cents>=s.cents
+  require affected_rows=1
+  INSERT outbox(credit:c7, packet, user, currency, s.cents) // frozen payload
+  UPDATE request SET claim_id=c7 WHERE user=user AND key=requestKey
+  COMMIT; return 200 c7, CREDIT_PENDING
+  // Any failed check/write aborts the entire transaction.
+  // A lost COMMIT reply means UNKNOWN: query authority with this user/key.

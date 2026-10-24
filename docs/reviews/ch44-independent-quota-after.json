@@ -1,0 +1,51 @@
+{
+  "passed": true,
+  "commands": [
+    {
+      "command": [
+        "/Library/Java/JavaVirtualMachines/jdk-17.0.10.jdk/Contents/Home/bin/javac",
+        "--release",
+        "17",
+        "-d",
+        "/var/folders/5k/y6qh6sfd2g30js0v0qrv4mfr0000gn/T/ch44-independent-after-4exr_f7d",
+        "examples/ch44/ServiceGovernance.java",
+        "docs/reviews/ch44-independent-probe.java",
+        "docs/reviews/ch44-independent-quota-after-probe.java"
+      ],
+      "exitCode": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "command": [
+        "/Library/Java/JavaVirtualMachines/jdk-17.0.10.jdk/Contents/Home/bin/java",
+        "-cp",
+        "/var/folders/5k/y6qh6sfd2g30js0v0qrv4mfr0000gn/T/ch44-independent-after-4exr_f7d",
+        "Ch44IndependentProbe"
+      ],
+      "exitCode": 0,
+      "stdout": "PASS independent deadline traces: positive delays, two attempts, late backoff, queue edge, finish reserve\nPASS independent breaker traces: 48-way half-open, stale SUCCESS, duplicate finish, abandoned probe, per-instance scope\nPASS real JVM cancellation counterexample: Future done is not local I/O termination\nINDEPENDENT JAVA CHECKS=64\n",
+      "stderr": ""
+    },
+    {
+      "command": [
+        "/Library/Java/JavaVirtualMachines/jdk-17.0.10.jdk/Contents/Home/bin/java",
+        "-cp",
+        "/var/folders/5k/y6qh6sfd2g30js0v0qrv4mfr0000gn/T/ch44-independent-after-4exr_f7d",
+        "Ch44QuotaAfterProbe"
+      ],
+      "exitCode": 0,
+      "stdout": "PASS repaired actual Java resource bracket: CLOSED/HALF_OPEN quota exception, next cooldown recovery, DENIED/UNKNOWN, late resume, transport error, attributed failure, success, Error/finally, live quota cancellation\nINDEPENDENT QUOTA FIX CHECKS=36\n",
+      "stderr": ""
+    }
+  ],
+  "sourceHashes": {
+    "examples/ch44/ServiceGovernance.java": "aa28bf3c42b2e891052cd0dc839198445d743d7aaeb04c93c4cd8cb9922c15ca",
+    "examples/ch44/retry.pseudo": "797833a5708b033bf82544d587252a0cd1b1533a2a40816079174c95b0f9f618"
+  },
+  "limits": [
+    "Calls actual local Java resource bracket/Breaker; quota adapter and full retry loop remain pseudocode",
+    "HALF_OPEN fixture checks general cleanup, not a full fixed-800ms request timeline",
+    "Live quota uses a JVM latch model, not a network call"
+  ]
+}

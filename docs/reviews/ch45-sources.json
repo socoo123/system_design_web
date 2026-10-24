@@ -1,0 +1,82 @@
+{
+  "checkedAt": "2026-10-24",
+  "method": "Opened the exact primary sources with web.run; checked named sections. Teaching identities, policies and numbers remain this chapter's assumptions.",
+  "sources": [
+    {
+      "ref": 1,
+      "url": "https://www.domainlanguage.com/wp-content/uploads/2016/05/DDD_Reference_2015-03.pdf",
+      "sections": "Printed pp.2–3 Bounded Context/Ubiquitous Language, p.13 Domain Events, p.16 Aggregates, p.36 Published Language",
+      "supports": "A model applies within an explicit context; domain events represent domain occurrences; a root enforces aggregate invariants; Published Language provides shared translation vocabulary.",
+      "doesNotSupport": "Our Order/Pay policy, transaction exception, event fields and numeric assumptions are examples, not Evans's prescribed implementation."
+    },
+    {
+      "ref": 2,
+      "url": "https://www.dddcommunity.org/wp-content/uploads/files/pdf_articles/Vernon_2011_1.pdf",
+      "sections": "PDF p.2 versioned persistence example; true invariants and small aggregates throughout",
+      "supports": "Persisted versions reject a stale client's change; avoid giant graphs and clusters that fail to protect true invariants.",
+      "doesNotSupport": "Java object methods alone do not implement durable optimistic concurrency."
+    },
+    {
+      "ref": 3,
+      "url": "https://www.dddcommunity.org/wp-content/uploads/files/pdf_articles/Vernon_2011_2.pdf",
+      "sections": "PDF pp.1–2 identity references/read composition, pp.4–5 Reasons To Break the Rules",
+      "supports": "Reference external aggregates by identity. Composing a read view does not license writes across aggregates. Deliberate multi-aggregate transaction exceptions need explicit reasons.",
+      "doesNotSupport": "The local Order/Stock reservation contract is our engineering choice."
+    },
+    {
+      "ref": 4,
+      "url": "https://martinfowler.com/bliki/BoundedContext.html",
+      "sections": "Different vocabularies, unified models and explicit context relationships",
+      "supports": "The same domain term can have different models and meanings across bounded contexts; integration requires explicit mapping."
+    },
+    {
+      "ref": 5,
+      "url": "https://microservices.io/patterns/data/transactional-outbox.html",
+      "sections": "Solution and Result context",
+      "supports": "Persist the publication intent with the business update; a relay sends it later. A crash after publication but before marking can cause duplicate publication.",
+      "doesNotSupport": "Our demo does not run a relay/broker or validate end-to-end delivery liveness."
+    },
+    {
+      "ref": 6,
+      "url": "https://microservices.io/patterns/communication-style/idempotent-consumer.html",
+      "additionalPrimaryUrl": "https://microservices.io/post/microservices/patterns/2020/10/16/idempotent-consumer.html",
+      "sections": "Solution/PROCESSED_MESSAGES; article high-level handler loop",
+      "supports": "The message identity insert belongs in the database transaction containing business changes; acknowledge after the local transaction."
+    },
+    {
+      "ref": 7,
+      "url": "https://www.postgresql.org/docs/18/explicit-locking.html",
+      "sections": "13.3.2 Row-Level Locks; 13.3.4 Deadlocks",
+      "supports": "Row locks block conflicting writers until transaction end. Consistent lock acquisition order reduces deadlocks; an aborted transaction can be retried.",
+      "doesNotSupport": "10 ms occupancy and the resulting hot-row ceiling are explicit teaching assumptions, not PostgreSQL benchmarks."
+    },
+    {
+      "ref": 8,
+      "url": "https://www.postgresql.org/docs/18/transaction-iso.html",
+      "sections": "13.2.1 Read Committed update predicate re-evaluation, ON CONFLICT DO NOTHING; 13.2.2/13.2.3 retry aborted transactions",
+      "supports": "After a concurrent update commits, an UPDATE predicate is re-evaluated. DO NOTHING can encounter a concurrent conflict absent from its initial snapshot; a subsequent statement obtains a new snapshot at Read Committed. Known serialization aborts require retrying the transaction.",
+      "doesNotSupport": "SQLite writer serialization is not experimental verification of PostgreSQL MVCC or isolation."
+    },
+    {
+      "ref": 9,
+      "url": "https://docs.stripe.com/api/idempotent_requests",
+      "sections": "Current API v1/v2 distinction and API v1 pruning/parameter checks",
+      "supports": "API v1 saves the first result after endpoint execution starts, compares parameters, permits pruning after at least 24 hours, and can create a new request when a pruned key is reused.",
+      "correction": "The original chapter omitted API v1. The current primary document distinguishes v2 retry behavior, so this chapter now explicitly scopes first-result/24-hour claims to API v1.",
+      "doesNotSupport": "No universal provider guarantee or automatic expiry of UNKNOWN."
+    },
+    {
+      "ref": 10,
+      "url": "https://docs.stripe.com/webhooks",
+      "sections": "Event ordering; Handle duplicate events; signature verification",
+      "supports": "Delivery order is not guaranteed. Events can repeat, and separate event objects can describe the same object/type. Verify webhook signatures against the raw request body.",
+      "doesNotSupport": "No PSP signature implementation or live Stripe calls were performed in this demo."
+    },
+    {
+      "ref": 11,
+      "url": "https://martinfowler.com/eaaDev/EventSourcing.html",
+      "sections": "Opening and How it Works",
+      "supports": "Event Sourcing retains application changes as an event sequence that can reconstruct states, unlike merely notifying consumers from an outbox."
+    }
+  ]
+}

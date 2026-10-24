@@ -1,0 +1,11 @@
+Produce(topic, partition, records[], producer_id, epoch, sequence)
+  → base_offset | explicit rejection | timeout: outcome UNKNOWN
+Fetch(topic, partition, fetch_offset, max_bytes, isolation)
+  → records[] | long-poll empty | OffsetOutOfRange
+OffsetCommit(group, member_id, member_epoch, partitions[].next_offset)
+  → persisted | stale member rejection | timeout: outcome UNKNOWN
+
+Record(topic, partition, offset, event_id, key, value, version)
+GroupOffset(group, topic, partition, committed_next)
+Business DB transaction: UNIQUE inbox(handler, event_id) + ledger update
+Kafka transaction: output records + safe next offsets + current group metadata

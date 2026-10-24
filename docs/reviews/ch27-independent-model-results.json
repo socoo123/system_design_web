@@ -1,0 +1,548 @@
+{
+  "checks": [
+    {
+      "name": "normal reserve commits order and one occupied slot",
+      "detail": null
+    },
+    {
+      "name": "business accept assigns without occupying twice",
+      "detail": null
+    },
+    {
+      "name": "delivery cannot precede pickup",
+      "detail": "CONTROLLED_HANDOFF_REQUIRED"
+    },
+    {
+      "name": "normal pickup to delivery frees slot and advances generation",
+      "detail": null
+    },
+    {
+      "name": "historic accept receipt retains current terminal state",
+      "detail": null
+    },
+    {
+      "name": "historic offer replay does not reactivate an expired or terminal assignment",
+      "detail": null
+    },
+    {
+      "name": "historical accept still validates authenticated courier",
+      "detail": "FORBIDDEN"
+    },
+    {
+      "name": "historical offer cannot change courier binding",
+      "detail": "ATTEMPT_BINDING"
+    },
+    {
+      "name": "duplicate proof cannot change evidence binding",
+      "detail": "EVIDENCE_CONFLICT"
+    },
+    {
+      "name": "normal path invariants",
+      "detail": null
+    },
+    {
+      "name": "two orders compete for the last of two courier slots",
+      "detail": [
+        {
+          "ok": true,
+          "value": {
+            "receipt": "offer:o1:7:c0:a1",
+            "current": {
+              "order_id": "o1",
+              "scope": "city-A",
+              "upstream_order": "paid-1",
+              "digest": "fixed-digest",
+              "state": "offered",
+              "generation": 7,
+              "current_attempt": "a1",
+              "attempt_count": 1,
+              "match_deadline": 220,
+              "created_at": 100
+            }
+          }
+        },
+        {
+          "ok": false,
+          "error": "REMATCH"
+        }
+      ]
+    },
+    {
+      "name": "capacity loser rematches rather than overbooking",
+      "detail": null
+    },
+    {
+      "name": "last-slot race invariants",
+      "detail": null
+    },
+    {
+      "name": "two couriers compete for one order",
+      "detail": [
+        {
+          "ok": false,
+          "error": "STALE"
+        },
+        {
+          "ok": true,
+          "value": {
+            "receipt": "offer:o0:7:c1:right",
+            "current": {
+              "order_id": "o0",
+              "scope": "city-A",
+              "upstream_order": "paid-0",
+              "digest": "fixed-digest",
+              "state": "offered",
+              "generation": 7,
+              "current_attempt": "right",
+              "attempt_count": 1,
+              "match_deadline": 220,
+              "created_at": 100
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "same-order race invariants",
+      "detail": null
+    },
+    {
+      "name": "accept/expiry share exact boundary at 119",
+      "detail": [
+        {
+          "ok": true,
+          "value": {
+            "receipt": "accepted:a0:7",
+            "current": {
+              "order_id": "o0",
+              "scope": "city-A",
+              "upstream_order": "paid-0",
+              "digest": "fixed-digest",
+              "state": "assigned",
+              "generation": 7,
+              "current_attempt": "a0",
+              "attempt_count": 1,
+              "match_deadline": 220,
+              "created_at": 100
+            }
+          }
+        },
+        {
+          "ok": false,
+          "error": "STALE"
+        }
+      ]
+    },
+    {
+      "name": "accept/expiry capacity agrees at 119",
+      "detail": null
+    },
+    {
+      "name": "accept/expiry invariants at 119",
+      "detail": null
+    },
+    {
+      "name": "accept/expiry share exact boundary at 120",
+      "detail": [
+        {
+          "ok": false,
+          "error": "STALE"
+        },
+        {
+          "ok": true,
+          "value": {
+            "receipt": "expired:a0",
+            "current": {
+              "order_id": "o0",
+              "scope": "city-A",
+              "upstream_order": "paid-0",
+              "digest": "fixed-digest",
+              "state": "pending_match",
+              "generation": 8,
+              "current_attempt": null,
+              "attempt_count": 1,
+              "match_deadline": 220,
+              "created_at": 100
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "accept/expiry capacity agrees at 120",
+      "detail": null
+    },
+    {
+      "name": "accept/expiry invariants at 120",
+      "detail": null
+    },
+    {
+      "name": "accept versus cancel grants exactly one state transition",
+      "detail": [
+        {
+          "ok": false,
+          "error": "STALE"
+        },
+        {
+          "ok": true,
+          "value": {
+            "receipt": "cancel:a0:cancel-proof",
+            "current": {
+              "order_id": "o0",
+              "scope": "city-A",
+              "upstream_order": "paid-0",
+              "digest": "fixed-digest",
+              "state": "cancelled",
+              "generation": 8,
+              "current_attempt": null,
+              "attempt_count": 1,
+              "match_deadline": 220,
+              "created_at": 100
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "accept/cancel capacity follows the winner",
+      "detail": null
+    },
+    {
+      "name": "accept/cancel invariants",
+      "detail": null
+    },
+    {
+      "name": "expire/cancel releases exactly once",
+      "detail": [
+        {
+          "ok": true,
+          "value": {
+            "receipt": "expired:a0",
+            "current": {
+              "order_id": "o0",
+              "scope": "city-A",
+              "upstream_order": "paid-0",
+              "digest": "fixed-digest",
+              "state": "pending_match",
+              "generation": 8,
+              "current_attempt": null,
+              "attempt_count": 1,
+              "match_deadline": 220,
+              "created_at": 100
+            }
+          }
+        },
+        {
+          "ok": false,
+          "error": "STALE"
+        }
+      ]
+    },
+    {
+      "name": "expire/cancel invariants",
+      "detail": null
+    },
+    {
+      "name": "assigned cancellation cannot race ahead of custody verification",
+      "detail": [
+        {
+          "ok": true,
+          "value": {
+            "receipt": "pickup:a0:pickup-proof",
+            "current": {
+              "order_id": "o0",
+              "scope": "city-A",
+              "upstream_order": "paid-0",
+              "digest": "fixed-digest",
+              "state": "picked_up",
+              "generation": 7,
+              "current_attempt": "a0",
+              "attempt_count": 1,
+              "match_deadline": 220,
+              "created_at": 100
+            }
+          }
+        },
+        {
+          "ok": false,
+          "error": "CONTROLLED_HANDOFF_REQUIRED"
+        }
+      ]
+    },
+    {
+      "name": "duplicate concurrent delivery returns one immutable receipt",
+      "detail": null
+    },
+    {
+      "name": "duplicate-delivery invariants",
+      "detail": null
+    },
+    {
+      "name": "GPS or mere lease loss is not custody release",
+      "detail": "REVIEW"
+    },
+    {
+      "name": "release credential must bind current physical operation",
+      "detail": "REVIEW"
+    },
+    {
+      "name": "verified custody clear advances same order without resetting match budget",
+      "detail": null
+    },
+    {
+      "name": "old accepted receipt reports new current attempt without restoring old rights",
+      "detail": null
+    },
+    {
+      "name": "old delivery cannot alter the new attempt",
+      "detail": "STALE"
+    },
+    {
+      "name": "old pickup replay remains history while new assignment stays offered",
+      "detail": null
+    },
+    {
+      "name": "controlled reassignment invariants",
+      "detail": null
+    },
+    {
+      "name": "reserve partial slot write rolls back state, occupancy, attempt and outbox",
+      "detail": null
+    },
+    {
+      "name": "release partial mutation rolls back physical state and slot together",
+      "detail": null
+    },
+    {
+      "name": "rollback invariants",
+      "detail": null
+    },
+    {
+      "name": "Routing delay consumes original candidate validity",
+      "detail": "STALE_CANDIDATE"
+    },
+    {
+      "name": "Routing-expired candidate leaves no durable offer",
+      "detail": null
+    },
+    {
+      "name": "reservation really waits behind another SQLite writer",
+      "detail": null
+    },
+    {
+      "name": "post-lock time rejects candidate expired during lock wait",
+      "detail": null
+    },
+    {
+      "name": "candidate wait invariants",
+      "detail": null
+    },
+    {
+      "name": "exact candidate upper boundary is inclusive",
+      "detail": null
+    },
+    {
+      "name": "accept samples time after an actual lock wait across deadline",
+      "detail": null
+    },
+    {
+      "name": "three unanswered attempts exhaust fixed match budget",
+      "detail": null
+    },
+    {
+      "name": "recovery cannot recreate failed work",
+      "detail": null
+    },
+    {
+      "name": "attempt exhaustion invariants",
+      "detail": null
+    },
+    {
+      "name": "queue loss recovers durable pending generation",
+      "detail": null
+    },
+    {
+      "name": "deadline scanner records one durable failure event",
+      "detail": null
+    },
+    {
+      "name": "unknown create cannot refund around an active offer",
+      "detail": "REVIEW_CURRENT_ASSIGNMENT"
+    },
+    {
+      "name": "refused compensation did not install a fence or intent",
+      "detail": null
+    },
+    {
+      "name": "absence compensation fences later creation identity",
+      "detail": "CREATION_FENCED"
+    },
+    {
+      "name": "compensation fence retry retains one intent",
+      "detail": null
+    },
+    {
+      "name": "create/compensate race cannot leave dispatchable fulfillment behind fence",
+      "detail": [
+        {
+          "ok": false,
+          "error": "CREATION_FENCED"
+        },
+        {
+          "ok": true,
+          "value": "compensate:city-A:same-paid"
+        }
+      ]
+    },
+    {
+      "name": "creation remains fenced after either race order",
+      "detail": "CREATION_FENCED"
+    },
+    {
+      "name": "duplicate/reordered points never refresh capture, receipt or expiry",
+      "detail": null
+    },
+    {
+      "name": "higher sequence with stale capture is not fresh",
+      "detail": "INVALID_POINT"
+    },
+    {
+      "name": "candidate accepts conservative age upper boundary",
+      "detail": null
+    },
+    {
+      "name": "candidate rejects stale capture while cleanup TTL remains",
+      "detail": null
+    },
+    {
+      "name": "epoch survives point TTL and advances on reconnect",
+      "detail": null
+    },
+    {
+      "name": "old disconnect cannot close newer epoch",
+      "detail": null
+    },
+    {
+      "name": "old epoch upload rejected after reconnect",
+      "detail": "STALE_SESSION"
+    },
+    {
+      "name": "new epoch can restart sequence at zero",
+      "detail": null
+    },
+    {
+      "name": "lost projection event leaves no false authoritative write",
+      "detail": null
+    },
+    {
+      "name": "periodic repair builds current valid membership",
+      "detail": null
+    },
+    {
+      "name": "old projection event cannot remigrate current courier",
+      "detail": null
+    },
+    {
+      "name": "current projection migrates membership once",
+      "detail": null
+    },
+    {
+      "name": "dropped movement is repaired from latest detail",
+      "detail": null
+    },
+    {
+      "name": "current disconnect invalidates candidate",
+      "detail": null
+    },
+    {
+      "name": "unbounded device time cannot make candidate point",
+      "detail": "INVALID_POINT"
+    },
+    {
+      "name": "pure freshness boundary delta=-6",
+      "detail": null
+    },
+    {
+      "name": "pure freshness boundary delta=-5",
+      "detail": null
+    },
+    {
+      "name": "pure freshness boundary delta=25",
+      "detail": null
+    },
+    {
+      "name": "pure freshness boundary delta=26",
+      "detail": null
+    },
+    {
+      "name": "invalid point {'accuracy': 51}",
+      "detail": null
+    },
+    {
+      "name": "invalid point {'accuracy': nan}",
+      "detail": null
+    },
+    {
+      "name": "invalid point {'lat': 91}",
+      "detail": null
+    },
+    {
+      "name": "invalid point {'lon': 181}",
+      "detail": null
+    },
+    {
+      "name": "invalid point {'lat': inf}",
+      "detail": null
+    },
+    {
+      "name": "ETA overlaps preparation and travel",
+      "detail": null
+    },
+    {
+      "name": "picked-up ETA uses remaining dropoff",
+      "detail": null
+    },
+    {
+      "name": "valid cache fallback is low-confidence",
+      "detail": null
+    },
+    {
+      "name": "expired live route cannot become zero-duration success",
+      "detail": null
+    },
+    {
+      "name": "wrong assignment/phase context rejected",
+      "detail": null
+    },
+    {
+      "name": "stale point disables both live and cache ETA",
+      "detail": null
+    },
+    {
+      "name": "missing route element disables ETA",
+      "detail": null
+    }
+  ],
+  "scenarios": [],
+  "limitations": [
+    "SQLite coarse single-writer locks, not PostgreSQL row-lock proof",
+    "Injected seconds clock and trusted authentication/candidate/custody facts",
+    "No production routing or physical custody experiment"
+  ],
+  "passed": true,
+  "count": 88,
+  "files": {
+    "examples/ch27/decide.pseudo": "952acdc0758c5292fd40b143ccff4a1a48896a4e3234ef1468004df9eade4ba0",
+    "examples/ch27/sync.mjs": "79d87c8ed0c6e4fcea903d907d1ee7b215af9433d7e571b189ee58ba99f610b1",
+    "examples/ch27/check.py": "dd337a429559e1a30ff7ceca53c137dce34d8f9ea927bab3c40a0598dd544dbd",
+    "examples/ch27/location.pseudo": "8360cf4b896a3f0d1e6fd3ea1ac58aaf7252726fbc7bc0894cc7dfc208a2d081",
+    "examples/ch27/schema.sql": "a8979aec18b243564542294fd5683d0764c833e685c704c85cd8b60a9e25e9f5",
+    "examples/ch27/recovery.pseudo": "86a49840a2079b1cc14578b2a08114592c84e16b35b85439c87e381bf7cea394",
+    "examples/ch27/LocationGate.java": "75117feadea386a34c5f48e827a5e3c06a83e771ab71a6911ff493cd04788980",
+    "examples/ch27/release.pseudo": "06794635fcd0b7d1a3ff02ab8a97537556cfe57892bea0c39e7baf530c72fed7",
+    "examples/ch27/reserve.pseudo": "3b49cdf7c00b730303b38ea903d10b742574ef6a7a456aa9f454ddec9154bde8",
+    "examples/ch27/model.py": "011214b436532a26de2bd815cda2079e38144a322c258e9c540d81d34c558b5a",
+    "examples/ch27/README.md": "df7fac7f35eeea0e856897fb7733729d615c913acee6e755473d1bbf9e821568",
+    "examples/ch27/keys.sql": "ce0026f474dd1dd97c48877b757131bc7d158a6e853fe0a80e6af8a55fa1a4f0"
+  }
+}

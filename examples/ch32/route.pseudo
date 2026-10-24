@@ -1,0 +1,27 @@
+# Pseudocode. Trusted policy data; no provider SDK is invoked here.
+principal = authenticate(credentials)                 # never trust tenant header
+tenant = principal.tenant
+digest = H(canonical_full_request)                    # includes accepted policy revision
+if Ledger.lookup(principal.tenant, rid) exists:
+    require same digest and current access
+    return recorded status/result                     # no new model dispatch
+plan = pin_route_revision(alias)
+eligible = [d for d in plan.deployments
+    if principal.may_use(d) and data.may_leave_to(d)
+    and required_capabilities <= d.capabilities
+    and final_input_bound(d) + enforced_output_cap(d) <= d.context
+    and caller.accepts(d.quality)]
+require eligible is not empty
+candidate = AnswerCache.lookup(H(principal.access_scope, digest, plan, data_rev))
+if reusable_task and candidate is COMPLETE and current_access(candidate.dependencies):
+    if unexpired(candidate) and candidate.served_model in {d.model_revision for d in eligible}
+            and candidate.route_revision == plan.revision and candidate.data_revision == data_rev:
+        deliver_cache_only_if_unique_record_created(tenant, rid, digest, candidate)
+        return recorded status                        # loser never starts another response
+pool = rank_by_health_latency_cost(eligible).first
+require shared_rate_and_concurrency.admit(pool.limit_group)
+created = Ledger.reserve_first(tenant, rid, digest, plan, bound(pool))
+if not created: return recorded status                  # concurrent winner owns I/O
+Adapter.dispatch_once(created.attempt, pool)             # disable hidden retries
+# Cache record uses the same unique (tenant,rid)+digest; service price is separate.
+# Rate permits and Ledger are separate stores: lost permits may be wasted.

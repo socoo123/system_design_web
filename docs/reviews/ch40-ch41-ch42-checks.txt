@@ -1,0 +1,238 @@
+COMMAND node tools/check.mjs
+EXIT 0
+STATS 45 chapters; 276 decks; 1411 frames; 195 code blocks (no count quotas)
+PASS structure, local resources, accessibility, bilingual nesting, chapter entries and animation preservation
+
+
+COMMAND node --test tools/validation.test.mjs
+EXIT 0
+PASS short chapter, one frame, portrait SVG, no legend/is-new/citation quota accepted
+PASS language counts may differ
+PASS incorrect title chapter number rejected
+PASS duplicate IDs rejected
+PASS cross-language nesting rejected
+PASS missing local resource rejected
+PASS unsafe URL rejected
+PASS protocol-relative runtime script rejected
+PASS frame deletion rejected against baseline
+PASS slide wrapper rejected to match real player
+PASS missing slide caption rejected
+PASS animation frame reorder reported
+PASS unmarked new code rejected
+PASS marked pseudocode accepted
+PASS SVG external content rejected
+PASS disabled existing chapter entry rejected
+PASS static diagram needs both theme resources
+17 focused regression cases passed
+✔ tools/validation.test.mjs (273.02275ms)
+ℹ tests 1
+ℹ suites 0
+ℹ pass 1
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 277.354417
+
+
+COMMAND node tools/audit-chapter.mjs ch40 ch41 ch42
+EXIT 0
+
+ch40 STATS {"decks":7,"frames":36,"perDeck":[5,5,5,6,5,5,5],"staticImages":0,"code":3,"han":9734,"zh":285,"en":285}
+PASS structural checks; content/translation/rendering require independent review
+
+ch41 STATS {"decks":8,"frames":40,"perDeck":[5,5,5,5,5,5,5,5],"staticImages":0,"code":4,"han":8865,"zh":244,"en":244}
+PASS structural checks; content/translation/rendering require independent review
+
+ch42 STATS {"decks":7,"frames":40,"perDeck":[6,6,5,6,6,5,6],"staticImages":0,"code":5,"han":5406,"zh":165,"en":165}
+PASS structural checks; content/translation/rendering require independent review
+
+
+COMMAND node examples/ch40/sync.mjs --check
+EXIT 0
+Ch40: 3 exact Java 17 source excerpts verified
+
+
+COMMAND /Users/zy/.pyenv/versions/3.11.8/bin/python3 examples/ch40/verify.py
+EXIT 0
+{"passed": true, "checks": 13, "changedFrames": ["d4s2t", "d4s3t", "d4s4t", "d4s5t", "d4s6t", "d7s4t", "d7s5t"]}
+
+
+COMMAND /Users/zy/.pyenv/versions/3.11.8/bin/python3 examples/ch41/verify.py
+EXIT 0
+{"passed": true, "evidence": "docs/reviews/ch41-code-results.json", "checks": ["Four page snippets equal their source; original 8 decks/40 frames/80 title-desc IDs retained", "Normal commit/lost reply reuse original response; changed request and stale state/version reject; caller key scope is independent", "Two real processes competing for the final unit produce one commit and one full rollback", "Injected outbox constraint error rolls back order and stock; a same-key retry after known rollback succeeds", "Process exits without cleanup after stock SQL; opening the local DB recovers uncommitted order/stock", "Local fence waits for an existing writer; after durable FROZEN, the same old revision cannot write", "ReadGate: fresh view, stale/fork, snapshot and admission checks passed"]}
+
+
+COMMAND /Users/zy/.pyenv/versions/3.11.8/bin/python3 examples/ch42/check_sources.py
+EXIT 0
+PASS: five HTML excerpts match canonical files/Java regions
+
+
+COMMAND /Users/zy/.pyenv/versions/3.11.8/bin/python3 examples/ch42/check_effect.py
+EXIT 0
+{
+  "sqlite": "3.51.0",
+  "source": "effect.pseudo",
+  "cases": [
+    "normal and same-identity replay: one durable effect",
+    "same identity, changed operation: rejected without mutation",
+    "two connections race: SQLite uniqueness/transaction applies one delta",
+    "failure after mutation before commit: claim and effect roll back",
+    "actual process exit after commit before reply: replay reads original outcome",
+    "missing target: inbox and ledger insert roll back together",
+    "NULL/empty/noncanonical identity rejected; NOT NULL also guards both tables"
+  ],
+  "final": {
+    "balance": 121,
+    "effects": 4,
+    "inbox": 4
+  },
+  "passed": true
+}
+
+
+COMMAND /Users/zy/.pyenv/versions/3.11.8/bin/python3 docs/reviews/ch40-ch41-ch42-root-storage.py
+EXIT 0
+{"passed": true, "checks": 29}
+
+
+COMMAND /Users/zy/.pyenv/versions/3.11.8/bin/python3 docs/reviews/ch40-ch41-ch42-root-java.py
+EXIT 0
+{
+  "groups": {
+    "protocol": {
+      "sourceHashes": {
+        "examples/ch40/ProtocolContracts.java": "f968e21b455c51cacc90ca29874b5310efe0685c211246ce7a3b7c5fa48fab6c",
+        "examples/ch40/ProtocolContractsTest.java": "d57c5a8311e21284b0f188a047928eee80fa12cf0e34e1fe07c80a5fdad55538",
+        "docs/reviews/ch40-ch41-ch42-root-ProtocolProbe.java": "49170a0535d82481fa76e84eba477d00eb8c92e9e072c74173e5d1b6e6e42fe3"
+      },
+      "compile": {
+        "exitCode": 0,
+        "output": ""
+      },
+      "runs": [
+        {
+          "main": "ProtocolContractsTest",
+          "exitCode": 0,
+          "output": "{\"java\":\"17\",\"passed\":40,\"checks\":[\n  \"A2: 240 ms remaining\",\n  \"second attempt cannot restart 300 ms\",\n  \"reserve boundary excludes new downstream work\",\n  \"expired budget stays zero\",\n  \"first attempt allowed without retry proof\",\n  \"unknown mutation is not blindly retried\",\n  \"safe second attempt within original budget\",\n  \"third total attempt rejected\",\n  \"safe retry cannot resurrect expiry\",\n  \"clock goes backward rejected\",\n  \"invalid reserve rejected\",\n  \"oldest minus one resumes with first retained event 43\",\n  \"highwater cursor tails future events\",\n  \"pruned event 42 requires coherent snapshot\",\n  \"epoch mismatch cannot replay\",\n  \"future cursor cannot silently skip history\",\n  \"negative cursor rejected\",\n  \"reauthorize reconnect\",\n  \"cross-scope cursor rejected\",\n  \"empty new log tails from zero\",\n  \"empty connection has no stalled-data timeout\",\n  \"first payload starts progress timer\",\n  \"partial write makes progress\",\n  \"partial remainder remains owned and counted\",\n  \"zero write does not reset timer\",\n  \"positive write reset stall origin\",\n  \"exact two seconds stalled aborts and clears\",\n  \"closed stream cannot resume implicitly\",\n  \"queued events preserve byte order\",\n  \"drained connection does not time out\",\n  \"exact cap accepted\",\n  \"overflow closes instead of silently dropping durable bytes\",\n  \"new queued bytes cannot renew stalled writer\",\n  \"I/O failure aborts local queue\",\n  \"sink return must match consumed ByteBuffer bytes\",\n  \"A1: 400 origin requests per second\",\n  \"A4: exact WS payload bytes\",\n  \"A6: retained raw payload\",\n  \"A7/A8: first event and remaining intervals\",\n  \"A9: 12.5 MiB queued payload\"\n]}\n"
+        },
+        {
+          "main": "ProtocolProbe",
+          "exitCode": 0,
+          "output": "ProtocolProbe PASS 26 independent assertions; deterministic policy inputs only.\n"
+        }
+      ],
+      "sourcesUnchangedDuringRun": true,
+      "passed": true
+    },
+    "read": {
+      "sourceHashes": {
+        "examples/ch41/ReadGate.java": "acbb4538508482e94ba675f5c4aa0b76f1bb4c3db2719727039a8376a06065b3",
+        "examples/ch41/ReadGateProbe.java": "5cdfa00f105aaa65aa8d07ce97990ccc816fd3f3f50674347d692c0b9fa79350",
+        "docs/reviews/ch40-ch41-ch42-root-ReadProbe.java": "b7dec6ca21218588def2bcbd777821e40c6d5536cedde66598131a9127becfa6"
+      },
+      "compile": {
+        "exitCode": 0,
+        "output": ""
+      },
+      "runs": [
+        {
+          "main": "ReadGateProbe",
+          "exitCode": 0,
+          "output": "ReadGate: fresh view, stale/fork, snapshot and admission checks passed\n"
+        },
+        {
+          "main": "RootReadProbe",
+          "exitCode": 0,
+          "output": "RootReadProbe PASS 12 independent assertions; eligibility only.\n"
+        }
+      ],
+      "sourcesUnchangedDuringRun": true,
+      "passed": true
+    },
+    "resilience": {
+      "sourceHashes": {
+        "examples/ch42/Resilience.java": "0fa1be5ea261dd35a98b5448d38c0c19628fd8ee9aa2da98b42b90c27c848b2e",
+        "docs/reviews/ch40-ch41-ch42-DelayedIoProbe.java": "26a82799a84b2d2d3eb4363371486fb17d4254da6016b28a6153c6960561fa31"
+      },
+      "compile": {
+        "exitCode": 0,
+        "output": ""
+      },
+      "runs": [
+        {
+          "main": "Resilience",
+          "exitCode": 0,
+          "output": "PREFIX: ordered fetched offsets, gaps, stale completion, revoke PASS\nI/O: normal, timeout with active work, saturation, failure, reject PASS\nLATE DISPATCH: expired worker skips I/O and returns one permit PASS\n"
+        },
+        {
+          "main": "DelayedIoProbe",
+          "exitCode": 0,
+          "output": "callerExpired=true; permitHeld=true; actualIoStartedAfterDeadline=0\n"
+        }
+      ],
+      "sourcesUnchangedDuringRun": true,
+      "passed": true
+    }
+  },
+  "limits": "Java17 local policy classes and controlled scheduling. No real transport, replica, broker, Kubernetes, remote cancellation or load experiment.",
+  "passed": true
+}
+
+
+COMMAND /Users/zy/.pyenv/versions/3.11.8/bin/python3 docs/reviews/ch40-ch41-ch42-numeric.py
+EXIT 0
+{"passed": true, "calculations": 43}
+
+
+COMMAND /Users/zy/.pyenv/versions/3.11.8/bin/python3 docs/reviews/ch40-ch41-ch42-scope.py
+EXIT 0
+{"baselineFiles": 2173, "outsideScope": [], "baselineSnapshotsMatch": {"ch40": true, "ch41": true, "ch42": true}, "passed": true, "limits": "Ignored local screenshots are deliberately outside git scope. No claim about production reliability."}
+
+
+COMMAND git diff --check
+EXIT 0
+
+
+COMMAND node --check assets/js/boot.js
+EXIT 0
+
+
+COMMAND node --check assets/js/lang.js
+EXIT 0
+
+
+COMMAND node --check assets/js/nav.js
+EXIT 0
+
+
+COMMAND node --check assets/js/progress.js
+EXIT 0
+
+
+COMMAND node --check assets/js/slides.js
+EXIT 0
+
+
+COMMAND node --check docs/reviews/ch40-ch41-ch42-browser.mjs
+EXIT 0
+
+
+COMMAND node --check docs/reviews/ch40-ch41-ch42-contact.mjs
+EXIT 0
+
+
+COMMAND node --check docs/reviews/ch40-ch41-ch42-frames.mjs
+EXIT 0
+
+
+COMMAND node --check docs/reviews/ch40-ch41-ch42-geometry.mjs
+EXIT 0
+
+
+COMMAND node --check docs/reviews/ch40-ch41-ch42-header.mjs
+EXIT 0
+
+
+COMMAND node --check examples/ch40/sync.mjs
+EXIT 0

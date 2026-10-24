@@ -1,0 +1,28 @@
+accept(authorized_tenant, operation, K, canonical_payload, deadline):
+  require nonempty canonical identity; authorize create for this tenant
+  digest = SHA256(canonical_payload); new_id = random_UUID()
+  # DB connection/lock/statement waits consume deadline; READ COMMITTED.
+  BEGIN
+  won = SQL INSERT INTO intents(tenant, operation, k, digest, order_id)
+        VALUES (:tenant, :operation, :K, :digest, :new_id)
+        ON CONFLICT (tenant, operation, k) DO NOTHING RETURNING order_id
+  if won is empty:
+    old = SQL SELECT digest, order_id, result FROM intents
+              WHERE tenant=:tenant AND operation=:operation AND k=:K
+    if old is empty: ROLLBACK; return UNKNOWN(K)
+    if old.digest != digest: ROLLBACK; return CONFLICT
+    authorize current access to old.order_id
+    ROLLBACK
+    return old.result or QUERY_CURRENT_STATE(old.order_id)
+  SQL INSERT INTO orders(tenant, order_id, state)
+      VALUES (:tenant, :new_id, 'ACCEPTED')
+  SQL INSERT INTO outbox(event_id, tenant, order_id)
+      VALUES (:new_id, :tenant, :new_id)
+  result = immutable {order_id: new_id, state: ACCEPTED}
+  SQL UPDATE intents SET result=:result
+      WHERE tenant=:tenant AND operation=:operation AND k=:K
+  COMMIT
+  return 201(result, operation_id=new_id)
+# Any DB/commit error: discard connection; return UNKNOWN(K), never new K.
+# If rollback is confirmed, same K may compete again. An empty SELECT alone
+# cannot prove absence while an earlier transaction remains unresolved.

@@ -1,0 +1,41 @@
+{
+  "initial_html_sha256": "1e3e6659d261dde9366bae474d81c6007989dc732d4d1e0e05880325a0086bfd",
+  "quote_retest_html_sha256": "19763e352a55128ab8f5571b37c3f2f56fd489386bec0709da26112ca439a496",
+  "findings": [
+    {
+      "id": "P1-quote",
+      "location": "examples/ch24/create.pseudo original lines3/10",
+      "old": "body.businessVersion used in digest/intent identity without an explicit check against the authorized server quote",
+      "counterexample": "Same valid order quote, rotated header, raw businessVersion1->2 could select another business-intent identity in the initial pseudocode. Model.create was explicitly a trusted fixture; arbitrary fixture inputs were not treated as an external API exploit.",
+      "fix": "Raw wrapper compares exact order/version/method and authenticated quote scope before writes; intent/digest/payload derive only from quote.",
+      "status": "closed",
+      "independent_checks": "67 model checks, including 10 new raw quote boundary assertions"
+    },
+    {
+      "id": "P2-backlog",
+      "location": "chapters/ch24.html capacity details",
+      "old": "rounded rate162/s implied at-most97200 in10min",
+      "counterexample": "Derived rate is4375/27=162.037...; two callbacks/success is an average, not a proven per-interval bound.",
+      "fix": "Explicit nominal sustained-rate/rounding estimate in both languages",
+      "status": "closed"
+    },
+    {
+      "id": "P1-local-timeout",
+      "location": "D5F4/5 SVG/desc/caption",
+      "old": "Red path starts atPSP(872,110) and desc says failure returns PSP to worker, although the branch is timeout.",
+      "counterexample": "PSP executes refund and its response is lost; only local worker timer fires. No PSP timeout reply exists.",
+      "required_fix": "Draw local timer/worker loop; retain reservation/UNKNOWN and mute original status reply; sync description and bilingual caption.",
+      "status": "closed",
+      "independent_retest": "D5 full5frames x2themes and actual390 left/middle/right; both loop ends onworker, no PSPtimeout message; 67 model probes rerun at finalhash."
+    },
+    {
+      "id": "P2-decline-label",
+      "location": "D2F5 caption/desc",
+      "old": "no old charge alone is weaker than no old charge and no future execution",
+      "required_fix": "Mirror the already-correct main-code/body no-future-execution prerequisite",
+      "status": "closed",
+      "independent_retest": "Final D2F5 caption explicitly requires permanent inability to execute old object/command and separate authorization."
+    }
+  ],
+  "final_html_sha256": "813ed6d22b42b442ede14fd1d131809a7496927982b53a33188676d7ee413428"
+}

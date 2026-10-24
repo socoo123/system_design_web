@@ -1,0 +1,943 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="parchment" data-locale="zh">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ch25 · 任务调度系统</title>
+  <link rel="icon" href="../favicon.ico" sizes="48x48">
+  <link rel="stylesheet" href="../assets/css/style.css">
+  <script src="../assets/js/boot.js"></script>
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="../index.html"><span class="brand-logo">SD</span><span class="lang-zh">系统设计面试</span><span class="lang-en">System Design Interview</span></a>
+  <span class="spacer"></span>
+  <a class="map-link" href="../index.html"><span class="lang-zh">课程地图</span><span class="lang-en">Map</span></a>
+  <div class="seg" role="group" aria-label="language">
+    <button type="button" data-locale-set="zh">中文</button>
+    <button type="button" data-locale-set="both"><span class="lang-zh">对照</span><span class="lang-en">Both</span></button>
+    <button type="button" data-locale-set="en">EN</button>
+  </div>
+  <div class="seg" role="group" aria-label="theme">
+    <button type="button" data-theme-set="parchment"><span class="lang-zh">护眼</span><span class="lang-en">Paper</span></button>
+    <button type="button" data-theme-set="dracula"><span class="lang-zh">深色</span><span class="lang-en">Dark</span></button>
+  </div>
+</header>
+<main class="wrap">
+<article class="chapter" id="ch25" data-ch="ch25">
+  <header>
+    <div class="ch-kicker"><span class="lang-zh">CHAPTER 25 · 系统设计题</span><span class="lang-en">CHAPTER 25 · case</span></div>
+    <h1><span class="lang-zh">任务调度系统</span><span class="lang-en">Job scheduler</span></h1>
+    <p class="ch-meta-line"><span class="lang-zh">约 45 分钟 · 前置：Ch08、Ch18、Ch24、Ch41 · 6 组 / 31 帧演进图</span><span class="lang-en">~45 min · after Ch08, Ch18, Ch24, Ch41 · 6 evolution decks / 31 frames</span></p>
+  </header>
+
+<section class="goal"><h2><span class="lang-zh">本章核心：时间到了，也必须有可恢复的工作</span><span class="lang-en">Core: a due time needs recoverable work</span></h2>
+<div class="bilingual"><div class="lang-zh"><p>先分清三次成功：<strong>202 是定义持久保存；T1 是火点已物化；run succeeded 是业务端给出确定结果。</strong>一行 run 仍可能有多个 attempt，worker accepted 更不是通知已经送达。主线是「时间索引 → 唯一火点 → 租约代次 → 稳定业务键」。</p></div><div class="lang-en"><p>Separate three successes: <strong>202 means a durable definition; T1 means a materialized occurrence; succeeded means a confirmed business result.</strong> One run may have several attempts, and worker acceptance does not establish notification delivery. Follow time index → unique occurrence → lease generation → stable business key.</p></div></div>
+<div class="bilingual"><div class="lang-zh"><p>范围是单地域、多实例的 cron 与一次性延迟任务，例子为对账、巡检和延迟关单。依赖编排另用工作流；先回答允许迟到多久、能否丢窗口、是否允许不同火点重叠、效果在哪个存储提交。</p></div><div class="lang-en"><p>Scope is one region with multiple instances, recurring cron and one-shot delays, illustrated by reconciliation, checks and order closure. Workflows own dependencies. Clarify allowed lateness, whether intervals may be dropped, overlap across occurrences and where effects commit.</p></div></div>
+</section>
+<section><h2><span class="lang-zh">边界与教学容量</span><span class="lang-en">Scope and assumed capacity</span></h2>
+<div class="bilingual"><div class="lang-zh"><p>基线采用一个权威事务库：10,000 个定义在压力例中全部每分钟触发；均值 0.2 秒、60% 使用率预算对应 <strong>56 个整池并发槽</strong>。执行租约 30 秒、心跳 10 秒、业务调用超时 20 秒，最多 5 次自动尝试。另一个恢复例只补十个 job，不能把两种负载相加后继续沿用原预算。</p></div><div class="lang-en"><p>Use one authoritative transactional database. In the stress case all 10,000 definitions fire each minute; 0.2 s mean service and a 60% utilization budget imply <strong>56 pool slots</strong>. Leases last 30 s, heartbeats 10 s, business-call timeout 20 s, with at most five automatic attempts. A separate recovery example covers ten jobs; it does not share the stress case’s load assumptions.</p></div></div>
+<details><summary><span class="lang-zh">展开完整假设、保留与时间口径</span><span class="lang-en">Full assumptions, retention and time conventions</span></summary><table><thead><tr><th><span class="lang-zh">编号与假设</span><span class="lang-en">ID and assumption</span></th><th><span class="lang-zh">本章取值</span><span class="lang-en">Value</span></th><th><span class="lang-zh">它改变的决定</span><span class="lang-en">Design consequence</span></th></tr></thead><tbody>
+<tr><td><span class="lang-zh">A1 · 任务量与压力场景</span><span class="lang-en">A1 · definitions and stress case</span></td><td><span class="lang-zh">10,000 个定义；压力场景全部每分钟</span><span class="lang-en">10,000 definitions; all every minute in the stress case</span></td><td><span class="lang-zh">166.7 次/秒平均，整分钟 10,000 个同时到期</span><span class="lang-en">166.7/s average; 10,000 simultaneously due at a boundary</span></td></tr>
+<tr><td><span class="lang-zh">A2 · 执行成本</span><span class="lang-en">A2 · execution cost</span></td><td><span class="lang-zh">平均 0.2 秒；计划使用率 60%</span><span class="lang-en">Mean 0.2 s; planned utilization 60%</span></td><td><span class="lang-zh">向上取整 56 个并发槽；固定时长模型另估突发下界</span><span class="lang-en">Round up to 56 slots; fixed-time model bounds burst completion</span></td></tr>
+<tr><td><span class="lang-zh">A3 · 轮询与批量</span><span class="lang-en">A3 · polling and batching</span></td><td><span class="lang-zh">1 秒轮询；每批最多 100 行</span><span class="lang-en">1 s poll; at most 100 rows per batch</span></td><td><span class="lang-zh">要验证 due 索引与锁等待；不保证端到端只晚 1 秒</span><span class="lang-en">Measure due index and lock wait; not a 1 s end-to-end guarantee</span></td></tr>
+<tr><td><span class="lang-zh">A4 · 逻辑分片</span><span class="lang-en">A4 · logical shards</span></td><td><span class="lang-zh">16 个稳定逻辑片，单个事务库</span><span class="lang-en">16 stable logical shards in one transactional database</span></td><td><span class="lang-zh">分摊扫描，不强迫拆库；迁移期间允许扫描重叠</span><span class="lang-en">Distribute scans without splitting storage; overlap during migration is safe</span></td></tr>
+<tr><td><span class="lang-zh">A5 · 租约与超时</span><span class="lang-en">A5 · lease and timeout</span></td><td><span class="lang-zh">租约 30 秒；每 10 秒心跳；业务调用超时 20 秒</span><span class="lang-en">30 s lease; 10 s heartbeat; 20 s business-call timeout</span></td><td><span class="lang-zh">长暂停仍可能发生，存储校验 owner、generation、到期时间</span><span class="lang-en">Long pauses remain possible; storage checks owner, generation and expiry</span></td></tr>
+<tr><td><span class="lang-zh">A6 · 补偿专用例子</span><span class="lang-en">A6 · separate recovery example</span></td><td><span class="lang-zh">10 个分钟 job 停 2 小时；安全预算 100/s，正常占 80/s</span><span class="lang-en">10 every-minute jobs down 2 h; safe budget 100/s, live load 80/s</span></td><td><span class="lang-zh">1,200 个积压，以余量 20/s 排，理想下界 60 秒</span><span class="lang-en">1,200 overdue; spare 20/s; ideal drain lower bound 60 s</span></td></tr>
+<tr><td><span class="lang-zh">A7 · 时间轮示例</span><span class="lang-en">A7 · illustrative timing wheel</span></td><td><span class="lang-zh">1 秒槽，60 槽；订单延迟 30 分钟</span><span class="lang-en">1 s tick, 60 slots; 30 min order delay</span></td><td><span class="lang-zh">一圈 60 秒；长延迟不能只取模</span><span class="lang-en">60 s horizon; long delays need more than modulo</span></td></tr>
+<tr><td><span class="lang-zh">A8 · 保留与字节</span><span class="lang-en">A8 · retention and bytes</span></td><td><span class="lang-zh">定义 1 KB；run 200 B；终态历史 7 天，3 份</span><span class="lang-en">1 KB definition; 200 B run; 7 days terminal history, 3 copies</span></td><td><span class="lang-zh">10 MB 定义；压力场景 run 原始 20.16 GB，三份 60.48 GB</span><span class="lang-en">10 MB definitions; stress-case raw runs 20.16 GB, 60.48 GB in three copies</span></td></tr>
+<tr><td><span class="lang-zh">A9 · 时钟与身份</span><span class="lang-en">A9 · clock and identity</span></td><td><span class="lang-zh">保存 UTC 火点、IANA 时区和版本；DB 时间判断租约</span><span class="lang-en">Store UTC occurrence, IANA timezone and version; DB time judges leases</span></td><td><span class="lang-zh">不拿各机器当前时间拼去重键；跨夏令时需显式规则</span><span class="lang-en">Do not derive keys from each machine’s now; DST needs a policy</span></td></tr>
+<tr><td><span class="lang-zh">A10 · 重试与业务效果</span><span class="lang-en">A10 · retries and effects</span></td><td><span class="lang-zh">最多 5 次自动尝试，人工接管；关单键保留到订单归档</span><span class="lang-en">At most 5 automatic attempts, then review; close key retained until order archival</span></td><td><span class="lang-zh">幂等期限覆盖恢复范围，运行历史删除不删除仍需保护的业务键</span><span class="lang-en">Deduplication survives recovery; run-history cleanup does not erase effect protection</span></td></tr>
+<tr><td><span class="lang-zh">A11 · 权威存储</span><span class="lang-en">A11 · authoritative storage</span></td><td><span class="lang-zh">权威事务库持久提交；切主不回退已确认记录</span><span class="lang-en">Authoritative durable commits; failover must not roll back acknowledged rows</span></td><td><span class="lang-zh">主库不确定时暂停认领；不把三份拷贝当作耐久承诺</span><span class="lang-en">Pause claims without an authoritative primary; three copies alone do not promise durability</span></td></tr>
+</tbody></table></details>
+<div class="bilingual"><div class="lang-zh"><p>认领和完成只访问权威主库；故障切换不得回退已确认的任务、run 和业务去重记录。副本数不是耐久保证。主库不确定时暂停新认领，展示 due lag，而不是从副本猜所有者。</p></div><div class="lang-en"><p>Claims and completion use the authoritative primary. Failover must preserve acknowledged schedules, runs and business deduplication records; copy count alone is not durability. Without a safe authority, pause claims and expose due lag rather than infer ownership from replicas.</p></div></div>
+</section>
+<section><h2><span class="lang-zh">T1：同事务保存火点与下一游标</span><span class="lang-en">T1: commit the occurrence and next cursor together</span></h2>
+<div class="bilingual"><div class="lang-zh"><p>注册 API 在定义、版本与注册幂等回执同库提交后返回 202；认证及同键冲突沿用 Ch09 模式。以下实现从已验证定义开始。第一组图的关键是：<strong>推进 next_run_at 时，必须留下持久 ready 行</strong>，再发 worker。提交后发送前崩溃就扫 ready；发送后丢确认就重投同一个 run_id。需要队列时在 T1 加 dispatch outbox，由 relay 恢复投递。</p></div><div class="lang-en"><p>The registration API returns 202 after definition, version and registration receipt commit together, using Ch09’s authentication and same-key conflict model. The code begins with validated definitions. Deck one’s key rule is to <strong>leave a durable ready row when advancing next_run_at</strong>, then dispatch. A crash before delivery re-scans ready; a lost delivery ACK resends run_id. A queue variant adds a dispatch outbox inside T1, relayed after commit.</p></div></div>
+<figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d1s1t d1s1d">
+          <title id="d1s1t">Persist the schedule before accepting it</title>
+          <desc id="d1s1d">Client sends POST to Job API, which saves the versioned job in Schedule DB. Commit returns via Job API to Client as 202.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <g class="is-new">
+            <rect x="96" y="18" width="848" height="364" rx="18" class="boundary"/><text x="112" y="38" class="tiny">REGISTER AND FIRE · durable intent before execution</text>
+            <circle cx="44" cy="102" r="12" class="box"/><path d="M24 148 Q44 116 64 148" class="wire"/><text x="44" y="170" text-anchor="middle" class="label">Client</text>
+            <rect x="180" y="90" width="140" height="76" rx="12" class="box"/><text x="250" y="125" text-anchor="middle" class="label">Job API</text><text x="250" y="144" text-anchor="middle" class="sub">validate + version</text>
+            <path d="M390 78 V148 A85 12 0 0 0 560 148 V78" class="store"/><ellipse cx="475" cy="78" rx="85" ry="12" class="store"/><text x="475" y="123" text-anchor="middle" class="label">Schedule DB</text><text x="475" y="141" text-anchor="middle" class="sub">jobs + runs</text>
+            <path d="M70 117 L170 117" class="wire"/><polygon points="180,117 170,122 170,112" class="head"/><path d="M180 135 L80 135" class="wire reply"/><polygon points="70,135 80,130 80,140" class="head reply"/><text x="122" y="109" text-anchor="middle" class="tiny">POST</text><text x="122" y="151" text-anchor="middle" class="tiny">202</text><path d="M320 117 L380 117" class="wire"/><polygon points="390,117 380,122 380,112" class="head"/><path d="M390 135 L330 135" class="wire reply"/><polygon points="320,135 330,130 330,140" class="head reply"/><text x="355" y="109" text-anchor="middle" class="tiny">save</text><text x="355" y="151" text-anchor="middle" class="tiny">commit</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">第一笔闭环：任务版本和 next_run_at 提交后才回 202。接受注册只承诺持久保存，不承诺此刻已经执行。</span><span class="lang-en">Close the first loop: return 202 only after the job version and next_run_at commit. Acceptance means durable registration; execution has not happened.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d1s2t d1s2d">
+          <title id="d1s2t">Claim and materialize one occurrence</title>
+          <desc id="d1s2d">Scheduler A claims a due job in Schedule DB. The same transaction creates ready run r7 and advances the cron cursor. Schedule DB returns r7 to Scheduler A.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="96" y="18" width="848" height="364" rx="18" class="boundary"/><text x="112" y="38" class="tiny">REGISTER AND FIRE · durable intent before execution</text>
+          <circle cx="44" cy="102" r="12" class="box"/><path d="M24 148 Q44 116 64 148" class="wire"/><text x="44" y="170" text-anchor="middle" class="label">Client</text>
+          <rect x="180" y="90" width="140" height="76" rx="12" class="box"/><text x="250" y="125" text-anchor="middle" class="label">Job API</text><text x="250" y="144" text-anchor="middle" class="sub">validate + version</text>
+          <path d="M390 78 V148 A85 12 0 0 0 560 148 V78" class="store"/><ellipse cx="475" cy="78" rx="85" ry="12" class="store"/><text x="475" y="123" text-anchor="middle" class="label">Schedule DB</text><text x="475" y="141" text-anchor="middle" class="sub">jobs + runs</text>
+          <path d="M70 117 L170 117" class="wire"/><polygon points="180,117 170,122 170,112" class="head"/><path d="M180 135 L80 135" class="wire reply"/><polygon points="70,135 80,130 80,140" class="head reply"/><text x="122" y="109" text-anchor="middle" class="tiny">POST</text><text x="122" y="151" text-anchor="middle" class="tiny">202</text><path d="M320 117 L380 117" class="wire"/><polygon points="390,117 380,122 380,112" class="head"/><path d="M390 135 L330 135" class="wire reply"/><polygon points="320,135 330,130 330,140" class="head reply"/><text x="355" y="109" text-anchor="middle" class="tiny">save</text><text x="355" y="151" text-anchor="middle" class="tiny">commit</text>
+          <g class="is-new">
+            <rect x="650" y="90" width="160" height="76" rx="12" class="box"/><text x="730" y="125" text-anchor="middle" class="label">Scheduler A</text><text x="730" y="144" text-anchor="middle" class="sub">indexed due scan</text>
+            <path d="M650 117 L570 117" class="wire"/><polygon points="560,117 570,112 570,122" class="head"/><path d="M560 135 L640 135" class="wire reply"/><polygon points="650,135 640,140 640,130" class="head reply"/><text x="605" y="109" text-anchor="middle" class="tiny">claim</text><text x="605" y="151" text-anchor="middle" class="tiny">r7 ready</text>
+            <text x="180" y="202" class="tiny">T1: UNIQUE occurrence + ready run + next cursor</text>
+            <text x="180" y="224" class="tiny">run r7 = (job j7, version 3, scheduled_at UTC)</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">认领、生成 ready run、推进下一火点必须同事务提交。周期游标前进后，未投递的 r7 仍留在库里，不能只留在进程内存。</span><span class="lang-en">Claiming, creating the ready run and advancing the next occurrence commit together. Advancing the cron cursor leaves an undispatched r7 durable, rather than only in process memory.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d1s3t d1s3d">
+          <title id="d1s3t">Execution leaves the registration path</title>
+          <desc id="d1s3d">Scheduler A dispatches durable run r7 asynchronously to Worker A. Worker A returns an acceptance acknowledgement to Scheduler A, independently of Client registration.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="96" y="18" width="848" height="364" rx="18" class="boundary"/><text x="112" y="38" class="tiny">REGISTER AND FIRE · durable intent before execution</text>
+          <circle cx="44" cy="102" r="12" class="box"/><path d="M24 148 Q44 116 64 148" class="wire"/><text x="44" y="170" text-anchor="middle" class="label">Client</text>
+          <rect x="180" y="90" width="140" height="76" rx="12" class="box"/><text x="250" y="125" text-anchor="middle" class="label">Job API</text><text x="250" y="144" text-anchor="middle" class="sub">validate + version</text>
+          <path d="M390 78 V148 A85 12 0 0 0 560 148 V78" class="store"/><ellipse cx="475" cy="78" rx="85" ry="12" class="store"/><text x="475" y="123" text-anchor="middle" class="label">Schedule DB</text><text x="475" y="141" text-anchor="middle" class="sub">jobs + runs</text>
+          <path d="M70 117 L170 117" class="wire"/><polygon points="180,117 170,122 170,112" class="head"/><path d="M180 135 L80 135" class="wire reply"/><polygon points="70,135 80,130 80,140" class="head reply"/><text x="122" y="109" text-anchor="middle" class="tiny">POST</text><text x="122" y="151" text-anchor="middle" class="tiny">202</text><path d="M320 117 L380 117" class="wire"/><polygon points="390,117 380,122 380,112" class="head"/><path d="M390 135 L330 135" class="wire reply"/><polygon points="320,135 330,130 330,140" class="head reply"/><text x="355" y="109" text-anchor="middle" class="tiny">save</text><text x="355" y="151" text-anchor="middle" class="tiny">commit</text>
+          <rect x="650" y="90" width="160" height="76" rx="12" class="box"/><text x="730" y="125" text-anchor="middle" class="label">Scheduler A</text><text x="730" y="144" text-anchor="middle" class="sub">indexed due scan</text>
+          <path d="M650 117 L570 117" class="wire"/><polygon points="560,117 570,112 570,122" class="head"/><path d="M560 135 L640 135" class="wire reply"/><polygon points="650,135 640,140 640,130" class="head reply"/><text x="605" y="109" text-anchor="middle" class="tiny">claim</text><text x="605" y="151" text-anchor="middle" class="tiny">r7 ready</text>
+          <text x="180" y="202" class="tiny">T1: UNIQUE occurrence + ready run + next cursor</text>
+          <text x="180" y="224" class="tiny">run r7 = (job j7, version 3, scheduled_at UTC)</text>
+          <g class="is-new">
+            <rect x="650" y="260" width="160" height="76" rx="12" class="box"/><text x="730" y="295" text-anchor="middle" class="label">Worker A</text><text x="730" y="314" text-anchor="middle" class="sub">run r7</text>
+            <path d="M717 166 L717 250" class="wire async"/><polygon points="717,260 712,250 722,250" class="head async"/><text x="698" y="212" text-anchor="end" class="tiny">run r7</text><path d="M741 260 L741 176" class="wire reply"/><polygon points="741,166 746,176 736,176" class="head reply"/><text x="757" y="234" class="tiny">accepted</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">第三笔才加 worker。202 的回程已经结束；worker 的 accepted 只证明收到了执行请求，业务成功还要另落状态。</span><span class="lang-en">Add the worker in stroke three. The Client 202 already returned; worker accepted acknowledges receipt, while business completion requires a separate durable result.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d1s4t d1s4d">
+          <title id="d1s4t">Close the committed-but-undispatched gap</title>
+          <desc id="d1s4d">If Scheduler A crashes after run r7 commits but before delivery, the ready row survives. A recovering scheduler reads it again from Schedule DB and uses the same dispatch path.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="96" y="18" width="848" height="364" rx="18" class="boundary"/><text x="112" y="38" class="tiny">REGISTER AND FIRE · durable intent before execution</text>
+          <circle cx="44" cy="102" r="12" class="box"/><path d="M24 148 Q44 116 64 148" class="wire"/><text x="44" y="170" text-anchor="middle" class="label">Client</text>
+          <rect x="180" y="90" width="140" height="76" rx="12" class="box"/><text x="250" y="125" text-anchor="middle" class="label">Job API</text><text x="250" y="144" text-anchor="middle" class="sub">validate + version</text>
+          <path d="M390 78 V148 A85 12 0 0 0 560 148 V78" class="store"/><ellipse cx="475" cy="78" rx="85" ry="12" class="store"/><text x="475" y="123" text-anchor="middle" class="label">Schedule DB</text><text x="475" y="141" text-anchor="middle" class="sub">jobs + runs</text>
+          <path d="M70 117 L170 117" class="wire"/><polygon points="180,117 170,122 170,112" class="head"/><path d="M180 135 L80 135" class="wire reply"/><polygon points="70,135 80,130 80,140" class="head reply"/><text x="122" y="109" text-anchor="middle" class="tiny">POST</text><text x="122" y="151" text-anchor="middle" class="tiny">202</text><path d="M320 117 L380 117" class="wire"/><polygon points="390,117 380,122 380,112" class="head"/><path d="M390 135 L330 135" class="wire reply"/><polygon points="320,135 330,130 330,140" class="head reply"/><text x="355" y="109" text-anchor="middle" class="tiny">save</text><text x="355" y="151" text-anchor="middle" class="tiny">commit</text>
+          <rect x="650" y="90" width="160" height="76" rx="12" class="box"/><text x="730" y="125" text-anchor="middle" class="label">Scheduler A</text><text x="730" y="144" text-anchor="middle" class="sub">indexed due scan</text>
+          <path d="M650 117 L570 117" class="wire"/><polygon points="560,117 570,112 570,122" class="head"/><path d="M560 135 L640 135" class="wire reply"/><polygon points="650,135 640,140 640,130" class="head reply"/><text x="605" y="109" text-anchor="middle" class="tiny">claim</text><text x="605" y="151" text-anchor="middle" class="tiny">r7 ready</text>
+          <text x="180" y="202" class="tiny">T1: UNIQUE occurrence + ready run + next cursor</text>
+          <text x="180" y="224" class="tiny">run r7 = (job j7, version 3, scheduled_at UTC)</text>
+          <rect x="650" y="260" width="160" height="76" rx="12" class="box"/><text x="730" y="295" text-anchor="middle" class="label">Worker A</text><text x="730" y="314" text-anchor="middle" class="sub">run r7</text>
+          <path d="M717 166 L717 250" class="wire async"/><polygon points="717,260 712,250 722,250" class="head async"/><text x="698" y="212" text-anchor="end" class="tiny">run r7</text><path d="M741 260 L741 176" class="wire reply"/><polygon points="741,166 746,176 736,176" class="head reply"/><text x="757" y="234" class="tiny">accepted</text>
+          <g class="is-new">
+            <path d="M475 66 L475 61 Q475 56 480 56 L842 56 Q850 56 850 64 L850 138 Q850 146 842 146 L820 146" class="wire fail"/><polygon points="810,146 820,141 820,151" class="head fail"/><text x="650" y="76" text-anchor="middle" class="tiny">ready re-read after crash</text>
+            <rect x="365" y="302" width="250" height="20" rx="10" class="badge"/><text x="490" y="316" text-anchor="middle" class="badge-text">ready survives process loss</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">进程死在提交与投递之间，恢复者重新读取 ready。死在投递后、确认前会重复发送同一个 run_id，因此不能用“发过了”判断成功。</span><span class="lang-en">A crash between commit and dispatch is repaired by re-reading ready. A crash after send but before acknowledgement can resend the same run_id, so sent cannot mean succeeded.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d1s5t d1s5d">
+          <title id="d1s5t">Separate the three guarantees</title>
+          <desc id="d1s5d">The complete diagram distinguishes durable registration, unique occurrence materialization and retryable execution. Replies remain between adjacent caller and callee; a persisted ready run closes scheduler dispatch loss.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="96" y="18" width="848" height="364" rx="18" class="boundary"/><text x="112" y="38" class="tiny">REGISTER AND FIRE · durable intent before execution</text>
+          <circle cx="44" cy="102" r="12" class="box"/><path d="M24 148 Q44 116 64 148" class="wire"/><text x="44" y="170" text-anchor="middle" class="label">Client</text>
+          <rect x="180" y="90" width="140" height="76" rx="12" class="box"/><text x="250" y="125" text-anchor="middle" class="label">Job API</text><text x="250" y="144" text-anchor="middle" class="sub">validate + version</text>
+          <path d="M390 78 V148 A85 12 0 0 0 560 148 V78" class="store"/><ellipse cx="475" cy="78" rx="85" ry="12" class="store"/><text x="475" y="123" text-anchor="middle" class="label">Schedule DB</text><text x="475" y="141" text-anchor="middle" class="sub">jobs + runs</text>
+          <path d="M70 117 L170 117" class="wire"/><polygon points="180,117 170,122 170,112" class="head"/><path d="M180 135 L80 135" class="wire reply"/><polygon points="70,135 80,130 80,140" class="head reply"/><text x="122" y="109" text-anchor="middle" class="tiny">POST</text><text x="122" y="151" text-anchor="middle" class="tiny">202</text><path d="M320 117 L380 117" class="wire"/><polygon points="390,117 380,122 380,112" class="head"/><path d="M390 135 L330 135" class="wire reply"/><polygon points="320,135 330,130 330,140" class="head reply"/><text x="355" y="109" text-anchor="middle" class="tiny">save</text><text x="355" y="151" text-anchor="middle" class="tiny">commit</text>
+          <rect x="650" y="90" width="160" height="76" rx="12" class="box"/><text x="730" y="125" text-anchor="middle" class="label">Scheduler A</text><text x="730" y="144" text-anchor="middle" class="sub">indexed due scan</text>
+          <path d="M650 117 L570 117" class="wire"/><polygon points="560,117 570,112 570,122" class="head"/><path d="M560 135 L640 135" class="wire reply"/><polygon points="650,135 640,140 640,130" class="head reply"/><text x="605" y="109" text-anchor="middle" class="tiny">claim</text><text x="605" y="151" text-anchor="middle" class="tiny">r7 ready</text>
+          <text x="180" y="202" class="tiny">T1: UNIQUE occurrence + ready run + next cursor</text>
+          <text x="180" y="224" class="tiny">run r7 = (job j7, version 3, scheduled_at UTC)</text>
+          <rect x="650" y="260" width="160" height="76" rx="12" class="box"/><text x="730" y="295" text-anchor="middle" class="label">Worker A</text><text x="730" y="314" text-anchor="middle" class="sub">run r7</text>
+          <path d="M717 166 L717 250" class="wire async"/><polygon points="717,260 712,250 722,250" class="head async"/><text x="698" y="212" text-anchor="end" class="tiny">run r7</text><path d="M741 260 L741 176" class="wire reply"/><polygon points="741,166 746,176 736,176" class="head reply"/><text x="757" y="234" class="tiny">accepted</text>
+          <path d="M475 66 L475 61 Q475 56 480 56 L842 56 Q850 56 850 64 L850 138 Q850 146 842 146 L820 146" class="wire fail"/><polygon points="810,146 820,141 820,151" class="head fail"/><text x="650" y="76" text-anchor="middle" class="tiny">ready re-read after crash</text>
+          <rect x="365" y="302" width="250" height="20" rx="10" class="badge"/><text x="490" y="316" text-anchor="middle" class="badge-text">ready survives process loss</text>
+          <g class="is-new">
+            <text x="180" y="350" class="tiny">ONE occurrence row; repeated delivery and handler attempts remain possible</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">完整图保留三份契约：注册不丢、同一火点一行、执行允许重试。业务效果只生效一次，要到第六组在业务存储侧证明。</span><span class="lang-en">The complete board keeps three contracts: durable registration, one row per occurrence, and retryable execution. A single business effect must be established at business storage in deck six.</span></figcaption>
+      </div>
+    </figure><h3><span class="lang-zh">身份与输入都冻结在 run</span><span class="lang-en">Freeze identity and input in the run</span></h3>
+<div class="bilingual"><div class="lang-zh"><p>非空唯一键是 (job_id, schedule_version, scheduled_at UTC)，而不是机器当前时间。改版只影响后续物化；已有 run 的处理参数与 effect_key 不随最新 job 改变，claim 也不再从 job 取新参数。业务键按意图选，例如同一租户下 close:o7；不能默认每次新 schedule_version 都代表可再做一次业务效果。[3]</p></div><div class="lang-en"><p>The non-null unique key is (job_id, schedule_version, scheduled_at UTC), rather than a machine’s current time. Edits affect future materialization; an existing run keeps its frozen input and effect_key, and claims do not reload new job parameters. Choose effect identity by business intent, such as tenant-scoped close:o7. A new schedule version does not automatically authorize another effect. [3]</p></div></div>
+<pre data-language="SQL · PostgreSQL 18 teaching schema" data-kind="teaching" data-source="schema.sql"><code>-- PostgreSQL 18 teaching schema; one authoritative scheduler database.
+CREATE TABLE job (
+  id text PRIMARY KEY, version bigint NOT NULL CHECK (version &gt; 0),
+  shard smallint NOT NULL CHECK (shard BETWEEN 0 AND 15),
+  enabled boolean NOT NULL, next_run_at timestamptz,
+  policy text NOT NULL CHECK (policy IN (&#x27;skip&#x27;,&#x27;coalesce&#x27;,&#x27;catch_up&#x27;)),
+  spec jsonb NOT NULL, recovery_cutoff timestamptz
+);
+CREATE INDEX job_due ON job(shard, next_run_at, id) WHERE enabled;
+CREATE TABLE run (
+  id uuid PRIMARY KEY, job_id text NOT NULL REFERENCES job(id),
+  schedule_version bigint NOT NULL, scheduled_at timestamptz NOT NULL,
+  payload jsonb NOT NULL, effect_key text NOT NULL,
+  state text NOT NULL CHECK (state IN
+    (&#x27;ready&#x27;,&#x27;running&#x27;,&#x27;retry_wait&#x27;,&#x27;succeeded&#x27;,&#x27;cancelled&#x27;,&#x27;review&#x27;)),
+  attempts integer NOT NULL DEFAULT 0 CHECK (attempts BETWEEN 0 AND 5),
+  generation bigint NOT NULL DEFAULT 0 CHECK (generation &gt;= 0),
+  owner text, lease_until timestamptz, retry_at timestamptz,
+  cancel_requested boolean NOT NULL DEFAULT false,
+  effect_unknown boolean NOT NULL DEFAULT false, result jsonb,
+  CONSTRAINT occurrence UNIQUE(job_id, schedule_version, scheduled_at),
+  CHECK ((state = &#x27;running&#x27; AND owner IS NOT NULL AND lease_until IS NOT NULL)
+      OR (state &lt;&gt; &#x27;running&#x27; AND owner IS NULL AND lease_until IS NULL))
+);
+CREATE INDEX run_ready ON run(state, retry_at, scheduled_at);
+CREATE INDEX run_expired ON run(lease_until) WHERE state = &#x27;running&#x27;;
+-- spec includes the pinned calendar/timezone rules and handler input.
+-- A separate audit table stores skip/coalesce ranges in the same T1.</code></pre>
+<div class="bilingual"><div class="lang-zh"><p>下列伪代码对应第 2/4 帧。PostgreSQL 18 的 SKIP LOCKED 适合队列表多消费者，读到的是不完整视图；行锁在事务结束释放，它只保护这次物化，不能替代执行租约。[1][2]</p></div><div class="lang-en"><p>This pseudocode implements frames 2/4. PostgreSQL 18 SKIP LOCKED suits consumers of a queue-like table but gives an incomplete view. Row locks end with the transaction; they protect materialization, not handler execution. [1][2]</p></div></div>
+<pre data-language="Pseudocode · durable occurrence" data-kind="pseudocode" data-source="materialize.pseudo"><code>materialize(shard):                         // PostgreSQL READ COMMITTED
+  BEGIN
+  jobs = SELECT * FROM job WHERE enabled AND shard = :shard
+         AND next_run_at &lt;= clock_timestamp()
+         ORDER BY next_run_at, id LIMIT 100 FOR UPDATE SKIP LOCKED
+  for j in jobs:
+    t = SELECT clock_timestamp()            // after acquiring this row lock
+    if calendar.is_recurring(j.spec) and (j.recovery_cutoff != null
+       or calendar.is_missed(j.spec, j.next_run_at, t)):
+      continue                             // bounded misfire planner owns this case
+    fire = j.next_run_at
+    next = calendar.next_after(j.spec, fire) // null for a one-shot; else &gt; fire
+    require next == null or next &gt; fire
+    payload, key = freeze_input_and_business_key(j, fire)
+    inserted = INSERT INTO run(id, job_id, schedule_version, scheduled_at,
+                  payload, effect_key, state)
+               VALUES(uuid(), j.id, j.version, fire, payload, key, &#x27;ready&#x27;)
+               ON CONFLICT ON CONSTRAINT occurrence DO NOTHING RETURNING id
+    if inserted is empty:
+      old = SELECT * FROM run WHERE job_id=j.id AND schedule_version=j.version
+                                  AND scheduled_at=fire
+      require old.payload == payload and old.effect_key == key
+    UPDATE job SET next_run_at=next WHERE id=j.id
+  COMMIT                                  // do not dispatch before this succeeds
+  // Any pre-commit error rolls back runs AND cursors.
+  // Unknown COMMIT: discard connection, re-read authoritative cursor/runs.
+  // Dispatch/recovery scans persisted ready rows; duplicates retain run.id.</code></pre>
+<div class="bilingual"><div class="lang-zh"><p>calendar 适配器必须按固定表达式、IANA 时区、时区规则版本和 DST 策略枚举原计划，返回严格递增 UTC 火点；一次性任务返回 null 下一火点。freeze_input_and_business_key 只做确定性纯计算。冲突只忽略 occurrence 约束，随后比较冻结输入；其他数据库错误回滚，不能一律当重复。未知 COMMIT 要丢弃连接、从主库重读游标与行，不从未确认提交的内存结果发 RPC。</p></div><div class="lang-en"><p>The calendar adapter enumerates the original expression, IANA timezone, pinned timezone rules and DST policy as strictly increasing UTC instants; one-shot jobs have a null next occurrence. freeze_input_and_business_key is deterministic pure computation. Only the occurrence conflict is handled as replay, with frozen-input comparison; other database errors roll back. An unknown COMMIT requires discarding the connection and re-reading primary state, not dispatching from unconfirmed memory.</p></div></div>
+<div class="bilingual"><div class="lang-zh"><p>cron 按日历推进，不等待上次成功；fixed delay 才是 finished_at 加间隔。当前示例允许不同火点重叠；若业务要求串行，必须再用 job 级活动指针或并发槽，并与 claim 同事务校验。暂停定义只停止后续物化，已有 ready/running 不会自动取消。</p></div><div class="lang-en"><p>Cron advances calendar instants without waiting for the previous success; fixed delay derives the next time from finished_at. This example permits distinct occurrences to overlap. Serial execution needs a job-level active pointer or slot checked with the claim transaction. Pausing a definition stops future materialization; existing ready/running runs are not automatically cancelled.</p></div></div>
+</section>
+<section><h2><span class="lang-zh">容量：平均速率与整分钟突发分开</span><span class="lang-en">Capacity: distinguish average rate from aligned bursts</span></h2>
+<div class="bilingual"><div class="lang-zh"><p>166.7/s 只是平均；整分钟会同时出现 10,000 个 due。100 行一批要 100 批事务，但批量不代表执行吞吐。第二组的 16 个稳定逻辑片只分摊扫描，不是 16 个数据库；迁移时允许重叠扫描，最终仍由行锁与唯一身份收口。</p></div><div class="lang-en"><p>166.7/s is an average; a minute boundary can make 10,000 rows due together. Batches of 100 need 100 transactions without establishing execution throughput. Deck two’s 16 stable logical shards divide scans, not databases; overlapping scans during reassignment still rely on row locks and unique identity.</p></div></div>
+<figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d2s1t d2s1d">
+          <title id="d2s1t">Average fire rate is not the minute-boundary burst</title>
+          <desc id="d2s1d">Scheduler A queries the due index of Schedule DB and receives persisted run r7. Ten thousand every-minute jobs average 10000 divided by 60 fires per second, but aligned schedules become due together.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <g class="is-new">
+            <rect x="96" y="18" width="848" height="364" rx="18" class="boundary"/><text x="112" y="38" class="tiny">CAPACITY AND CLAIM · assume every-minute cron for the stress case</text>
+            <rect x="160" y="100" width="160" height="76" rx="12" class="box"/><text x="240" y="135" text-anchor="middle" class="label">Scheduler A</text><text x="240" y="154" text-anchor="middle" class="sub">shards 0..7</text>
+            <path d="M422 145 V265 A78 12 0 0 0 578 265 V145" class="store"/><ellipse cx="500" cy="145" rx="78" ry="12" class="store"/><text x="500" y="215" text-anchor="middle" class="label">Schedule DB</text><text x="500" y="233" text-anchor="middle" class="sub">due index + runs</text>
+            <path d="M320 126 L372 126 Q380 126 380 134 L380 162 Q380 170 388 170 L412 170" class="wire"/><polygon points="422,170 412,175 412,165" class="head"/><text x="365" y="118" text-anchor="middle" class="tiny">claim</text><path d="M422 188 L362 188 Q354 188 354 180 L354 152 Q354 144 346 144 L330 144" class="wire reply"/><polygon points="320,144 330,139 330,149" class="head reply"/><text x="365" y="203" text-anchor="middle" class="tiny">ready r7</text>
+            <text x="160" y="218" class="tiny">10,000 / 60 = 166.7 fires/s average</text>
+            <text x="160" y="240" class="tiny">minute boundary: 10,000 due</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">10,000 ÷ 60 = 166.7 次/秒只是平均值；若都在整分钟触发，某一刻会出现 10,000 个到期行。平均速率不能当峰值上界。</span><span class="lang-en">10,000 / 60 = 166.7 fires/s is an average. If all schedules align to a minute boundary, 10,000 rows become due together; the average is not a peak ceiling.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d2s2t d2s2d">
+          <title id="d2s2t">Shard scanning without sharding persistence</title>
+          <desc id="d2s2d">Scheduler B claims other rows of the same Schedule DB. Stable logical shards limit scan work, and row locking with SKIP LOCKED lets concurrent schedulers take different due jobs.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="96" y="18" width="848" height="364" rx="18" class="boundary"/><text x="112" y="38" class="tiny">CAPACITY AND CLAIM · assume every-minute cron for the stress case</text>
+          <rect x="160" y="100" width="160" height="76" rx="12" class="box"/><text x="240" y="135" text-anchor="middle" class="label">Scheduler A</text><text x="240" y="154" text-anchor="middle" class="sub">shards 0..7</text>
+          <path d="M422 145 V265 A78 12 0 0 0 578 265 V145" class="store"/><ellipse cx="500" cy="145" rx="78" ry="12" class="store"/><text x="500" y="215" text-anchor="middle" class="label">Schedule DB</text><text x="500" y="233" text-anchor="middle" class="sub">due index + runs</text>
+          <path d="M320 126 L372 126 Q380 126 380 134 L380 162 Q380 170 388 170 L412 170" class="wire"/><polygon points="422,170 412,175 412,165" class="head"/><text x="365" y="118" text-anchor="middle" class="tiny">claim</text><path d="M422 188 L362 188 Q354 188 354 180 L354 152 Q354 144 346 144 L330 144" class="wire reply"/><polygon points="320,144 330,139 330,149" class="head reply"/><text x="365" y="203" text-anchor="middle" class="tiny">ready r7</text>
+          <text x="160" y="218" class="tiny">10,000 / 60 = 166.7 fires/s average</text>
+          <text x="160" y="240" class="tiny">minute boundary: 10,000 due</text>
+          <g class="is-new">
+            <rect x="160" y="270" width="160" height="76" rx="12" class="box"/><text x="240" y="305" text-anchor="middle" class="label">Scheduler B</text><text x="240" y="324" text-anchor="middle" class="sub">shards 8..15</text>
+            <path d="M320 295 L382 295 Q390 295 390 287 L390 246 Q390 238 398 238 L412 238" class="wire"/><polygon points="422,238 412,243 412,233" class="head"/><text x="340" y="282" class="tiny">claim</text><path d="M422 256 L416 256 Q410 256 410 262 L410 310 Q410 318 402 318 L330 318" class="wire reply"/><polygon points="320,318 330,313 330,323" class="head reply"/><text x="327" y="338" class="tiny">other rows / skip locked</text>
+            <text x="580" y="285" class="tiny">16 logical shards; one DB</text>
+            <text x="580" y="308" class="tiny">short lock: persist claim, then commit</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">第二笔分摊扫描责任，不拆数据库。16 个逻辑片只是教学选择；主备切换会暂时重叠，行锁与唯一键仍要收口。</span><span class="lang-en">The second stroke divides scanning responsibility without splitting the database. Sixteen logical shards are a teaching choice; ownership can overlap during failover, so locks and unique keys remain necessary.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d2s3t d2s3d">
+          <title id="d2s3t">Batch acquisition is separate from execution capacity</title>
+          <desc id="d2s3d">Scheduler A dispatches run r7 to Worker A and receives accepted. Claims use batches of 100: an aligned 10000-row burst requires 100 batches, with transaction performance to be measured.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="96" y="18" width="848" height="364" rx="18" class="boundary"/><text x="112" y="38" class="tiny">CAPACITY AND CLAIM · assume every-minute cron for the stress case</text>
+          <rect x="160" y="100" width="160" height="76" rx="12" class="box"/><text x="240" y="135" text-anchor="middle" class="label">Scheduler A</text><text x="240" y="154" text-anchor="middle" class="sub">shards 0..7</text>
+          <path d="M422 145 V265 A78 12 0 0 0 578 265 V145" class="store"/><ellipse cx="500" cy="145" rx="78" ry="12" class="store"/><text x="500" y="215" text-anchor="middle" class="label">Schedule DB</text><text x="500" y="233" text-anchor="middle" class="sub">due index + runs</text>
+          <path d="M320 126 L372 126 Q380 126 380 134 L380 162 Q380 170 388 170 L412 170" class="wire"/><polygon points="422,170 412,175 412,165" class="head"/><text x="365" y="118" text-anchor="middle" class="tiny">claim</text><path d="M422 188 L362 188 Q354 188 354 180 L354 152 Q354 144 346 144 L330 144" class="wire reply"/><polygon points="320,144 330,139 330,149" class="head reply"/><text x="365" y="203" text-anchor="middle" class="tiny">ready r7</text>
+          <text x="160" y="218" class="tiny">10,000 / 60 = 166.7 fires/s average</text>
+          <text x="160" y="240" class="tiny">minute boundary: 10,000 due</text>
+          <rect x="160" y="270" width="160" height="76" rx="12" class="box"/><text x="240" y="305" text-anchor="middle" class="label">Scheduler B</text><text x="240" y="324" text-anchor="middle" class="sub">shards 8..15</text>
+          <path d="M320 295 L382 295 Q390 295 390 287 L390 246 Q390 238 398 238 L412 238" class="wire"/><polygon points="422,238 412,243 412,233" class="head"/><text x="340" y="282" class="tiny">claim</text><path d="M422 256 L416 256 Q410 256 410 262 L410 310 Q410 318 402 318 L330 318" class="wire reply"/><polygon points="320,318 330,313 330,323" class="head reply"/><text x="327" y="338" class="tiny">other rows / skip locked</text>
+          <text x="580" y="285" class="tiny">16 logical shards; one DB</text>
+          <text x="580" y="308" class="tiny">short lock: persist claim, then commit</text>
+          <g class="is-new">
+            <rect x="760" y="170" width="150" height="76" rx="12" class="box"/><text x="835" y="205" text-anchor="middle" class="label">Worker A</text><text x="835" y="224" text-anchor="middle" class="sub">bounded pool</text>
+            <path d="M320 112 L330 112 Q338 112 338 104 L338 96 Q338 88 346 88 L692 88 Q700 88 700 96 L700 184 Q700 192 708 192 L750 192" class="wire async"/><polygon points="760,192 750,197 750,187" class="head async"/><text x="650" y="106" text-anchor="middle" class="tiny">dispatch r7</text><path d="M760 210 L734 210 Q726 210 726 202 L726 78 Q726 70 718 70 L248 70 Q240 70 240 78 L240 90" class="wire reply"/><polygon points="240,100 235,90 245,90" class="head reply"/><text x="605" y="62" text-anchor="middle" class="tiny">accepted</text>
+            <text x="580" y="326" class="tiny">100 rows/batch: 10,000 / 100 = 100 batches</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">100 行一批，整分钟的 10,000 行需要 100 批。减少事务批次数不等于处理器跑得更快；数据库和 worker 要分别压测。</span><span class="lang-en">At 100 rows per batch, 10,000 aligned rows require 100 batches. Fewer claim transactions do not speed up handlers; measure database acquisition and workers separately.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d2s4t d2s4d">
+          <title id="d2s4t">Size worker slots using service time and headroom</title>
+          <desc id="d2s4d">The same Worker A pool represents all workers. At 166.7 fires per second and mean service time 0.2 seconds, mean demand is 33.3 occupied slots; 60 percent planned utilization requires 56 slots.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="96" y="18" width="848" height="364" rx="18" class="boundary"/><text x="112" y="38" class="tiny">CAPACITY AND CLAIM · assume every-minute cron for the stress case</text>
+          <rect x="160" y="100" width="160" height="76" rx="12" class="box"/><text x="240" y="135" text-anchor="middle" class="label">Scheduler A</text><text x="240" y="154" text-anchor="middle" class="sub">shards 0..7</text>
+          <path d="M422 145 V265 A78 12 0 0 0 578 265 V145" class="store"/><ellipse cx="500" cy="145" rx="78" ry="12" class="store"/><text x="500" y="215" text-anchor="middle" class="label">Schedule DB</text><text x="500" y="233" text-anchor="middle" class="sub">due index + runs</text>
+          <path d="M320 126 L372 126 Q380 126 380 134 L380 162 Q380 170 388 170 L412 170" class="wire"/><polygon points="422,170 412,175 412,165" class="head"/><text x="365" y="118" text-anchor="middle" class="tiny">claim</text><path d="M422 188 L362 188 Q354 188 354 180 L354 152 Q354 144 346 144 L330 144" class="wire reply"/><polygon points="320,144 330,139 330,149" class="head reply"/><text x="365" y="203" text-anchor="middle" class="tiny">ready r7</text>
+          <text x="160" y="218" class="tiny">10,000 / 60 = 166.7 fires/s average</text>
+          <text x="160" y="240" class="tiny">minute boundary: 10,000 due</text>
+          <rect x="160" y="270" width="160" height="76" rx="12" class="box"/><text x="240" y="305" text-anchor="middle" class="label">Scheduler B</text><text x="240" y="324" text-anchor="middle" class="sub">shards 8..15</text>
+          <path d="M320 295 L382 295 Q390 295 390 287 L390 246 Q390 238 398 238 L412 238" class="wire"/><polygon points="422,238 412,243 412,233" class="head"/><text x="340" y="282" class="tiny">claim</text><path d="M422 256 L416 256 Q410 256 410 262 L410 310 Q410 318 402 318 L330 318" class="wire reply"/><polygon points="320,318 330,313 330,323" class="head reply"/><text x="327" y="338" class="tiny">other rows / skip locked</text>
+          <text x="580" y="285" class="tiny">16 logical shards; one DB</text>
+          <text x="580" y="308" class="tiny">short lock: persist claim, then commit</text>
+          <rect x="760" y="170" width="150" height="76" rx="12" class="box"/><text x="835" y="205" text-anchor="middle" class="label">Worker A</text><text x="835" y="224" text-anchor="middle" class="sub">bounded pool</text>
+          <path d="M320 112 L330 112 Q338 112 338 104 L338 96 Q338 88 346 88 L692 88 Q700 88 700 96 L700 184 Q700 192 708 192 L750 192" class="wire async"/><polygon points="760,192 750,197 750,187" class="head async"/><text x="650" y="106" text-anchor="middle" class="tiny">dispatch r7</text><path d="M760 210 L734 210 Q726 210 726 202 L726 78 Q726 70 718 70 L248 70 Q240 70 240 78 L240 90" class="wire reply"/><polygon points="240,100 235,90 245,90" class="head reply"/><text x="605" y="62" text-anchor="middle" class="tiny">accepted</text>
+          <text x="580" y="326" class="tiny">100 rows/batch: 10,000 / 100 = 100 batches</text>
+          <g class="is-new">
+            <rect x="762" y="276" width="146" height="20" rx="10" class="badge"/><text x="835" y="290" text-anchor="middle" class="badge-text">56 slots aggregate</text>
+            <text x="580" y="346" class="tiny">166.7 x 0.2 / 0.6 = 55.6 =&gt; 56 slots</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">假设平均处理 0.2 秒，平均占用 166.7 × 0.2 = 33.3 槽；按 60% 计划使用率需向上取整 56 槽。这是整池并发，不是 56 台机器。</span><span class="lang-en">Assuming mean service time 0.2 s, average demand is 166.7 x 0.2 = 33.3 slots. At 60% planned utilization, round up to 56 slots across the pool, rather than 56 machines.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d2s5t d2s5d">
+          <title id="d2s5t">Keep an aligned burst durable rather than spawning unbounded work</title>
+          <desc id="d2s5d">The full board keeps two schedulers, one transactional Schedule DB and a bounded Worker A pool. An aligned 10000-run burst lasts 179 rounds of 0.2 seconds, or 35.8 seconds, under the simplified fixed-service-time assumption.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="96" y="18" width="848" height="364" rx="18" class="boundary"/><text x="112" y="38" class="tiny">CAPACITY AND CLAIM · assume every-minute cron for the stress case</text>
+          <rect x="160" y="100" width="160" height="76" rx="12" class="box"/><text x="240" y="135" text-anchor="middle" class="label">Scheduler A</text><text x="240" y="154" text-anchor="middle" class="sub">shards 0..7</text>
+          <path d="M422 145 V265 A78 12 0 0 0 578 265 V145" class="store"/><ellipse cx="500" cy="145" rx="78" ry="12" class="store"/><text x="500" y="215" text-anchor="middle" class="label">Schedule DB</text><text x="500" y="233" text-anchor="middle" class="sub">due index + runs</text>
+          <path d="M320 126 L372 126 Q380 126 380 134 L380 162 Q380 170 388 170 L412 170" class="wire"/><polygon points="422,170 412,175 412,165" class="head"/><text x="365" y="118" text-anchor="middle" class="tiny">claim</text><path d="M422 188 L362 188 Q354 188 354 180 L354 152 Q354 144 346 144 L330 144" class="wire reply"/><polygon points="320,144 330,139 330,149" class="head reply"/><text x="365" y="203" text-anchor="middle" class="tiny">ready r7</text>
+          <text x="160" y="218" class="tiny">10,000 / 60 = 166.7 fires/s average</text>
+          <text x="160" y="240" class="tiny">minute boundary: 10,000 due</text>
+          <rect x="160" y="270" width="160" height="76" rx="12" class="box"/><text x="240" y="305" text-anchor="middle" class="label">Scheduler B</text><text x="240" y="324" text-anchor="middle" class="sub">shards 8..15</text>
+          <path d="M320 295 L382 295 Q390 295 390 287 L390 246 Q390 238 398 238 L412 238" class="wire"/><polygon points="422,238 412,243 412,233" class="head"/><text x="340" y="282" class="tiny">claim</text><path d="M422 256 L416 256 Q410 256 410 262 L410 310 Q410 318 402 318 L330 318" class="wire reply"/><polygon points="320,318 330,313 330,323" class="head reply"/><text x="327" y="338" class="tiny">other rows / skip locked</text>
+          <text x="580" y="285" class="tiny">16 logical shards; one DB</text>
+          <text x="580" y="308" class="tiny">short lock: persist claim, then commit</text>
+          <rect x="760" y="170" width="150" height="76" rx="12" class="box"/><text x="835" y="205" text-anchor="middle" class="label">Worker A</text><text x="835" y="224" text-anchor="middle" class="sub">bounded pool</text>
+          <path d="M320 112 L330 112 Q338 112 338 104 L338 96 Q338 88 346 88 L692 88 Q700 88 700 96 L700 184 Q700 192 708 192 L750 192" class="wire async"/><polygon points="760,192 750,197 750,187" class="head async"/><text x="650" y="106" text-anchor="middle" class="tiny">dispatch r7</text><path d="M760 210 L734 210 Q726 210 726 202 L726 78 Q726 70 718 70 L248 70 Q240 70 240 78 L240 90" class="wire reply"/><polygon points="240,100 235,90 245,90" class="head reply"/><text x="605" y="62" text-anchor="middle" class="tiny">accepted</text>
+          <text x="580" y="326" class="tiny">100 rows/batch: 10,000 / 100 = 100 batches</text>
+          <rect x="762" y="276" width="146" height="20" rx="10" class="badge"/><text x="835" y="290" text-anchor="middle" class="badge-text">56 slots aggregate</text>
+          <text x="580" y="346" class="tiny">166.7 x 0.2 / 0.6 = 55.6 =&gt; 56 slots</text>
+          <g class="is-new">
+            <text x="580" y="366" class="tiny">fixed 0.2s/run: ceil(10,000 / 56) x 0.2 = 35.8s</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">在每次固定 0.2 秒、无额外开销的简化模型里，56 槽最多 280 次/秒，10,000 次需 179 轮，也就是至少 35.8 秒。若要求 5 秒内完成，就必须改容量或错峰，不能靠分片口号。</span><span class="lang-en">With fixed 0.2 s runs and no extra overhead, 56 slots provide at most 280/s and 10,000 runs need 179 rounds, taking at least 35.8 s. A 5 s completion target requires different capacity or permitted schedule staggering.</span></figcaption>
+      </div>
+    </figure><details><summary><span class="lang-zh">展开并发、突发下界与存储算式</span><span class="lang-en">Slot, burst and storage arithmetic</span></summary><div class="bilingual"><div class="lang-zh"><p>10,000 ÷ 60 = 166.666…/s；乘 0.2 秒得均值占用 33.333… 槽，再除以 0.6 并向上取整为 56。固定每次 0.2 秒且无额外开销时，56 槽吞吐 280/s，流体下界是 35.714… 秒，离散轮次是 ceil(10,000÷56)=179，完成要 35.8 秒。五秒完成的理想并发至少 400；若仍按 60% 预算预留，则约 667，尚未算认领和排队。</p></div><div class="lang-en"><p>10,000 / 60 = 166.666…/s; multiplying by 0.2 s gives 33.333… occupied slots, then dividing by 0.6 and rounding up gives 56. With fixed 0.2 s runs and no overhead, 56 slots supply 280/s. The fluid lower bound is 35.714… s, while ceil(10,000/56)=179 discrete rounds take 35.8 s. Five-second completion needs at least 400 ideal slots, or about 667 at the same 60% budget, before claims and queueing.</p></div></div>
+<div class="bilingual"><div class="lang-zh"><p>定义：10,000×1 KB=10 MB，三份 30 MB。run：10,000×1,440=14.4M/天；14.4M×200 B×7=20.16 GB，三份 60.48 GB。均为十进制原始行估算，未算索引、WAL、attempt 审计、结果和备份；只清终态历史，不清 ready/running/retry_wait/review 或仍需保护的业务键。</p></div><div class="lang-en"><p>Definitions: 10,000×1 KB=10 MB, or 30 MB for three copies. Runs: 10,000×1,440=14.4M/day; 14.4M×200 B×7=20.16 GB, or 60.48 GB for three copies. These decimal raw-row estimates exclude indexes, WAL, attempt audits, results and backups. Clean terminal history only, preserving ready/running/retry_wait/review work and still-needed effect keys.</p></div></div>
+</details>
+<div class="bilingual"><div class="lang-zh"><p>指标分别看 due lag、最老 ready 年龄、过期租约、claim 拒绝与下游错误。开始迟到 = 实际开始 − scheduled_at；业务完成还要加 handler 时间。1 秒轮询只贡献检测延迟的一部分。扫描慢才扩 scanner；执行或下游预算不足时，更多 scanner 只会更快地产生积压。</p></div><div class="lang-en"><p>Track due lag, oldest ready age, expired leases, rejected claims and downstream errors separately. Start lateness is actual start minus scheduled_at; completion also includes handler time. One-second polling covers only part of detection latency. Add scanners for scanning limits; execution/downstream bottlenecks otherwise create backlog faster.</p></div></div>
+</section>
+<section><h2><span class="lang-zh">执行租约：代次保护状态，业务端保护效果</span><span class="lang-en">Execution lease: generations protect state; receivers protect effects</span></h2>
+<div class="bilingual"><div class="lang-zh"><p>第三组保留最重要的反例：A 暂停到第 31 秒，B 接管同一个 r7，代次从 41 到 42；A 仍会醒来发送旧请求。<strong>租约过期不杀进程，代次也不自动传遍远程系统。</strong>保护资源必须参与拒绝旧权利。[4]</p></div><div class="lang-en"><p>Deck three retains the key counterexample: A pauses until second 31, B takes over r7 and advances generation 41→42, and A can still resume sending requests. <strong>Expiry does not kill a process or automatically fence remote systems.</strong> The protected resource must enforce stale-authority rejection. [4]</p></div></div>
+<figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d3s1t d3s1d">
+          <title id="d3s1t">An execution claim outlives its short transaction</title>
+          <desc id="d3s1d">Worker A acquires run r7 from Schedule DB and receives generation 41 with a 30-second execution lease. The transaction ends while the owner, generation and expiry remain stored.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <g class="is-new">
+            <rect x="96" y="18" width="848" height="364" rx="18" class="boundary"/><text x="112" y="38" class="tiny">EXECUTION LEASE · attempts share r7; generations differ</text>
+            <rect x="150" y="80" width="160" height="76" rx="12" class="box"/><text x="230" y="115" text-anchor="middle" class="label">Worker A</text><text x="230" y="134" text-anchor="middle" class="sub">attempt 1 · gen 41</text>
+            <path d="M495 125 V250 A105 12 0 0 0 705 250 V125" class="store"/><ellipse cx="600" cy="125" rx="105" ry="12" class="store"/><text x="600" y="197.5" text-anchor="middle" class="label">Schedule DB</text><text x="600" y="215.5" text-anchor="middle" class="sub">r7 · owner + generation</text>
+            <path d="M310 110 L447 110 Q455 110 455 118 L455 142 Q455 150 463 150 L485 150" class="wire"/><polygon points="495,150 485,155 485,145" class="head"/><text x="365" y="128" class="tiny">acquire r7</text><path d="M495 168 L438 168 Q430 168 430 160 L430 148 Q430 140 422 140 L320 140" class="wire reply"/><polygon points="310,140 320,135 320,145" class="head reply"/><text x="335" y="185" class="tiny">gen 41; lease 30s</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">短事务释放行锁后，持久 owner、generation 和 lease_until 仍在。30 秒是本章假设；领取租约与此前 scheduler 的短行锁是两种生命周期。</span><span class="lang-en">After the short transaction releases its row lock, durable owner, generation and lease_until remain. Thirty seconds is an assumption; this execution lease has a different lifetime from the scheduler row lock.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d3s2t d3s2d">
+          <title id="d3s2t">A paused process does not stop when its lease expires</title>
+          <desc id="d3s2d">Worker A is paused beyond its stored lease expiry. Schedule DB remains authoritative; expiry makes recovery eligible but does not kill Worker A.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="96" y="18" width="848" height="364" rx="18" class="boundary"/><text x="112" y="38" class="tiny">EXECUTION LEASE · attempts share r7; generations differ</text>
+          <rect x="150" y="80" width="160" height="76" rx="12" class="box"/><text x="230" y="115" text-anchor="middle" class="label">Worker A</text><text x="230" y="134" text-anchor="middle" class="sub">attempt 1 · gen 41</text>
+          <path d="M495 125 V250 A105 12 0 0 0 705 250 V125" class="store"/><ellipse cx="600" cy="125" rx="105" ry="12" class="store"/><text x="600" y="197.5" text-anchor="middle" class="label">Schedule DB</text><text x="600" y="215.5" text-anchor="middle" class="sub">r7 · owner + generation</text>
+          <path d="M310 110 L447 110 Q455 110 455 118 L455 142 Q455 150 463 150 L485 150" class="wire"/><polygon points="495,150 485,155 485,145" class="head"/><text x="365" y="128" class="tiny">acquire r7</text><path d="M495 168 L438 168 Q430 168 430 160 L430 148 Q430 140 422 140 L320 140" class="wire reply"/><polygon points="310,140 320,135 320,145" class="head reply"/><text x="335" y="185" class="tiny">gen 41; lease 30s</text>
+          <g class="is-new">
+            <rect x="495" y="288" width="215" height="20" rx="10" class="badge"/><text x="602.5" y="302" text-anchor="middle" class="badge-text">t=31s: lease expired</text>
+            <text x="150" y="215" class="tiny">pause &gt; TTL does not stop the old process</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">暂停超过 30 秒只让接管变得合法，不会杀死旧进程。即使正常任务 P99 小于 TTL，也必须处理这个异常窗口。</span><span class="lang-en">A pause beyond 30 s makes takeover eligible without killing the old process. A normal P99 below the TTL still leaves this exceptional window to handle.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d3s3t d3s3d">
+          <title id="d3s3t">Take over the same run with a new generation</title>
+          <desc id="d3s3d">Worker B atomically claims the expired owner in Schedule DB and receives generation 42. It is attempt 2 of the same run r7, rather than a newly scheduled occurrence.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="96" y="18" width="848" height="364" rx="18" class="boundary"/><text x="112" y="38" class="tiny">EXECUTION LEASE · attempts share r7; generations differ</text>
+          <rect x="150" y="80" width="160" height="76" rx="12" class="box"/><text x="230" y="115" text-anchor="middle" class="label">Worker A</text><text x="230" y="134" text-anchor="middle" class="sub">attempt 1 · gen 41</text>
+          <path d="M495 125 V250 A105 12 0 0 0 705 250 V125" class="store"/><ellipse cx="600" cy="125" rx="105" ry="12" class="store"/><text x="600" y="197.5" text-anchor="middle" class="label">Schedule DB</text><text x="600" y="215.5" text-anchor="middle" class="sub">r7 · owner + generation</text>
+          <path d="M310 110 L447 110 Q455 110 455 118 L455 142 Q455 150 463 150 L485 150" class="wire"/><polygon points="495,150 485,155 485,145" class="head"/><text x="365" y="128" class="tiny">acquire r7</text><path d="M495 168 L438 168 Q430 168 430 160 L430 148 Q430 140 422 140 L320 140" class="wire reply"/><polygon points="310,140 320,135 320,145" class="head reply"/><text x="335" y="185" class="tiny">gen 41; lease 30s</text>
+          <rect x="495" y="288" width="215" height="20" rx="10" class="badge"/><text x="602.5" y="302" text-anchor="middle" class="badge-text">t=31s: lease expired</text>
+          <text x="150" y="215" class="tiny">pause &gt; TTL does not stop the old process</text>
+          <g class="is-new">
+            <rect x="150" y="265" width="160" height="76" rx="12" class="box"/><text x="230" y="300" text-anchor="middle" class="label">Worker B</text><text x="230" y="319" text-anchor="middle" class="sub">attempt 2 · gen 42</text>
+            <path d="M310 291 L432 291 Q440 291 440 283 L440 204 Q440 196 448 196 L485 196" class="wire"/><polygon points="495,196 485,201 485,191" class="head"/><text x="325" y="281" class="tiny">CAS expired owner</text><path d="M495 214 L473 214 Q465 214 465 222 L465 311 Q465 319 457 319 L320 319" class="wire reply"/><polygon points="310,319 320,314 320,324" class="head reply"/><text x="330" y="337" class="tiny">gen 42; same run r7</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">Worker B 通过 CAS 把同一个 r7 的代次从 41 推到 42。重试不新建火点；否则唯一键保护的是错误对象。</span><span class="lang-en">Worker B uses CAS to advance the generation of the same r7 from 41 to 42. A retry keeps the occurrence identity, or the unique key protects the wrong object.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d3s4t d3s4d">
+          <title id="d3s4t">Show the stale worker reaching storage</title>
+          <desc id="d3s4d">Worker A resumes and sends a late generation-41 completion to Schedule DB while generation 42 is current. The failed path reaches storage rather than ending at an abstract fencing box.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="96" y="18" width="848" height="364" rx="18" class="boundary"/><text x="112" y="38" class="tiny">EXECUTION LEASE · attempts share r7; generations differ</text>
+          <rect x="150" y="80" width="160" height="76" rx="12" class="box"/><text x="230" y="115" text-anchor="middle" class="label">Worker A</text><text x="230" y="134" text-anchor="middle" class="sub">attempt 1 · gen 41</text>
+          <path d="M495 125 V250 A105 12 0 0 0 705 250 V125" class="store"/><ellipse cx="600" cy="125" rx="105" ry="12" class="store"/><text x="600" y="197.5" text-anchor="middle" class="label">Schedule DB</text><text x="600" y="215.5" text-anchor="middle" class="sub">r7 · owner + generation</text>
+          <path d="M310 110 L447 110 Q455 110 455 118 L455 142 Q455 150 463 150 L485 150" class="wire"/><polygon points="495,150 485,155 485,145" class="head"/><text x="365" y="128" class="tiny">acquire r7</text><path d="M495 168 L438 168 Q430 168 430 160 L430 148 Q430 140 422 140 L320 140" class="wire reply"/><polygon points="310,140 320,135 320,145" class="head reply"/><text x="335" y="185" class="tiny">gen 41; lease 30s</text>
+          <rect x="495" y="288" width="215" height="20" rx="10" class="badge"/><text x="602.5" y="302" text-anchor="middle" class="badge-text">t=31s: lease expired</text>
+          <text x="150" y="215" class="tiny">pause &gt; TTL does not stop the old process</text>
+          <rect x="150" y="265" width="160" height="76" rx="12" class="box"/><text x="230" y="300" text-anchor="middle" class="label">Worker B</text><text x="230" y="319" text-anchor="middle" class="sub">attempt 2 · gen 42</text>
+          <path d="M310 291 L432 291 Q440 291 440 283 L440 204 Q440 196 448 196 L485 196" class="wire"/><polygon points="495,196 485,201 485,191" class="head"/><text x="325" y="281" class="tiny">CAS expired owner</text><path d="M495 214 L473 214 Q465 214 465 222 L465 311 Q465 319 457 319 L320 319" class="wire reply"/><polygon points="310,319 320,314 320,324" class="head reply"/><text x="330" y="337" class="tiny">gen 42; same run r7</text>
+          <g class="is-new">
+            <path d="M310 96 L422 96 Q430 96 430 88 L430 68 Q430 60 438 60 L792 60 Q800 60 800 68 L800 160 Q800 168 792 168 L715 168" class="wire fail"/><polygon points="705,168 715,163 715,173" class="head fail"/><text x="640" y="80" text-anchor="middle" class="tiny">late finish: gen 41</text>
+            <text x="725" y="248" class="tiny">41 != current 42</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">第四笔把危险请求画到存储边界：旧进程还会发写。不能只在 worker 内检查“我的锁过期没有”，检查结果与真正提交之间还会暂停。</span><span class="lang-en">The fourth stroke takes the dangerous write to storage: the old process can still send it. A worker-side lease check alone leaves another pause window before commit.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d3s5t d3s5d">
+          <title id="d3s5t">Reject stale completion at the authoritative row</title>
+          <desc id="d3s5d">Schedule DB rejects Worker A generation 41 and sends the rejection back to Worker A. Completion and heartbeat must match current owner and generation and an unexpired lease. Worker B remains the current owner.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="96" y="18" width="848" height="364" rx="18" class="boundary"/><text x="112" y="38" class="tiny">EXECUTION LEASE · attempts share r7; generations differ</text>
+          <rect x="150" y="80" width="160" height="76" rx="12" class="box"/><text x="230" y="115" text-anchor="middle" class="label">Worker A</text><text x="230" y="134" text-anchor="middle" class="sub">attempt 1 · gen 41</text>
+          <path d="M495 125 V250 A105 12 0 0 0 705 250 V125" class="store"/><ellipse cx="600" cy="125" rx="105" ry="12" class="store"/><text x="600" y="197.5" text-anchor="middle" class="label">Schedule DB</text><text x="600" y="215.5" text-anchor="middle" class="sub">r7 · owner + generation</text>
+          <path d="M310 110 L447 110 Q455 110 455 118 L455 142 Q455 150 463 150 L485 150" class="wire"/><polygon points="495,150 485,155 485,145" class="head"/><text x="365" y="128" class="tiny">acquire r7</text><path d="M495 168 L438 168 Q430 168 430 160 L430 148 Q430 140 422 140 L320 140" class="wire reply"/><polygon points="310,140 320,135 320,145" class="head reply"/><text x="335" y="185" class="tiny">gen 41; lease 30s</text>
+          <rect x="495" y="288" width="215" height="20" rx="10" class="badge"/><text x="602.5" y="302" text-anchor="middle" class="badge-text">t=31s: lease expired</text>
+          <text x="150" y="215" class="tiny">pause &gt; TTL does not stop the old process</text>
+          <rect x="150" y="265" width="160" height="76" rx="12" class="box"/><text x="230" y="300" text-anchor="middle" class="label">Worker B</text><text x="230" y="319" text-anchor="middle" class="sub">attempt 2 · gen 42</text>
+          <path d="M310 291 L432 291 Q440 291 440 283 L440 204 Q440 196 448 196 L485 196" class="wire"/><polygon points="495,196 485,201 485,191" class="head"/><text x="325" y="281" class="tiny">CAS expired owner</text><path d="M495 214 L473 214 Q465 214 465 222 L465 311 Q465 319 457 319 L320 319" class="wire reply"/><polygon points="310,319 320,314 320,324" class="head reply"/><text x="330" y="337" class="tiny">gen 42; same run r7</text>
+          <path d="M310 96 L422 96 Q430 96 430 88 L430 68 Q430 60 438 60 L792 60 Q800 60 800 68 L800 160 Q800 168 792 168 L715 168" class="wire fail"/><polygon points="705,168 715,163 715,173" class="head fail"/><text x="640" y="80" text-anchor="middle" class="tiny">late finish: gen 41</text>
+          <text x="725" y="248" class="tiny">41 != current 42</text>
+          <g class="is-new">
+            <path d="M705 186 L842 186 Q850 186 850 178 L850 54 Q850 46 842 46 L268 46 Q260 46 260 54 L260 70" class="wire fail"/><polygon points="260,80 255,70 265,70" class="head fail"/><text x="765" y="203" class="tiny">reject stale finish</text>
+            <text x="495" y="355" class="tiny">CAS finish: owner + generation + lease_until &gt; DB now</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">完整图让红线回到旧 worker：当前代次已经是 42，41 的心跳与完成都被拒绝。这个护栏只保护 Schedule DB；远程关单效果还需业务端幂等。</span><span class="lang-en">The complete red return reaches the old worker: current generation 42 rejects heartbeats and completion from 41. This guard protects Schedule DB; remote order effects still need business-side idempotency.</span></figcaption>
+      </div>
+    </figure><h3><span class="lang-zh">领取：短事务，事务外执行</span><span class="lang-en">Claim briefly, execute outside the transaction</span></h3>
+<div class="bilingual"><div class="lang-zh"><p>输入是持久 run_id 与唯一 owner（进程 boot UUID + 本次 claim UUID），输出是已提交代次、租约和冻结参数。ready、到点的 retry_wait 或已过期 running 才可领取；每次合法领取都计 attempt，包括崩溃接管，不能因没有调用结果而无限重置次数。</p></div><div class="lang-en"><p>Input is a durable run_id and unique owner (process boot UUID plus claim UUID); output is a committed generation, lease and frozen input. Only ready, due retry_wait or expired running is eligible. Every claim counts as an attempt, including crash takeover; missing results do not reset the budget.</p></div></div>
+<pre data-language="Pseudocode · claim with generation" data-kind="pseudocode" data-source="claim.pseudo"><code>claim(run_id, owner):                       // owner = boot UUID + claim UUID
+  BEGIN
+  r = SELECT * FROM run WHERE id=run_id FOR UPDATE
+  t = SELECT clock_timestamp()             // not transaction-start now()
+  if r is absent or r.cancel_requested: ROLLBACK; return NOT_CLAIMED
+  eligible = (r.state == &#x27;ready&#x27;)
+          or (r.state == &#x27;retry_wait&#x27; and r.retry_at &lt;= t)
+          or (r.state == &#x27;running&#x27; and r.lease_until &lt;= t)
+  if not eligible: ROLLBACK; return BUSY_OR_TERMINAL
+  if r.attempts == 5:
+    UPDATE run SET state=&#x27;review&#x27;, owner=null, lease_until=null,
+                   effect_unknown=true WHERE id=run_id
+    COMMIT; return REVIEW
+  UPDATE run SET state=&#x27;running&#x27;, attempts=attempts+1, generation=generation+1,
+                 owner=:owner, lease_until=t+30s, retry_at=null,
+                 effect_unknown=true WHERE id=run_id
+    RETURNING id, owner, generation, lease_until, payload, effect_key
+  COMMIT
+  return committed claim                   // handler runs outside the transaction
+  // A lost commit ACK is not a failed claim. Read this owner from the primary
+  // and obtain its current generation/valid lease before issuing any effect.
+  // Do not create another occurrence or issue an RPC from an unconfirmed claim.</code></pre>
+<div class="bilingual"><div class="lang-zh"><p>租约判定要在取得保护行锁之后采样实际 DB 时间。PostgreSQL 的 now()/CURRENT_TIMESTAMP 固定在事务起点；若先采样、再等锁，旧时间可能把已过期租约误判为有效。本例锁后取 clock_timestamp()，取样、判断、更新期间不做 RPC。[12] 判定在持锁期间序列化；不声称物理 COMMIT 落盘瞬间仍在租约内，若数据库事务异常挂起，接管必须等该事务结束。</p></div><div class="lang-en"><p>Sample actual database time after acquiring the protected row lock. PostgreSQL now()/CURRENT_TIMESTAMP uses transaction-start time: sampling before waiting can admit an already expired lease. This example calls clock_timestamp() after locking, with no RPC between sampling and update. [12] Decisions serialize while locked; this does not claim the lease is still valid at physical commit. A stuck database transaction also blocks takeover until it ends.</p></div></div>
+<h3><span class="lang-zh">心跳、完成、超时与取消走同一状态门</span><span class="lang-en">One state gate for heartbeat, completion, timeout and cancellation</span></h3>
+<div class="bilingual"><div class="lang-zh"><p>下列伪代码把错误分支写在同一处。心跳与完成必须匹配 running、owner、generation 及锁后取样时尚未到期的 lease；超时保留 effect_unknown，退避后仍用同一业务键。backoff 有上限并加入抖动，执行还受共享下游预算约束；reaper 与直接过期接管是可竞争的恢复路径，由同一行锁串行。</p></div><div class="lang-en"><p>The following pseudocode keeps failure branches together. Heartbeat and completion require running, matching owner/generation and an unexpired lease at the locked sample time. Timeout retains effect_unknown and retries the same business key after bounded backoff with jitter, subject to shared downstream admission. A reaper and direct expired takeover are competing recovery paths serialized on the same row.</p></div></div>
+<pre data-language="Pseudocode · lease transitions" data-kind="pseudocode" data-source="transition.pseudo"><code>transition(id, action, owner=null, gen=null, result=null):
+  BEGIN
+  r = SELECT * FROM run WHERE id=:id FOR UPDATE
+  t = SELECT clock_timestamp()             // read AFTER lock acquisition
+  if r is absent: ROLLBACK; return NOT_FOUND
+  if action == &#x27;cancel&#x27;:                    // authenticated management command
+    r.cancel_requested = true
+    if r.state == &#x27;ready&#x27; and r.attempts == 0: r.state = &#x27;cancelled&#x27;
+    if r.state == &#x27;retry_wait&#x27;: r.state = &#x27;review&#x27;
+    // A running attempt can still report a confirmed effect; cancel is not undo.
+  else if action == &#x27;reap&#x27;:
+    if r.state != &#x27;running&#x27; or r.lease_until &gt; t: ROLLBACK; return NO_CHANGE
+    r.effect_unknown = true                 // expiry does not prove no effect
+    r.state = &#x27;review&#x27; if r.cancel_requested or r.attempts == 5 else &#x27;retry_wait&#x27;
+    r.retry_at = t + bounded_backoff(r.attempts) if r.state == &#x27;retry_wait&#x27; else null
+  else:
+    if r.state != &#x27;running&#x27; or r.owner != owner or r.generation != gen
+       or r.lease_until &lt;= t: ROLLBACK; return STALE
+    if action == &#x27;heartbeat&#x27;: r.lease_until = t + 30s
+    else if action == &#x27;complete&#x27;:
+      require result is a durable, authenticated result for r.effect_key/payload
+      r.state = &#x27;succeeded&#x27;; r.result = result; r.effect_unknown = false
+    else if action == &#x27;timeout&#x27;:
+      r.effect_unknown = true               // retain the SAME business key
+      r.state = &#x27;review&#x27; if r.cancel_requested or r.attempts == 5 else &#x27;retry_wait&#x27;
+      r.retry_at = t + bounded_backoff(r.attempts) if r.state == &#x27;retry_wait&#x27; else null
+    else: ROLLBACK; return BAD_ACTION
+  if r.state != &#x27;running&#x27;: r.owner = null; r.lease_until = null
+  UPDATE run SET state=r.state, owner=r.owner, lease_until=r.lease_until,
+    retry_at=r.retry_at, cancel_requested=r.cancel_requested,
+    effect_unknown=r.effect_unknown, result=r.result WHERE id=:id
+  COMMIT
+  // Errors roll back. Lost ACK: read the saved state, never overwrite success.</code></pre>
+<div class="bilingual"><div class="lang-zh"><p>20 秒 RPC 超时只结束本地等待，不证明订单未关闭；5 次耗尽进入持久 review，可能仍有未知效果。只有业务适配器验证同租户、同操作键和冻结输入的确定结果才能 complete；accepted、网络超时、查不到尚未提交行都不是该证据。失去租约就停止发新动作，已发在途动作仍靠接收端幂等。</p></div><div class="lang-en"><p>A 20 s RPC timeout ends local waiting without proving the order remained open. Five exhausted attempts enter durable review, possibly with unknown effects. complete requires the business adapter to verify a durable result for the same tenant, operation key and frozen input; acceptance, timeouts or absence of an uncommitted row are insufficient. Stop new actions after losing authority; receiver idempotency still protects in-flight actions.</p></div></div>
+<div class="bilingual"><div class="lang-zh"><p>取消未尝试 ready 可落 cancelled；取消 running 只记请求并合作停止，确定效果仍可完成；retry_wait 有过执行尝试则转 review，不能冒充「从未执行」。review 的查证/人工处理使用原键并留审计，本示例不实现完整人工控制台。单 run 的代次不是跨 job 的资源 fence；需要保护共享资源时另建同域单调令牌并由资源验证。</p></div><div class="lang-en"><p>An unattempted ready run may become cancelled. Running cancellation records a cooperative request and still permits confirmed completion. A previously attempted retry_wait becomes review, not “never executed.” Review/query/manual actions retain the original key and audit evidence; a full review console is outside this example. Per-run generations are not resource fences across jobs: shared resources need tokens from a common monotonic authority enforced by that resource.</p></div></div>
+</section>
+<section><h2><span class="lang-zh">Misfire：先保留原窗口，再控制恢复速度</span><span class="lang-en">Misfire: retain original intervals and bound recovery</span></h2>
+<div class="bilingual"><div class="lang-zh"><p>错过未物化火点与同一 run 的执行重试是两件事。恢复例为 [09:00,11:00) UTC：每个分钟 job 有 120 个旧槽，十个共 1,200；11:00 正常火点另算。skip、coalesce、catch_up 是每个 job 的互斥选择，不能把三行当连续三次执行。</p></div><div class="lang-en"><p>Recovering unmaterialized occurrences differs from retrying an existing run. In [09:00,11:00) UTC, each minute job has 120 missed slots, giving 1,200 for ten jobs; the live 11:00 occurrence is separate. skip, coalesce and catch_up are alternative per-job policies, not three sequential executions.</p></div></div>
+<figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d4s1t d4s1d">
+          <title id="d4s1t">Use a half-open missed-occurrence interval</title>
+          <desc id="d4s1d">Scheduler A reads the durable cursor from Schedule DB. Ten every-minute jobs missed occurrences in the half-open interval 09:00 to 11:00, giving 120 occurrences each and 1200 total.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <g class="is-new">
+            <rect x="96" y="18" width="848" height="364" rx="18" class="boundary"/><text x="112" y="38" class="tiny">MISFIRE · mutually exclusive policies per job; preserve occurrence identities</text>
+            <path d="M320 80 V150 A90 12 0 0 0 500 150 V80" class="store"/><ellipse cx="410" cy="80" rx="90" ry="12" class="store"/><text x="410" y="125" text-anchor="middle" class="label">Schedule DB</text><text x="410" y="143" text-anchor="middle" class="sub">cursor + backlog</text>
+            <rect x="650" y="90" width="160" height="76" rx="12" class="box"/><text x="730" y="125" text-anchor="middle" class="label">Scheduler A</text><text x="730" y="144" text-anchor="middle" class="sub">policy + rate budget</text>
+            <path d="M650 117 L510 117" class="wire"/><polygon points="500,117 510,112 510,122" class="head"/><path d="M500 135 L640 135" class="wire reply"/><polygon points="650,135 640,140 640,130" class="head reply"/><text x="575" y="109" text-anchor="middle" class="tiny">plan due</text><text x="575" y="151" text-anchor="middle" class="tiny">saved cursor</text>
+            <text x="150" y="202" class="tiny">missed: [09:00, 11:00) UTC</text>
+            <text x="150" y="226" class="tiny">10 jobs x 120 slots = 1,200 overdue runs</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">先定区间再数火点：[09:00, 11:00) 含 09:00 到 10:59，共 120 个分钟槽。10 个 job 就有 1,200 次；11:00 的正常火点另算。</span><span class="lang-en">Define the interval before counting: [09:00, 11:00) contains minute slots from 09:00 through 10:59, or 120 per job. Ten jobs produce 1,200; the live 11:00 occurrence is separate.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d4s2t d4s2d">
+          <title id="d4s2t">Skip records the decision rather than pretending success</title>
+          <desc id="d4s2d">For a job configured to skip, Scheduler A records the skipped interval and moves its cursor to the first still-live occurrence without executing old intervals.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="96" y="18" width="848" height="364" rx="18" class="boundary"/><text x="112" y="38" class="tiny">MISFIRE · mutually exclusive policies per job; preserve occurrence identities</text>
+          <path d="M320 80 V150 A90 12 0 0 0 500 150 V80" class="store"/><ellipse cx="410" cy="80" rx="90" ry="12" class="store"/><text x="410" y="125" text-anchor="middle" class="label">Schedule DB</text><text x="410" y="143" text-anchor="middle" class="sub">cursor + backlog</text>
+          <rect x="650" y="90" width="160" height="76" rx="12" class="box"/><text x="730" y="125" text-anchor="middle" class="label">Scheduler A</text><text x="730" y="144" text-anchor="middle" class="sub">policy + rate budget</text>
+          <path d="M650 117 L510 117" class="wire"/><polygon points="500,117 510,112 510,122" class="head"/><path d="M500 135 L640 135" class="wire reply"/><polygon points="650,135 640,140 640,130" class="head reply"/><text x="575" y="109" text-anchor="middle" class="tiny">plan due</text><text x="575" y="151" text-anchor="middle" class="tiny">saved cursor</text>
+          <text x="150" y="202" class="tiny">missed: [09:00, 11:00) UTC</text>
+          <text x="150" y="226" class="tiny">10 jobs x 120 slots = 1,200 overdue runs</text>
+          <g class="is-new">
+            <text x="150" y="270" class="tiny">skip: audit missed range; 0 replay runs</text>
+            <text x="150" y="290" class="tiny">inspection / cache refresh; live cursor only</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">skip 是明确放弃旧窗口，不是假装执行成功。适用于只看当前状态的巡检；业务要求每个结算窗口都覆盖时不能选它。</span><span class="lang-en">Skip explicitly abandons old intervals rather than marking them executed. It fits checks of current state and cannot satisfy a requirement to cover every settlement window.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d4s3t d4s3d">
+          <title id="d4s3t">Coalesce keeps a deterministic occurrence key</title>
+          <desc id="d4s3d">For a coalescing job, Scheduler A maps the missed interval to its latest missed occurrence identity and admits one run to Worker A. The next live occurrence is kept separate.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="96" y="18" width="848" height="364" rx="18" class="boundary"/><text x="112" y="38" class="tiny">MISFIRE · mutually exclusive policies per job; preserve occurrence identities</text>
+          <path d="M320 80 V150 A90 12 0 0 0 500 150 V80" class="store"/><ellipse cx="410" cy="80" rx="90" ry="12" class="store"/><text x="410" y="125" text-anchor="middle" class="label">Schedule DB</text><text x="410" y="143" text-anchor="middle" class="sub">cursor + backlog</text>
+          <rect x="650" y="90" width="160" height="76" rx="12" class="box"/><text x="730" y="125" text-anchor="middle" class="label">Scheduler A</text><text x="730" y="144" text-anchor="middle" class="sub">policy + rate budget</text>
+          <path d="M650 117 L510 117" class="wire"/><polygon points="500,117 510,112 510,122" class="head"/><path d="M500 135 L640 135" class="wire reply"/><polygon points="650,135 640,140 640,130" class="head reply"/><text x="575" y="109" text-anchor="middle" class="tiny">plan due</text><text x="575" y="151" text-anchor="middle" class="tiny">saved cursor</text>
+          <text x="150" y="202" class="tiny">missed: [09:00, 11:00) UTC</text>
+          <text x="150" y="226" class="tiny">10 jobs x 120 slots = 1,200 overdue runs</text>
+          <text x="150" y="270" class="tiny">skip: audit missed range; 0 replay runs</text>
+          <text x="150" y="290" class="tiny">inspection / cache refresh; live cursor only</text>
+          <g class="is-new">
+            <rect x="650" y="270" width="160" height="70" rx="12" class="box"/><text x="730" y="302" text-anchor="middle" class="label">Worker A</text><text x="730" y="321" text-anchor="middle" class="sub">shared live capacity</text>
+            <path d="M715 166 L715 260" class="wire async"/><polygon points="715,270 710,260 720,260" class="head async"/><text x="699" y="230" text-anchor="end" class="tiny">admit</text><path d="M741 270 L741 176" class="wire reply"/><polygon points="741,166 746,176 736,176" class="head reply"/><text x="755" y="246" class="tiny">accepted</text>
+            <text x="150" y="316" class="tiny">coalesce: latest missed slot; 1 run/job</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">补一次把同 job 的旧火点合并为最后一个错过槽的 run，共 10 次；重启仍命中同一身份。业务必须允许一次处理覆盖这些窗口。</span><span class="lang-en">Coalescing maps each job to its latest missed slot, producing 10 runs with stable identities across restarts. It is valid only when one execution can cover the missed work.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d4s4t d4s4d">
+          <title id="d4s4t">Catch up only through the shared admission budget</title>
+          <desc id="d4s4d">For jobs requiring every interval, Scheduler A materializes the 1200 occurrences in bounded pages in Schedule DB and dispatches them through the same bounded Worker A path. Live traffic receives 80/s out of the 100/s downstream-safe budget.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="96" y="18" width="848" height="364" rx="18" class="boundary"/><text x="112" y="38" class="tiny">MISFIRE · mutually exclusive policies per job; preserve occurrence identities</text>
+          <path d="M320 80 V150 A90 12 0 0 0 500 150 V80" class="store"/><ellipse cx="410" cy="80" rx="90" ry="12" class="store"/><text x="410" y="125" text-anchor="middle" class="label">Schedule DB</text><text x="410" y="143" text-anchor="middle" class="sub">cursor + backlog</text>
+          <rect x="650" y="90" width="160" height="76" rx="12" class="box"/><text x="730" y="125" text-anchor="middle" class="label">Scheduler A</text><text x="730" y="144" text-anchor="middle" class="sub">policy + rate budget</text>
+          <path d="M650 117 L510 117" class="wire"/><polygon points="500,117 510,112 510,122" class="head"/><path d="M500 135 L640 135" class="wire reply"/><polygon points="650,135 640,140 640,130" class="head reply"/><text x="575" y="109" text-anchor="middle" class="tiny">plan due</text><text x="575" y="151" text-anchor="middle" class="tiny">saved cursor</text>
+          <text x="150" y="202" class="tiny">missed: [09:00, 11:00) UTC</text>
+          <text x="150" y="226" class="tiny">10 jobs x 120 slots = 1,200 overdue runs</text>
+          <text x="150" y="270" class="tiny">skip: audit missed range; 0 replay runs</text>
+          <text x="150" y="290" class="tiny">inspection / cache refresh; live cursor only</text>
+          <rect x="650" y="270" width="160" height="70" rx="12" class="box"/><text x="730" y="302" text-anchor="middle" class="label">Worker A</text><text x="730" y="321" text-anchor="middle" class="sub">shared live capacity</text>
+          <path d="M715 166 L715 260" class="wire async"/><polygon points="715,270 710,260 720,260" class="head async"/><text x="699" y="230" text-anchor="end" class="tiny">admit</text><path d="M741 270 L741 176" class="wire reply"/><polygon points="741,166 746,176 736,176" class="head reply"/><text x="755" y="246" class="tiny">accepted</text>
+          <text x="150" y="316" class="tiny">coalesce: latest missed slot; 1 run/job</text>
+          <g class="is-new">
+            <text x="150" y="342" class="tiny">catch-up: page 1,200; same claim + retry path</text>
+            <rect x="420" y="192" width="210" height="20" rx="10" class="badge"/><text x="525" y="206" text-anchor="middle" class="badge-text">100/s budget; live 80/s</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">必须覆盖每槽时，1,200 次分有界页落成持久积压，再走同一认领路径。教学假设下游安全预算 100 次/秒，正常流量 80 次/秒，补偿只能用余下 20。</span><span class="lang-en">When every interval matters, persist all 1,200 in bounded pages, then use the normal claim path. With an assumed downstream-safe budget of 100/s and live load of 80/s, recovery receives only the remaining 20/s.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d4s5t d4s5d">
+          <title id="d4s5t">Compute recovery time from spare capacity</title>
+          <desc id="d4s5d">The complete board shows alternative per-job policies and one shared Worker A admission path. With no new failure and constant 80/s live traffic, 1200 divided by 100 minus 80 gives a 60-second ideal drain time.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="96" y="18" width="848" height="364" rx="18" class="boundary"/><text x="112" y="38" class="tiny">MISFIRE · mutually exclusive policies per job; preserve occurrence identities</text>
+          <path d="M320 80 V150 A90 12 0 0 0 500 150 V80" class="store"/><ellipse cx="410" cy="80" rx="90" ry="12" class="store"/><text x="410" y="125" text-anchor="middle" class="label">Schedule DB</text><text x="410" y="143" text-anchor="middle" class="sub">cursor + backlog</text>
+          <rect x="650" y="90" width="160" height="76" rx="12" class="box"/><text x="730" y="125" text-anchor="middle" class="label">Scheduler A</text><text x="730" y="144" text-anchor="middle" class="sub">policy + rate budget</text>
+          <path d="M650 117 L510 117" class="wire"/><polygon points="500,117 510,112 510,122" class="head"/><path d="M500 135 L640 135" class="wire reply"/><polygon points="650,135 640,140 640,130" class="head reply"/><text x="575" y="109" text-anchor="middle" class="tiny">plan due</text><text x="575" y="151" text-anchor="middle" class="tiny">saved cursor</text>
+          <text x="150" y="202" class="tiny">missed: [09:00, 11:00) UTC</text>
+          <text x="150" y="226" class="tiny">10 jobs x 120 slots = 1,200 overdue runs</text>
+          <text x="150" y="270" class="tiny">skip: audit missed range; 0 replay runs</text>
+          <text x="150" y="290" class="tiny">inspection / cache refresh; live cursor only</text>
+          <rect x="650" y="270" width="160" height="70" rx="12" class="box"/><text x="730" y="302" text-anchor="middle" class="label">Worker A</text><text x="730" y="321" text-anchor="middle" class="sub">shared live capacity</text>
+          <path d="M715 166 L715 260" class="wire async"/><polygon points="715,270 710,260 720,260" class="head async"/><text x="699" y="230" text-anchor="end" class="tiny">admit</text><path d="M741 270 L741 176" class="wire reply"/><polygon points="741,166 746,176 736,176" class="head reply"/><text x="755" y="246" class="tiny">accepted</text>
+          <text x="150" y="316" class="tiny">coalesce: latest missed slot; 1 run/job</text>
+          <text x="150" y="342" class="tiny">catch-up: page 1,200; same claim + retry path</text>
+          <rect x="420" y="192" width="210" height="20" rx="10" class="badge"/><text x="525" y="206" text-anchor="middle" class="badge-text">100/s budget; live 80/s</text>
+          <g class="is-new">
+            <text x="150" y="366" class="tiny">spare = 100 - 80 = 20/s; drain = 1,200 / 20 = 60s</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">完整图的三行策略是不同 job 的互斥选择。1,200 ÷ (100 − 80) = 60 秒只是不再失败时的理想下界；新流量吃满 100，积压就排不掉。</span><span class="lang-en">The three policy rows are mutually exclusive per-job choices. 1,200 / (100 - 80) = 60 s is an ideal lower bound with no new failures; if live load reaches 100/s, recovery cannot drain.</span></figcaption>
+      </div>
+    </figure><div class="bilingual"><div class="lang-zh"><p>skip 记录放弃范围，适合只看当前状态的巡检。coalesce 用最后一个旧火点的稳定身份，输入冻结整个遗漏区间，handler 必须真能覆盖它。catch_up 按原计划逐火点生成；每页最多 100，页内 run、审计与游标同事务。首个活跃火点 cutoff 在本次恢复过程中固定，剩余页不能因「现在没那么迟」就退出。</p></div><div class="lang-en"><p>skip audits abandonment and suits current-state checks. coalesce uses the last missed occurrence identity with a frozen complete interval that the handler must actually cover. catch_up creates original occurrences in pages of at most 100; each page commits runs, audit and cursor together. Pin the first live occurrence cutoff throughout that recovery pass, continuing remaining pages even when they no longer appear very late.</p></div></div>
+<pre data-language="Pseudocode · recurring misfire pages" data-kind="pseudocode" data-source="misfire.pseudo"><code>recover_missed(job_id):                     // recurring calendars with future fires
+  BEGIN
+  j = SELECT * FROM job WHERE id=job_id FOR UPDATE
+  t = SELECT clock_timestamp()
+  if not j.enabled or j.next_run_at == null: ROLLBACK; return NONE
+  if j.recovery_cutoff == null and not calendar.has_misfire(j, t):
+    ROLLBACK; return NONE
+  cutoff = j.recovery_cutoff ?? calendar.first_live_fire(j.spec, t)
+  // Pin this cutoff across catch-up pages. Missed fires are in [cursor, cutoff).
+  from = j.next_run_at
+  require cutoff &gt; from
+  if j.policy == &#x27;catch_up&#x27;:
+    fires = calendar.first_at_most_100(j.spec, from, cutoff)
+    for fire in fires:
+      INSERT ready occurrence with frozen input and UNIQUE identity
+      // Same INSERT + conflict comparison as materialize; all within this T1.
+    next = calendar.next_after(j.spec, fires.last)
+  else if j.policy == &#x27;coalesce&#x27;:
+    last = calendar.last_before(j.spec, cutoff)
+    INSERT one ready occurrence at last, with immutable range [from, cutoff)
+    // The handler contract must cover the entire range; use the same T1 insert.
+    next = cutoff
+  else if j.policy == &#x27;skip&#x27;: next = cutoff
+  else: ROLLBACK; return BAD_POLICY
+  INSERT audit(job_id, version, from, next, policy)
+  UPDATE job SET next_run_at=next,
+                 recovery_cutoff=(cutoff if next &lt; cutoff else null)
+    WHERE id=job_id
+  COMMIT
+  // No RPC in T1. Failure rolls back the page and cursor; ACK loss re-reads both.
+  // Live cutoff fires use the normal path, independently of missed intervals.</code></pre>
+<div class="bilingual"><div class="lang-zh"><p>这段只处理有后续火点的周期 calendar；calendar.first_live_fire 按该定义的原相位和容忍阈值找首个仍可正常调度的火点，不能用 epoch 取模代替。例如火点 30、90、150 秒，恢复时刻 180 秒且容忍为零，下一个是 210 秒，合并身份是 150 秒。一次性任务默认补做原 deadline，T1 留原身份并将 next_run_at 置 null；若产品允许丢弃，须显式记录 skipped，不能因没有下一 cron 点而漏掉它。</p></div><div class="lang-en"><p>This routine is for recurring calendars that still have future occurrences. calendar.first_live_fire respects the definition’s original phase and lateness tolerance, rather than epoch modulo. For fires at seconds 30, 90 and 150, recovery at 180 with zero tolerance gives next=210 and coalesced identity=150. A one-shot defaults to materializing its original deadline, retaining identity and setting next_run_at=null. Dropping it requires an explicit audited skip policy; absence of a next cron instant must not lose it.</p></div></div>
+<div class="bilingual"><div class="lang-zh"><p>恢复预算是 100−80=20/s，1,200÷20=60 秒只是在恒定流量、无额外失败和开销下的理想下界；正常已占 100/s 就没有排空余量。对账可合并 [watermark,cutoff)，但 cutoff 必须有数据完整性证据，水位只随已持久完成的连续前缀推进。恢复新火点与已有 unknown run 的查证都要限速。</p></div><div class="lang-en"><p>Spare capacity is 100−80=20/s, so 1,200/20=60 s is an ideal lower bound under constant load with no additional failure or overhead. At 100/s live load there is no drain capacity. Reconciliation can process [watermark,cutoff), but cutoff needs completeness evidence and the watermark advances only over a durably finished contiguous prefix. Rate-limit both new recovery occurrences and investigation of unknown runs.</p></div></div>
+<details><summary><span class="lang-zh">产品示例只支持它们自己的默认值</span><span class="lang-en">Product examples have version-specific defaults</span></summary><div class="bilingual"><div class="lang-zh"><p>Quartz 2.3.0 JobStoreTX 的 misfireThreshold 默认 60000 ms；Airflow 3.0.0 的 catchup_by_default=False。这些是公开产品配置，不是本章迟到 SLO、租约 TTL 或全行业默认；选 skip 还是补齐仍由业务窗口要求决定。[5][6]</p></div><div class="lang-en"><p>Quartz 2.3.0 JobStoreTX documents a default misfireThreshold of 60000 ms; Airflow 3.0.0 documents catchup_by_default=False. These product settings are not our lateness SLO, lease TTL or universal defaults. Business interval requirements decide skip versus recovery. [5][6]</p></div></div>
+</details>
+</section>
+<section><h2><span class="lang-zh">延迟任务：时间轮是提示，截止点才是事实</span><span class="lang-en">Delayed jobs: a wheel is a hint; the deadline is durable</span></h2>
+<div class="bilingual"><div class="lang-zh"><p>30 分钟关单先持久保存绝对 UTC deadline=创建时刻+1,800 秒。用 due 索引分页轮询已经足够时，不加时间轮。第五组的 Timer index 可以丢失与重建；候选必须带 job_id、版本和 deadline，回权威行核对 enabled、当前版本和到期条件，再走 T1。旧槽或重复提示不能直接调用 handler。</p></div><div class="lang-en"><p>Persist an absolute UTC deadline of creation time plus 1,800 s for a 30-minute close. Omit a timing wheel when indexed due polling is sufficient. Deck five’s Timer index is rebuildable; hints carry job_id, version and deadline, checked against authoritative enabled/version/due state before T1. Stale or duplicate hints cannot invoke the handler directly.</p></div></div>
+<figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s1t d5s1d">
+          <title id="d5s1t">Persist the absolute deadline for a delayed job</title>
+          <desc id="d5s1d">Job API writes the one-shot order o7 schedule with absolute UTC delay_until into Schedule DB and receives commit. A 30-minute delay is 1800 seconds, independent of worker finish time.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <g class="is-new">
+            <rect x="96" y="18" width="848" height="364" rx="18" class="boundary"/><text x="112" y="38" class="tiny">DELAYED JOB · persistent deadline; timer index is an accelerator</text>
+            <rect x="120" y="90" width="160" height="76" rx="12" class="box"/><text x="200" y="125" text-anchor="middle" class="label">Job API</text><text x="200" y="144" text-anchor="middle" class="sub">one-shot order o7</text>
+            <path d="M350 80 V150 A90 12 0 0 0 530 150 V80" class="store"/><ellipse cx="440" cy="80" rx="90" ry="12" class="store"/><text x="440" y="125" text-anchor="middle" class="label">Schedule DB</text><text x="440" y="143" text-anchor="middle" class="sub">delay_until + version</text>
+            <path d="M280 117 L340 117" class="wire"/><polygon points="350,117 340,122 340,112" class="head"/><path d="M350 135 L290 135" class="wire reply"/><polygon points="280,135 290,130 290,140" class="head reply"/><text x="315" y="109" text-anchor="middle" class="tiny">save</text><text x="315" y="151" text-anchor="middle" class="tiny">commit</text>
+            <text x="150" y="182" class="tiny">30 min = 1,800s; UTC deadline</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">延迟 30 分钟就是创建时刻 + 1,800 秒的绝对截止点。先持久保存，再考虑用什么内存结构叫醒，不能只写一个会随进程消失的 timer。</span><span class="lang-en">A 30-minute delay means an absolute deadline of creation time plus 1,800 s. Persist it before choosing an in-memory wake-up structure; a process-local timer alone can disappear.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s2t d5s2d">
+          <title id="d5s2t">Add an accelerator only after measuring indexed polling</title>
+          <desc id="d5s2d">Schedule DB supplies near-term scheduling hints to a rebuildable Timer index. The durable job version and delay_until remain in Schedule DB.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="96" y="18" width="848" height="364" rx="18" class="boundary"/><text x="112" y="38" class="tiny">DELAYED JOB · persistent deadline; timer index is an accelerator</text>
+          <rect x="120" y="90" width="160" height="76" rx="12" class="box"/><text x="200" y="125" text-anchor="middle" class="label">Job API</text><text x="200" y="144" text-anchor="middle" class="sub">one-shot order o7</text>
+          <path d="M350 80 V150 A90 12 0 0 0 530 150 V80" class="store"/><ellipse cx="440" cy="80" rx="90" ry="12" class="store"/><text x="440" y="125" text-anchor="middle" class="label">Schedule DB</text><text x="440" y="143" text-anchor="middle" class="sub">delay_until + version</text>
+          <path d="M280 117 L340 117" class="wire"/><polygon points="350,117 340,122 340,112" class="head"/><path d="M350 135 L290 135" class="wire reply"/><polygon points="280,135 290,130 290,140" class="head reply"/><text x="315" y="109" text-anchor="middle" class="tiny">save</text><text x="315" y="151" text-anchor="middle" class="tiny">commit</text>
+          <text x="150" y="182" class="tiny">30 min = 1,800s; UTC deadline</text>
+          <g class="is-new">
+            <rect x="147" y="252" width="160" height="70" rx="8" class="cache"/><rect x="140" y="245" width="160" height="70" rx="8" class="cache"/><text x="220" y="277" text-anchor="middle" class="label">Timer index</text><text x="220" y="296" text-anchor="middle" class="sub">rebuildable hints</text>
+            <path d="M440 162 L440 202 Q440 210 432 210 L228 210 Q220 210 220 218 L220 235" class="wire async"/><polygon points="220,245 215,235 225,235" class="head async"/><text x="315" y="200" text-anchor="middle" class="tiny">load near-term hints</text>
+            <text x="350" y="310" class="tiny">wheel: 1s x 60 slots = 60s horizon</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">第二笔的 Timer index 可以是时间轮或有序集合。若示例轮是 1 秒一槽、60 槽，只覆盖 60 秒；30 分钟任务需轮数、分层或近窗装载，不能取模后直接提前执行。</span><span class="lang-en">The Timer index can be a timing wheel or sorted set. A 1 s tick with 60 slots spans 60 s; a 30 min job needs rounds, hierarchy, or near-window loading, rather than immediate execution after modulo.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s3t d5s3d">
+          <title id="d5s3t">A timer hint still passes the durable due predicate</title>
+          <desc id="d5s3d">Timer index wakes Scheduler A with a candidate. Scheduler A checks due time and current version in Schedule DB, persists ready and receives the durable claim result.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="96" y="18" width="848" height="364" rx="18" class="boundary"/><text x="112" y="38" class="tiny">DELAYED JOB · persistent deadline; timer index is an accelerator</text>
+          <rect x="120" y="90" width="160" height="76" rx="12" class="box"/><text x="200" y="125" text-anchor="middle" class="label">Job API</text><text x="200" y="144" text-anchor="middle" class="sub">one-shot order o7</text>
+          <path d="M350 80 V150 A90 12 0 0 0 530 150 V80" class="store"/><ellipse cx="440" cy="80" rx="90" ry="12" class="store"/><text x="440" y="125" text-anchor="middle" class="label">Schedule DB</text><text x="440" y="143" text-anchor="middle" class="sub">delay_until + version</text>
+          <path d="M280 117 L340 117" class="wire"/><polygon points="350,117 340,122 340,112" class="head"/><path d="M350 135 L290 135" class="wire reply"/><polygon points="280,135 290,130 290,140" class="head reply"/><text x="315" y="109" text-anchor="middle" class="tiny">save</text><text x="315" y="151" text-anchor="middle" class="tiny">commit</text>
+          <text x="150" y="182" class="tiny">30 min = 1,800s; UTC deadline</text>
+          <rect x="147" y="252" width="160" height="70" rx="8" class="cache"/><rect x="140" y="245" width="160" height="70" rx="8" class="cache"/><text x="220" y="277" text-anchor="middle" class="label">Timer index</text><text x="220" y="296" text-anchor="middle" class="sub">rebuildable hints</text>
+          <path d="M440 162 L440 202 Q440 210 432 210 L228 210 Q220 210 220 218 L220 235" class="wire async"/><polygon points="220,245 215,235 225,235" class="head async"/><text x="315" y="200" text-anchor="middle" class="tiny">load near-term hints</text>
+          <text x="350" y="310" class="tiny">wheel: 1s x 60 slots = 60s horizon</text>
+          <g class="is-new">
+            <rect x="650" y="90" width="160" height="76" rx="12" class="box"/><text x="730" y="125" text-anchor="middle" class="label">Scheduler A</text><text x="730" y="144" text-anchor="middle" class="sub">due predicate</text>
+            <path d="M300 272 L592 272 Q600 272 600 264 L600 156 Q600 148 608 148 L640 148" class="wire async"/><polygon points="650,148 640,153 640,143" class="head async"/><text x="465" y="263" text-anchor="middle" class="tiny">candidate; not authority</text>
+            <path d="M650 117 L540 117" class="wire"/><polygon points="530,117 540,112 540,122" class="head"/><text x="590" y="109" text-anchor="middle" class="tiny">claim due</text><path d="M530 135 L640 135" class="wire reply"/><polygon points="650,135 640,140 640,130" class="head reply"/><text x="570" y="151" text-anchor="middle" class="tiny">ready</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">索引只送候选。到期条件、版本、取消标记必须回到权威行判断，并生成持久 run。这样旧槽、重复叫醒、过期版本都不会绕过认领。</span><span class="lang-en">The index supplies candidates only. Due time, current version and cancellation are checked at the authoritative row before persisting a run, so stale slots and duplicate wake-ups cannot bypass claims.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s4t d5s4d">
+          <title id="d5s4t">Execution checks order state rather than trusting the timer</title>
+          <desc id="d5s4d">Scheduler A dispatches the persisted one-shot run to Worker A and receives accepted. Worker A uses stable business key close:o7; Order API verifies current order state in deck six.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="96" y="18" width="848" height="364" rx="18" class="boundary"/><text x="112" y="38" class="tiny">DELAYED JOB · persistent deadline; timer index is an accelerator</text>
+          <rect x="120" y="90" width="160" height="76" rx="12" class="box"/><text x="200" y="125" text-anchor="middle" class="label">Job API</text><text x="200" y="144" text-anchor="middle" class="sub">one-shot order o7</text>
+          <path d="M350 80 V150 A90 12 0 0 0 530 150 V80" class="store"/><ellipse cx="440" cy="80" rx="90" ry="12" class="store"/><text x="440" y="125" text-anchor="middle" class="label">Schedule DB</text><text x="440" y="143" text-anchor="middle" class="sub">delay_until + version</text>
+          <path d="M280 117 L340 117" class="wire"/><polygon points="350,117 340,122 340,112" class="head"/><path d="M350 135 L290 135" class="wire reply"/><polygon points="280,135 290,130 290,140" class="head reply"/><text x="315" y="109" text-anchor="middle" class="tiny">save</text><text x="315" y="151" text-anchor="middle" class="tiny">commit</text>
+          <text x="150" y="182" class="tiny">30 min = 1,800s; UTC deadline</text>
+          <rect x="147" y="252" width="160" height="70" rx="8" class="cache"/><rect x="140" y="245" width="160" height="70" rx="8" class="cache"/><text x="220" y="277" text-anchor="middle" class="label">Timer index</text><text x="220" y="296" text-anchor="middle" class="sub">rebuildable hints</text>
+          <path d="M440 162 L440 202 Q440 210 432 210 L228 210 Q220 210 220 218 L220 235" class="wire async"/><polygon points="220,245 215,235 225,235" class="head async"/><text x="315" y="200" text-anchor="middle" class="tiny">load near-term hints</text>
+          <text x="350" y="310" class="tiny">wheel: 1s x 60 slots = 60s horizon</text>
+          <rect x="650" y="90" width="160" height="76" rx="12" class="box"/><text x="730" y="125" text-anchor="middle" class="label">Scheduler A</text><text x="730" y="144" text-anchor="middle" class="sub">due predicate</text>
+          <path d="M300 272 L592 272 Q600 272 600 264 L600 156 Q600 148 608 148 L640 148" class="wire async"/><polygon points="650,148 640,153 640,143" class="head async"/><text x="465" y="263" text-anchor="middle" class="tiny">candidate; not authority</text>
+          <path d="M650 117 L540 117" class="wire"/><polygon points="530,117 540,112 540,122" class="head"/><text x="590" y="109" text-anchor="middle" class="tiny">claim due</text><path d="M530 135 L640 135" class="wire reply"/><polygon points="650,135 640,140 640,130" class="head reply"/><text x="570" y="151" text-anchor="middle" class="tiny">ready</text>
+          <g class="is-new">
+            <rect x="650" y="270" width="160" height="70" rx="12" class="box"/><text x="730" y="302" text-anchor="middle" class="label">Worker A</text><text x="730" y="321" text-anchor="middle" class="sub">close:o7</text>
+            <path d="M715 166 L715 260" class="wire async"/><polygon points="715,270 710,260 720,260" class="head async"/><text x="699" y="227" text-anchor="end" class="tiny">run</text><path d="M741 270 L741 176" class="wire reply"/><polygon points="741,166 746,176 736,176" class="head reply"/><text x="755" y="245" class="tiny">accepted</text>
+            <text x="150" y="339" class="tiny">wake-up is a hint; Order API checks current order state</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">订单在 30 分钟内可能已支付，叫醒不等于必须关单。Worker A 使用 close:o7 调业务端，由订单状态 CAS 决定实际效果。</span><span class="lang-en">The order may have been paid during those 30 min, so a wake-up does not require cancellation. Worker A uses close:o7 and lets a business-side order-state CAS decide the effect.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s5t d5s5d">
+          <title id="d5s5t">Rebuild future hints and recover overdue work</title>
+          <desc id="d5s5d">After Timer index is lost on restart, Schedule DB reloads its hints through a fallback path. Scheduler A also re-scans overdue rows through the existing durable claim path; future rebuilding alone would miss old deadlines.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="96" y="18" width="848" height="364" rx="18" class="boundary"/><text x="112" y="38" class="tiny">DELAYED JOB · persistent deadline; timer index is an accelerator</text>
+          <rect x="120" y="90" width="160" height="76" rx="12" class="box"/><text x="200" y="125" text-anchor="middle" class="label">Job API</text><text x="200" y="144" text-anchor="middle" class="sub">one-shot order o7</text>
+          <path d="M350 80 V150 A90 12 0 0 0 530 150 V80" class="store"/><ellipse cx="440" cy="80" rx="90" ry="12" class="store"/><text x="440" y="125" text-anchor="middle" class="label">Schedule DB</text><text x="440" y="143" text-anchor="middle" class="sub">delay_until + version</text>
+          <path d="M280 117 L340 117" class="wire"/><polygon points="350,117 340,122 340,112" class="head"/><path d="M350 135 L290 135" class="wire reply"/><polygon points="280,135 290,130 290,140" class="head reply"/><text x="315" y="109" text-anchor="middle" class="tiny">save</text><text x="315" y="151" text-anchor="middle" class="tiny">commit</text>
+          <text x="150" y="182" class="tiny">30 min = 1,800s; UTC deadline</text>
+          <rect x="147" y="252" width="160" height="70" rx="8" class="cache"/><rect x="140" y="245" width="160" height="70" rx="8" class="cache"/><text x="220" y="277" text-anchor="middle" class="label">Timer index</text><text x="220" y="296" text-anchor="middle" class="sub">rebuildable hints</text>
+          <path d="M440 162 L440 202 Q440 210 432 210 L228 210 Q220 210 220 218 L220 235" class="wire async"/><polygon points="220,245 215,235 225,235" class="head async"/><text x="315" y="200" text-anchor="middle" class="tiny">load near-term hints</text>
+          <text x="350" y="310" class="tiny">wheel: 1s x 60 slots = 60s horizon</text>
+          <rect x="650" y="90" width="160" height="76" rx="12" class="box"/><text x="730" y="125" text-anchor="middle" class="label">Scheduler A</text><text x="730" y="144" text-anchor="middle" class="sub">due predicate</text>
+          <path d="M300 272 L592 272 Q600 272 600 264 L600 156 Q600 148 608 148 L640 148" class="wire async"/><polygon points="650,148 640,153 640,143" class="head async"/><text x="465" y="263" text-anchor="middle" class="tiny">candidate; not authority</text>
+          <path d="M650 117 L540 117" class="wire"/><polygon points="530,117 540,112 540,122" class="head"/><text x="590" y="109" text-anchor="middle" class="tiny">claim due</text><path d="M530 135 L640 135" class="wire reply"/><polygon points="650,135 640,140 640,130" class="head reply"/><text x="570" y="151" text-anchor="middle" class="tiny">ready</text>
+          <rect x="650" y="270" width="160" height="70" rx="12" class="box"/><text x="730" y="302" text-anchor="middle" class="label">Worker A</text><text x="730" y="321" text-anchor="middle" class="sub">close:o7</text>
+          <path d="M715 166 L715 260" class="wire async"/><polygon points="715,270 710,260 720,260" class="head async"/><text x="699" y="227" text-anchor="end" class="tiny">run</text><path d="M741 270 L741 176" class="wire reply"/><polygon points="741,166 746,176 736,176" class="head reply"/><text x="755" y="245" class="tiny">accepted</text>
+          <text x="150" y="339" class="tiny">wake-up is a hint; Order API checks current order state</text>
+          <g class="is-new">
+            <path d="M440 68 L440 62 Q440 56 434 56 L120 56 Q112 56 112 64 L112 272 Q112 280 120 280 L130 280" class="wire fail"/><polygon points="140,280 130,285 130,275" class="head fail"/><text x="130" y="203" class="tiny">reload</text><text x="150" y="360" class="tiny">restart: reload future hints + scan overdue rows</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">完整图把重启回路接回 DB：未来窗口重建索引，过去窗口另扫到期行。只重建“现在以后”的轮，会让停机期间到期的订单永久沉默。</span><span class="lang-en">The complete recovery loop returns to the DB: rebuild future hints and separately scan overdue rows. Rebuilding only the future wheel could permanently silence orders whose deadlines passed during downtime.</span></figcaption>
+      </div>
+    </figure><div class="bilingual"><div class="lang-zh"><p>1 秒×60 槽只有 60 秒范围；1,800 mod 60=0 表示三十圈后落同槽，不是立即到期。可保留 rounds、用分层轮或只装近窗，最后仍比较绝对 deadline。Netty 4.1 把 HashedWheelTimer 定位为近似 I/O 超时；它没有承诺业务准点执行或持久恢复。[7] 重启分页重建未来提示，并另扫停机期间到期的定义；只重建未来会漏一次性任务。</p></div><div class="lang-en"><p>A 1 s×60-slot wheel spans 60 s. 1,800 mod 60=0 means the same slot thirty revolutions later, not immediate expiry. Use rounds, hierarchy or near-window loading, then check the absolute deadline. Netty 4.1 describes approximate I/O timeout scheduling, not punctual business execution or durability. [7] Rebuild future hints in pages and separately scan deadlines missed during downtime; future-only reconstruction loses one-shot jobs.</p></div></div>
+<div class="bilingual"><div class="lang-zh"><p>cron 保存 IANA 时区与明确 DST 策略，火点存 UTC；每天某本地时刻不等于每隔 86,400 秒。前跳的不存在时刻与后退的两次时刻如何处理必须写入定义，固定时区规则版本后枚举。[11] DB 时间用于到期和租约，本地经过时间用单调时钟；大幅授时异常影响及时性，不能靠代次修好时间。</p></div><div class="lang-en"><p>Cron stores an IANA timezone and explicit DST policy; occurrences store UTC. A fixed local daily time is not always an 86,400 s interval. Define omitted and repeated local-time behavior and enumerate with pinned timezone rules. [11] Use database time for due/lease decisions and monotonic time for local elapsed time. Generations do not repair timeliness under large authority-clock errors.</p></div></div>
+</section>
+<section><h2><span class="lang-zh">业务 T2：稳定键、状态条件与 Outbox 一起提交</span><span class="lang-en">Business T2: commit key, state predicate and outbox together</span></h2>
+<div class="bilingual"><div class="lang-zh"><p>第六组把跨库边界留在图上：Schedule DB 不参加 Order DB 的 T2。close:o7 在该租户下标识同一个关单意图，所有 attempt、旧 worker 和人工恢复都保持它。接收端验证身份和参数后，在订单行锁内检查状态与真正业务截止点；只有确定结果才保存可重复回放的回执。[8]</p></div><div class="lang-en"><p>Deck six keeps the database boundary explicit: Schedule DB does not join Order DB’s T2. Tenant-scoped close:o7 identifies one closure intent across attempts, stale workers and manual recovery. After identity/input verification, the receiver checks order state and the authoritative business deadline while holding the order row lock, saving a replayable receipt only for a confirmed result. [8]</p></div></div>
+<figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d6s1t d6s1d">
+          <title id="d6s1t">The attempt ID is not the business operation key</title>
+          <desc id="d6s1d">Worker A sends close:o7 to Order API. The stable key identifies order closure across all attempts of run r7; an attempt-specific key would defeat retry deduplication.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <g class="is-new">
+            <rect x="96" y="18" width="848" height="364" rx="18" class="boundary"/><text x="112" y="38" class="tiny">BUSINESS EFFECT · Schedule DB and Order DB are separate transactions</text>
+            <rect x="140" y="90" width="160" height="76" rx="12" class="box"/><text x="220" y="125" text-anchor="middle" class="label">Worker A</text><text x="220" y="144" text-anchor="middle" class="sub">run r7 · close:o7</text>
+            <rect x="395" y="90" width="160" height="76" rx="12" class="box"/><text x="475" y="125" text-anchor="middle" class="label">Order API</text><text x="475" y="144" text-anchor="middle" class="sub">idempotent command</text>
+            <path d="M300 117 L385 117" class="wire"/><polygon points="395,117 385,122 385,112" class="head"/><text x="346" y="109" text-anchor="middle" class="tiny">close:o7</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">第一笔先钉住业务键 close:o7。attempt 1 和 attempt 2 都使用它；把幂等键换成每次重试的新 UUID，会让接收端认为是两个业务动作。</span><span class="lang-en">First pin the business key close:o7. Attempts 1 and 2 both use it; a fresh retry UUID would tell the receiver that two business operations were intended.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d6s2t d6s2d">
+          <title id="d6s2t">Atomically deduplicate and apply the business transition</title>
+          <desc id="d6s2d">Order API performs local T2 in Order DB: insert inbox key close:o7, conditionally close the unpaid order, save the result and insert outbox event e7. Commit returns through Order API to Worker A.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="96" y="18" width="848" height="364" rx="18" class="boundary"/><text x="112" y="38" class="tiny">BUSINESS EFFECT · Schedule DB and Order DB are separate transactions</text>
+          <rect x="140" y="90" width="160" height="76" rx="12" class="box"/><text x="220" y="125" text-anchor="middle" class="label">Worker A</text><text x="220" y="144" text-anchor="middle" class="sub">run r7 · close:o7</text>
+          <rect x="395" y="90" width="160" height="76" rx="12" class="box"/><text x="475" y="125" text-anchor="middle" class="label">Order API</text><text x="475" y="144" text-anchor="middle" class="sub">idempotent command</text>
+          <path d="M300 117 L385 117" class="wire"/><polygon points="395,117 385,122 385,112" class="head"/><text x="346" y="109" text-anchor="middle" class="tiny">close:o7</text>
+          <g class="is-new">
+            <path d="M680 80 V150 A90 12 0 0 0 860 150 V80" class="store"/><ellipse cx="770" cy="80" rx="90" ry="12" class="store"/><text x="770" y="125" text-anchor="middle" class="label">Order DB</text><text x="770" y="143" text-anchor="middle" class="sub">order + inbox + outbox</text>
+            <path d="M555 117 L670 117" class="wire"/><polygon points="680,117 670,122 670,112" class="head"/><path d="M680 135 L565 135" class="wire reply"/><polygon points="555,135 565,130 565,140" class="head reply"/><text x="615" y="109" text-anchor="middle" class="tiny">local T2</text><text x="615" y="151" text-anchor="middle" class="tiny">commit</text><path d="M395 135 L310 135" class="wire reply"/><polygon points="300,135 310,130 310,140" class="head reply"/><text x="346" y="152" text-anchor="middle" class="tiny">result</text>
+            <text x="395" y="192" class="tiny">T2: inbox + order CAS + saved result</text><text x="395" y="214" class="tiny">+ outbox e7 (one local transaction)</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">订单端在自己的 T2 内一起提交去重键、订单 CAS、结果和 e7。Order DB → Order API → Worker A 逐跳返回；调度库没有参加这个事务。</span><span class="lang-en">The order service commits deduplication, order CAS, saved result and e7 in its own T2. Order DB returns via Order API to Worker A; Schedule DB does not participate in this transaction.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d6s3t d6s3d">
+          <title id="d6s3t">The committed outbox supplies the relay</title>
+          <desc id="d6s3d">Order DB supplies committed event e7 to Relay asynchronously. Relay is independent of the successful Order API reply and can recover after a process crash.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="96" y="18" width="848" height="364" rx="18" class="boundary"/><text x="112" y="38" class="tiny">BUSINESS EFFECT · Schedule DB and Order DB are separate transactions</text>
+          <rect x="140" y="90" width="160" height="76" rx="12" class="box"/><text x="220" y="125" text-anchor="middle" class="label">Worker A</text><text x="220" y="144" text-anchor="middle" class="sub">run r7 · close:o7</text>
+          <rect x="395" y="90" width="160" height="76" rx="12" class="box"/><text x="475" y="125" text-anchor="middle" class="label">Order API</text><text x="475" y="144" text-anchor="middle" class="sub">idempotent command</text>
+          <path d="M300 117 L385 117" class="wire"/><polygon points="395,117 385,122 385,112" class="head"/><text x="346" y="109" text-anchor="middle" class="tiny">close:o7</text>
+          <path d="M680 80 V150 A90 12 0 0 0 860 150 V80" class="store"/><ellipse cx="770" cy="80" rx="90" ry="12" class="store"/><text x="770" y="125" text-anchor="middle" class="label">Order DB</text><text x="770" y="143" text-anchor="middle" class="sub">order + inbox + outbox</text>
+          <path d="M555 117 L670 117" class="wire"/><polygon points="680,117 670,122 670,112" class="head"/><path d="M680 135 L565 135" class="wire reply"/><polygon points="555,135 565,130 565,140" class="head reply"/><text x="615" y="109" text-anchor="middle" class="tiny">local T2</text><text x="615" y="151" text-anchor="middle" class="tiny">commit</text><path d="M395 135 L310 135" class="wire reply"/><polygon points="300,135 310,130 310,140" class="head reply"/><text x="346" y="152" text-anchor="middle" class="tiny">result</text>
+          <text x="395" y="192" class="tiny">T2: inbox + order CAS + saved result</text><text x="395" y="214" class="tiny">+ outbox e7 (one local transaction)</text>
+          <g class="is-new">
+            <rect x="650" y="270" width="160" height="70" rx="12" class="box"/><text x="730" y="302" text-anchor="middle" class="label">Relay</text><text x="730" y="321" text-anchor="middle" class="sub">read committed outbox</text>
+            <path d="M770 162 L770 260" class="wire async"/><polygon points="770,270 765,260 775,260" class="head async"/><text x="754" y="217" text-anchor="end" class="tiny">committed e7</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">第三笔从 Order DB 的 outbox 引出 Relay；业务 API 不在提交后直接 publish。关单已提交但进程死掉，e7 仍能恢复投递。</span><span class="lang-en">The third stroke connects Relay to Order DB outbox; the API does not directly publish after committing. If the process dies after closure commits, e7 remains available for delivery.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d6s4t d6s4d">
+          <title id="d6s4t">A downstream acknowledgement follows durable deduplication</title>
+          <desc id="d6s4d">Relay sends e7 to Event sink. Event sink commits its durable inbox and effect before acknowledging Relay. Relay can resend e7 after an acknowledgement loss.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="96" y="18" width="848" height="364" rx="18" class="boundary"/><text x="112" y="38" class="tiny">BUSINESS EFFECT · Schedule DB and Order DB are separate transactions</text>
+          <rect x="140" y="90" width="160" height="76" rx="12" class="box"/><text x="220" y="125" text-anchor="middle" class="label">Worker A</text><text x="220" y="144" text-anchor="middle" class="sub">run r7 · close:o7</text>
+          <rect x="395" y="90" width="160" height="76" rx="12" class="box"/><text x="475" y="125" text-anchor="middle" class="label">Order API</text><text x="475" y="144" text-anchor="middle" class="sub">idempotent command</text>
+          <path d="M300 117 L385 117" class="wire"/><polygon points="395,117 385,122 385,112" class="head"/><text x="346" y="109" text-anchor="middle" class="tiny">close:o7</text>
+          <path d="M680 80 V150 A90 12 0 0 0 860 150 V80" class="store"/><ellipse cx="770" cy="80" rx="90" ry="12" class="store"/><text x="770" y="125" text-anchor="middle" class="label">Order DB</text><text x="770" y="143" text-anchor="middle" class="sub">order + inbox + outbox</text>
+          <path d="M555 117 L670 117" class="wire"/><polygon points="680,117 670,122 670,112" class="head"/><path d="M680 135 L565 135" class="wire reply"/><polygon points="555,135 565,130 565,140" class="head reply"/><text x="615" y="109" text-anchor="middle" class="tiny">local T2</text><text x="615" y="151" text-anchor="middle" class="tiny">commit</text><path d="M395 135 L310 135" class="wire reply"/><polygon points="300,135 310,130 310,140" class="head reply"/><text x="346" y="152" text-anchor="middle" class="tiny">result</text>
+          <text x="395" y="192" class="tiny">T2: inbox + order CAS + saved result</text><text x="395" y="214" class="tiny">+ outbox e7 (one local transaction)</text>
+          <rect x="650" y="270" width="160" height="70" rx="12" class="box"/><text x="730" y="302" text-anchor="middle" class="label">Relay</text><text x="730" y="321" text-anchor="middle" class="sub">read committed outbox</text>
+          <path d="M770 162 L770 260" class="wire async"/><polygon points="770,270 765,260 775,260" class="head async"/><text x="754" y="217" text-anchor="end" class="tiny">committed e7</text>
+          <g class="is-new">
+            <rect x="400" y="270" width="160" height="70" rx="12" class="box"/><text x="480" y="302" text-anchor="middle" class="label">Event sink</text><text x="480" y="321" text-anchor="middle" class="sub">durable inbox</text>
+            <path d="M650 294 L570 294" class="wire async"/><polygon points="560,294 570,289 570,299" class="head async"/><text x="605" y="282" text-anchor="middle" class="tiny">event e7</text><path d="M560 312 L640 312" class="wire reply"/><polygon points="650,312 640,317 640,307" class="head reply"/><text x="605" y="329" text-anchor="middle" class="tiny">inbox ack</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">Event sink 先提交自己的 inbox 去重与效果，再回确认。Relay 死在发送后、记账前会重发 e7，Outbox 本身没有消灭重复。</span><span class="lang-en">Event sink commits its own inbox deduplication and effect before acknowledging. Relay can resend e7 after a send-before-bookkeeping crash; an outbox does not eliminate duplicates.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d6s5t d6s5d">
+          <title id="d6s5t">Lost responses retry the same business operation</title>
+          <desc id="d6s5d">If the Order API response is lost, Worker A retries close:o7. Order API uses its stored inbox result rather than applying the order transition twice; the original reply path is the successful alternative.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="96" y="18" width="848" height="364" rx="18" class="boundary"/><text x="112" y="38" class="tiny">BUSINESS EFFECT · Schedule DB and Order DB are separate transactions</text>
+          <rect x="140" y="90" width="160" height="76" rx="12" class="box"/><text x="220" y="125" text-anchor="middle" class="label">Worker A</text><text x="220" y="144" text-anchor="middle" class="sub">run r7 · close:o7</text>
+          <rect x="395" y="90" width="160" height="76" rx="12" class="box"/><text x="475" y="125" text-anchor="middle" class="label">Order API</text><text x="475" y="144" text-anchor="middle" class="sub">idempotent command</text>
+          <path d="M300 117 L385 117" class="wire"/><polygon points="395,117 385,122 385,112" class="head"/><text x="346" y="109" text-anchor="middle" class="tiny">close:o7</text>
+          <path d="M680 80 V150 A90 12 0 0 0 860 150 V80" class="store"/><ellipse cx="770" cy="80" rx="90" ry="12" class="store"/><text x="770" y="125" text-anchor="middle" class="label">Order DB</text><text x="770" y="143" text-anchor="middle" class="sub">order + inbox + outbox</text>
+          <path d="M555 117 L670 117" class="wire"/><polygon points="680,117 670,122 670,112" class="head"/><path d="M680 135 L565 135" class="wire reply"/><polygon points="555,135 565,130 565,140" class="head reply"/><text x="615" y="109" text-anchor="middle" class="tiny">local T2</text><text x="615" y="151" text-anchor="middle" class="tiny">commit</text><path d="M395 135 L310 135" class="wire reply"/><polygon points="300,135 310,130 310,140" class="head reply"/><text x="346" y="152" text-anchor="middle" class="tiny">result</text>
+          <text x="395" y="192" class="tiny">T2: inbox + order CAS + saved result</text><text x="395" y="214" class="tiny">+ outbox e7 (one local transaction)</text>
+          <rect x="650" y="270" width="160" height="70" rx="12" class="box"/><text x="730" y="302" text-anchor="middle" class="label">Relay</text><text x="730" y="321" text-anchor="middle" class="sub">read committed outbox</text>
+          <path d="M770 162 L770 260" class="wire async"/><polygon points="770,270 765,260 775,260" class="head async"/><text x="754" y="217" text-anchor="end" class="tiny">committed e7</text>
+          <rect x="400" y="270" width="160" height="70" rx="12" class="box"/><text x="480" y="302" text-anchor="middle" class="label">Event sink</text><text x="480" y="321" text-anchor="middle" class="sub">durable inbox</text>
+          <path d="M650 294 L570 294" class="wire async"/><polygon points="560,294 570,289 570,299" class="head async"/><text x="605" y="282" text-anchor="middle" class="tiny">event e7</text><path d="M560 312 L640 312" class="wire reply"/><polygon points="650,312 640,317 640,307" class="head reply"/><text x="605" y="329" text-anchor="middle" class="tiny">inbox ack</text>
+          <g class="is-new">
+            <path d="M260 90 L260 82 Q260 74 268 74 L462 74 Q465 74 465 77 L465 80" class="wire fail"/><polygon points="465,90 460,80 470,80" class="head fail"/><text x="352" y="63" class="tiny">retry same close:o7</text>
+            <text x="395" y="240" class="tiny">same key + payload =&gt; stored result</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">第五笔标出丢响应的窗口。接收端必须返回同键同参数的已存结果；同键不同参数要报冲突，不能把未知当失败后换新键重做。</span><span class="lang-en">The fifth stroke marks a lost-response window. The receiver returns the stored result for the same key and payload and rejects changed payloads, rather than treating unknown as failure and retrying with a new key.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d6s6t d6s6d">
+          <title id="d6s6t">Run completion follows a confirmed business result</title>
+          <desc id="d6s6d">After a confirmed Order API result, Worker A conditionally marks run r7 succeeded in Schedule DB. Schedule DB acknowledges Worker A only if its generation and lease are current. A crash between T2 and run completion is repaired by retrying the same business key.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="96" y="18" width="848" height="364" rx="18" class="boundary"/><text x="112" y="38" class="tiny">BUSINESS EFFECT · Schedule DB and Order DB are separate transactions</text>
+          <rect x="140" y="90" width="160" height="76" rx="12" class="box"/><text x="220" y="125" text-anchor="middle" class="label">Worker A</text><text x="220" y="144" text-anchor="middle" class="sub">run r7 · close:o7</text>
+          <rect x="395" y="90" width="160" height="76" rx="12" class="box"/><text x="475" y="125" text-anchor="middle" class="label">Order API</text><text x="475" y="144" text-anchor="middle" class="sub">idempotent command</text>
+          <path d="M300 117 L385 117" class="wire"/><polygon points="395,117 385,122 385,112" class="head"/><text x="346" y="109" text-anchor="middle" class="tiny">close:o7</text>
+          <path d="M680 80 V150 A90 12 0 0 0 860 150 V80" class="store"/><ellipse cx="770" cy="80" rx="90" ry="12" class="store"/><text x="770" y="125" text-anchor="middle" class="label">Order DB</text><text x="770" y="143" text-anchor="middle" class="sub">order + inbox + outbox</text>
+          <path d="M555 117 L670 117" class="wire"/><polygon points="680,117 670,122 670,112" class="head"/><path d="M680 135 L565 135" class="wire reply"/><polygon points="555,135 565,130 565,140" class="head reply"/><text x="615" y="109" text-anchor="middle" class="tiny">local T2</text><text x="615" y="151" text-anchor="middle" class="tiny">commit</text><path d="M395 135 L310 135" class="wire reply"/><polygon points="300,135 310,130 310,140" class="head reply"/><text x="346" y="152" text-anchor="middle" class="tiny">result</text>
+          <text x="395" y="192" class="tiny">T2: inbox + order CAS + saved result</text><text x="395" y="214" class="tiny">+ outbox e7 (one local transaction)</text>
+          <rect x="650" y="270" width="160" height="70" rx="12" class="box"/><text x="730" y="302" text-anchor="middle" class="label">Relay</text><text x="730" y="321" text-anchor="middle" class="sub">read committed outbox</text>
+          <path d="M770 162 L770 260" class="wire async"/><polygon points="770,270 765,260 775,260" class="head async"/><text x="754" y="217" text-anchor="end" class="tiny">committed e7</text>
+          <rect x="400" y="270" width="160" height="70" rx="12" class="box"/><text x="480" y="302" text-anchor="middle" class="label">Event sink</text><text x="480" y="321" text-anchor="middle" class="sub">durable inbox</text>
+          <path d="M650 294 L570 294" class="wire async"/><polygon points="560,294 570,289 570,299" class="head async"/><text x="605" y="282" text-anchor="middle" class="tiny">event e7</text><path d="M560 312 L640 312" class="wire reply"/><polygon points="650,312 640,317 640,307" class="head reply"/><text x="605" y="329" text-anchor="middle" class="tiny">inbox ack</text>
+          <path d="M260 90 L260 82 Q260 74 268 74 L462 74 Q465 74 465 77 L465 80" class="wire fail"/><polygon points="465,90 460,80 470,80" class="head fail"/><text x="352" y="63" class="tiny">retry same close:o7</text>
+          <text x="395" y="240" class="tiny">same key + payload =&gt; stored result</text>
+          <g class="is-new">
+            <path d="M140 245 V315 A80 12 0 0 0 300 315 V245" class="store"/><ellipse cx="220" cy="245" rx="80" ry="12" class="store"/><text x="220" y="290" text-anchor="middle" class="label">Schedule DB</text><text x="220" y="308" text-anchor="middle" class="sub">r7 · current generation</text>
+            <path d="M220 166 L220 223" class="wire"/><polygon points="220,233 215,223 225,223" class="head"/><text x="234" y="207" class="tiny">CAS success</text><path d="M300 270 L332 270 Q340 270 340 262 L340 162 Q340 154 332 154 L310 154" class="wire reply"/><polygon points="300,154 310,149 310,159" class="head reply"/><text x="353" y="235" class="tiny">saved</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">完整图最后才接调度成功：拿到业务端确定结果后，Worker A 带当前代次 CAS 写 r7。若 T2 成功但这一步丢了，下次同键重试读取原结果，再完成状态；通知投递是独立进度。</span><span class="lang-en">Only the final stroke records scheduler success: after a confirmed business result, Worker A completes r7 with its current generation. If T2 succeeded but this step was lost, a same-key retry retrieves the result then completes the run; event delivery has separate progress.</span></figcaption>
+      </div>
+    </figure><pre data-language="Pseudocode · business transaction and outbox" data-kind="pseudocode" data-source="close_order.pseudo"><code>close_order(authenticated_tenant, key, order_id, canonical_payload):
+  require caller may close this tenant&#x27;s order and key == &#x27;close:&#x27; + order_id
+  BEGIN                                    // T2 is ONLY in Order DB
+  o = SELECT * FROM orders WHERE tenant=:tenant AND id=order_id FOR UPDATE
+  if o is absent: ROLLBACK; return NOT_FOUND
+  old = SELECT * FROM inbox WHERE tenant=:tenant AND operation_key=key
+  if old exists:
+    if old.payload != canonical_payload: ROLLBACK; return CONFLICT
+    COMMIT; return old.result
+  t = SELECT clock_timestamp()              // Order DB judges business deadline
+  if o.state == &#x27;UNPAID&#x27; and o.close_at &gt; t:
+    ROLLBACK; return RETRY_AT(o.close_at)     // do NOT cache an early no-op receipt
+  if o.state == &#x27;UNPAID&#x27;:
+    changed = UPDATE orders SET state=&#x27;CLOSED&#x27;
+              WHERE tenant=:tenant AND id=order_id AND state=&#x27;UNPAID&#x27;
+                    AND close_at &lt;= t RETURNING id
+    require changed has exactly one row
+    result = CLOSED
+    INSERT INTO outbox(tenant, event_id, payload) VALUES(:tenant, &#x27;closed:&#x27;+o.id, ...)
+  else: result = NOOP_TERMINAL              // paid/closed cannot reopen here
+  INSERT INTO inbox(tenant, operation_key, payload, result) VALUES(...)
+  COMMIT; return result
+  // Any error rolls back order + receipt + event; unknown COMMIT =&gt; same-key retry.
+  // Worker marks run succeeded only after CLOSED/NOOP_TERMINAL is confirmed.
+  // Relay sends committed events, then records delivery; a lost ACK may resend.
+  // Sink commits UNIQUE(tenant,event_id) inbox + its local effect before ACK.</code></pre>
+<div class="bilingual"><div class="lang-zh"><p>本例订单的 PAID/CLOSED 是不可重新打开的终态；canonical_payload 由已验证 order_id 和操作构造，不包含 attempt_id。同租户、同 key 不同参数返回冲突。提前叫醒但尚未到业务 deadline 时返回 RETRY_AT，<strong>不能保存“无需关闭”回执</strong>，否则到真正截止点仍会一直重放早期 no-op。worker 对 RETRY_AT 重新安排原操作，不标 succeeded。</p></div><div class="lang-en"><p>PAID/CLOSED are non-reopenable terminal states in this example. canonical_payload is constructed from validated order identity and operation, without attempt_id. Same-tenant/same-key changed input conflicts. An early wake-up returns RETRY_AT without saving a terminal no-op receipt; otherwise later legitimate closure would replay that early no-op forever. The worker reschedules the original operation on RETRY_AT rather than marking success.</p></div></div>
+<div class="bilingual"><div class="lang-zh"><p>T2 已提交、响应丢失或 run 完成写丢失：保留 unknown，用同键取得原结果，再由当前代次完成 run。run succeeded 在本章指订单已关闭或已处于不需关闭的终态；通知另看 outbox。Relay 发送后记 delivered 前崩溃会重投，Event sink 必须把非空唯一 (tenant,event_id) inbox 与本地效果同事务提交再 ACK。[9]</p></div><div class="lang-en"><p>If T2 commits but the reply or run completion write is lost, retain uncertainty, retrieve the original same-key result, then complete using the current generation. Here succeeded means closed or an already terminal no-op; notification progress belongs to outbox. A relay crash after sending but before delivered bookkeeping resends the event. The sink commits a non-null unique (tenant,event_id) inbox and its local effect together before ACK. [9]</p></div></div>
+<div class="bilingual"><div class="lang-zh"><p>该证明只保护支持本地事务/幂等契约的接收端。普通邮件接口没有发送幂等键时，Outbox 仍可能重复发邮件；取消、超时和调度租约不能撤回它。业务去重期限覆盖所有可能重放，关单键保留到订单归档，不随七天 run 历史一起删除。Kubernetes CronJob 也明确近似调度可重复或漏建，要求幂等；并发策略只约束同一 CronJob。[10]</p></div><div class="lang-en"><p>The proof applies only to receivers supporting the local transaction/idempotency contract. A plain email interface without send idempotency may still send twice through an outbox; cancellation, timeout and scheduler leases cannot undo it. Effect retention covers every permitted replay: keep close keys until order archival independently of seven-day run history. Kubernetes CronJob likewise documents approximate creation with duplicates or omissions, requiring idempotency; concurrency policies apply within a CronJob. [10]</p></div></div>
+</section>
+<section><h2><span class="lang-zh">复盘与可运行验证</span><span class="lang-en">Review and executable checks</span></h2>
+<div class="bilingual"><div class="lang-zh"><p>口述四个落点：T1 留唯一 ready 与游标；claim 留当前代次与租约；超时留原键和未知结果；业务 T2 留效果、回执与事件。扩规模先指出扫描、执行还是下游预算不足，跨地域先定唯一权威。</p></div><div class="lang-en"><p>Name four durable facts: T1’s unique ready row and cursor; the claim’s generation and lease; the original key and uncertainty after timeout; and business T2’s effect, receipt and event. Scale the exhausted scan, execution or downstream budget; establish authority before adding regions.</p></div></div>
+<div class="bilingual"><div class="lang-zh"><p>六段是教学 SQL/伪代码，不是可编译 Java。<a href="../examples/ch25/README.md">examples/ch25</a> 提供 Python 3 标准库 SQLite 适配器与同源校验：实际两连接事务、回滚、过期旧写、取消、偏移相位、Outbox 跨库重投均可执行。SQLite BEGIN IMMEDIATE 串行写者，比 PostgreSQL 行锁更粗；fixture_clock 是受控测试行，calendar 只实现 UTC 固定间隔和一次性，未验证真实 PG SKIP LOCKED、授时、复制切主、网络故障或生产吞吐。[13]</p></div><div class="lang-en"><p>These six blocks are teaching SQL/pseudocode, not compilable Java. <a href="../examples/ch25/README.md">examples/ch25</a> provides a Python 3 standard-library SQLite adapter and source checks, executing real two-connection transactions, rollback, stale writes, cancellation, shifted phases and cross-database outbox replay. SQLite BEGIN IMMEDIATE serializes writers more coarsely than PostgreSQL row locks. fixture_clock is a controlled test row; the calendar fixture implements UTC fixed intervals and one-shot jobs only. Real PG SKIP LOCKED, clocks, replication/failover, network failures and production throughput remain untested. [13]</p></div></div>
+</section>
+<section><h2><span class="lang-zh">引用与延伸</span><span class="lang-en">References and follow-ups</span></h2>
+<ol class="references">
+<li id="ref1">[1] PostgreSQL Global Development Group, <a href="https://www.postgresql.org/docs/18/sql-select.html">PostgreSQL 18 · SELECT</a> · <span class="lang-zh">官方版本文档，2026-10-23 核验。SKIP LOCKED 的队列消费者用途和不一致视图边界；批量 100 是本章假设。</span><span class="lang-en">Official versioned documentation, verified 2026-10-23. Queue consumers and inconsistent-view boundary of SKIP LOCKED; batch size 100 is our assumption.</span></li>
+<li id="ref2">[2] PostgreSQL Global Development Group, <a href="https://www.postgresql.org/docs/18/explicit-locking.html">PostgreSQL 18 · Explicit Locking</a> · <span class="lang-zh">官方版本文档，2026-10-23 核验。行锁在事务结束释放，不能当跨事务执行租约。</span><span class="lang-en">Official versioned documentation, verified 2026-10-23. Row locks end with transactions; execution leases need durable state.</span></li>
+<li id="ref3">[3] PostgreSQL Global Development Group, <a href="https://www.postgresql.org/docs/18/ddl-constraints.html">PostgreSQL 18 · Constraints</a> · <span class="lang-zh">官方版本文档，2026-10-23 核验。组合唯一约束及默认空值行为；火点字段全部 NOT NULL。</span><span class="lang-en">Official versioned documentation, verified 2026-10-23. Composite uniqueness and default null behavior; all occurrence-key fields are non-null.</span></li>
+<li id="ref4">[4] Martin Kleppmann, <a href="https://martin.kleppmann.com/2016/02/08/how-to-do-distributed-locking.html">How to do distributed locking · 2016</a> · <span class="lang-zh">原作者文章。核验长暂停与存储侧 fencing；图中 41/42 为本章代次例子，不引用原文令牌数字。</span><span class="lang-en">Author article. Verifies long pauses and resource-enforced fencing; 41/42 are our per-run generation example.</span></li>
+<li id="ref5">[5] Quartz, <a href="https://www.quartz-scheduler.org/documentation/quartz-2.3.0/configuration/ConfigJobStoreTX.html">Quartz 2.3.0 · JobStoreTX Configuration</a> · <span class="lang-zh">官方版本文档。原文默认 misfireThreshold=60000 ms=60 秒；不是本章 SLO。</span><span class="lang-en">Official versioned documentation. Default misfireThreshold=60000 ms=60 s; not our SLO.</span></li>
+<li id="ref6">[6] Apache Airflow, <a href="https://airflow.apache.org/docs/apache-airflow/3.0.0/core-concepts/dag-run.html">Airflow 3.0.0 · DAG Runs</a> · <span class="lang-zh">官方版本文档。核验 catchup_by_default=False 与显式逐区间补齐；不外推行业默认。</span><span class="lang-en">Official versioned documentation. Verifies catchup_by_default=False and explicit interval replay; no universal default is inferred.</span></li>
+<li id="ref7">[7] Netty, <a href="https://netty.io/4.1/api/io/netty/util/HashedWheelTimer.html">Netty 4.1 · HashedWheelTimer</a> · <span class="lang-zh">官方 API 文档。核验近似超时与 tick 检查；1 秒、60 槽是本章示例。</span><span class="lang-en">Official API documentation. Approximate timeout scheduling and tick checks; 1 s and 60 slots are our illustration.</span></li>
+<li id="ref8">[8] Malcolm Featonby / AWS Builders’ Library, <a href="https://aws.amazon.com/builders-library/making-retries-safe-with-idempotent-APIs/">Making retries safe with idempotent APIs · 2021</a> · <span class="lang-zh">作者工程原文。核验调用方请求身份、迟到重试和同键不同意图；close:o7 是本章业务键。</span><span class="lang-en">Author engineering article. Caller identity, late retries and changed intent; close:o7 is our business key.</span></li>
+<li id="ref9">[9] AWS Prescriptive Guidance, <a href="https://docs.aws.amazon.com/prescriptive-guidance/latest/cloud-design-patterns/transactional-outbox.html">Transactional outbox pattern</a> · <span class="lang-zh">官方工程文档，2026-10-23 核验。同库事务事件行及消费者幂等；不据此承诺网络恰好一次。</span><span class="lang-en">Official engineering documentation, verified 2026-10-23. Same-database event transaction and consumer idempotency; no exactly-once network claim.</span></li>
+<li id="ref10">[10] Kubernetes, <a href="https://kubernetes.io/docs/concepts/workloads/controllers/cron-jobs/">CronJob · limitations</a> · <span class="lang-zh">官方文档，2026-10-23 核验。近似调度可重复或缺失，需幂等；并发策略只在同 CronJob 内。</span><span class="lang-en">Official documentation, verified 2026-10-23. Approximate scheduling may duplicate or miss Jobs; per-CronJob concurrency and idempotency.</span></li>
+<li id="ref11">[11] Quartz, <a href="https://www.quartz-scheduler.org/documentation/quartz-2.5.x/tutorials/crontrigger.html">Quartz 2.5.x · CronTrigger Tutorial</a> · <span class="lang-zh">官方文档，2026-10-23 核验。夏令时的跳过/重复警告；不做 cron 语法手册。</span><span class="lang-en">Official documentation, verified 2026-10-23. DST skip/repeat warning; no cron syntax manual.</span></li>
+<li id="ref12">[12] PostgreSQL Global Development Group, <a href="https://www.postgresql.org/docs/18/functions-datetime.html#FUNCTIONS-DATETIME-CURRENT">PostgreSQL 18 · Current Date/Time</a> · <span class="lang-zh">now/CURRENT_TIMESTAMP 为事务起点；clock_timestamp 为实际取样时间，2026-10-23 核验。</span><span class="lang-en">now/CURRENT_TIMESTAMP uses transaction start; clock_timestamp samples actual time. Verified 2026-10-23.</span></li>
+<li id="ref13">[13] SQLite, <a href="https://www.sqlite.org/lang_transaction.html">Transaction</a> · <span class="lang-zh">真实单写者与 BEGIN IMMEDIATE 的验证边界，2026-10-23 核验。</span><span class="lang-en">Single-writer and BEGIN IMMEDIATE validation boundary. Verified 2026-10-23.</span></li></ol><p class="cite"><a class="chip" href="ch08.html">Ch08</a> <a class="chip" href="ch18.html">Ch18</a> <a class="chip" href="ch24.html">Ch24</a> <a class="chip" href="ch34.html">Ch34</a> <a class="chip" href="ch41.html">Ch41</a></p></section>
+<section><h2><span class="lang-zh">闪卡</span><span class="lang-en">Flashcards</span></h2>
+<p class="cite"><span class="lang-zh">点按或用 Enter/Space 翻面；回答时说出持久记录、键与失败边界。</span><span class="lang-en">Click or press Enter/Space; name the durable row, key and failure boundary.</span></p><div class="cards-grid">
+<button type="button" class="flip"><span class="q"><span class="lang-zh">唯一火点能保证 handler 只调用一次吗？</span><span class="lang-en">Does one occurrence mean one handler call?</span></span><span class="a"><span class="lang-zh">不能。UNIQUE 约束一行 run；attempt 可重复，业务效果由稳定键和接收端事务保护。</span><span class="lang-en">No. UNIQUE protects one run row; attempts repeat, while stable keys and receiver transactions protect effects.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">T1 为什么不能先推进游标再发线程池？</span><span class="lang-en">Why not advance the cursor then enqueue in memory?</span></span><span class="a"><span class="lang-zh">两步之间崩溃会丢火点；ready、冻结输入与下一游标同事务，提交后可重投。</span><span class="lang-en">A crash in between loses work. Commit ready, frozen input and cursor together, then retry delivery.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">改版后已有 run 读哪个参数？</span><span class="lang-en">Which input does an existing run use after an edit?</span></span><span class="a"><span class="lang-zh">用自己的冻结 payload/effect_key，不读最新 job 参数；新版本不自动授权第二次业务效果。</span><span class="lang-en">Use its own frozen payload/effect_key, not new job input. A new version does not automatically authorize another effect.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">为什么 166.7/s 仍可能排几十秒？</span><span class="lang-en">Why can 166.7/s still cause tens of seconds of queueing?</span></span><span class="a"><span class="lang-zh">整分钟 10,000 同时到期；固定0.2秒、56槽需179轮，即35.8秒，其他开销另算。</span><span class="lang-en">10,000 align at a minute boundary. At fixed 0.2s with 56 slots, 179 rounds take 35.8s, plus overhead.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">56 槽与七天历史怎么算？</span><span class="lang-en">How are 56 slots and seven-day history derived?</span></span><span class="a"><span class="lang-zh">ceil((10000÷60)×0.2÷0.6)=56；14.4M×200B×7=20.16GB原始，不含索引等。</span><span class="lang-en">ceil((10000/60)×0.2/0.6)=56; 14.4M×200B×7=20.16GB raw, excluding indexes and extras.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">为什么不能用事务开始 now 判续租？</span><span class="lang-en">Why not use transaction-start now for renewal?</span></span><span class="a"><span class="lang-zh">等行锁可能跨过租约截止点；持锁后采样 clock_timestamp，再校验状态、owner、generation 与 lease。</span><span class="lang-en">Waiting for the row lock may cross expiry. Sample clock_timestamp after locking, then check state, owner, generation and lease.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">A 代次41，B接管为42后会怎样？</span><span class="lang-en">What happens after B replaces generation 41 with 42?</span></span><span class="a"><span class="lang-zh">A 的心跳/完成被权威行拒绝，但已发外部动作仍需业务幂等；单run代次不是跨job资源fence。</span><span class="lang-en">Authority rejects A heartbeat/completion, but in-flight effects still need receiver idempotency. A per-run generation is not a cross-job resource fence.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">超时五次或取消运行中任务，能说从未执行吗？</span><span class="lang-en">Do five timeouts or running cancellation prove no execution?</span></span><span class="a"><span class="lang-zh">不能。保留原键、unknown与review；取消未尝试ready才可记cancelled，确定效果仍可完成。</span><span class="lang-en">No. Retain the original key, uncertainty and review. Only unattempted ready can be cancelled as unstarted; confirmed effects may still complete.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">1200次补偿为什么至少60秒？</span><span class="lang-en">Why does 1200-run recovery need at least 60 seconds?</span></span><span class="a"><span class="lang-zh">[09:00,11:00)每job120槽；十个1200。预算100/s减正常80/s余20/s，理想1200÷20=60。</span><span class="lang-en">[09:00,11:00) has 120 slots per job, 1200 for ten. Spare capacity is 100−80=20/s; ideal drain is 60s.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">分页补偿的 cutoff 与任务相位怎么保留？</span><span class="lang-en">How do recovery pages retain cutoff and phase?</span></span><span class="a"><span class="lang-zh">首次固定cutoff，剩余页继续；30/90/150秒火点在180秒恢复，下一个210，合并身份150，不能按epoch取模。</span><span class="lang-en">Pin cutoff until pages finish. Fires 30/90/150s recovered at 180s give next=210 and coalesce=150; epoch modulo changes the schedule.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">时间轮重启只装未来够吗？</span><span class="lang-en">Is future-only wheel rebuilding sufficient?</span></span><span class="a"><span class="lang-zh">不够，还扫停机到期定义；一次性默认补原deadline，T1留原身份并置next=null。</span><span class="lang-en">No. Also scan deadlines missed during downtime. A one-shot defaults to its original deadline and sets next=null in T1.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">提前关单为何不存 no-op 回执？</span><span class="lang-en">Why not save a no-op receipt on early closure?</span></span><span class="a"><span class="lang-zh">它会让真正到期后仍重放早期no-op。返回RETRY_AT，不存终态回执；已支付等终态才可持久no-op。</span><span class="lang-en">It would replay forever after the real deadline. Return RETRY_AT without a terminal receipt; paid/closed terminal states may save a no-op.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">T2成功但run完成回包丢失如何恢复？</span><span class="lang-en">How is lost run completion recovered after T2 commits?</span></span><span class="a"><span class="lang-zh">订单端同键取原结果，再用当前代次完成run；两个库不假装同事务，通知进度另看outbox。</span><span class="lang-en">Read the original same-key order result, then complete with the current generation. The databases are separate; outbox tracks notifications.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">Outbox为何仍需接收端inbox？</span><span class="lang-en">Why does outbox still require receiver inbox?</span></span><span class="a"><span class="lang-zh">发送后记delivered前会重投；接收端非空唯一事件键与本地效果同事务再ACK。</span><span class="lang-en">A crash before delivery bookkeeping resends. Commit a non-null unique event key and local effect together before ACK.</span></span></button>
+</div></section>
+  <p><button type="button" class="read-toggle"><span class="when-off"><span class="lang-zh">我已学完本章</span><span class="lang-en">Mark this chapter done</span></span><span class="when-on"><span class="lang-zh">已学完本章</span><span class="lang-en">Completed</span></span></button></p>
+  <p class="cite"><span class="lang-zh">进度存在这台浏览器里。</span><span class="lang-en">Saved in this browser only.</span></p>
+</article>
+</main>
+<script src="../assets/js/nav.js"></script>
+<script src="../assets/js/lang.js"></script>
+<script src="../assets/js/slides.js"></script>
+<script src="../assets/js/progress.js"></script>
+</body>
+</html>

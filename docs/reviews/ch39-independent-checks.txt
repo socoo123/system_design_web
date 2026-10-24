@@ -1,0 +1,127 @@
+$ node tools/check.mjs
+STATS 45 chapters; 276 decks; 1411 frames; 183 code blocks (no count quotas)
+PASS structure, local resources, accessibility, bilingual nesting, chapter entries and animation preservation
+
+$ node tools/audit-chapter.mjs ch39
+
+ch39 STATS {"decks":7,"frames":37,"perDeck":[5,5,6,5,6,5,5],"staticImages":0,"code":3,"han":6168,"zh":223,"en":223}
+PASS structural checks; content/translation/rendering require independent review
+
+$ node examples/ch39/sync.mjs --check
+3 Ch39 blocks match executable Java17 source
+
+$ python3 -B docs/reviews/ch39-independent-numeric.py
+PASS 36 independent arithmetic checks
+
+$ /Library/Java/JavaVirtualMachines/jdk-17.0.10.jdk/Contents/Home/bin/java -version
+java version "17.0.10" 2024-01-16 LTS
+Java(TM) SE Runtime Environment (build 17.0.10+11-LTS-240)
+Java HotSpot(TM) 64-Bit Server VM (build 17.0.10+11-LTS-240, mixed mode, sharing)
+
+$ /Library/Java/JavaVirtualMachines/jdk-17.0.10.jdk/Contents/Home/bin/javac --release 17 -d /var/folders/5k/y6qh6sfd2g30js0v0qrv4mfr0000gn/T/ch39-independent-kybhzkc8 examples/ch39/LoadBalancing.java examples/ch39/LoadBalancingTest.java docs/reviews/ch39-independent-GateProbe.java
+
+$ /Library/Java/JavaVirtualMachines/jdk-17.0.10.jdk/Contents/Home/bin/java -cp /var/folders/5k/y6qh6sfd2g30js0v0qrv4mfr0000gn/T/ch39-independent-kybhzkc8 Ch39IndependentGateProbe
+PASS 53 independent assertions
+P2C compares only two sampled eligible endpoints
+filter precedes sampling; second sample excludes first
+no READY+healthy target fails closed
+tie remains within selected ready pair
+archived stale-drain P1: old incarnation cannot close fresh READY gate
+current incarnation still admits after stale command
+old unhealthy/ACK/ready callbacks do not mutate fresh gate
+old callbacks preserve both current permits
+foreign completion cannot free a fresh incarnation
+first finish succeeds once, duplicate does not release another slot
+double finish preserves other active work
+stale-inc command also rejects on same drain revision before idempotent return
+same-revision repeat cannot extend cutoff
+new revision cannot restart an existing drain
+stale selector cannot acquire work after local close
+late health success cannot reopen draining gate
+wrong ACK revision/incarnation is rejected
+active work without ACK waits before cutoff
+exact trusted withdrawal ACK recorded
+at exact cutoff active work needs forced path
+FORCE_REQUIRED does not invent physical completion
+physical completion frees original permit
+exact ACK plus actual zero permits clean exit
+zero work without all-ingress evidence is not clean exit
+missing ACK retains bounded forced path even idle
+UNHEALTHY cannot be revived in the old incarnation
+health loss closes admission without clearing work
+old unhealthy work still completes exactly once
+cannot drain before WARMING has passed external readiness checks
+invalid early drain leaves WARMING intact
+twenty ingress contenders finish
+twenty stale ingress snapshots cannot exceed authoritative three slots
+all actual winners finish without leakage
+physical handler has acquired its permit
+caller abandonment cannot release live handler capacity
+only physical handler completion releases capacity
+admission expires while blocked on implementation lock
+expired lock waiter adds no active record
+drain relative budget starts from lock-after observation
+poll observes cutoff crossed during lock wait
+valid relative deadline accepts across signed ticks 0
+exact relative deadline rejects across signed ticks 0
+valid relative deadline accepts across signed ticks 1
+exact relative deadline rejects across signed ticks 1
+valid relative deadline accepts across signed ticks 2
+exact relative deadline rejects across signed ticks 2
+valid relative deadline accepts across signed ticks 3
+exact relative deadline rejects across signed ticks 3
+valid relative deadline accepts across signed ticks 4
+exact relative deadline rejects across signed ticks 4
+negative drain budget rejected
+ambiguous half-range drain budget rejected
+invalid drain budget leaves current gate open
+
+$ /Library/Java/JavaVirtualMachines/jdk-17.0.10.jdk/Contents/Home/bin/java -cp /var/folders/5k/y6qh6sfd2g30js0v0qrv4mfr0000gn/T/ch39-independent-kybhzkc8 LoadBalancingTest
+PASS 39 targeted checks
+- filter unavailable before P2C; two distinct candidates choose 2 not 8
+- no available endpoint rejects instead of falling back to unhealthy
+- empty snapshot
+- one available endpoint
+- warming denies admission
+- readiness requires current incarnation
+- stale incarnation denied
+- exact deadline is expired
+- normal admission holds one permit
+- ready but saturated denies work
+- another incarnation cannot release old work
+- duplicate completion cannot double release
+- two ingress threads: exactly one winner
+- last-slot race never exceeds local limit
+- deadline crossed while waiting for lock: deny with lock-after time
+- expired waiter consumes no capacity
+- drain deadline starts after lock acquisition
+- stale selector denied after local close
+- late success probe cannot revive DRAINING
+- removal ACK binds exact incarnation and revision
+- drain keeps active work alive
+- duplicate drain never extends original deadline
+- changed drain revision cannot reset lifecycle
+- trusted coordinator confirms withdrawal
+- before cutoff retains old active work
+- drain polling observes deadline crossed under lock contention
+- cancel/close decision does not fabricate resource completion
+- old handler completes once after deadline
+- ACK plus actual zero allows clean exit
+- zero active without removal evidence is insufficient
+- lost removal ACK reaches bounded forced path
+- unhealthy gate denies new work
+- failure neither clears work nor revives by probe
+- late drain for prior incarnation cannot close replacement
+- old route and old completion cannot affect replacement incarnation
+- replacement retains its own permit
+- old completion belongs only to old gate
+- monotonic tick wrap does not prematurely expire future deadline
+- deadline comparison survives monotonic tick wrap
+
+$ node --check docs/reviews/ch39-independent-browser.mjs
+
+$ node --check docs/reviews/ch39-independent-render.mjs
+
+$ node --check docs/reviews/ch39-independent-focus.mjs
+
+$ git diff --check

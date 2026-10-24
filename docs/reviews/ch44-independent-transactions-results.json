@@ -1,0 +1,50 @@
+{
+  "passed": true,
+  "sqlite": "3.51.0",
+  "sqlStatementsFromSources": 8,
+  "checks": [
+    "16 concurrent equal requests commit one order/result/outbox and recover the same result",
+    "same K with two concurrently different payloads has one commit and one conflict",
+    "tenant and operation scopes both participate in stable K identity",
+    "abort after all order/outbox/result writes leaves no partial intent",
+    "dropped caller ACK and later trimmed result preserve original order identity",
+    "local inbox replays exact effect, and binds both account and delta",
+    "consumer/tenant scopes are separate; missing account and precommit abort roll back inbox/effect",
+    "16 concurrent inbox deliveries apply one +7; independent expected balances are 905/523/1000",
+    "18 direct DB NULL/empty/blank identity injections rejected across all scope columns"
+  ],
+  "count": 9,
+  "finalCounts": [
+    5,
+    5,
+    5,
+    5
+  ],
+  "balances": [
+    [
+      "other-tenant",
+      "a",
+      905
+    ],
+    [
+      "review-tenant",
+      "a",
+      523
+    ],
+    [
+      "review-tenant",
+      "b",
+      1000
+    ]
+  ],
+  "sourceHashes": {
+    "examples/ch44/accept.pseudo": "135fa9e41309e38d20ce38aeba5ec6d840e7dcfa4d777e15d76648b51ef36bf1",
+    "examples/ch44/consume.pseudo": "9d1e0ecc0c7b4875d6860ffed05747ca0a74bd93cb888730ef7a29f0e56e84a0",
+    "examples/ch44/schema.sql": "51ee511c868ccd93d4210647bcd32476478e1fdafe5929447f4cadbae1ee3067"
+  },
+  "limits": [
+    "SQLite concurrency and local transactions only",
+    "ACK loss is caller-modelled, not a network injection",
+    "Authentication/current authorization and PostgreSQL were not executed"
+  ]
+}

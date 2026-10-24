@@ -1,0 +1,22 @@
+split(parent, route_epoch):
+  P = ALL source partitions that can emit a move into or out of parent
+  pause projectors at hole-free applied offsets S[p] for every p in P
+  snapshot = read parent members + tombstones while its writers are fenced
+  resume parent projection; COPY live rows by point and tombstones to ALL four children
+  // Copy guards compare versions, even if a newer live replay arrived first.
+  REPLAY source offsets > S[p] to children; do not skip deletes or cross-border moves
+  CAS durable route directory: PARENT(e) -> MIGRATING(e, parent + children)
+  // Parent keeps receiving all live changes; copy/replay may safely retry.
+  pause every relevant projector at offsets W[p] after its in-flight writes finish
+  drain child replay until applied[p] >= W[p] for ALL p in P
+  // Advance applied[p] only over a contiguous prefix with all destination effects durable.
+  CAS directory: MIGRATING(e) -> CHILDREN(e+1)
+  invalidate route/cell-cache pointers; retain their ORIGINAL not_after deadlines
+  resume projection to BOTH parent and children through the old-reader grace period
+  wait until all old routes expired AND all readers using them finished/expired
+  fence old parent writers/readers; retire parent; project only to children
+on failure before cutover: keep parent serving; resume from durable migration state
+// Pauses affect index visibility, not authority commits; events stay in the durable log.
+// An entity version is NOT a cross-entity offset. W is a per-partition vector.
+// Leases/epochs are checked by storage; a late worker cannot continue on a retired parent.
+// CAS changes one directory record. It does not atomically copy data across shards.

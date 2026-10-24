@@ -1,0 +1,17 @@
+{
+  "status": "open",
+  "severity": "P1",
+  "family": "durable quota cleanup",
+  "htmlSHA256": "a53b7cc84d7a33443fd5795793acd36085ce807a2a3e72e6299add3324fc4f5f",
+  "admissionSHA256": "3477752c6387558b6b5791ddcacc02b87bf04cc13b38a70e67a68b094e8928bd",
+  "kind": "independent source trace, not an executing scheduler",
+  "branch": "on_release(owner):                         # same event loop; poll ledger transitions\n  if worker_ledger.state(owner) != RELEASED: return\n  grant = charged.remove(owner)             # absent means duplicate notification\n  if grant:\n    active[grant.tenant] -= 1; tenant_page_credits[grant.tenant] -= grant.need\n    persist_terminal_and_quota_settlement(owner) # actual use; never assume all unused after launch\n",
+  "trace": [
+    "worker state RELEASED",
+    "charged.remove succeeds and decrements local counters",
+    "persist_terminal_and_quota_settlement fails or COMMIT result unknown",
+    "duplicate on_release sees no grant",
+    "terminal/outbox persistence never retried by this function"
+  ],
+  "expected": "persist/recover durable intent before charged.remove, or preserve a retryable pending cleanup record"
+}

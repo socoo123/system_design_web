@@ -1,0 +1,79 @@
+node tools/check.mjs
+STATS 45 chapters; 276 decks; 1411 frames; 183 code blocks (no count quotas)
+PASS structure, local resources, accessibility, bilingual nesting, chapter entries and animation preservation
+
+
+node tools/audit-chapter.mjs ch39
+
+ch39 STATS {"decks":7,"frames":37,"perDeck":[5,5,6,5,6,5,5],"staticImages":0,"code":3,"han":6168,"zh":223,"en":223}
+PASS structural checks; content/translation/rendering require independent review
+
+
+node examples/ch39/sync.mjs --check
+3 Ch39 blocks match executable Java17 source
+
+
+/Library/Java/JavaVirtualMachines/jdk-17.0.10.jdk/Contents/Home/bin/javac -version
+javac 17.0.10
+
+
+/Library/Java/JavaVirtualMachines/jdk-17.0.10.jdk/Contents/Home/bin/javac -d /tmp/ch39-classes examples/ch39/LoadBalancing.java examples/ch39/LoadBalancingTest.java
+
+
+/Library/Java/JavaVirtualMachines/jdk-17.0.10.jdk/Contents/Home/bin/java -cp /tmp/ch39-classes LoadBalancingTest
+PASS 39 targeted checks
+- filter unavailable before P2C; two distinct candidates choose 2 not 8
+- no available endpoint rejects instead of falling back to unhealthy
+- empty snapshot
+- one available endpoint
+- warming denies admission
+- readiness requires current incarnation
+- stale incarnation denied
+- exact deadline is expired
+- normal admission holds one permit
+- ready but saturated denies work
+- another incarnation cannot release old work
+- duplicate completion cannot double release
+- two ingress threads: exactly one winner
+- last-slot race never exceeds local limit
+- deadline crossed while waiting for lock: deny with lock-after time
+- expired waiter consumes no capacity
+- drain deadline starts after lock acquisition
+- stale selector denied after local close
+- late success probe cannot revive DRAINING
+- removal ACK binds exact incarnation and revision
+- drain keeps active work alive
+- duplicate drain never extends original deadline
+- changed drain revision cannot reset lifecycle
+- trusted coordinator confirms withdrawal
+- before cutoff retains old active work
+- drain polling observes deadline crossed under lock contention
+- cancel/close decision does not fabricate resource completion
+- old handler completes once after deadline
+- ACK plus actual zero allows clean exit
+- zero active without removal evidence is insufficient
+- lost removal ACK reaches bounded forced path
+- unhealthy gate denies new work
+- failure neither clears work nor revives by probe
+- late drain for prior incarnation cannot close replacement
+- old route and old completion cannot affect replacement incarnation
+- replacement retains its own permit
+- old completion belongs only to old gate
+- monotonic tick wrap does not prematurely expire future deadline
+- deadline comparison survives monotonic tick wrap
+
+
+python3 docs/reviews/ch39-numeric-review.py
+PASS 31 arithmetic checks; these are assumptions, not benchmarks
+
+
+node --check examples/ch39/sync.mjs
+
+
+node --check docs/reviews/ch39-browser.mjs
+
+
+node --check docs/reviews/ch39-render.mjs
+
+
+git diff --check -- chapters/ch39.html examples/ch39 docs/reviews/ch39.md

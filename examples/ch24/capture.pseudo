@@ -1,0 +1,27 @@
+postCapture(verifiedEvidence):
+  e = verifiedEvidence  // trusted adapter result, never browser input
+  key = (e.environment, e.channel, e.account, e.captureId, CAPTURE)
+  begin transaction
+    p = lockPaymentBoundTo(e.attemptId)
+    require e.account == p.channelAccount
+    require e.amount == p.amount AND e.currency == p.currency
+    old = findPosting(key)
+    if old exists:
+      require old.payment/attempt/amount/currency == p/e.attemptId/e.amount/e.currency
+      commit; return old  // different event, same effect
+    require p.captured == 0  // this chapter permits one full capture
+    require attemptIsBoundToThisPayment(e.attemptId, p)
+    j = insertPosting(key, p.payNo, e.amount, e.currency)
+    appendEntry(j, PSP_RECEIVABLE, DR, e.amount, e.currency)
+    appendEntry(j, MERCHANT_PAYABLE, CR, e.amount, e.currency)
+    require atLeastTwoEntries(j)
+    require sumDebits(j, e.currency) == sumCredits(j, e.currency)
+    // All entry currencies/accounts must match this validated template.
+    p.captured = e.amount
+    markAttemptConfirmed(e.attemptId, e.captureId)
+    insertOutbox("paid:" + p.payNo, paymentPaid(p, j))
+  commit
+  return j
+on mismatch or a second distinct capture:
+  rollback; retain verified evidence in durable REVIEW
+  // Never discard external money; exceptional suspense handling is separate.

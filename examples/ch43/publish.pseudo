@@ -1,0 +1,27 @@
+publish(table, batch, digest, expected, candidate):
+  # All candidate objects are durable; batch identifies one logical operation.
+  BEGIN TRANSACTION
+    known = SELECT digest, snapshot FROM accepted
+            WHERE table_id = table AND batch_id = batch
+    if known exists:
+      require known.digest == digest
+      COMMIT; return known.snapshot
+    changed = UPDATE catalog SET current = candidate
+              WHERE table_id = table AND current = expected
+    if changed != 1:
+      ROLLBACK; return CONFLICT
+    INSERT accepted(table_id, batch_id, digest, snapshot)
+           VALUES(table, batch, digest, candidate)
+    # UNIQUE(table_id, batch_id); any insert failure rolls back UPDATE too.
+  COMMIT
+  return candidate
+
+on timeout or CONFLICT:
+  known = strongly_read_accepted(table, batch)
+  if known exists:
+    require known.digest == digest
+    return known.snapshot
+  # Absence does not rule out an in-flight transaction.
+  retry SAME batch + digest within budget, or return UNKNOWN
+  # Rebase only after refreshing and validating operation-specific assumptions.
+  # Never delete output while publication can still complete.

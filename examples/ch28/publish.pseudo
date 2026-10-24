@@ -1,0 +1,26 @@
+publish(auth, requestKey, draft):
+    require authenticated_and_authorized(auth, draft.namespace, "publish")
+    draft = freeze_validated_intent(draft)       // schema, size, ranges, approval
+    hash = SHA256(canonical_full_intent(draft))  // include expected g, rule, reason
+    BEGIN                                      // same authority database
+    current = SELECT Current WHERE namespace = draft.namespace FOR UPDATE
+    prior = SELECT Receipt WHERE (principal, namespace, key) =
+                                 (auth.principal, draft.namespace, requestKey)
+    if prior exists:                            // recheck after serialization
+        require prior.request_hash == hash else CONFLICT
+        COMMIT; return prior.result              // before checking expected g
+    require current.generation == draft.expected_generation else STALE
+    if draft has new content:
+        INSERT immutable Release                // same ID + different bytes conflicts
+    require stable_and_canary_belong_to_namespace(draft)
+    next = current.generation + 1               // including rule-only / rollback
+    UPDATE Current SET generation = next, pointers_and_rule = draft
+      WHERE namespace = draft.namespace AND generation = draft.expected_generation
+    require affected_rows == 1
+    INSERT Publication(namespace, next, principal, key, reason, previous_pointers)
+    INSERT Receipt(principal, namespace, key, hash, result = next)
+    INSERT ChangeLog(namespace, next)
+    COMMIT                                      // any error rolls back every row
+    return 201(next)                             // lost reply: retry same intent/key
+// Relay tails committed ChangeLog per connection owner; hints may repeat.
+// An unknown COMMIT outcome is resolved using the original receipt key.

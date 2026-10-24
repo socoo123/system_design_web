@@ -1,0 +1,29 @@
+dispatchCommittedAttempt(a7):
+  begin transaction
+    a = lockAttempt(a7)
+    if a.state in {CONFIRMED, DECLINED}: commit; return
+    if a.firstSendAt is null:
+      a.firstSendAt = databaseNow()
+      a.retryBefore = a.firstSendAt + adapter.safeReplayWindow
+    if databaseNow() >= a.retryBefore:
+      commit; enqueueResolver(a7); return
+    a.state = SENT  // commit BEFORE I/O: the request may leave
+    request = a.frozenPayload; key = a.channelKey
+  commit
+  // Adapter must enforce send deadline and account/operation contract.
+  // DB/outbox cannot fence a stale sender at the PSP.
+  result = adapter.send(request, key, deadline=a.retryBefore)
+  if result is authenticated captured evidence:
+    postCapture(result)  // same gate as webhook/reconciliation
+  else:
+    begin transaction
+      a = lockAttempt(a7)
+      if a.state in {CONFIRMED, DECLINED}: commit; return
+      if result proves final no-charge AND no future execution:
+        a.state = DECLINED
+      else:
+        a.state = UNKNOWN  // includes timeouts and ambiguous 5xx
+      saveEvidence(result)
+    commit
+  // A new attempt requires separate authorization and an irrevocably
+  // non-chargeable old command/object; elapsed time is not that proof.

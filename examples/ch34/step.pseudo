@@ -1,0 +1,30 @@
+advance(run, owner, epoch, roleRevision, expectedVersion):
+  BEGIN RunStore transaction; lock run
+    require current owner/epoch/roleRevision, version=expectedVersion, live lease
+    require RUNNING, not cancelled, before deadline
+    if unresolved action exists: COMMIT; return RECONCILE_OR_WAIT
+    step = current logical step
+    if step exists: require matching revisions, or perform explicit migration
+    if step exists and step.output is stored: COMMIT; return stored output + actions
+    if step does not exist:
+      require step_count < 12; increment step_count
+      INSERT step with workflow/model/tool revisions, messages,
+        retrieved evidence, recorded time/random values, input hash
+    require physical attempt and token reservation within remaining caps
+    INSERT attempt; reserve input + max_output tokens; bump run version
+    attemptVersion = updated run.version; retain exact owner/epoch/role token
+  COMMIT; on uncertain acknowledgment, read step/attempt before sending
+  output, usage = LLM_GW.call(step.immutableInput, attempt.id)  // outside TX
+  record trusted usage by attempt.id; missing usage keeps its reservation
+  proposals = validate(output, pinned schema and allowed workflow edge)
+  BEGIN RunStore transaction; lock run and step
+    require current owner/epoch/roleRevision, version=attemptVersion, live lease
+    require RUNNING, not cancelled, before deadline
+    if step exists and step.output is stored: COMMIT; return stored output + actions
+    UPDATE step SET output = proposals WHERE output IS NULL
+    INSERT exact actions with stable business intent, binding and PREPARED
+    INSERT checkpoint + next-state event; bump run version
+  COMMIT; only the committed winner may advance
+  // Tool dispatch separately checks state, budget, approval and Ch33 contract.
+  // Renewal/version changes require revalidation; never reuse the old entry version.
+  // No saved output: a new attempt may differ/cost more; never replace an intent.

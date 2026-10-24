@@ -1,0 +1,22 @@
+receiveWebhook(endpointConfig, rawBody, headers):
+  event = providerSDK.verify(rawBody, headers, endpointConfig.secret,
+                            endpointConfig.timestampTolerance)
+  require event.environment/account matches endpointConfig
+  begin transaction
+    old = findInbox(endpointScope, event.id)
+    if old exists:
+      if old.payloadHash != hash(rawBody):
+        appendReceiptAnomaly(old, hash(rawBody))
+    else:
+      insertInbox(endpointScope, event.id, rawBody, state=READY)
+  commit
+  return 2xx  // responsibility accepted, not money posted
+on invalid signature/account: return 400
+on unknown DB commit: return retryable error; same event can redeliver
+
+processInbox(claim):
+  evidence = validateOrFetchAuthoritativeObject(claim.event)
+  // Validate bound attempt, provider account, kind, amount and currency.
+  // Missing capture for a refund -> retain WAITING/REVIEW; do not invent it.
+  applyEvidenceThroughPostingGate(evidence)
+  markDoneIfLeaseMatches(claim)  // a stale claim cannot finish a new lease

@@ -1,0 +1,227 @@
+COMMAND node tools/check.mjs
+EXIT 0
+STATS 45 chapters; 276 decks; 1411 frames; 173 code blocks (no count quotas)
+PASS structure, local resources, accessibility, bilingual nesting, chapter entries and animation preservation
+
+
+COMMAND node --test tools/validation.test.mjs
+EXIT 0
+PASS short chapter, one frame, portrait SVG, no legend/is-new/citation quota accepted
+PASS language counts may differ
+PASS incorrect title chapter number rejected
+PASS duplicate IDs rejected
+PASS cross-language nesting rejected
+PASS missing local resource rejected
+PASS unsafe URL rejected
+PASS protocol-relative runtime script rejected
+PASS frame deletion rejected against baseline
+PASS slide wrapper rejected to match real player
+PASS missing slide caption rejected
+PASS animation frame reorder reported
+PASS unmarked new code rejected
+PASS marked pseudocode accepted
+PASS SVG external content rejected
+PASS disabled existing chapter entry rejected
+PASS static diagram needs both theme resources
+17 focused regression cases passed
+✔ tools/validation.test.mjs (279.306ms)
+ℹ tests 1
+ℹ suites 0
+ℹ pass 1
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 283.458458
+
+
+COMMAND node tools/audit-chapter.mjs ch34
+EXIT 0
+
+ch34 STATS {"decks":7,"frames":37,"perDeck":[5,5,5,6,5,6,5],"staticImages":0,"code":4,"han":5751,"zh":158,"en":158}
+PASS structural checks; content/translation/rendering require independent review
+
+
+COMMAND node tools/audit-chapter.mjs ch35
+EXIT 0
+
+ch35 STATS {"decks":6,"frames":33,"perDeck":[5,5,6,6,5,6],"staticImages":0,"code":4,"han":5531,"zh":158,"en":158}
+PASS structural checks; content/translation/rendering require independent review
+
+
+COMMAND node tools/audit-chapter.mjs ch36
+EXIT 0
+
+ch36 STATS {"decks":7,"frames":36,"perDeck":[5,5,5,5,5,5,6],"staticImages":0,"code":4,"han":6361,"zh":210,"en":210}
+PASS structural checks; content/translation/rendering require independent review
+
+
+COMMAND node examples/ch34/sync.mjs --check
+EXIT 0
+4 snippets match examples/ch34 sources
+
+
+COMMAND node examples/ch35/sync.mjs --check
+EXIT 0
+4 Ch35 blocks match sources
+
+
+COMMAND /Users/zy/.pyenv/versions/3.11.8/bin/python3 examples/ch34/check.py
+EXIT 0
+{"passed": true, "count": 101, "failure": null}
+
+
+COMMAND /Users/zy/.pyenv/versions/3.11.8/bin/python3 examples/ch35/check.py
+EXIT 0
+105 actual SQLite assertions passed
+
+
+COMMAND /Users/zy/.pyenv/versions/3.11.8/bin/python3 examples/ch36/run.py
+EXIT 0
+{
+  "passed": true,
+  "checks": [
+    "CAP completed-write then stale-read counterexample",
+    "Quorum new-old inversion without read writeback",
+    "Retry shares one eligible event and original deadline",
+    "Exactly one second is within the declared deadline",
+    "Late correct durable result remains bad",
+    "202 does not satisfy terminal checkout",
+    "Exposed incorrect terminal cannot be washed by a correct retry",
+    "Exposed non-durable terminal cannot be washed by a durable retry",
+    "No reply counts bad once cohort is mature",
+    "Non-durable 200 cannot satisfy good",
+    "Exclude immature cohort until its original deadline",
+    "Half-open lower bound excluded, upper included",
+    "Eligibility is fixed separately from failure",
+    "Reject retry reset of original start",
+    "A9 allowed10000 remain4000",
+    "Zero denominator has no SLI",
+    "Whole-event boundary:999 eligible permits0 bad",
+    "Whole-event boundary:1000 eligible permits1 bad",
+    "Good traffic expiry can worsen budget",
+    "Reject invalid counts (-1, 0)",
+    "Reject invalid counts (1, 2)",
+    "Reject invalid counts (1, -1)",
+    "Healthy budget permits only next canary step",
+    "Positive monthly balance can still HOLD on burn",
+    "Long hot / short healthy does not page",
+    "Exact14.4 is not above strict threshold",
+    "Second pair uses OR and threshold6",
+    "Exhausted balance freezes features",
+    "Missing window is no-data",
+    "Incomplete telemetry holds even when observed ratio is healthy",
+    "Unhealthy canary holds",
+    "Unreviewed reopening holds",
+    "Per-dependency p99s cannot simply add"
+  ],
+  "count": 33,
+  "cap": {
+    "write": "OK(1)",
+    "later_read": 0,
+    "strong_read_without_proof": "UNAVAILABLE"
+  },
+  "quorum": {
+    "R1": "x=1",
+    "R2_after_R1": "x=0",
+    "linearizable": false
+  },
+  "percentiles": {
+    "sum_of_p99_ms": 2,
+    "p99_of_path_ms": 101
+  },
+  "A9": {
+    "remaining": "4000",
+    "allowed": "10000",
+    "burn": "3/5"
+  },
+  "gate_high_burn": "HOLD_BURN"
+}
+
+
+COMMAND /Users/zy/.pyenv/versions/3.11.8/bin/python3 docs/reviews/ch36-evidence.py
+EXIT 0
+{"passed": true, "snippets": [{"source": "partition.pseudo", "verbatim": true, "lines": 26}, {"source": "tradeoffs.py:quorum", "verbatim": true, "lines": 14}, {"source": "slo.py:count", "verbatim": true, "lines": 24}, {"source": "slo.py:gate", "verbatim": true, "lines": 27}], "decks": 7, "frames": 36, "idsPreserved": 72, "changedFrames": ["d1s5", "d2s3", "d2s4", "d2s5", "d4s2", "d4s3", "d4s4", "d4s5", "d5s4", "d5s5", "d7s4", "d7s5", "d7s6"]}
+
+
+COMMAND /Users/zy/.pyenv/versions/3.11.8/bin/python3 docs/reviews/ch34-ch35-ch36-root-runtime.py
+EXIT 0
+{"passed": true, "checks": 27}
+
+
+COMMAND /Users/zy/.pyenv/versions/3.11.8/bin/python3 docs/reviews/ch34-ch35-ch36-root-fleet.py
+EXIT 0
+{"passed": true, "checks": 29}
+
+
+COMMAND /Users/zy/.pyenv/versions/3.11.8/bin/python3 docs/reviews/ch34-ch35-ch36-root-slo.py
+EXIT 0
+{"passed": true, "checks": 23}
+
+
+COMMAND /Users/zy/.pyenv/versions/3.11.8/bin/python3 docs/reviews/ch34-ch35-ch36-numeric.py
+EXIT 0
+{"passed": true, "equations": 62, "failures": []}
+
+
+COMMAND git diff --check
+EXIT 0
+
+
+COMMAND /Library/Java/JavaVirtualMachines/jdk-17.0.10.jdk/Contents/Home/bin/javac --release 17 -d <temporary class directory> examples/ch35/Capacity.java
+EXIT 0
+
+
+COMMAND /Library/Java/JavaVirtualMachines/jdk-17.0.10.jdk/Contents/Home/bin/java -cp <temporary class directory> Capacity
+EXIT 0
+meanActive=160 slotLowerBound=5 normal=7
+nine: rawSurvivor=24.0 plannedSurvivor=19.2
+same-budget N-1 across 3 nodes: 11
+
+
+COMMAND node --check assets/js/boot.js
+EXIT 0
+
+
+COMMAND node --check assets/js/lang.js
+EXIT 0
+
+
+COMMAND node --check assets/js/nav.js
+EXIT 0
+
+
+COMMAND node --check assets/js/progress.js
+EXIT 0
+
+
+COMMAND node --check assets/js/slides.js
+EXIT 0
+
+
+COMMAND node --check docs/reviews/ch34-ch35-ch36-browser.mjs
+EXIT 0
+
+
+COMMAND node --check docs/reviews/ch34-ch35-ch36-contact.mjs
+EXIT 0
+
+
+COMMAND node --check docs/reviews/ch34-ch35-ch36-frames.mjs
+EXIT 0
+
+
+COMMAND node --check docs/reviews/ch34-ch35-ch36-geometry.mjs
+EXIT 0
+
+
+COMMAND node --check docs/reviews/ch34-ch35-ch36-headers.mjs
+EXIT 0
+
+
+COMMAND node --check examples/ch34/sync.mjs
+EXIT 0
+
+
+COMMAND node --check examples/ch35/sync.mjs
+EXIT 0

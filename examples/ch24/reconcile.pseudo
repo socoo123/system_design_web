@@ -1,0 +1,17 @@
+reconcile(batchHash, revision, rules, internalSnapshotW):
+  run = persistRunIdentity(batchHash, revision, rules, internalSnapshotW)
+  require verifiedReportCompletenessOrKeepRunOpen(run)
+  compare identities/counts/gross/fee/net/currency at matching scope
+  for difference in run.differences:
+    c = upsertCase(run, difference.businessKey, difference.kind)
+    if difference is external_only:
+      e = queryAndValidateAuthoritativeObject(c)
+      if e is verified capture/refund:
+        applyEvidenceThroughPostingGate(e)  // original effect key
+        markCaseClosedAfterKnownCommit(c)
+      else: retainReview(c)
+    else:
+      retainReview(c)  // investigate lateness, cutoffs and mismatches
+// A crash after posting but before closing c only repeats the same gate.
+// No reconciliation branch creates another charge or guesses a reversal.
+// Report revisions append evidence; an absent row is not final failure.

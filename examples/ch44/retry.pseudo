@@ -1,0 +1,39 @@
+readStock(request, D):                         # D: local monotonic deadline
+  for attempt in [1, 2]:                      # Order is the only retry owner
+    if attempt == 2:
+      if not previous.transient or not previous.local_io_terminal: STOP
+      sleep_cancellable(random(0, 40ms), D - 140ms)
+    if cancelled or D - now() < 100ms + 140ms: STOP
+    slot = inventory_slots.tryAcquire()       # local bounded I/O; no wait queue
+    if slot is empty: STOP
+    ticket = inventory_breaker.tryAcquire()   # OPEN rejects; HALF_OPEN: one probe
+    if ticket is empty: release(slot); STOP
+    attempt_end = min(now() + 220ms, D - 140ms)
+    submit worker (on rejection: finish(ticket, IGNORED); release(slot); STOP):
+      outcome = NOT_DISPATCHED
+      try:                                   # covers ALL owned-resource paths
+        if not cancelled and attempt_end - now() >= 100ms:
+          grant = GRANTED
+          if attempt == 2:
+            quota_end = min(now() + 10ms, attempt_end - 100ms)
+            grant = shared_retry_budget.spend_once(quota_end, cancellation)
+            # One bounded call, no SDK retry. Result: GRANTED, DENIED, or UNKNOWN.
+          if grant == GRANTED and not cancelled and attempt_end - now() >= 100ms:
+            # Discovery, DNS, connect, remote queue and execution share this
+            # SAME attempt_end. Disable every SDK/proxy automatic retry.
+            outcome = inventory_read_once(request, attempt_end)
+            finish(ticket, classify_dependency(outcome))
+      catch unexpected_local_error:
+        outcome = LOCAL_FAILURE              # quota/parse/SDK errors included
+      finally:
+        try: finish(ticket, IGNORED)          # once-only ticket ignores fallback
+        finally: release(slot)               # after quota/local I/O really exits
+      report outcome with local_io_terminal=true
+    previous = await worker result only until attempt_end
+    if caller wait timed out: request cancellation; STOP
+    if previous.success: return previous     # then <=140ms finishing allowance
+  return failure_or_explicit_stale_read       # never invent stock/paid success
+# spend_once admits <=20 extras per fixed second across ALL callers in A7.
+# Its quota I/O must honor quota_end/cancellation; unknown may waste a token.
+# Keep a slot for live local I/O; timeout/cancel does not prove remote rollback.
+# A timed-out write resolves UNKNOWN using durable K, not this read-only loop.

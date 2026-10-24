@@ -1,0 +1,31 @@
+# Teaching pseudocode: one authoritative DB; UNIQUE(principal, key), NOT NULL hash.
+claim(principal, key, canonical_body_hash, now):
+  BEGIN ISOLATION LEVEL READ COMMITTED
+  INSERT attempt(principal,key,body_hash,state,expires_at)
+    VALUES(principal,key,canonical_body_hash,'CLAIMED',now + 24h)
+    ON CONFLICT(principal,key) DO NOTHING
+  row = SELECT ... WHERE principal=? AND key=? FOR UPDATE
+  if row.body_hash != canonical_body_hash: ROLLBACK; return CONFLICT
+  if row.expires_at <= authority_now_after_lock(): ROLLBACK; return RETRY_WINDOW_CLOSED
+  COMMIT; return row                     # same key never starts a new generation
+
+bind_owner(principal, key, boot, generation):
+  UPDATE attempt SET state='ASSIGNED', owner_boot=boot, owner_gen=generation
+    WHERE principal=? AND key=? AND state='CLAIMED' AND owner_boot IS NULL
+  # Exactly one changed row authorizes delivery; zero rows means recover saved state.
+  # Redeliver the SAME (attempt,boot,generation); worker deduplicates that identity.
+
+finish(principal, key, boot, generation, terminal_metadata):
+  UPDATE attempt SET state='TERMINAL', metadata=terminal_metadata
+    WHERE principal=? AND key=? AND owner_boot=boot AND owner_gen=generation
+      AND state='ASSIGNED'                # old/duplicate terminal cannot overwrite
+
+retry(principal, key, hash):
+  row = claim(principal, key, hash, authority_now())
+  if conflict_or_expired(row): return row
+  if row.state in [CLAIMED, ASSIGNED]: return PENDING_WITHOUT_SECOND_STREAM
+  if row.metadata.reason == DONE: return COMPLETION_METADATA
+  return INTERRUPTED_REQUIRES_EXPLICIT_NEW_KEY
+# Unknown dispatch/terminal commits are queried by the same key, never guessed.
+# Crash after ASSIGNED before enqueue may fail closed as INTERRUPTED after fencing.
+# Token logs, replay, cross-worker live migration, and quota atomicity are separate.

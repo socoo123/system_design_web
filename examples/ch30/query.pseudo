@@ -1,0 +1,31 @@
+query(verified_identity, question, deadline):
+  # Identity comes from authentication; body tenant/groups are never trusted.
+  principal = (verified_identity.tenant, verified_identity.subject)
+  bundle = Catalog.read_whole_bundle()       # immutable model/splitter/lanes/pack
+  scope = Authority.current_membership(principal)  # timeout => deny
+  key = (principal, scope.epoch, bundle.id, hash(exact_question_and_options))
+  hits = candidate_cache.get(key)             # IDs only; no authorization proof
+  if hits is absent:
+    vector = embed(bundle.encoder, question, deadline)
+    hits = parallel_search(
+      bundle.bm25, bundle.dense, vector, question,
+      tenant=principal.tenant, groups=scope.groups,
+      pool=bundle.pool, limit_per_lane=100, deadline=deadline)
+    candidate_cache.put(key, hits, bounded_ttl)
+  # Read primary authority, not cached ACLs or a lagging replica.
+  # Join published manifest ID/hash/child role + tenant/doc/pool/current_rev,
+  # live membership + whole-span ACL. Parents must be manifest text entries.
+  eligible = Authority.filter_ids(principal, bundle, hits)
+  # Preserve original lane ranks; discard duplicates within each lane.
+  order = rrf(eligible).take(80)
+  text = ChunkStore.read_exact_ids_and_verify_hashes(order)
+  if any returned tenant/revision/hash differs: fail_closed()
+  ranked = rerank(question, text, max_pairs=80, deadline=deadline)
+  if rerank times out: ranked = evaluated_RRF_fallback(order)
+  pack = pack_with_parent_checks_and_full_token_count(ranked, bundle)
+  if deadline expired or pack is empty: return insufficient_evidence()
+  Authority.check_all_pack_dependencies(principal, bundle, pack)
+  # Any failure discards pack; no generator sees unauthorized text.
+  draft = Inference.generate(question, pack, tools=NONE, deadline=deadline)
+  return release_buffered_sentences(principal, bundle, pack, draft)
+  # Cancellation/deadline propagates to every child call; raw answers never cache.

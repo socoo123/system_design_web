@@ -1,0 +1,47 @@
+# Teaching pseudocode: one live scheduler owns this worker boot.
+# A shared Attempt Store has already claimed (principal, key, body_hash).
+# queued_total = sum(queue sizes); active_total = sum(per-tenant active counts).
+enqueue(attempt, trusted_tenant, prompt_tokens, max_output, now):
+  require fixed model/template/tokenizer; 1 <= prompt_tokens <= 2048
+  require 1 <= max_output <= 512 and prompt_tokens + max_output <= 2560
+  row = read_authority_attempt(attempt)       # read failure is unknown, never an empty row
+  if row.state == TERMINAL: return row.saved_http_result
+  if row.state != ASSIGNED or row.owner != attempt.owner: return PENDING
+  if attempt is already queued or active: return saved_status(attempt)
+  if queued_total == 100 or queued[trusted_tenant].size == 25:
+    return reject_unstarted(attempt.owner, 429, OVERLOADED) # next listing
+  # Input/output quota reservation belongs to attempt, not the HTTP connection.
+  if attempt.quota != RESERVED: return PENDING # recover the same quota reservation
+  r = Entry(attempt, trusted_tenant, prompt_tokens, max_output)
+  r.wait_deadline = now + 600ms             # local monotonic time, not persisted
+  r.request_deadline = now + validated_remaining_service_budget
+  queued[trusted_tenant].append(r)
+  return QUEUED                           # no KV credit and no physical KV
+
+admit_waiters(now):                        # execute on the same event loop
+  for tenant in rotating_tenant_ring:      # one head/tenant per pass
+    q = queued[tenant]
+    while q and now >= q.head.wait_deadline:
+      expired = q.head
+      decision = reject_unstarted(expired.owner, 429, WAIT_EXPIRED)
+      if decision == PENDING: recover_owner(q.pop()); continue # no guessed refund
+      q.pop()
+    if not q: continue
+    r = q.head
+    need = ceil((r.prompt_tokens + r.max_output) / 16)
+    if active[tenant] == 32 or tenant_page_credits[tenant] + need > 5120: continue
+    if active_total == measured_safe_sequence_cap: continue
+    if not calibrated_shape_allows(r): continue
+    # Only this scheduler mutates local credits; worker validates boot/generation.
+    if not worker_ledger.admit(r.owner, r.prompt_tokens, r.max_output): continue
+    q.pop(); active[tenant] += 1; tenant_page_credits[tenant] += need
+    charged[r.owner] = (tenant, need)
+    ready[tenant].append(r)                # prefill runs in iteration(), below
+  rotate_ring_start()                      # blocked tenant does not block others
+
+on_release(owner):                         # same event loop; poll ledger transitions
+  if worker_ledger.state(owner) != RELEASED: return
+  grant = charged.remove(owner)             # absent means duplicate notification
+  if grant:
+    active[grant.tenant] -= 1; tenant_page_credits[grant.tenant] -= grant.need
+    persist_terminal_and_quota_settlement(owner) # actual use; never assume all unused after launch

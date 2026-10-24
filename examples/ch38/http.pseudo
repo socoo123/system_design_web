@@ -1,0 +1,27 @@
+# Policy pseudocode, not an HTTP parser or a CDN implementation.
+# The Edge applies this pass policy BEFORE any shared-cache lookup.
+if request.Authorization or request.Cookie or route.isPersonalized:
+    return passToAuthorizedApp(cacheControl="private, no-store")
+
+# Origin App: canonical key includes URI + language + content coding.
+key = selectedPublicRepresentation(request)
+if request.IfNoneMatch or request.requiresAuthoritativeValidation:
+    observed = clock.now()             # before a NEW primary snapshot
+    row = originBudget.readPrimary(key) # timeout/rejection -> 503 no-store
+    evidence = primaryEvidence(row, observed)
+else:
+    evidence = appCache.getOrReadPrimary(key)
+
+# Evidence retains the ORIGINAL hard deadline across every cache copy.
+now = clock.now()                       # ONE eligibility/budget sample
+if not evidence.canSend(now):
+    return error(503, cacheControl="no-store")
+n = evidence.sharedSeconds(now) # deduct clock + final-send margin
+headers = {CacheControl: "public, max-age=0, s-maxage=" + n + ", must-revalidate",
+           Vary: "Accept-Language, Accept-Encoding", ETag: weakTag(evidence, key)}
+# RFC parser handles lists, weak comparison and '*' for this GET.
+if evidence.exists and ifNoneMatchMatches(request, headers.ETag):
+    return response(304, headers, noBody)
+return response(evidence.exists ? 200 : 404, headers, evidence.body)
+# Date/Age accumulation belongs to the HTTP stack; never reset Age at Shield.
+# From the now check THROUGH final send: <=1s total; otherwise abandon.

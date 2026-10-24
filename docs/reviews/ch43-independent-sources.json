@@ -1,0 +1,16 @@
+{
+  "checkedAt": "2026-10-24",
+  "scope": "Independent primary-source spot check, 9 of the chapter's 10 references. Custom Catalog, pin/GC and cutover contracts remain explicit chapter design requirements.",
+  "sources": [
+    {"ref": 1, "url": "https://static.googleusercontent.com/media/research.google.com/en//pubs/archive/36632.pdf", "location": "T1 table / Section 7 / Figure 10", "method": "web access failed; fetched exact primary PDF with urllib and inspected pdftotext output", "supports": "T1 has 85 billion records and 87 TB raw. The one-field MR/Dremel comparison reads about 0.5TB compressed versus 87TB record-oriented data. No transferable latency claim.", "evidence": "ch43-independent-dremel-fetch.json"},
+    {"ref": 2, "url": "https://www.cs.umd.edu/~abadi/papers/abadi-sigmod08.pdf", "location": "Abstract / introduction / execution optimizations", "supports": "Column layout alone is insufficient: compression, late materialization and block/vector execution contribute. The chapter correctly labels 3/20 and 4:1 as assumptions."},
+    {"ref": 3, "url": "https://parquet.apache.org/docs/file-format/", "location": "File Format reader description", "supports": "Metadata locates selected column chunks within row groups; predicate columns remain required input."},
+    {"ref": 4, "url": "https://iceberg.apache.org/docs/1.10.0/evolution/", "location": "Partition evolution", "supports": "Old/new layouts coexist; metadata evolution does not eagerly rewrite files. Version 1.10.0 is explicit, not called latest."},
+    {"ref": 5, "url": "https://iceberg.apache.org/docs/1.10.0/reliability/", "location": "Concurrent write operations / Retry validation", "supports": "Atomic metadata-pointer exchange, refresh after conflict and operation-specific assumptions before retry. The chapter does not attribute custom accepted(table,batch) atomicity to Iceberg."},
+    {"ref": 6, "url": "https://iceberg.apache.org/spec/", "location": "Sequence Numbers / Row-level Deletes / Scan Planning, v2-scoped claims", "supports": "V2 delete files and sequence applicability are needed for live rows. Newer v3/v4 features are outside the illustrated v2 contract."},
+    {"ref": 7, "url": "https://iceberg.apache.org/docs/1.10.0/maintenance/", "location": "Remove orphan files / Compact data files", "supports": "Short orphan-retention windows can delete in-progress files; compaction reduces file-open/metadata work. The chapter's explicit pin/fence protocol is a requirement, not a claimed built-in API."},
+    {"ref": 9, "url": "https://www.oreilly.com/radar/questioning-the-lambda-architecture/", "location": "An alternative, replay steps and per-partition offset background", "supports": "Replay a new processor into another output table and switch after catch-up. The chapter explicitly defines its own next-offset half-open convention and recoverable continuation barrier."},
+    {"ref": 10, "url": "https://docs.aws.amazon.com/AmazonS3/latest/userguide/Welcome.html", "location": "Amazon S3 data consistency model", "supports": "Strong object read-after-write and atomic single-key updates do not provide atomic cross-key publication. No live object-store behavior was tested."}
+  ],
+  "notIndependentlyOpened": [8]
+}

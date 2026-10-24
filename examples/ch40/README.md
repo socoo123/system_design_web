@@ -1,0 +1,22 @@
+# Ch40 protocol policy examples
+
+Java 17, standard library only. `ProtocolContracts.java` supplies three exact page excerpts. It is a deterministic policy model, not an HTTP, gRPC, EventSource, TLS or QUIC implementation.
+
+Run everything with `PYTHONDONTWRITEBYTECODE=1 python3 examples/ch40/run.py`. This also checks the animation inventory, exact arithmetic and a real SQLite local projection/cursor rollback trace. Python uses only its standard library. Set `CH40_JAVA_HOME` if Java 17 lives elsewhere. Build output goes to an automatically removed temporary directory; evidence goes to `docs/reviews/ch40-*-results.json` / `ch40-verification.json`.
+
+Equivalent Java/source commands:
+
+```sh
+node examples/ch40/sync.mjs --check
+CH40_BUILD=$(mktemp -d /tmp/ch40-java.XXXXXX)
+/Library/Java/JavaVirtualMachines/jdk-17.0.10.jdk/Contents/Home/bin/javac --release 17 -d "$CH40_BUILD" examples/ch40/ProtocolContracts.java examples/ch40/ProtocolContractsTest.java
+/Library/Java/JavaVirtualMachines/jdk-17.0.10.jdk/Contents/Home/bin/java -cp "$CH40_BUILD" ProtocolContractsTest
+```
+
+`Budget` accepts timestamps from one monotonic clock, normally `System.nanoTime()`, for intervals below 2^63 nanoseconds. Keep the same instance and total attempt counter through the operation. `downstreamNanos` is a duration: never transmit a process-local nanoTime epoch to a remote host. The gRPC adapter must apply this duration immediately before starting the call, use the incoming context as an additional deadline cap, disable independent retry multiplication, and propagate cancellation. Zero prevents dispatch. A retry-safe boolean is supplied only after the application has established the operation's retry contract; this model does not establish distributed idempotency or prove non-execution after a timeout.
+
+`resume` consumes an authenticated application's durable applied cursor. `LogView` must come from the log authority and represent a coherent retained range, not separately sampled counters. Its permission boolean is the result of fresh authentication/authorization for the requested scope. A valid range permits reading after the supplied cursor, including the first retained event when cursor = oldest - 1. The log read/tail adapter must recheck pruning at read time or pin the needed history. This pure classifier neither creates a snapshot nor proves atomic application. Persist projection changes and the applied cursor together in the client's local database transaction, or make the projection idempotent and advance only after success. On handler failure, close the old EventSource, finish/cancel its in-flight handler, and create a new subscription using the durable applied cursor in a URL parameter; validate it separately from the browser's automatic Last-Event-ID header. Old handler generations must not write after replacement. Use fetch when application-controlled recovery is preferable.
+
+`BoundedWriter` has one event-loop owner. A successful nonempty `offer` transfers exclusive ownership of its byte array; the producer must never mutate it afterward. A failed offer keeps ownership at the producer and closes/clears the writer. The 64 KiB bound covers this writer's pending payload only. Pull at most one bounded upstream chunk (for example 4 KiB), stop pulling when capacity is exhausted, and include that staging chunk, TLS, kernel socket buffers, model state and metadata in separate memory budgets. No upstream or framework unbounded queue is permitted. The nonblocking sink advances its source by the number it accepts; a successful local write does not prove peer delivery. A real adapter must expose readiness and bounded buffering, call `tick` even without writable callbacks, and abort upstream on false/exception. The no-progress timer starts when an empty queue receives its first byte, restarts only after a positive write, and stops when drained. At exactly two seconds with pending bytes and no progress the writer aborts. A byte trickle can avoid this stall limit, so use an independent overall run deadline/minimum throughput policy if needed. A control error may be unsendable on a failed channel; missing `done` remains interruption, not success. Cleanup and durable run outcome belong to the upstream application.
+
+The test exercises deadline exhaustion, bounded attempts, scope/epoch/pruning/future-cursor cases, exact-cap and overflow, partial/zero writes, ordered drain, timer origin, I/O failure and sink-contract failure. The test sink is explicit simulation, not a slow-network, proxy, TLS or QUIC experiment.

@@ -1,0 +1,38 @@
+readStock(request, D):                         # D: local monotonic deadline
+  for attempt in [1, 2]:                      # Order is the only retry owner
+    if attempt == 2:
+      if not previous.transient or not previous.local_io_terminal: STOP
+      sleep_cancellable(random(0, 40ms), D - 140ms)
+    if cancelled or D - now() < 100ms + 140ms: STOP
+    slot = inventory_slots.tryAcquire()       # local bounded I/O; no wait queue
+    if slot is empty: STOP
+    ticket = inventory_breaker.tryAcquire()   # OPEN rejects; HALF_OPEN: one probe
+    if ticket is empty: release(slot); STOP
+    attempt_end = min(now() + 220ms, D - 140ms)
+    submit bounded worker (on rejection: finish(ticket, IGNORED); release(slot); STOP):
+      # Recheck after scheduling; minimum useful budget is a teaching 100ms.
+      if cancelled or attempt_end - now() < 100ms:
+        finish(ticket, IGNORED); release(slot); report NOT_DISPATCHED
+      else if attempt == 2 and not shared_retry_budget.trySpend():
+        finish(ticket, IGNORED); release(slot); report NO_RETRY_BUDGET
+      else:
+        try:
+          if cancelled or attempt_end - now() < 100ms:
+            finish(ticket, IGNORED); outcome = NOT_DISPATCHED
+          else:
+            # Discovery, DNS, connect, remote queue and execution share this
+            # SAME attempt_end. Disable every SDK/proxy automatic retry.
+            outcome = inventory_read_once(request, attempt_end)
+            finish(ticket, classify_dependency(outcome))
+        catch unexpected_local_error:
+          finish(ticket, IGNORED); outcome = LOCAL_FAILURE
+        finally:
+          release(slot)                      # only after local I/O really exits
+        report outcome with local_io_terminal=true
+    previous = await worker result only until attempt_end
+    if caller wait timed out: request cancellation; STOP
+    if previous.success: return previous     # then <=140ms finishing allowance
+  return failure_or_explicit_stale_read       # never invent stock/paid success
+# trySpend atomically admits <=20 extras per fixed second across ALL callers
+# in A7's 200 originals/second scenario; local 20/s buckets do not.
+# A timed-out write resolves UNKNOWN using durable K, not this read-only loop.

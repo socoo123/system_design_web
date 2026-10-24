@@ -1,0 +1,79 @@
+{
+  "sourceHashes": {
+    "chapters/ch42.html": "fb1e571cbdad8aee2674a29cdf4864dbc20fa4841d0409d81b60388cbe446323",
+    "examples/ch42/README.md": "51b58b587e184e9276bffcd6ebb118058f5f0b79cc7de1f6cb74925e377bbf3d",
+    "examples/ch42/Resilience.java": "0fa1be5ea261dd35a98b5448d38c0c19628fd8ee9aa2da98b42b90c27c848b2e",
+    "examples/ch42/check_effect.py": "2d7a776d2dffa1f562b51bd4ac22f641f1da900644dd887cd65fbc875e7a9130",
+    "examples/ch42/check_sources.py": "366e099cdc12f157b8f5b7cc25bcc740fd3c9e7b0b08a4c61b4b49219e15df10",
+    "examples/ch42/consumer.pseudo": "404c1a7869e773f0a17d12c867f09cce9458079f796bda70658b3a4dabe93485",
+    "examples/ch42/drain.pseudo": "ebca0c6f4937eb5ef4b1373953bf9f71c03618ed55a41b224840cfc66bbf784c",
+    "examples/ch42/effect.pseudo": "fad751610cb64844386ec5fcf24c99bf417e04674bfb25aa997c61fbd34a1a8f",
+    "examples/ch42/retry.pseudo": "fdc463f9dac251afee7fdfff980468261d7def56aaed2aca02e845dac9f92f54"
+  },
+  "sourceChangesDuringReview": {
+    "chapters/ch42.html": {
+      "initial": "d5c538a53ca4381f015424aca5a7d7b70d9a30df3cb186726abd3fdc573c825a",
+      "final": "fb1e571cbdad8aee2674a29cdf4864dbc20fa4841d0409d81b60388cbe446323"
+    },
+    "examples/ch42/retry.pseudo": {
+      "initial": "e0a3aaae93859ac75ae1ca2eaabfaec38a9b47ffde7558c1c004daaf266a5b35",
+      "final": "fdc463f9dac251afee7fdfff980468261d7def56aaed2aca02e845dac9f92f54"
+    }
+  },
+  "passed": true,
+  "openFindings": [],
+  "kind": "Pseudocode contract inspection and independently recomputed traces; not integration execution",
+  "retryTraces": [
+    {
+      "case": "Normal wake",
+      "deadlineMs": 800,
+      "wakeMs": 450,
+      "remainingMs": 350,
+      "prestartOverheadMs": 15,
+      "beforeStartRemainingMs": 335,
+      "attemptPlusReturnMs": 300,
+      "finishWithReturnMs": 765,
+      "outcome": "May start; finishes budget at 765 <= 800"
+    },
+    {
+      "case": "Late wake but not yet expired",
+      "deadlineMs": 800,
+      "wakeMs": 550,
+      "remainingMs": 250,
+      "requiredMs": 300,
+      "outcome": "STOP at wake before taking token/permit; 250 < 300"
+    },
+    {
+      "case": "Budget consumed between wake and dispatch",
+      "deadlineMs": 800,
+      "wakeMs": 500,
+      "remainingMs": 300,
+      "prestartOverheadMs": 1,
+      "beforeStartRemainingMs": 299,
+      "requiredMs": 300,
+      "outcome": "Second check STOP; release unstarted permit; consumed extra-attempt token is conservatively retained"
+    },
+    {
+      "case": "Deadline passed",
+      "deadlineMs": 800,
+      "wakeMs": 830,
+      "remainingMs": -30,
+      "outcome": "STOP; positive retry traffic budget cannot revive an expired call"
+    }
+  ],
+  "drainInspection": [
+    "A preStop-triggered local drain fixes cutoff once under the same lock as HTTP admission. A later TERM returns that task rather than extending the cutoff.",
+    "Endpoint updates are concurrent and may propagate late. Local admission is already closed; readiness alone does not stop queue fetch/dispatch.",
+    "Before cutoff, a durable Effect DB receipt may mark a fetched record complete. Commit only its completed prefix while still assigned; revoke invalidates generation.",
+    "At cutoff, no receipt or an unknown source commit does not become done. Close uses the reserved remaining budget; a new owner replays original scope/event keys.",
+    "SIGKILL and unreachable nodes can leave unknown or continuing side effects. Replacement is not rollback; stable business uniqueness/fencing remains required."
+  ],
+  "decimalChecks": {
+    "retryCeiling": "110.00",
+    "rawRetentionTB": "2.17728"
+  },
+  "limits": [
+    "No actual retry scheduler/admission-controller integration or Kubernetes cluster experiment",
+    "Kafka poll/commit/leader-epoch behavior checked against official contracts; Java class is not a Kafka client"
+  ]
+}

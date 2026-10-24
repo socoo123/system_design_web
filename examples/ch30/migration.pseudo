@@ -1,0 +1,28 @@
+migrate(g1, g2):
+  start_retaining_change_log()                 # before the consistent snapshot
+  snapshot, watermark = source.snapshot_with_cursor()
+  backfill(snapshot, g2.model, g2.splitter, g2.bm25, g2.dense)
+  replay_in_source_order(g2, after=watermark)   # upserts, deletes AND ACL events
+  barrier = source.current_cursor()
+  wait_until_both_lanes_visible_and_reconciled(g2, through=barrier)
+  require evaluation_passes(g2) AND all_source_partitions_covered(barrier)
+  BEGIN Catalog; LOCK bundle_pointer
+  require current_bundle == g1 AND g2.complete_through >= barrier
+  CAS bundle_pointer FROM g1 TO g2              # all immutable fields together
+  COMMIT
+  continue_replay(g1 AND g2)                    # retain old encoder too
+  # New requests pin g2; old requests keep g1. ACL/tombstone stays live globally.
+
+rollback(g2, g1):
+  barrier = source.current_cursor()
+  require g1.model_available AND log_retention_covers(g1.cursor, barrier)
+  replay_and_reconcile_all_changes(g1, through=barrier)  # especially deletes
+  require g1.searchable_through >= barrier AND g1.evaluation_passes
+  CAS Catalog.bundle_pointer FROM g2 TO g1
+  # Missing logs/encoder/coverage => do not claim rollback is safe; rebuild instead.
+
+retire(g1):
+  require no_active_g1_requests AND rollback_retention_expired
+  stop_g1_replay(); purge_g1_indexes_and_unpinned_text_by_manifest()
+  # Without consistent snapshots + retained logs, choose a write freeze or declare
+  # a weaker reconciliation contract. An index alias cannot create a source barrier.

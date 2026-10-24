@@ -1,0 +1,19 @@
+// Same business key; at most 2 TOTAL attempts including the first.
+if permanent_error or unsafe_to_repeat: STOP_OR_RECONCILE
+if attempts_started >= 2: STOP
+if previous_local_io_has_not_terminated: WAIT_WITHIN_DEADLINE_OR_STOP
+delay = uniform_random(0, 100 ms)         // A6/A7 bounded jitter
+if now + delay + 250 ms + 50 ms > original_deadline: STOP
+schedule_at(now + delay)                  // do not sleep the poll thread
+at scheduled time:
+    remaining = original_deadline - now
+    if remaining < 250 ms + 50 ms: STOP
+    recheck business validity
+    if retry_budget has no extra-attempt token: STOP
+    reserve one extra-attempt token        // conservative; no refund on rejection
+    try nonblocking dependency bulkhead admission; on rejection STOP
+    if original_deadline - now < 250 ms + 50 ms:
+        release the unstarted permit; STOP
+    start attempt 2 with at most 250 ms; keep 50 ms for return
+// The tier's admission controller owns the retry budget, including replay.
+// A token reserves extra traffic; it does not make a write idempotent.

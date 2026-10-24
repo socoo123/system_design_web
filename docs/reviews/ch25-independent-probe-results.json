@@ -1,0 +1,187 @@
+{
+  "source": "8d63886e11e9778b8abb0300fa2fef59ad7125e9f0a4c4a82e278d60ebd06583",
+  "checks": [
+    {
+      "name": "T1 -> claim -> Order T2 -> complete",
+      "passed": true
+    },
+    {
+      "name": "one-shot cursor is exhausted",
+      "passed": true
+    },
+    {
+      "name": "repeated business result leaves one journaled event",
+      "passed": true
+    },
+    {
+      "name": "send before checkpoint loses ACK",
+      "passed": true
+    },
+    {
+      "name": "real receiving DB has one effect after replay",
+      "passed": true
+    },
+    {
+      "name": "takeover at equality increments generation",
+      "passed": true
+    },
+    {
+      "name": "old completion is rejected",
+      "passed": true
+    },
+    {
+      "name": "old timeout is rejected",
+      "passed": true
+    },
+    {
+      "name": "unknown outcome retained by new owner",
+      "passed": true
+    },
+    {
+      "name": "timeout retains original business identity",
+      "passed": true
+    },
+    {
+      "name": "unknown T2 reply resolves to original committed result",
+      "passed": true
+    },
+    {
+      "name": "only current scheduler generation completes",
+      "passed": true
+    },
+    {
+      "name": "late timeout cannot regress succeeded",
+      "passed": true
+    },
+    {
+      "name": "completion connection is actually blocked",
+      "passed": true
+    },
+    {
+      "name": "post-lock clock rejects expired completion",
+      "passed": true
+    },
+    {
+      "name": "cancelled running unknown remains review rather than unstarted",
+      "passed": true
+    },
+    {
+      "name": "five claims exhaust one persistent run",
+      "passed": true
+    },
+    {
+      "name": "original 17s/45s phase skip",
+      "passed": true
+    },
+    {
+      "name": "live cursor retained skip",
+      "passed": true
+    },
+    {
+      "name": "original 17s/45s phase coalesce",
+      "passed": true
+    },
+    {
+      "name": "live cursor retained coalesce",
+      "passed": true
+    },
+    {
+      "name": "new 45s-phase first page has 100 stable identities",
+      "passed": true
+    },
+    {
+      "name": "101st pinned occurrence completes despite later now",
+      "passed": true
+    },
+    {
+      "name": "original 17s/45s phase catch_up",
+      "passed": true
+    },
+    {
+      "name": "live cursor retained catch_up",
+      "passed": true
+    },
+    {
+      "name": "new T1 crash probe aborts run and cursor",
+      "passed": true
+    },
+    {
+      "name": "T1 rollback leaves original due cursor",
+      "passed": true
+    },
+    {
+      "name": "early wake does not save a terminal receipt",
+      "passed": true
+    },
+    {
+      "name": "new T2 crash input rolls back event and receipt",
+      "passed": true
+    },
+    {
+      "name": "T2 rollback has no closed order",
+      "passed": true
+    },
+    {
+      "name": "deadline closes after uncached early retry",
+      "passed": true
+    },
+    {
+      "name": "changed canonical payload conflicts",
+      "passed": true
+    },
+    {
+      "name": "discrete burst recomputed",
+      "passed": true
+    },
+    {
+      "name": "storage/recovery recomputed",
+      "passed": true
+    }
+  ],
+  "findings": [
+    {
+      "level": "P1",
+      "location": "examples/ch25/model.py:124,142",
+      "issue": "materialize uses 60s lateness tolerance, recovery skips a 30s-late live fire",
+      "counterexample": "fire0, interval60s, policy skip, now90s => skip[0,120s); normal path can materialize60s"
+    }
+  ],
+  "trace": {
+    "misfireTolerance": {
+      "recovery": {
+        "next_at": 120000,
+        "cutoff": null
+      },
+      "normalMaterializes": [
+        60000
+      ],
+      "audit": [
+        {
+          "job_id": "j7",
+          "version": 1,
+          "from_at": 0,
+          "to_at": 120000,
+          "policy": "skip"
+        }
+      ]
+    }
+  },
+  "numeric": {
+    "average_per_second": "500/3",
+    "occupied_slots": "100/3",
+    "planned_slots": "56",
+    "rounds": "179",
+    "seconds": "179/5",
+    "five_second_ideal_slots": "400",
+    "five_second_planned_slots": "667",
+    "raw_run_bytes": "20160000000",
+    "replica_run_bytes": "60480000000",
+    "definition_bytes": "10000000",
+    "missed": "1200",
+    "spare_rate": "20",
+    "ideal_drain": "60",
+    "wheel_rounds": "30",
+    "wheel_slot": "0"
+  },
+  "passed": false
+}

@@ -1,0 +1,262 @@
+COMMAND node tools/check.mjs
+EXIT 0
+STATS 45 chapters; 276 decks; 1411 frames; 183 code blocks (no count quotas)
+PASS structure, local resources, accessibility, bilingual nesting, chapter entries and animation preservation
+
+
+COMMAND node --test tools/validation.test.mjs
+EXIT 0
+PASS short chapter, one frame, portrait SVG, no legend/is-new/citation quota accepted
+PASS language counts may differ
+PASS incorrect title chapter number rejected
+PASS duplicate IDs rejected
+PASS cross-language nesting rejected
+PASS missing local resource rejected
+PASS unsafe URL rejected
+PASS protocol-relative runtime script rejected
+PASS frame deletion rejected against baseline
+PASS slide wrapper rejected to match real player
+PASS missing slide caption rejected
+PASS animation frame reorder reported
+PASS unmarked new code rejected
+PASS marked pseudocode accepted
+PASS SVG external content rejected
+PASS disabled existing chapter entry rejected
+PASS static diagram needs both theme resources
+17 focused regression cases passed
+✔ tools/validation.test.mjs (301.685167ms)
+ℹ tests 1
+ℹ suites 0
+ℹ pass 1
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 305.980417
+
+
+COMMAND node tools/audit-chapter.mjs ch37
+EXIT 0
+
+ch37 STATS {"decks":7,"frames":38,"perDeck":[5,6,5,5,6,6,5],"staticImages":0,"code":3,"han":6090,"zh":222,"en":222}
+PASS structural checks; content/translation/rendering require independent review
+
+
+COMMAND node tools/audit-chapter.mjs ch38
+EXIT 0
+
+ch38 STATS {"decks":7,"frames":38,"perDeck":[5,6,6,5,5,5,6],"staticImages":0,"code":4,"han":5926,"zh":196,"en":196}
+PASS structural checks; content/translation/rendering require independent review
+
+
+COMMAND node tools/audit-chapter.mjs ch39
+EXIT 0
+
+ch39 STATS {"decks":7,"frames":37,"perDeck":[5,5,6,5,6,5,5],"staticImages":0,"code":3,"han":6168,"zh":223,"en":223}
+PASS structural checks; content/translation/rendering require independent review
+
+
+COMMAND /Users/zy/.pyenv/versions/3.11.8/bin/python3 examples/ch37/check_sources.py
+EXIT 0
+{
+  "passed": true,
+  "snippets": [
+    {
+      "source": "checkout.pseudo",
+      "sha256": "f7199c5963d650485ba7eb7dcf44c7f274b72ec5fbbabf25673d795d8e037df8",
+      "exact": true
+    },
+    {
+      "source": "publication.sql",
+      "sha256": "4a9decb56bddf634485508e38e802655bafd8bca55f49f1bf00373cb5eb8a309",
+      "exact": true
+    },
+    {
+      "source": "ExactSum.java:aggregate",
+      "sha256": "cc7373b11d3e511f058dd37c0c0cf28497459637bf6775bcc9774dd42500b548",
+      "exact": true
+    }
+  ],
+  "stockSqlSame": true,
+  "originalIdsPreserved": true,
+  "decks": 7,
+  "frames": 38,
+  "chapterSha256": "2a5a4663abc4f6329d24465ed182ffceaec704d06bd4c4be47c536967585b505"
+}
+
+
+COMMAND node examples/ch38/sync.mjs --check
+EXIT 0
+4 snippets match examples/ch38
+
+
+COMMAND node examples/ch39/sync.mjs --check
+EXIT 0
+3 Ch39 blocks match executable Java17 source
+
+
+COMMAND /Users/zy/.pyenv/versions/3.11.8/bin/python3 examples/ch37/run_contracts.py --output docs/reviews/ch37-contract-results.json
+EXIT 0
+{"passed": true, "checks": 57, "failure": null}
+
+
+COMMAND /Users/zy/.pyenv/versions/3.11.8/bin/python3 examples/ch38/run.py
+EXIT 0
+{"checks": 84, "SQLite": "3.51.0", "numbers": 26, "status": "passed"}
+
+
+COMMAND /Users/zy/.pyenv/versions/3.11.8/bin/python3 docs/reviews/ch37-ch38-ch39-root-storage.py
+EXIT 0
+{"passed": true, "checks": 48}
+
+
+COMMAND /Users/zy/.pyenv/versions/3.11.8/bin/python3 docs/reviews/ch37-ch38-ch39-root-cache.py
+EXIT 0
+{"passed": true, "checks": 29}
+
+
+COMMAND /Users/zy/.pyenv/versions/3.11.8/bin/python3 docs/reviews/ch37-ch38-ch39-root-negative-cache.py
+EXIT 0
+{"passed": true, "claims": 336, "authorityReads": 28, "rate": 2.3333333333333335}
+
+
+COMMAND /Users/zy/.pyenv/versions/3.11.8/bin/python3 docs/reviews/ch37-ch38-ch39-numeric.py
+EXIT 0
+{"passed": true, "calculations": 65}
+
+
+COMMAND /Users/zy/.pyenv/versions/3.11.8/bin/python3 docs/reviews/ch37-ch38-ch39-scope.py
+EXIT 0
+{"baselineFiles": 1929, "outsideScope": [], "baselineSnapshotsMatch": {"ch37": true, "ch38": true, "ch39": true}, "passed": true, "limits": "Ignored local screenshots are deliberately outside git scope. No claim about production reliability."}
+
+
+COMMAND git diff --check
+EXIT 0
+
+
+COMMAND /Library/Java/JavaVirtualMachines/jdk-17.0.10.jdk/Contents/Home/bin/javac --release 17 -d <temporary class directory> examples/ch37/ExactSumTest.java examples/ch37/ExactSum.java examples/ch38/AgeBudget.java examples/ch38/SingleFlight.java examples/ch39/LoadBalancingTest.java examples/ch39/LoadBalancing.java docs/reviews/ch37-ch38-ch39-root-CacheProbe.java docs/reviews/ch37-ch38-ch39-root-GateProbe.java docs/reviews/ch37-ch38-ch39-root-SumProbe.java
+EXIT 0
+
+
+COMMAND /Library/Java/JavaVirtualMachines/jdk-17.0.10.jdk/Contents/Home/bin/java -cp <temporary class directory> ExactSumTest
+EXIT 0
+{"passed":true,"checks":16,"cases":["normal two fragment sum","reordered replies","identical retry deduped","missing fragment incomplete","all replies missing incomplete","conflicting sum same hash","unknown fragment","wrong query","wrong snapshot","wrong manifest version","wrong fragment content hash","changed manifest expected hash","no long overflow","signed amounts preserve refunds","verified empty dataset","null sum rejected"]}
+
+
+COMMAND /Library/Java/JavaVirtualMachines/jdk-17.0.10.jdk/Contents/Home/bin/java -cp <temporary class directory> AgeBudget
+EXIT 0
+AgeBudget: 16 checks passed
+
+
+COMMAND /Library/Java/JavaVirtualMachines/jdk-17.0.10.jdk/Contents/Home/bin/java -cp <temporary class directory> SingleFlight
+EXIT 1
+Exception in thread "main" java.lang.AssertionError: individual cancellation
+	at SingleFlight.check(SingleFlight.java:35)
+	at SingleFlight.main(SingleFlight.java:70)
+
+
+COMMAND /Library/Java/JavaVirtualMachines/jdk-17.0.10.jdk/Contents/Home/bin/java -cp <temporary class directory> LoadBalancingTest
+EXIT 0
+PASS 39 targeted checks
+- filter unavailable before P2C; two distinct candidates choose 2 not 8
+- no available endpoint rejects instead of falling back to unhealthy
+- empty snapshot
+- one available endpoint
+- warming denies admission
+- readiness requires current incarnation
+- stale incarnation denied
+- exact deadline is expired
+- normal admission holds one permit
+- ready but saturated denies work
+- another incarnation cannot release old work
+- duplicate completion cannot double release
+- two ingress threads: exactly one winner
+- last-slot race never exceeds local limit
+- deadline crossed while waiting for lock: deny with lock-after time
+- expired waiter consumes no capacity
+- drain deadline starts after lock acquisition
+- stale selector denied after local close
+- late success probe cannot revive DRAINING
+- removal ACK binds exact incarnation and revision
+- drain keeps active work alive
+- duplicate drain never extends original deadline
+- changed drain revision cannot reset lifecycle
+- trusted coordinator confirms withdrawal
+- before cutoff retains old active work
+- drain polling observes deadline crossed under lock contention
+- cancel/close decision does not fabricate resource completion
+- old handler completes once after deadline
+- ACK plus actual zero allows clean exit
+- zero active without removal evidence is insufficient
+- lost removal ACK reaches bounded forced path
+- unhealthy gate denies new work
+- failure neither clears work nor revives by probe
+- late drain for prior incarnation cannot close replacement
+- old route and old completion cannot affect replacement incarnation
+- replacement retains its own permit
+- old completion belongs only to old gate
+- monotonic tick wrap does not prematurely expire future deadline
+- deadline comparison survives monotonic tick wrap
+
+
+COMMAND /Library/Java/JavaVirtualMachines/jdk-17.0.10.jdk/Contents/Home/bin/java -cp <temporary class directory> CacheProbe
+EXIT 0
+CacheProbe: 26 independent checks passed
+
+
+COMMAND /Library/Java/JavaVirtualMachines/jdk-17.0.10.jdk/Contents/Home/bin/java -cp <temporary class directory> GateProbe
+EXIT 0
+GateProbe: 28 independent checks passed
+
+
+COMMAND /Library/Java/JavaVirtualMachines/jdk-17.0.10.jdk/Contents/Home/bin/java -cp <temporary class directory> SumProbe
+EXIT 0
+SumProbe: 10 independent checks passed
+
+
+COMMAND node --check assets/js/boot.js
+EXIT 0
+
+
+COMMAND node --check assets/js/lang.js
+EXIT 0
+
+
+COMMAND node --check assets/js/nav.js
+EXIT 0
+
+
+COMMAND node --check assets/js/progress.js
+EXIT 0
+
+
+COMMAND node --check assets/js/slides.js
+EXIT 0
+
+
+COMMAND node --check docs/reviews/ch37-ch38-ch39-browser.mjs
+EXIT 0
+
+
+COMMAND node --check docs/reviews/ch37-ch38-ch39-contact.mjs
+EXIT 0
+
+
+COMMAND node --check docs/reviews/ch37-ch38-ch39-frames.mjs
+EXIT 0
+
+
+COMMAND node --check docs/reviews/ch37-ch38-ch39-geometry.mjs
+EXIT 0
+
+
+COMMAND node --check docs/reviews/ch37-ch38-ch39-header.mjs
+EXIT 0
+
+
+COMMAND node --check examples/ch38/sync.mjs
+EXIT 0
+
+
+COMMAND node --check examples/ch39/sync.mjs
+EXIT 0

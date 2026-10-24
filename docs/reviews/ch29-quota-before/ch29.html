@@ -1,0 +1,1024 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="parchment" data-locale="zh">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ch29 · LLM 推理服务</title>
+  <link rel="icon" href="../favicon.ico" sizes="48x48">
+  <link rel="stylesheet" href="../assets/css/style.css">
+  <script src="../assets/js/boot.js"></script>
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="../index.html"><span class="brand-logo">SD</span><span class="lang-zh">系统设计面试</span><span class="lang-en">System Design Interview</span></a>
+  <span class="spacer"></span>
+  <a class="map-link" href="../index.html"><span class="lang-zh">课程地图</span><span class="lang-en">Map</span></a>
+  <div class="seg" role="group" aria-label="language">
+    <button type="button" data-locale-set="zh">中文</button>
+    <button type="button" data-locale-set="both"><span class="lang-zh">对照</span><span class="lang-en">Both</span></button>
+    <button type="button" data-locale-set="en">EN</button>
+  </div>
+  <div class="seg" role="group" aria-label="theme">
+    <button type="button" data-theme-set="parchment"><span class="lang-zh">护眼</span><span class="lang-en">Paper</span></button>
+    <button type="button" data-theme-set="dracula"><span class="lang-zh">深色</span><span class="lang-en">Dark</span></button>
+  </div>
+</header>
+<main class="wrap">
+<article class="chapter" id="ch29" data-ch="ch29">
+  <header>
+    <div class="ch-kicker"><span class="lang-zh">CHAPTER 29 · 大模型</span><span class="lang-en">CHAPTER 29 · LLM</span></div>
+    <h1><span class="lang-zh">LLM 推理服务</span><span class="lang-en">LLM inference service</span></h1>
+    <p class="ch-meta-line"><span class="lang-zh">约 35 分钟 · 前置：Ch03、Ch04 · 6 组 / 31 帧演进图</span><span class="lang-en">~35 min · after Ch03, Ch04 · 6 decks / 31 evolution frames</span></p>
+  </header>
+
+<section class="goal"><h2><span class="lang-zh">本章核心：先守承诺，再提高利用率</span><span class="lang-en">Core: honor commitments before improving utilization</span></h2><div class="bilingual"><div class="lang-zh"><p><strong>准入分两关：</strong>等待描述有界、租户份额有界；上卡时一次承诺 prompt + 最大输出的页信用，逐轮再核计算预算。</p><p><strong>取消分两步：</strong>先停后续调度，相关 GPU 访问全退休后才释放引用和信用。旧 generation、旧 worker boot 的消息不能碰新池。</p><p><strong>容量分三账：</strong>显存能放多少、目标延迟下能服务多少、用户收到多少，分别计算和测量。</p></div><div class="lang-en"><p><strong>Two admission gates:</strong> bound waiting descriptions and tenant shares. Commit prompt-plus-output-cap page credits at GPU admission, then check compute budgets each iteration.</p><p><strong>Two cancellation steps:</strong> stop future scheduling, then release references and credits after every relevant GPU access retires. Old generations and worker boots cannot touch a new pool.</p><p><strong>Three capacity ledgers:</strong> memory fit, service at target latency, and client delivery require separate calculations and measurements.</p></div></div></section>
+<section><h2><span class="lang-zh">设计范围与可替换的假设</span><span class="lang-en">Scope and replaceable assumptions</span></h2><div class="bilingual"><div class="lang-zh"><p>设计自托管、单地域、单模型的在线文本聊天服务。起点是同卡 prefill + decode；离线摘要另队列、另池。RAG只在前面准备 prompt。先问输入/输出长度分布、TTFT与输出停顿目标、模型版本以及是否允许显式续写。</p><p>主路径 <strong>Client → API gateway → Scheduler → GPU worker</strong>，输出逐跳返回。分页管存放，continuous batching管每轮成员；内核优化不能替代租户公平或生命周期。</p><p>示例接口 <code>POST /v1/chat/completions</code>、<code>stream=true</code>：浏览器用fetch发POST并解析SSE格式响应。原生EventSource不直接发该POST；事件id/Last-Event-ID也不会替服务器保存token日志或KV。<a href="#ref-9">[9]</a></p></div><div class="lang-en"><p>Self-host one model for online text chat in one region, initially colocating prefill and decode. Offline summaries have another queue and pool. RAG prepares the prompt upstream. Clarify length distributions, first-token and stall targets, model identity, and explicit continuation.</p><p>The path is <strong>Client → API gateway → Scheduler → GPU worker</strong>, with every return hop. Paging manages placement; continuous batching selects each iteration’s members. Kernel optimization does not provide tenant fairness or lifecycle safety.</p><p>The illustrative API is <code>POST /v1/chat/completions</code>, <code>stream=true</code>. Browsers use fetch for POST and parse an SSE-format response. Native EventSource does not directly issue this POST; event IDs and Last-Event-ID supply neither a server token log nor KV recovery. <a href="#ref-9">[9]</a></p></div></div><details><summary><span class="lang-zh">教学假设 A1–A12：改数时在这里统一重算</span><span class="lang-en">Teaching assumptions A1–A12: change numbers in one place</span></summary><table><thead><tr><th><span class="lang-zh">假设</span><span class="lang-en">Assumption</span></th><th><span class="lang-zh">取值</span><span class="lang-en">Value</span></th><th><span class="lang-zh">改变哪个决定</span><span class="lang-en">Design consequence</span></th></tr>
+</thead><tbody><tr><td><span class="lang-zh">A1 · 到达与长度</span><span class="lang-en">A1 · arrivals and lengths</span></td><td><span class="lang-zh">平均 10、峰值 30 req/s；输入 2,048，平均输出 256，输出上限 512 token</span><span class="lang-en">10 average, 30 peak req/s; 2,048 input, 256 mean output, 512 output cap</span></td><td><span class="lang-zh">上下文上限 2,560；长请求在分词后校验</span><span class="lang-en">Total context cap 2,560; validate after tokenization</span></td></tr>
+<tr><td><span class="lang-zh">A2 · 模型形状</span><span class="lang-en">A2 · model shape</span></td><td><span class="lang-zh">32 层、8 个 KV head、head dim 128、KV 元素 2 B；全注意力、单副本无分片</span><span class="lang-en">32 layers, 8 KV heads, head dim 128, 2 B/KV element; full attention, unsharded replica</span></td><td><span class="lang-zh">128 KiB/token；架构、并行度变化须重算</span><span class="lang-en">128 KiB/token; recompute for architecture or parallelism changes</span></td></tr>
+<tr><td><span class="lang-zh">A3 · 权重与可用池</span><span class="lang-en">A3 · weights and usable pool</span></td><td><span class="lang-zh">8B 参数 × 2 B；权重、激活峰值、工作区和图捕获留足后，KV 池可用 40 GiB</span><span class="lang-en">8B parameters × 2 B; usable KV pool 40 GiB after weights, peak activations, workspaces, and graph reserves</span></td><td><span class="lang-zh">不指定显卡型号；40 GiB 是独立预算</span><span class="lang-en">No GPU SKU assumption; forty GiB is a separate budget</span></td></tr>
+<tr><td><span class="lang-zh">A4 · 页与保守准入</span><span class="lang-en">A4 · pages and conservative admission</span></td><td><span class="lang-zh">本章页大小 16 token；所有活动请求预留 prompt + 输出上限；图中演示页为 4</span><span class="lang-en">16 tokens/design block; reserve prompt plus output cap; diagram toy block is 4</span></td><td><span class="lang-zh">2 MiB/页，160 页信用/请求；不押平均输出</span><span class="lang-en">2 MiB/block, 160 credits/request; do not bet on mean output</span></td></tr>
+<tr><td><span class="lang-zh">A5 · 延迟观测目标</span><span class="lang-en">A5 · latency observation targets</span></td><td><span class="lang-zh">每请求TTFT≤800 ms且最大worker ITL≤50 ms；联合达标≥99%</span><span class="lang-en">Per-request TTFT≤800 ms and maximum worker ITL≤50 ms; joint attainment≥99%</span></td><td><span class="lang-zh">另报客户端块间隔与请求联合达标比例</span><span class="lang-en">Also report client chunk gaps and joint request attainment</span></td></tr>
+<tr><td><span class="lang-zh">A6 · 单次延迟预算</span><span class="lang-en">A6 · per-request latency budget</span></td><td><span class="lang-zh">端到端其他开销 50 ms、纯 prefill 150 ms、排队预算 600 ms</span><span class="lang-en">50 ms other end-to-end work, 150 ms pure prefill, 600 ms wait budget</span></td><td><span class="lang-zh">这是条件预算，分量 p99 不能直接相加</span><span class="lang-en">Conditional budget, not a sum of component p99s</span></td></tr>
+<tr><td><span class="lang-zh">A7 · 容量示例</span><span class="lang-en">A7 · capacity illustration</span></td><td><span class="lang-zh">若联合达标比例≥99%时最高接纳率测得12 req/s，计划用70%；GPU驻留均值假设6 s</span><span class="lang-en">If maximum admission at ≥99% joint attainment benchmarks at 12 req/s, plan at 70%; assume 6 s mean GPU residence</span></td><td><span class="lang-zh">尚未实际压测；示例需 4 台，N+1 为 5</span><span class="lang-en">No benchmark run here; example needs 4 replicas or 5 with N+1</span></td></tr>
+<tr><td><span class="lang-zh">A8 · decode 时长例子</span><span class="lang-en">A8 · decode timing example</span></td><td><span class="lang-zh">固定成员下相邻 token 平均间隔 20 ms</span><span class="lang-en">20 ms mean gap with fixed membership</span></td><td><span class="lang-zh">只算该条件下时长，不推出 128 并发吞吐</span><span class="lang-en">Only a timing illustration, not throughput at concurrency 128</span></td></tr>
+<tr><td><span class="lang-zh">A9 · 准入与公平</span><span class="lang-en">A9 · admission and fairness</span></td><td><span class="lang-zh">全局队列100、每租户25；活动每租户32/5,120页；输入配额例4,096 token/s</span><span class="lang-en">Global queue 100, per tenant 25; tenant active cap 32/5,120 pages; input quota example 4,096 token/s</span></td><td><span class="lang-zh">数量上限与 600 ms 期限同时检查</span><span class="lang-en">Enforce both count cap and 600 ms deadline</span></td></tr>
+<tr><td><span class="lang-zh">A10 · 尝试身份</span><span class="lang-en">A10 · attempt identity</span></td><td><span class="lang-zh">同主体/key/body hash；幂等结果保留 24 h，客户端重试窗口最多 15 min</span><span class="lang-en">Principal/key/body hash identity; retain dedupe results 24 h for a client retry window of at most 15 min</span></td><td><span class="lang-zh">过期 key 不继续自动重试；epoch 隔离旧 owner</span><span class="lang-en">Expired keys stop automatic retry; epochs fence old owners</span></td></tr>
+<tr><td><span class="lang-zh">A11 · 流缓冲与取消</span><span class="lang-en">A11 · buffers and cancellation</span></td><td><span class="lang-zh">每流待发送字节上限 64 KiB；持续 2 s 无进展就取消；共享页按引用计数</span><span class="lang-en">64 KiB pending-send cap/stream; cancel after 2 s without progress; refcount shared pages</span></td><td><span class="lang-zh">等待本轮 GPU fence，再退休引用</span><span class="lang-en">Wait for the GPU fence before retiring references</span></td></tr>
+<tr><td><span class="lang-zh">A12 · 分离互连</span><span class="lang-en">A12 · split-pool interconnect</span></td><td><span class="lang-zh">有效 KV 传输带宽假设 10 GB/s；先锁 decode 目标信用，再做 prefill</span><span class="lang-en">Assumed effective KV transfer 10 GB/s; reserve decode credits before prefill</span></td><td><span class="lang-zh">prompt KV 256 MiB；搬运握手带模型与 epoch</span><span class="lang-en">256 MiB prompt KV; handshake carries model and epoch</span></td></tr>
+</tbody></table><div class="bilingual"><div class="lang-zh"><p>均为教学假设，不对应具体显卡、模型或已执行的压测。40 GiB是权重、激活峰值、工作区、页表和图捕获预留之后的KV池；峰值随batch/chunk变化，不能简单用总显存减权重。租户配额、页/活动上限和服务器信任域由服务端决定。</p></div><div class="lang-en"><p>These are teaching assumptions, not a GPU SKU, model specification, or executed benchmark. Forty GiB is the KV pool after weights, peak activations, workspaces, tables, and graph reserves. Batch/chunk shapes change peaks; advertised memory minus weights is insufficient. The server assigns quotas, page/active caps, and trust domains.</p></div></div></details></section>
+<section><h2><span class="lang-zh">估算：128条信用不是128条的吞吐</span><span class="lang-en">Estimate: 128 reservations do not establish throughput</span></h2><div class="bilingual"><div class="lang-zh"><p>全注意力KV：<code>2 × 32层 × 8 KV head × 128维 × 2 B = 128 KiB/token</code>。16 token页是2 MiB；<code>ceil((2,048 + 512) ÷ 16) = 160页 = 320 MiB/请求</code>。40 GiB = 40,960 MiB，因此最多128条满额信用；第129条会超出320 MiB。这里使用KV head，且不含权重等运行时开销。</p><p><strong>Little定律必须圈同一个边界。</strong>令λ是稳定准入并退出GPU的尝试率（含取消），W是从GPU准入到引用/信用释放的平均驻留时间，排队不计入W。若λ=10/s且W=6s，平均活动60条，保守信用18.75 GiB；若持续30/s仍保持6s，条件需求是180条/56.25 GiB，超过单池。它说明需要拒绝、扩容或改预算，不能从128÷6反推单卡产能。</p><p>算力容量另做负载基准：假设最大接纳率C=12 req/s时仍有≥99%请求同时达到TTFT≤800ms和<strong>该请求最大worker ITL≤50ms</strong>，规划用70%，即8.4 req/s。峰值30需<code>ceil(30÷8.4)=4</code>个副本；同预算N−1需5个，剩余33.6 req/s。12尚未实测；只给“goodput=12”也不能把它直接当总完成率或排队服务率。</p></div><div class="lang-en"><p>Full-attention KV is <code>2 × 32 layers × 8 KV heads × 128 dimensions × 2 B = 128 KiB/token</code>. A sixteen-token block is 2 MiB. <code>ceil((2,048 + 512) ÷ 16) = 160 blocks = 320 MiB/request</code>. Forty GiB is 40,960 MiB and fits 128 full-cap reservations; number 129 exceeds it by 320 MiB. Count KV heads, excluding weights and other runtime overhead.</p><p><strong>Little’s law needs one boundary.</strong> Let λ be stable admitted/departing attempts per second, including cancellation, and W mean residence from GPU admission through reference/credit release, excluding queueing. At λ=10/s and W=6s, mean active count is sixty and conservative credits are 18.75 GiB. Sustained thirty/s with W still six requires 180 requests/56.25 GiB. This conditional demand exceeds one pool and requires rejection, expansion, or a changed budget. It does not infer compute capacity from 128÷6.</p><p>Benchmark compute separately. Suppose maximum admission C=12 req/s still gives ≥99% of requests both TTFT≤800ms and <strong>maximum worker ITL within that request≤50ms</strong>. Plan at 70%, or 8.4 req/s. Peak thirty needs <code>ceil(30÷8.4)=4</code> replicas; five preserve the same N−1 budget, leaving 33.6 req/s. Twelve is unmeasured. A goodput of twelve alone is not total completion rate or a queue service rate.</p></div></div><details><summary><span class="lang-zh">完整需求、权重与长上下文复算</span><span class="lang-en">Demand, weights, and longer-context calculations</span></summary><div class="bilingual"><div class="lang-zh"><p>权重 <code>8×10⁹×2=16 GB≈14.9 GiB</code>。输入需求平均20,480、峰值61,440 token/s；输出平均2,560、峰值7,680 token/s，假定均接纳并按均值256输出。租户输入4,096 token/s约容许2条标准prompt/s，但长输出仍需输出预留与活动上限。</p><p>若输入改8,192、输出上限仍512，需8,704×128 KiB=1,088 MiB，40,960÷1,088≈37.65，只容37条满额信用；prefill时间和新上下文工作区仍需重测。weight-only量化不改变KV字节/token，却可能腾大可用池。</p></div><div class="lang-en"><p>Weights are <code>8×10⁹×2=16 GB≈14.9 GiB</code>. Input demand averages 20,480 and peaks at 61,440 tokens/s; output averages 2,560 and peaks at 7,680 tokens/s if all requests complete with mean output 256. A 4,096 input-token/s quota permits about two standard prompts/s, while long outputs still need output reservations and active caps.</p><p>Changing input to 8,192 with output cap 512 needs 8,704×128 KiB=1,088 MiB; 40,960÷1,088≈37.65 fits thirty-seven reservations. Remeasure prefill and workspace peaks. Weight-only quantization keeps KV bytes/token unchanged but may enlarge the usable pool.</p></div></div></details></section>
+<section><h2><span class="lang-zh">在线闭环：排队不占KV，上卡才作承诺</span><span class="lang-en">Online loop: queue without KV, commit at admission</span></h2><figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d1s1t d1s1d">
+          <title id="d1s1t">Start with an authenticated streaming boundary</title>
+          <desc id="d1s1d">Client submits to API gateway; API gateway returns SSE or a pre-stream HTTP error to Client.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <g class="is-new">
+            <rect x="148" y="18" width="796" height="364" rx="18" class="boundary"/><text x="164" y="38" class="tiny">ONLINE SERVING · one model · one region</text>
+            <circle cx="44" cy="156" r="12" class="box"/><path d="M24 202 Q44 170 64 202" class="wire"/><text x="44" y="224" text-anchor="middle" class="label">Client</text>
+            <rect x="160" y="145" width="150" height="80" rx="12" class="box"/><text x="235" y="182" text-anchor="middle" class="label">API gateway</text><text x="235" y="201" text-anchor="middle" class="sub">auth + token quota</text>
+            <path d="M70 171 L150 171" class="wire"/><polygon points="160,171 150,176 150,166" class="head"/><text x="110" y="161" text-anchor="middle" class="tiny">POST</text>
+            <path d="M160 189 L80 189" class="wire reply"/><polygon points="70,189 80,184 80,194" class="head reply"/><text x="110" y="209" text-anchor="middle" class="tiny">SSE / error</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">先画入口闭环。网关验身份与 token 配额，错误也沿原路返回；流式只提前展示首段内容，不会减少生成步数。</span><span class="lang-en">Start with a closed ingress loop. The gateway checks identity and token quota and returns errors on the same path. Streaming exposes output earlier; it does not remove generation steps.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d1s2t d1s2d">
+          <title id="d1s2t">Add the owner-aware scheduler</title>
+          <desc id="d1s2d">API gateway submits to Scheduler; Scheduler returns deltas or admission status through API gateway to Client.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="148" y="18" width="796" height="364" rx="18" class="boundary"/><text x="164" y="38" class="tiny">ONLINE SERVING · one model · one region</text>
+          <circle cx="44" cy="156" r="12" class="box"/><path d="M24 202 Q44 170 64 202" class="wire"/><text x="44" y="224" text-anchor="middle" class="label">Client</text>
+          <rect x="160" y="145" width="150" height="80" rx="12" class="box"/><text x="235" y="182" text-anchor="middle" class="label">API gateway</text><text x="235" y="201" text-anchor="middle" class="sub">auth + token quota</text>
+          <path d="M70 171 L150 171" class="wire"/><polygon points="160,171 150,176 150,166" class="head"/><text x="110" y="161" text-anchor="middle" class="tiny">POST</text>
+          <path d="M160 189 L80 189" class="wire reply"/><polygon points="70,189 80,184 80,194" class="head reply"/><text x="110" y="209" text-anchor="middle" class="tiny">SSE / error</text>
+          <g class="is-new">
+            <rect x="430" y="145" width="150" height="80" rx="12" class="box"/><text x="505" y="182" text-anchor="middle" class="label">Scheduler</text><text x="505" y="201" text-anchor="middle" class="sub">owner + admission</text>
+            <path d="M310 171 L420 171" class="wire"/><polygon points="430,171 420,176 420,166" class="head"/><text x="370" y="161" text-anchor="middle" class="tiny">submit</text>
+            <path d="M430 189 L320 189" class="wire reply"/><polygon points="310,189 320,184 320,194" class="head reply"/><text x="370" y="209" text-anchor="middle" class="tiny">delta / status</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">把路由和准入交给 Scheduler：它选择 worker 并记录 owner epoch。两台网关不能因为各自看见空位，就把同一尝试调度两次。</span><span class="lang-en">Scheduler owns routing and admission with an owner epoch. Two gateways cannot schedule the same attempt twice merely because both see capacity.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d1s3t d1s3d">
+          <title id="d1s3t">Wait without holding KV</title>
+          <desc id="d1s3d">Scheduler enqueues a waiting request into Online queue and takes it back only when admission is available; the waiting description owns no GPU KV.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="148" y="18" width="796" height="364" rx="18" class="boundary"/><text x="164" y="38" class="tiny">ONLINE SERVING · one model · one region</text>
+          <circle cx="44" cy="156" r="12" class="box"/><path d="M24 202 Q44 170 64 202" class="wire"/><text x="44" y="224" text-anchor="middle" class="label">Client</text>
+          <rect x="160" y="145" width="150" height="80" rx="12" class="box"/><text x="235" y="182" text-anchor="middle" class="label">API gateway</text><text x="235" y="201" text-anchor="middle" class="sub">auth + token quota</text>
+          <path d="M70 171 L150 171" class="wire"/><polygon points="160,171 150,176 150,166" class="head"/><text x="110" y="161" text-anchor="middle" class="tiny">POST</text>
+          <path d="M160 189 L80 189" class="wire reply"/><polygon points="70,189 80,184 80,194" class="head reply"/><text x="110" y="209" text-anchor="middle" class="tiny">SSE / error</text>
+          <rect x="430" y="145" width="150" height="80" rx="12" class="box"/><text x="505" y="182" text-anchor="middle" class="label">Scheduler</text><text x="505" y="201" text-anchor="middle" class="sub">owner + admission</text>
+          <path d="M310 171 L420 171" class="wire"/><polygon points="430,171 420,176 420,166" class="head"/><text x="370" y="161" text-anchor="middle" class="tiny">submit</text>
+          <path d="M430 189 L320 189" class="wire reply"/><polygon points="310,189 320,184 320,194" class="head reply"/><text x="370" y="209" text-anchor="middle" class="tiny">delta / status</text>
+          <g class="is-new">
+            <path d="M441 300 h148 a21 21 0 0 1 0 42 h-148 a21 21 0 0 1 0 -42" class="queue"/><path d="M582 309 v24" class="queue"/><path d="M574 309 v24" class="queue"/><path d="M566 309 v24" class="queue"/><text x="499" y="327" text-anchor="middle" class="label">Online queue</text>
+            <path d="M465 225 L465 290" class="wire"/><polygon points="465,300 460,290 470,290" class="head"/><text x="455" y="267" text-anchor="end" class="tiny">wait</text>
+            <path d="M545 300 L545 235" class="wire reply"/><polygon points="545,225 550,235 540,235" class="head reply"/><text x="555" y="267" class="tiny">ready</text>
+            <text x="435" y="368" class="tiny">bounded wait · no KV while queued</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">排队保存描述，不占 KV。示例等待预算 600 ms；预计无法按时启动就提前拒绝，不能把无限等待包装成“接住请求”。</span><span class="lang-en">The queue stores descriptions without KV. The illustrative wait budget is 600 ms. Reject when timely start is unlikely; unlimited waiting does not create capacity.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d1s4t d1s4d">
+          <title id="d1s4t">Assign one worker and stream every hop</title>
+          <desc id="d1s4d">Scheduler assigns GPU worker. GPU worker runs prefill then decode; tokens return GPU worker to Scheduler to API gateway to Client.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="148" y="18" width="796" height="364" rx="18" class="boundary"/><text x="164" y="38" class="tiny">ONLINE SERVING · one model · one region</text>
+          <circle cx="44" cy="156" r="12" class="box"/><path d="M24 202 Q44 170 64 202" class="wire"/><text x="44" y="224" text-anchor="middle" class="label">Client</text>
+          <rect x="160" y="145" width="150" height="80" rx="12" class="box"/><text x="235" y="182" text-anchor="middle" class="label">API gateway</text><text x="235" y="201" text-anchor="middle" class="sub">auth + token quota</text>
+          <path d="M70 171 L150 171" class="wire"/><polygon points="160,171 150,176 150,166" class="head"/><text x="110" y="161" text-anchor="middle" class="tiny">POST</text>
+          <path d="M160 189 L80 189" class="wire reply"/><polygon points="70,189 80,184 80,194" class="head reply"/><text x="110" y="209" text-anchor="middle" class="tiny">SSE / error</text>
+          <rect x="430" y="145" width="150" height="80" rx="12" class="box"/><text x="505" y="182" text-anchor="middle" class="label">Scheduler</text><text x="505" y="201" text-anchor="middle" class="sub">owner + admission</text>
+          <path d="M310 171 L420 171" class="wire"/><polygon points="430,171 420,176 420,166" class="head"/><text x="370" y="161" text-anchor="middle" class="tiny">submit</text>
+          <path d="M430 189 L320 189" class="wire reply"/><polygon points="310,189 320,184 320,194" class="head reply"/><text x="370" y="209" text-anchor="middle" class="tiny">delta / status</text>
+          <path d="M441 300 h148 a21 21 0 0 1 0 42 h-148 a21 21 0 0 1 0 -42" class="queue"/><path d="M582 309 v24" class="queue"/><path d="M574 309 v24" class="queue"/><path d="M566 309 v24" class="queue"/><text x="499" y="327" text-anchor="middle" class="label">Online queue</text>
+          <path d="M465 225 L465 290" class="wire"/><polygon points="465,300 460,290 470,290" class="head"/><text x="455" y="267" text-anchor="end" class="tiny">wait</text>
+          <path d="M545 300 L545 235" class="wire reply"/><polygon points="545,225 550,235 540,235" class="head reply"/><text x="555" y="267" class="tiny">ready</text>
+          <text x="435" y="368" class="tiny">bounded wait · no KV while queued</text>
+          <g class="is-new">
+            <rect x="710" y="145" width="175" height="80" rx="12" class="box"/><text x="797.5" y="182" text-anchor="middle" class="label">GPU worker</text><text x="797.5" y="201" text-anchor="middle" class="sub">prefill / decode</text>
+            <path d="M580 171 L700 171" class="wire"/><polygon points="710,171 700,176 700,166" class="head"/><text x="645" y="161" text-anchor="middle" class="tiny">assigned epoch</text>
+            <path d="M710 189 L590 189" class="wire reply"/><polygon points="580,189 590,184 590,194" class="head reply"/><text x="645" y="209" text-anchor="middle" class="tiny">token / finish</text>
+            <text x="712" y="120" class="tiny">KV stays on this GPU worker</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">上卡前同时检查显存信用和本轮 token 预算。GPU worker 的每个 delta 都经 Scheduler、API gateway 回 Client；运行中不会轮询换卡。</span><span class="lang-en">Before dispatch, check memory credits and iteration token budget. Every delta traverses GPU worker, Scheduler, API gateway, and Client. An active generation does not round-robin across cards.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d1s5t d1s5d">
+          <title id="d1s5t">Load model weights before becoming ready</title>
+          <desc id="d1s5d">GPU worker requests Weights at boot and receives their bytes. Weights remain resident; the token hot path reads no object storage.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="148" y="18" width="796" height="364" rx="18" class="boundary"/><text x="164" y="38" class="tiny">ONLINE SERVING · one model · one region</text>
+          <circle cx="44" cy="156" r="12" class="box"/><path d="M24 202 Q44 170 64 202" class="wire"/><text x="44" y="224" text-anchor="middle" class="label">Client</text>
+          <rect x="160" y="145" width="150" height="80" rx="12" class="box"/><text x="235" y="182" text-anchor="middle" class="label">API gateway</text><text x="235" y="201" text-anchor="middle" class="sub">auth + token quota</text>
+          <path d="M70 171 L150 171" class="wire"/><polygon points="160,171 150,176 150,166" class="head"/><text x="110" y="161" text-anchor="middle" class="tiny">POST</text>
+          <path d="M160 189 L80 189" class="wire reply"/><polygon points="70,189 80,184 80,194" class="head reply"/><text x="110" y="209" text-anchor="middle" class="tiny">SSE / error</text>
+          <rect x="430" y="145" width="150" height="80" rx="12" class="box"/><text x="505" y="182" text-anchor="middle" class="label">Scheduler</text><text x="505" y="201" text-anchor="middle" class="sub">owner + admission</text>
+          <path d="M310 171 L420 171" class="wire"/><polygon points="430,171 420,176 420,166" class="head"/><text x="370" y="161" text-anchor="middle" class="tiny">submit</text>
+          <path d="M430 189 L320 189" class="wire reply"/><polygon points="310,189 320,184 320,194" class="head reply"/><text x="370" y="209" text-anchor="middle" class="tiny">delta / status</text>
+          <path d="M441 300 h148 a21 21 0 0 1 0 42 h-148 a21 21 0 0 1 0 -42" class="queue"/><path d="M582 309 v24" class="queue"/><path d="M574 309 v24" class="queue"/><path d="M566 309 v24" class="queue"/><text x="499" y="327" text-anchor="middle" class="label">Online queue</text>
+          <path d="M465 225 L465 290" class="wire"/><polygon points="465,300 460,290 470,290" class="head"/><text x="455" y="267" text-anchor="end" class="tiny">wait</text>
+          <path d="M545 300 L545 235" class="wire reply"/><polygon points="545,225 550,235 540,235" class="head reply"/><text x="555" y="267" class="tiny">ready</text>
+          <text x="435" y="368" class="tiny">bounded wait · no KV while queued</text>
+          <rect x="710" y="145" width="175" height="80" rx="12" class="box"/><text x="797.5" y="182" text-anchor="middle" class="label">GPU worker</text><text x="797.5" y="201" text-anchor="middle" class="sub">prefill / decode</text>
+          <path d="M580 171 L700 171" class="wire"/><polygon points="710,171 700,176 700,166" class="head"/><text x="645" y="161" text-anchor="middle" class="tiny">assigned epoch</text>
+          <path d="M710 189 L590 189" class="wire reply"/><polygon points="580,189 590,184 590,194" class="head reply"/><text x="645" y="209" text-anchor="middle" class="tiny">token / finish</text>
+          <text x="712" y="120" class="tiny">KV stays on this GPU worker</text>
+          <g class="is-new">
+            <path d="M755 292 V356 A65 12 0 0 0 885 356 V292" class="store"/><ellipse cx="820" cy="292" rx="65" ry="12" class="store"/><text x="820" y="334" text-anchor="middle" class="label">Weights</text><text x="820" y="352" text-anchor="middle" class="sub">object storage</text>
+            <path d="M790 225 L790 252.5 Q790 260 782.5 260 L781.7 260 Q775 260 775 266.7 L775 273.3" class="wire async"/><polygon points="775,283.3 770,273.3 780,273.3" class="head async"/><text x="806" y="247" class="tiny">boot GET</text><path d="M885 328 L914 328 Q922 328 922 320 L922 213 Q922 205 914 205 L895 205" class="wire reply"/><polygon points="885,205 895,200 895,210" class="head reply"/><text x="905" y="274" text-anchor="end" class="tiny">bytes</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">权重加载完成、内核预热和 KV 池建好才 ready。8B × 2 B = 16 GB ≈ 14.9 GiB 只是权重字节，不是可用显存或启动时间。</span><span class="lang-en">Become ready after weights load, kernel warmup, and KV pool creation. 8B × 2 B = 16 GB ≈ 14.9 GiB describes weights, not free memory or startup duration.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d1s6t d1s6d">
+          <title id="d1s6t">Persist an attempt identity outside gateway memory</title>
+          <desc id="d1s6d">API gateway claims or recovers a key in Attempt Store and receives the saved result. Scheduler conditionally assigns an owner epoch in Attempt Store and receives its result; the store contains neither KV nor replay tokens.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="148" y="18" width="796" height="364" rx="18" class="boundary"/><text x="164" y="38" class="tiny">ONLINE SERVING · one model · one region</text>
+          <circle cx="44" cy="156" r="12" class="box"/><path d="M24 202 Q44 170 64 202" class="wire"/><text x="44" y="224" text-anchor="middle" class="label">Client</text>
+          <rect x="160" y="145" width="150" height="80" rx="12" class="box"/><text x="235" y="182" text-anchor="middle" class="label">API gateway</text><text x="235" y="201" text-anchor="middle" class="sub">auth + token quota</text>
+          <path d="M70 171 L150 171" class="wire"/><polygon points="160,171 150,176 150,166" class="head"/><text x="110" y="161" text-anchor="middle" class="tiny">POST</text>
+          <path d="M160 189 L80 189" class="wire reply"/><polygon points="70,189 80,184 80,194" class="head reply"/><text x="110" y="209" text-anchor="middle" class="tiny">SSE / error</text>
+          <rect x="430" y="145" width="150" height="80" rx="12" class="box"/><text x="505" y="182" text-anchor="middle" class="label">Scheduler</text><text x="505" y="201" text-anchor="middle" class="sub">owner + admission</text>
+          <path d="M310 171 L420 171" class="wire"/><polygon points="430,171 420,176 420,166" class="head"/><text x="370" y="161" text-anchor="middle" class="tiny">submit</text>
+          <path d="M430 189 L320 189" class="wire reply"/><polygon points="310,189 320,184 320,194" class="head reply"/><text x="370" y="209" text-anchor="middle" class="tiny">delta / status</text>
+          <path d="M441 300 h148 a21 21 0 0 1 0 42 h-148 a21 21 0 0 1 0 -42" class="queue"/><path d="M582 309 v24" class="queue"/><path d="M574 309 v24" class="queue"/><path d="M566 309 v24" class="queue"/><text x="499" y="327" text-anchor="middle" class="label">Online queue</text>
+          <path d="M465 225 L465 290" class="wire"/><polygon points="465,300 460,290 470,290" class="head"/><text x="455" y="267" text-anchor="end" class="tiny">wait</text>
+          <path d="M545 300 L545 235" class="wire reply"/><polygon points="545,225 550,235 540,235" class="head reply"/><text x="555" y="267" class="tiny">ready</text>
+          <text x="435" y="368" class="tiny">bounded wait · no KV while queued</text>
+          <rect x="710" y="145" width="175" height="80" rx="12" class="box"/><text x="797.5" y="182" text-anchor="middle" class="label">GPU worker</text><text x="797.5" y="201" text-anchor="middle" class="sub">prefill / decode</text>
+          <path d="M580 171 L700 171" class="wire"/><polygon points="710,171 700,176 700,166" class="head"/><text x="645" y="161" text-anchor="middle" class="tiny">assigned epoch</text>
+          <path d="M710 189 L590 189" class="wire reply"/><polygon points="580,189 590,184 590,194" class="head reply"/><text x="645" y="209" text-anchor="middle" class="tiny">token / finish</text>
+          <text x="712" y="120" class="tiny">KV stays on this GPU worker</text>
+          <path d="M755 292 V356 A65 12 0 0 0 885 356 V292" class="store"/><ellipse cx="820" cy="292" rx="65" ry="12" class="store"/><text x="820" y="334" text-anchor="middle" class="label">Weights</text><text x="820" y="352" text-anchor="middle" class="sub">object storage</text>
+          <path d="M790 225 L790 252.5 Q790 260 782.5 260 L781.7 260 Q775 260 775 266.7 L775 273.3" class="wire async"/><polygon points="775,283.3 770,273.3 780,273.3" class="head async"/><text x="806" y="247" class="tiny">boot GET</text><path d="M885 328 L914 328 Q922 328 922 320 L922 213 Q922 205 914 205 L895 205" class="wire reply"/><polygon points="885,205 895,200 895,210" class="head reply"/><text x="905" y="274" text-anchor="end" class="tiny">bytes</text>
+          <g class="is-new">
+            <path d="M180 286 V356 A65 12 0 0 0 310 356 V286" class="store"/><ellipse cx="245" cy="286" rx="65" ry="12" class="store"/><text x="245" y="331" text-anchor="middle" class="label">Attempt Store</text><text x="245" y="349" text-anchor="middle" class="sub">key + owner epoch</text>
+            <path d="M210 225 L210 265.9" class="wire"/><polygon points="210,275.9 205,265.9 215,265.9" class="head"/><text x="200" y="266" text-anchor="end" class="tiny">claim</text><path d="M280 275.9 L280 235" class="wire reply"/><polygon points="280,225 285,235 275,235" class="head reply"/><text x="291" y="266" class="tiny">result</text><path d="M430 215 L378 215 Q370 215 370 223 L370 322 Q370 330 362 330 L320 330" class="wire"/><polygon points="310,330 320,325 320,335" class="head"/><text x="345" y="290" text-anchor="middle" class="tiny">assign</text><path d="M310 348 L387 348 Q395 348 395 340 L395 233 Q395 225 403 225 L450 225" class="wire reply"/><polygon points="460,225 450,230 450,220" class="head reply"/>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">最后补尝试记录：主体、正文哈希、key 与 owner epoch 用条件更新绑定。这里持久化的是一次准入身份，没有持久 token 日志，也没有换卡续写的能力。</span><span class="lang-en">Complete the attempt identity: conditional updates bind principal, payload hash, key, and owner epoch. This persists admission identity, without a durable token log or cross-worker continuation.</span></figcaption>
+      </div>
+    </figure><div class="bilingual"><div class="lang-zh"><p>网关固定model/template/tokenizer并按实际token校验长度。主体/key/规范正文哈希在共享Attempt Store绑定一次尝试，重复请求不重复扣输入/输出配额；换网关仍读同一记录。持久尝试与配额若跨库，必须用可恢复预留/撤销协议。下面从已持久受理且配额就绪的请求开始，不拿本地队列当持久去重。</p><p>Scheduler对一个worker boot独占调度；等待只保存有界描述。租户轮转避免被一个租户的队头堵住，分别限制队列数、活动序列与页信用。<strong>期限和数量是两条限制：</strong>若总完成率假设12/s，100条相当于约8.33秒工作量，远超600ms；限制成7条也不是p99证明。</p></div><div class="lang-en"><p>The gateway fixes model/template/tokenizer and validates actual token lengths. A shared Attempt Store binds principal/key/canonical-body hash to one attempt; input/output quota is reserved once across retries and gateway changes. Separate stores require recoverable reserve/revoke steps. The next listing starts with a durable claim and ready quota; a local queue is not durable deduplication.</p><p>One scheduler exclusively controls a worker boot. Waiting stores bounded descriptions. Rotate tenants and separately bound queued count, active sequences, and page credits. <strong>Deadlines and counts are separate limits:</strong> at an assumed total completion rate of twelve/s, one hundred requests represent about 8.33 seconds of work, exceeding 600ms. Capping at seven still does not prove p99.</p></div></div><pre data-language="Pseudocode · bounded tenant admission" data-kind="pseudocode" data-source="admission.pseudo"><code># Teaching pseudocode: one live scheduler owns this worker boot.
+# A shared Attempt Store has already claimed (principal, key, body_hash).
+enqueue(attempt, trusted_tenant, prompt_tokens, max_output, now):
+  require fixed model/template/tokenizer; 1 &lt;= prompt_tokens &lt;= 2048
+  require 1 &lt;= max_output &lt;= 512 and prompt_tokens + max_output &lt;= 2560
+  if attempt is already queued or active: return saved_status(attempt)
+  if queued_total == 100 or queued[trusted_tenant].size == 25: return OVERLOADED
+  # Input/output quota reservation belongs to attempt, not the HTTP connection.
+  if attempt.quota != RESERVED: return QUOTA_NOT_READY
+  r = Entry(attempt, trusted_tenant, prompt_tokens, max_output)
+  r.wait_deadline = now + 600ms             # local monotonic time, not persisted
+  r.request_deadline = now + validated_remaining_service_budget
+  queued[trusted_tenant].append(r)
+  return QUEUED                           # no KV credit and no physical KV
+
+admit_waiters(now):                        # execute on the same event loop
+  for tenant in rotating_tenant_ring:      # one head/tenant per pass
+    q = queued[tenant]
+    while q and now &gt;= q.head.wait_deadline:
+      expired = q.pop(); expire(expired); release_quota_idempotently(expired.attempt)
+    if not q: continue
+    r = q.head
+    need = ceil((r.prompt_tokens + r.max_output) / 16)
+    if active[tenant] == 32 or tenant_page_credits[tenant] + need &gt; 5120: continue
+    if active_total == measured_safe_sequence_cap: continue
+    if not calibrated_shape_allows(r): continue
+    # Only this scheduler mutates local credits; worker validates boot/generation.
+    if not worker_ledger.admit(r.owner, r.prompt_tokens, r.max_output): continue
+    q.pop(); active[tenant] += 1; tenant_page_credits[tenant] += need
+    charged[r.owner] = (tenant, need)
+    ready[tenant].append(r)                # prefill runs in iteration(), below
+  rotate_ring_start()                      # blocked tenant does not block others
+
+on_release(owner):                         # same event loop; poll ledger transitions
+  if worker_ledger.state(owner) != RELEASED: return
+  grant = charged.remove(owner)             # absent means duplicate notification
+  if grant:
+    active[grant.tenant] -= 1; tenant_page_credits[grant.tenant] -= grant.need
+    settle_quota_idempotently(owner.attempt)</code></pre><div class="bilingual"><div class="lang-zh"><p>这是单Scheduler事件循环伪代码，输入是已验证请求；输出QUEUED、过期/超额或ready。25/32/5,120是教学政策。等待用本地单调时间，重启不沿用旧时钟值；持久ASSIGNED恢复后查询原worker或隔离并明确中断，不能悄悄重放内存队列。当前代码不实现跨库配额预留。</p><p>健康容量缺失用503；租户超额/等待不可接受用429；上下文错误用400，均为本章接口约定。流头发出后改用终止事件，socket断了由客户端检测。权重加载、KV池和内核预热完成才ready；新worker只接新请求。离线另池；同池优先级不能中断一个已执行的长chunk。</p></div><div class="lang-en"><p>This single-scheduler event-loop pseudocode maps validated requests to QUEUED, expiry/denial, or ready. The 25/32/5,120 caps are teaching policy. Waiting uses local monotonic time; restart does not reuse old clock values. Recover ASSIGNED by querying its worker or fencing and explicitly interrupting, without silently replaying a lost queue. Cross-store quota reservations are not implemented.</p><p>Our API uses 503 for unavailable healthy capacity, 429 for tenant/excessive-wait denial, and 400 for context errors. After stream headers, send a terminal event; broken sockets are detected by Client. Become ready after weight loading, pool setup, and warmup. New workers take new requests. Offline uses another pool; a priority label cannot interrupt a running long chunk.</p></div></div></section>
+<section><h2><span class="lang-zh">KV分页：信用、物理页和共享引用</span><span class="lang-en">Paged KV: credits, physical pages, and shared references</span></h2><figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d2s1t d2s1d">
+          <title id="d2s1t">Separate reservation credits from physical KV</title>
+          <desc id="d2s1d">Scheduler reserves full-cap credits for R1. Block table maps logical L0 to physical P7 in GPU KV pool. The page example uses four token states per block, independently of the production assumption of sixteen.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <g class="is-new">
+            <rect x="125" y="18" width="819" height="364" rx="18" class="boundary"/><text x="141" y="38" class="tiny">PAGED KV · logical order, scattered physical blocks</text>
+            <rect x="155" y="125" width="175" height="75" rx="12" class="box"/><text x="242.5" y="159.5" text-anchor="middle" class="label">Scheduler</text><text x="242.5" y="178.5" text-anchor="middle" class="sub">reserve full cap</text>
+            <rect x="390" y="64" width="180" height="276" rx="18" class="boundary"/><text x="406" y="85" class="tiny">Block table · R1</text>
+            <rect x="730" y="64" width="190" height="276" rx="18" class="boundary"/><text x="746" y="85" class="tiny">GPU KV pool</text>
+            <rect x="420" y="105" width="120" height="45" rx="12" class="box"/><text x="480" y="124.5" text-anchor="middle" class="label">L0</text><text x="480" y="143.5" text-anchor="middle" class="sub">logical block</text>
+            <rect x="760" y="105" width="130" height="45" rx="12" class="cache"/><text x="825" y="124.5" text-anchor="middle" class="label">P7</text><text x="825" y="143.5" text-anchor="middle" class="sub">4 / 4 states</text>
+            <path d="M540 127 L750 127" class="wire"/><polygon points="760,127 750,132 750,122" class="head"/><text x="650" y="117" text-anchor="middle" class="tiny">mapping</text>
+            <path d="M330 162 L362 162 Q370 162 370 154 L370 135 Q370 127 378 127 L410 127" class="wire"/><polygon points="420,127 410,132 410,122" class="head"/><text x="155" y="222" class="tiny">160 credits / request</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">准入预留 160 个生产 block 的信用，物理页按需分配。图用每页 4 个状态演示映射；P7 的编号说明逻辑顺序不等于物理位置。</span><span class="lang-en">Reserve credits for 160 production blocks; allocate physical blocks on demand. The diagram uses four states per page, and P7 illustrates that logical order is not physical order.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d2s2t d2s2d">
+          <title id="d2s2t">A seven-token prompt maps two pages</title>
+          <desc id="d2s2d">The seven-token prompt occupies L0 to P7 and L1 to P2. P2 initially holds three of four token states. Mapping edges are pointers, not network requests.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="125" y="18" width="819" height="364" rx="18" class="boundary"/><text x="141" y="38" class="tiny">PAGED KV · logical order, scattered physical blocks</text>
+          <rect x="155" y="125" width="175" height="75" rx="12" class="box"/><text x="242.5" y="159.5" text-anchor="middle" class="label">Scheduler</text><text x="242.5" y="178.5" text-anchor="middle" class="sub">reserve full cap</text>
+          <rect x="390" y="64" width="180" height="276" rx="18" class="boundary"/><text x="406" y="85" class="tiny">Block table · R1</text>
+          <rect x="730" y="64" width="190" height="276" rx="18" class="boundary"/><text x="746" y="85" class="tiny">GPU KV pool</text>
+          <rect x="420" y="105" width="120" height="45" rx="12" class="box"/><text x="480" y="124.5" text-anchor="middle" class="label">L0</text><text x="480" y="143.5" text-anchor="middle" class="sub">logical block</text>
+          <rect x="760" y="105" width="130" height="45" rx="12" class="cache"/><text x="825" y="124.5" text-anchor="middle" class="label">P7</text><text x="825" y="143.5" text-anchor="middle" class="sub">4 / 4 states</text>
+          <path d="M540 127 L750 127" class="wire"/><polygon points="760,127 750,132 750,122" class="head"/><text x="650" y="117" text-anchor="middle" class="tiny">mapping</text>
+          <path d="M330 162 L362 162 Q370 162 370 154 L370 135 Q370 127 378 127 L410 127" class="wire"/><polygon points="420,127 410,132 410,122" class="head"/><text x="155" y="222" class="tiny">160 credits / request</text>
+          <g class="is-new">
+            <rect x="420" y="187" width="120" height="45" rx="12" class="box"/><text x="480" y="206.5" text-anchor="middle" class="label">L1</text><text x="480" y="225.5" text-anchor="middle" class="sub">logical block</text>
+            <rect x="760" y="187" width="130" height="45" rx="12" class="cache"/><text x="825" y="206.5" text-anchor="middle" class="label">P2</text><text x="825" y="225.5" text-anchor="middle" class="sub">3 / 4 at prefill</text>
+            <path d="M540 209 L750 209" class="wire"/><polygon points="760,209 750,214 750,204" class="head"/><text x="650" y="199" text-anchor="middle" class="tiny">mapping</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">7 个 prompt token 需要 ceil(7 ÷ 4) = 2 页。第二页暂时剩 1 槽；图上的箭头是页表指针，不是让 KV 经过一个远程数据库。</span><span class="lang-en">Seven prompt tokens require ceil(7 ÷ 4) = 2 pages, leaving one slot on the second page. Arrows are page-table pointers, not KV requests to a remote database.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d2s3t d2s3d">
+          <title id="d2s3t">Grow only after the last page is full</title>
+          <desc id="d2s3d">R1 fills the remaining P2 slot before allocating L2 mapped to P9. The board accumulates allocation history: P2’s label describes its initial prefill occupancy.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="125" y="18" width="819" height="364" rx="18" class="boundary"/><text x="141" y="38" class="tiny">PAGED KV · logical order, scattered physical blocks</text>
+          <rect x="155" y="125" width="175" height="75" rx="12" class="box"/><text x="242.5" y="159.5" text-anchor="middle" class="label">Scheduler</text><text x="242.5" y="178.5" text-anchor="middle" class="sub">reserve full cap</text>
+          <rect x="390" y="64" width="180" height="276" rx="18" class="boundary"/><text x="406" y="85" class="tiny">Block table · R1</text>
+          <rect x="730" y="64" width="190" height="276" rx="18" class="boundary"/><text x="746" y="85" class="tiny">GPU KV pool</text>
+          <rect x="420" y="105" width="120" height="45" rx="12" class="box"/><text x="480" y="124.5" text-anchor="middle" class="label">L0</text><text x="480" y="143.5" text-anchor="middle" class="sub">logical block</text>
+          <rect x="760" y="105" width="130" height="45" rx="12" class="cache"/><text x="825" y="124.5" text-anchor="middle" class="label">P7</text><text x="825" y="143.5" text-anchor="middle" class="sub">4 / 4 states</text>
+          <path d="M540 127 L750 127" class="wire"/><polygon points="760,127 750,132 750,122" class="head"/><text x="650" y="117" text-anchor="middle" class="tiny">mapping</text>
+          <path d="M330 162 L362 162 Q370 162 370 154 L370 135 Q370 127 378 127 L410 127" class="wire"/><polygon points="420,127 410,132 410,122" class="head"/><text x="155" y="222" class="tiny">160 credits / request</text>
+          <rect x="420" y="187" width="120" height="45" rx="12" class="box"/><text x="480" y="206.5" text-anchor="middle" class="label">L1</text><text x="480" y="225.5" text-anchor="middle" class="sub">logical block</text>
+          <rect x="760" y="187" width="130" height="45" rx="12" class="cache"/><text x="825" y="206.5" text-anchor="middle" class="label">P2</text><text x="825" y="225.5" text-anchor="middle" class="sub">3 / 4 at prefill</text>
+          <path d="M540 209 L750 209" class="wire"/><polygon points="760,209 750,214 750,204" class="head"/><text x="650" y="199" text-anchor="middle" class="tiny">mapping</text>
+          <g class="is-new">
+            <rect x="420" y="269" width="120" height="45" rx="12" class="box"/><text x="480" y="288.5" text-anchor="middle" class="label">L2</text><text x="480" y="307.5" text-anchor="middle" class="sub">logical block</text>
+            <rect x="760" y="269" width="130" height="45" rx="12" class="cache"/><text x="825" y="288.5" text-anchor="middle" class="label">P9</text><text x="825" y="307.5" text-anchor="middle" class="sub">next state / 4</text>
+            <path d="M540 291 L750 291" class="wire"/><polygon points="760,291 750,296 750,286" class="head"/><text x="650" y="281" text-anchor="middle" class="tiny">mapping</text>
+            <text x="430" y="365" class="tiny">7 → 8 states: fill P2; 8 → 9: allocate P9</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">缓存状态从 7 到 8，先填 P2；从 8 到 9 才加 L2→P9。不是每生成一个 token 都新要一页，已画出的标签保留分配历史。</span><span class="lang-en">Going from 7 to 8 cached states fills P2; going from 8 to 9 adds L2→P9. A token does not require a new page every time. Earlier labels retain allocation history.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d2s4t d2s4d">
+          <title id="d2s4t">Account for the whole maximum before accepting more work</title>
+          <desc id="d2s4d">Full-cap credits across active requests must fit the usable GPU KV pool. With forty GiB and two MiB per production block there are 20,480 blocks; 160 credits per full request allow 128 such reservations.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="125" y="18" width="819" height="364" rx="18" class="boundary"/><text x="141" y="38" class="tiny">PAGED KV · logical order, scattered physical blocks</text>
+          <rect x="155" y="125" width="175" height="75" rx="12" class="box"/><text x="242.5" y="159.5" text-anchor="middle" class="label">Scheduler</text><text x="242.5" y="178.5" text-anchor="middle" class="sub">reserve full cap</text>
+          <rect x="390" y="64" width="180" height="276" rx="18" class="boundary"/><text x="406" y="85" class="tiny">Block table · R1</text>
+          <rect x="730" y="64" width="190" height="276" rx="18" class="boundary"/><text x="746" y="85" class="tiny">GPU KV pool</text>
+          <rect x="420" y="105" width="120" height="45" rx="12" class="box"/><text x="480" y="124.5" text-anchor="middle" class="label">L0</text><text x="480" y="143.5" text-anchor="middle" class="sub">logical block</text>
+          <rect x="760" y="105" width="130" height="45" rx="12" class="cache"/><text x="825" y="124.5" text-anchor="middle" class="label">P7</text><text x="825" y="143.5" text-anchor="middle" class="sub">4 / 4 states</text>
+          <path d="M540 127 L750 127" class="wire"/><polygon points="760,127 750,132 750,122" class="head"/><text x="650" y="117" text-anchor="middle" class="tiny">mapping</text>
+          <path d="M330 162 L362 162 Q370 162 370 154 L370 135 Q370 127 378 127 L410 127" class="wire"/><polygon points="420,127 410,132 410,122" class="head"/><text x="155" y="222" class="tiny">160 credits / request</text>
+          <rect x="420" y="187" width="120" height="45" rx="12" class="box"/><text x="480" y="206.5" text-anchor="middle" class="label">L1</text><text x="480" y="225.5" text-anchor="middle" class="sub">logical block</text>
+          <rect x="760" y="187" width="130" height="45" rx="12" class="cache"/><text x="825" y="206.5" text-anchor="middle" class="label">P2</text><text x="825" y="225.5" text-anchor="middle" class="sub">3 / 4 at prefill</text>
+          <path d="M540 209 L750 209" class="wire"/><polygon points="760,209 750,214 750,204" class="head"/><text x="650" y="199" text-anchor="middle" class="tiny">mapping</text>
+          <rect x="420" y="269" width="120" height="45" rx="12" class="box"/><text x="480" y="288.5" text-anchor="middle" class="label">L2</text><text x="480" y="307.5" text-anchor="middle" class="sub">logical block</text>
+          <rect x="760" y="269" width="130" height="45" rx="12" class="cache"/><text x="825" y="288.5" text-anchor="middle" class="label">P9</text><text x="825" y="307.5" text-anchor="middle" class="sub">next state / 4</text>
+          <path d="M540 291 L750 291" class="wire"/><polygon points="760,291 750,296 750,286" class="head"/><text x="650" y="281" text-anchor="middle" class="tiny">mapping</text>
+          <text x="430" y="365" class="tiny">7 → 8 states: fill P2; 8 → 9: allocate P9</text>
+          <g class="is-new">
+            <rect x="155" y="65" width="200" height="20" rx="10" class="badge"/><text x="255" y="79" text-anchor="middle" class="badge-text">Pool = 20,480 blocks</text>
+            <text x="155" y="105" class="clock">128 × 160 = 20,480 credits</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">40 GiB ÷ 2 MiB = 20,480 页，128 × 160 正好用满信用。物理页尚未写满，不代表这些空位可以再向第 129 条承诺一遍。</span><span class="lang-en">40 GiB ÷ 2 MiB = 20,480 blocks; 128 × 160 spends all credits. Unwritten physical slots cannot be promised again to request 129.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d2s5t d2s5d">
+          <title id="d2s5t">Deny a new reservation without expanding the pool</title>
+          <desc id="d2s5d">R2 remains waiting outside Block table when Scheduler has no reservation credits. A red denial returns to Scheduler; no R2 logical mapping is created. Release and reuse are covered by the later lifecycle board.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="125" y="18" width="819" height="364" rx="18" class="boundary"/><text x="141" y="38" class="tiny">PAGED KV · logical order, scattered physical blocks</text>
+          <rect x="155" y="125" width="175" height="75" rx="12" class="box"/><text x="242.5" y="159.5" text-anchor="middle" class="label">Scheduler</text><text x="242.5" y="178.5" text-anchor="middle" class="sub">reserve full cap</text>
+          <rect x="390" y="64" width="180" height="276" rx="18" class="boundary"/><text x="406" y="85" class="tiny">Block table · R1</text>
+          <rect x="730" y="64" width="190" height="276" rx="18" class="boundary"/><text x="746" y="85" class="tiny">GPU KV pool</text>
+          <rect x="420" y="105" width="120" height="45" rx="12" class="box"/><text x="480" y="124.5" text-anchor="middle" class="label">L0</text><text x="480" y="143.5" text-anchor="middle" class="sub">logical block</text>
+          <rect x="760" y="105" width="130" height="45" rx="12" class="cache"/><text x="825" y="124.5" text-anchor="middle" class="label">P7</text><text x="825" y="143.5" text-anchor="middle" class="sub">4 / 4 states</text>
+          <path d="M540 127 L750 127" class="wire"/><polygon points="760,127 750,132 750,122" class="head"/><text x="650" y="117" text-anchor="middle" class="tiny">mapping</text>
+          <path d="M330 162 L362 162 Q370 162 370 154 L370 135 Q370 127 378 127 L410 127" class="wire"/><polygon points="420,127 410,132 410,122" class="head"/><text x="155" y="222" class="tiny">160 credits / request</text>
+          <rect x="420" y="187" width="120" height="45" rx="12" class="box"/><text x="480" y="206.5" text-anchor="middle" class="label">L1</text><text x="480" y="225.5" text-anchor="middle" class="sub">logical block</text>
+          <rect x="760" y="187" width="130" height="45" rx="12" class="cache"/><text x="825" y="206.5" text-anchor="middle" class="label">P2</text><text x="825" y="225.5" text-anchor="middle" class="sub">3 / 4 at prefill</text>
+          <path d="M540 209 L750 209" class="wire"/><polygon points="760,209 750,214 750,204" class="head"/><text x="650" y="199" text-anchor="middle" class="tiny">mapping</text>
+          <rect x="420" y="269" width="120" height="45" rx="12" class="box"/><text x="480" y="288.5" text-anchor="middle" class="label">L2</text><text x="480" y="307.5" text-anchor="middle" class="sub">logical block</text>
+          <rect x="760" y="269" width="130" height="45" rx="12" class="cache"/><text x="825" y="288.5" text-anchor="middle" class="label">P9</text><text x="825" y="307.5" text-anchor="middle" class="sub">next state / 4</text>
+          <path d="M540 291 L750 291" class="wire"/><polygon points="760,291 750,296 750,286" class="head"/><text x="650" y="281" text-anchor="middle" class="tiny">mapping</text>
+          <text x="430" y="365" class="tiny">7 → 8 states: fill P2; 8 → 9: allocate P9</text>
+          <rect x="155" y="65" width="200" height="20" rx="10" class="badge"/><text x="255" y="79" text-anchor="middle" class="badge-text">Pool = 20,480 blocks</text>
+          <text x="155" y="105" class="clock">128 × 160 = 20,480 credits</text>
+          <g class="is-new">
+            <rect x="155" y="280" width="175" height="60" rx="12" class="box"/><text x="242.5" y="307" text-anchor="middle" class="label">R2 waiting</text><text x="242.5" y="326" text-anchor="middle" class="sub">no reserved credits</text>
+            <path d="M330 310 L357 310 Q365 310 365 302 L365 188 Q365 180 357 180 L340 180" class="wire fail"/><polygon points="330,180 340,175 340,185" class="head fail"/><text x="155" y="262" class="tiny">reject new R2 at credit cap</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">完整图：R1 按逻辑页映射到散落的物理页；R2 留在准入之外。严守信用可避免输出一起变长时超订，代价是利用率较保守。</span><span class="lang-en">Complete board: R1 maps ordered logical pages to scattered physical pages; R2 remains outside admission. Strict credits avoid overcommit when outputs grow together, at the cost of conservative utilization.</span></figcaption>
+      </div>
+    </figure><div class="bilingual"><div class="lang-zh"><p>图的L0/L1/L2映射到P7/P2/P9，表示物理地址可分散；attention按block table读KV。演示页4个状态：7→8填P2，8→9才加P9；它不同于容量假设的16 token页。PagedAttention减少连续分配造成的碎片，不自动解决逻辑超订。<a href="#ref-2">[2]</a></p><p>保守策略为每个请求预留prompt+最大输出的完整信用，物理页随实际状态增长。即使物理页空着，也可能已承诺给活动请求未来输出；只有总承诺有余量才再准入。下面Java17可运行模型把信用补判扣与物理分配串行化在<strong>一个worker的CPU锁</strong>内；分布式尝试身份仍由共享记录负责。</p></div><div class="lang-en"><p>L0/L1/L2 map to P7/P2/P9: physical blocks may be scattered while attention follows the block table. Toy pages hold four states; 7→8 fills P2 and 8→9 adds P9. Capacity assumptions use sixteen-token pages. PagedAttention reduces contiguous-allocation fragmentation without solving logical overcommit. <a href="#ref-2">[2]</a></p><p>Our conservative policy reserves prompt-plus-output-cap credits while allocating physical blocks on demand. Empty physical blocks may already be promised to active requests’ future output. Admission needs uncommitted credits. This runnable Java17 model serializes credit checks/debits and allocation under <strong>one worker’s CPU lock</strong>; shared records separately govern distributed attempt identity.</p></div></div><pre data-language="Java17 · runnable model excerpt" data-kind="runnable" data-source="KvLedger.java#admission"><code>public synchronized boolean admit(Owner owner, int prompt, int maxOutput) {
+    long total = (long) prompt + maxOutput;
+    if (prompt &lt;= 0 || maxOutput &lt;= 0 || total &gt; contextLimit)
+        throw new IllegalArgumentException(&quot;Token limits&quot;);
+    if (!healthy || !boot.equals(owner.boot())) return false;
+    int need = (int) ((total + BLOCK - 1) / BLOCK);
+    Generation prior = generations.get(owner);
+    if (prior != null) {
+        if (prior.credits != need) throw new IllegalArgumentException(&quot;Changed request&quot;);
+        return prior.state == State.RUNNING;
+    }
+    boolean oldOwnerLive = generations.entrySet().stream().anyMatch(e -&gt;
+            e.getKey().attempt().equals(owner.attempt()) &amp;&amp; e.getValue().state != State.RELEASED);
+    if (oldOwnerLive || need &gt; pool.length - reserved) return false;
+    generations.put(owner, new Generation(need));
+    reserved += need;                    // promise full output; allocate no page yet
+    return true;
+}
+
+public synchronized Handle allocate(Owner owner) {
+    Generation gen = mutable(owner);
+    if (gen.pages.size() &gt;= gen.credits) throw new IllegalStateException(&quot;Credit exhausted&quot;);
+    for (int i = 0; i &lt; pool.length; i++) {
+        Page page = pool[i];
+        if (page.refs != 0 || page.pins != 0) continue;
+        page.incarnation = Math.incrementExact(page.incarnation);
+        page.cached = page.sealed = false; // evict an unused cache entry if needed
+        page.refs = 1;
+        Handle h = new Handle(boot, i, page.incarnation);
+        gen.pages.add(h);
+        return h;
+    }
+    throw new IllegalStateException(&quot;Pool accounting violated&quot;);
+}</code></pre><div class="bilingual"><div class="lang-zh"><p>输入owner=(attempt,generation,worker boot)、prompt与最大输出；输出信用是否受理、或一个带incarnation的页Handle。源码的generation保留页集合，页分别计活动引用refs和在途访问pins。只共享已完成的不可变完整块；未满尾页共享/COW不在此模型中。真实引擎若超订、COW或有隐藏workspace，必须另外补入同一预算。</p><p>前缀命中比较token与计算身份，固定模型/LoRA、位置语义和信任域。vLLM v0.15.1按父哈希、块token与额外身份缓存完整块；cache salt隔离复用，本设计由服务器按信任域赋值。APC减少重复prefill，不减少待生成后缀步数；miss正常重算。模型升级换命名空间，输出额度不随命中减少。<a href="#ref-5">[5]</a> <a href="#ref-6">[6]</a></p><p>完整前缀可在refs=0时留作可驱逐缓存；有refs或pins就不能复用地址。本策略不把共享收益卖成更多信用，简化最坏输出承诺；活页超订则需明确抢占/重算以及被抢占请求的延迟代价。</p></div><div class="lang-en"><p>Inputs are owner=(attempt,generation,worker boot), prompt, and output cap. Outputs are admission or an incarnation-stamped block Handle. The source tracks a generation’s page set, with separate active references and in-flight pins per page. It shares only complete immutable blocks; partial-tail sharing/COW is outside this model. Real overcommit, COW, and hidden workspaces need the same explicit budget.</p><p>Reuse compares tokens and computation identity, fixing model/LoRA, positions, and trust domain. vLLM v0.15.1 caches complete blocks using parent hashes, block tokens, and extra identity. Cache salts isolate reuse; this design assigns them by server trust domain. APC saves repeated prefill, not suffix steps; misses compute normally. Model upgrades change namespaces and hits never bypass output quota. <a href="#ref-5">[5]</a> <a href="#ref-6">[6]</a></p><p>A full prefix with refs=0 may remain an evictable cache entry. References or pins prevent address reuse. We do not sell sharing savings as more credits, simplifying worst-output promises. Live-page overcommit instead needs explicit preemption/recomputation and its waiting cost.</p></div></div></section>
+<section><h2><span class="lang-zh">逐轮batch：换成员，也要限制本轮工作</span><span class="lang-en">Iteration batching: change members and bound work</span></h2><figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d3s1t d3s1d">
+          <title id="d3s1t">One decode iteration with D waiting</title>
+          <desc id="d3s1d">In iteration t, A, B, and C each run one decode step. D is waiting. Row positions and column positions stay fixed as later iterations are added.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <g class="is-new">
+            <rect x="130" y="18" width="814" height="364" rx="18" class="boundary"/><text x="146" y="38" class="tiny">ITERATION HISTORY · cells accumulate; request identities stay fixed</text>
+            <text x="195" y="70" class="clock">iteration t</text><text x="440" y="70" class="clock">iteration t+1</text><text x="685" y="70" class="clock">iteration t+2</text>
+            <text x="150" y="113" class="label">A</text>
+            <text x="150" y="185" class="label">B</text>
+            <text x="150" y="257" class="label">C</text>
+            <text x="150" y="329" class="label">D</text>
+            <rect x="190" y="85" width="165" height="48" rx="12" class="box"/><text x="272.5" y="106" text-anchor="middle" class="label">A decode</text><text x="272.5" y="125" text-anchor="middle" class="sub">still long</text>
+            <rect x="190" y="157" width="165" height="48" rx="12" class="box"/><text x="272.5" y="178" text-anchor="middle" class="label">B decode</text><text x="272.5" y="197" text-anchor="middle" class="sub">near EOS</text>
+            <rect x="190" y="229" width="165" height="48" rx="12" class="box"/><text x="272.5" y="250" text-anchor="middle" class="label">C decode</text><text x="272.5" y="269" text-anchor="middle" class="sub">active</text>
+            <rect x="190" y="301" width="165" height="48" rx="12" class="box"/><text x="272.5" y="322" text-anchor="middle" class="label">D waiting</text><text x="272.5" y="341" text-anchor="middle" class="sub">not on GPU</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">先画一轮，A、B、C 各推进一步，D 等待。列是时间、行是请求身份；后面保留历史，不把同一个请求在图上挪来挪去。</span><span class="lang-en">Start with one iteration: A, B, and C advance one step while D waits. Columns are time and rows are request identities. Later frames retain history rather than moving requests.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d3s2t d3s2d">
+          <title id="d3s2t">B completes at the iteration boundary</title>
+          <desc id="d3s2d">B’s t cell transitions to an EOS and release event at the next boundary. B no longer participates in later decode columns. A and C need not finish before this release.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="130" y="18" width="814" height="364" rx="18" class="boundary"/><text x="146" y="38" class="tiny">ITERATION HISTORY · cells accumulate; request identities stay fixed</text>
+          <text x="195" y="70" class="clock">iteration t</text><text x="440" y="70" class="clock">iteration t+1</text><text x="685" y="70" class="clock">iteration t+2</text>
+          <text x="150" y="113" class="label">A</text>
+          <text x="150" y="185" class="label">B</text>
+          <text x="150" y="257" class="label">C</text>
+          <text x="150" y="329" class="label">D</text>
+          <rect x="190" y="85" width="165" height="48" rx="12" class="box"/><text x="272.5" y="106" text-anchor="middle" class="label">A decode</text><text x="272.5" y="125" text-anchor="middle" class="sub">still long</text>
+          <rect x="190" y="157" width="165" height="48" rx="12" class="box"/><text x="272.5" y="178" text-anchor="middle" class="label">B decode</text><text x="272.5" y="197" text-anchor="middle" class="sub">near EOS</text>
+          <rect x="190" y="229" width="165" height="48" rx="12" class="box"/><text x="272.5" y="250" text-anchor="middle" class="label">C decode</text><text x="272.5" y="269" text-anchor="middle" class="sub">active</text>
+          <rect x="190" y="301" width="165" height="48" rx="12" class="box"/><text x="272.5" y="322" text-anchor="middle" class="label">D waiting</text><text x="272.5" y="341" text-anchor="middle" class="sub">not on GPU</text>
+          <g class="is-new">
+            <rect x="435" y="157" width="165" height="48" rx="12" class="box ok"/><text x="517.5" y="178" text-anchor="middle" class="label">B EOS</text><text x="517.5" y="197" text-anchor="middle" class="sub">retire + release</text>
+            <path d="M355 181 L425 181" class="wire reply"/><polygon points="435,181 425,186 425,176" class="head reply"/>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">B 在边界结束，退休它的本轮访问后归还引用。A 仍长、C 仍活跃，B 的空位无需等整批结束才释放。</span><span class="lang-en">B finishes at the boundary. Retire iteration accesses before releasing references. A is still long and C remains active, but B’s capacity need not wait for the whole batch.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d3s3t d3s3d">
+          <title id="d3s3t">Admit D at the next eligible iteration</title>
+          <desc id="d3s3d">A and C transition to another decode step in t+1. D transitions from waiting to prefill in t+1 after capacity and token-budget checks. D does not wait for A’s complete output.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="130" y="18" width="814" height="364" rx="18" class="boundary"/><text x="146" y="38" class="tiny">ITERATION HISTORY · cells accumulate; request identities stay fixed</text>
+          <text x="195" y="70" class="clock">iteration t</text><text x="440" y="70" class="clock">iteration t+1</text><text x="685" y="70" class="clock">iteration t+2</text>
+          <text x="150" y="113" class="label">A</text>
+          <text x="150" y="185" class="label">B</text>
+          <text x="150" y="257" class="label">C</text>
+          <text x="150" y="329" class="label">D</text>
+          <rect x="190" y="85" width="165" height="48" rx="12" class="box"/><text x="272.5" y="106" text-anchor="middle" class="label">A decode</text><text x="272.5" y="125" text-anchor="middle" class="sub">still long</text>
+          <rect x="190" y="157" width="165" height="48" rx="12" class="box"/><text x="272.5" y="178" text-anchor="middle" class="label">B decode</text><text x="272.5" y="197" text-anchor="middle" class="sub">near EOS</text>
+          <rect x="190" y="229" width="165" height="48" rx="12" class="box"/><text x="272.5" y="250" text-anchor="middle" class="label">C decode</text><text x="272.5" y="269" text-anchor="middle" class="sub">active</text>
+          <rect x="190" y="301" width="165" height="48" rx="12" class="box"/><text x="272.5" y="322" text-anchor="middle" class="label">D waiting</text><text x="272.5" y="341" text-anchor="middle" class="sub">not on GPU</text>
+          <rect x="435" y="157" width="165" height="48" rx="12" class="box ok"/><text x="517.5" y="178" text-anchor="middle" class="label">B EOS</text><text x="517.5" y="197" text-anchor="middle" class="sub">retire + release</text>
+          <path d="M355 181 L425 181" class="wire reply"/><polygon points="435,181 425,186 425,176" class="head reply"/>
+          <g class="is-new">
+            <rect x="435" y="85" width="165" height="48" rx="12" class="box"/><text x="517.5" y="106" text-anchor="middle" class="label">A decode</text><text x="517.5" y="125" text-anchor="middle" class="sub">next token</text>
+            <path d="M355 109 L425 109" class="wire"/><polygon points="435,109 425,114 425,104" class="head"/>
+            <rect x="435" y="229" width="165" height="48" rx="12" class="box"/><text x="517.5" y="250" text-anchor="middle" class="label">C decode</text><text x="517.5" y="269" text-anchor="middle" class="sub">next token</text>
+            <path d="M355 253 L425 253" class="wire"/><polygon points="435,253 425,258 425,248" class="head"/>
+            <rect x="435" y="301" width="165" height="48" rx="12" class="box"/><text x="517.5" y="322" text-anchor="middle" class="label">D prefill</text><text x="517.5" y="341" text-anchor="middle" class="sub">budget permits</text>
+            <path d="M355 325 L425 325" class="wire"/><polygon points="435,325 425,330 425,320" class="head"/>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">t+1 有预算时才让 D prefill，A、C 同轮 decode。D 可以在下一轮被考虑，是否真正进入还取决于公平性、页信用和计算预算。</span><span class="lang-en">With capacity, D prefills in t+1 while A and C decode. D may be considered next iteration; actual entry still depends on fairness, page credits, and compute budget.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d3s4t d3s4d">
+          <title id="d3s4t">D joins decode after prefill</title>
+          <desc id="d3s4d">A and C continue decode in t+2; D transitions from prefill to decode. B’s completed history remains visible without rejoining the active batch.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="130" y="18" width="814" height="364" rx="18" class="boundary"/><text x="146" y="38" class="tiny">ITERATION HISTORY · cells accumulate; request identities stay fixed</text>
+          <text x="195" y="70" class="clock">iteration t</text><text x="440" y="70" class="clock">iteration t+1</text><text x="685" y="70" class="clock">iteration t+2</text>
+          <text x="150" y="113" class="label">A</text>
+          <text x="150" y="185" class="label">B</text>
+          <text x="150" y="257" class="label">C</text>
+          <text x="150" y="329" class="label">D</text>
+          <rect x="190" y="85" width="165" height="48" rx="12" class="box"/><text x="272.5" y="106" text-anchor="middle" class="label">A decode</text><text x="272.5" y="125" text-anchor="middle" class="sub">still long</text>
+          <rect x="190" y="157" width="165" height="48" rx="12" class="box"/><text x="272.5" y="178" text-anchor="middle" class="label">B decode</text><text x="272.5" y="197" text-anchor="middle" class="sub">near EOS</text>
+          <rect x="190" y="229" width="165" height="48" rx="12" class="box"/><text x="272.5" y="250" text-anchor="middle" class="label">C decode</text><text x="272.5" y="269" text-anchor="middle" class="sub">active</text>
+          <rect x="190" y="301" width="165" height="48" rx="12" class="box"/><text x="272.5" y="322" text-anchor="middle" class="label">D waiting</text><text x="272.5" y="341" text-anchor="middle" class="sub">not on GPU</text>
+          <rect x="435" y="157" width="165" height="48" rx="12" class="box ok"/><text x="517.5" y="178" text-anchor="middle" class="label">B EOS</text><text x="517.5" y="197" text-anchor="middle" class="sub">retire + release</text>
+          <path d="M355 181 L425 181" class="wire reply"/><polygon points="435,181 425,186 425,176" class="head reply"/>
+          <rect x="435" y="85" width="165" height="48" rx="12" class="box"/><text x="517.5" y="106" text-anchor="middle" class="label">A decode</text><text x="517.5" y="125" text-anchor="middle" class="sub">next token</text>
+          <path d="M355 109 L425 109" class="wire"/><polygon points="435,109 425,114 425,104" class="head"/>
+          <rect x="435" y="229" width="165" height="48" rx="12" class="box"/><text x="517.5" y="250" text-anchor="middle" class="label">C decode</text><text x="517.5" y="269" text-anchor="middle" class="sub">next token</text>
+          <path d="M355 253 L425 253" class="wire"/><polygon points="435,253 425,258 425,248" class="head"/>
+          <rect x="435" y="301" width="165" height="48" rx="12" class="box"/><text x="517.5" y="322" text-anchor="middle" class="label">D prefill</text><text x="517.5" y="341" text-anchor="middle" class="sub">budget permits</text>
+          <path d="M355 325 L425 325" class="wire"/><polygon points="435,325 425,330 425,320" class="head"/>
+          <g class="is-new">
+            <rect x="680" y="85" width="165" height="48" rx="12" class="box"/><text x="762.5" y="106" text-anchor="middle" class="label">A decode</text><text x="762.5" y="125" text-anchor="middle" class="sub">next token</text>
+            <path d="M600 109 L670 109" class="wire"/><polygon points="680,109 670,114 670,104" class="head"/>
+            <rect x="680" y="229" width="165" height="48" rx="12" class="box"/><text x="762.5" y="250" text-anchor="middle" class="label">C decode</text><text x="762.5" y="269" text-anchor="middle" class="sub">next token</text>
+            <path d="M600 253 L670 253" class="wire"/><polygon points="680,253 670,258 670,248" class="head"/>
+            <rect x="680" y="301" width="165" height="48" rx="12" class="box"/><text x="762.5" y="322" text-anchor="middle" class="label">D decode</text><text x="762.5" y="341" text-anchor="middle" class="sub">first suffix step</text>
+            <path d="M600 325 L670 325" class="wire"/><polygon points="680,325 670,330 670,320" class="head"/>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">t+2 的成员变成 A、C、D。批成员在 iteration 边界变化，attention 内核如何算是另一层；长输出 A 的剩余步数没有被删掉。</span><span class="lang-en">t+2 contains A, C, and D. Membership changes at iteration boundaries; attention kernels are a separate layer. A still needs its remaining output steps.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d3s5t d3s5d">
+          <title id="d3s5t">Reject a whole-request barrier, not long outputs themselves</title>
+          <desc id="d3s5d">The complete iteration history shows B leaving and D joining before A finishes. A rejected red barrier would keep D waiting for A’s full completion. This board is a scheduling history, not a token transport diagram.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="130" y="18" width="814" height="364" rx="18" class="boundary"/><text x="146" y="38" class="tiny">ITERATION HISTORY · cells accumulate; request identities stay fixed</text>
+          <text x="195" y="70" class="clock">iteration t</text><text x="440" y="70" class="clock">iteration t+1</text><text x="685" y="70" class="clock">iteration t+2</text>
+          <text x="150" y="113" class="label">A</text>
+          <text x="150" y="185" class="label">B</text>
+          <text x="150" y="257" class="label">C</text>
+          <text x="150" y="329" class="label">D</text>
+          <rect x="190" y="85" width="165" height="48" rx="12" class="box"/><text x="272.5" y="106" text-anchor="middle" class="label">A decode</text><text x="272.5" y="125" text-anchor="middle" class="sub">still long</text>
+          <rect x="190" y="157" width="165" height="48" rx="12" class="box"/><text x="272.5" y="178" text-anchor="middle" class="label">B decode</text><text x="272.5" y="197" text-anchor="middle" class="sub">near EOS</text>
+          <rect x="190" y="229" width="165" height="48" rx="12" class="box"/><text x="272.5" y="250" text-anchor="middle" class="label">C decode</text><text x="272.5" y="269" text-anchor="middle" class="sub">active</text>
+          <rect x="190" y="301" width="165" height="48" rx="12" class="box"/><text x="272.5" y="322" text-anchor="middle" class="label">D waiting</text><text x="272.5" y="341" text-anchor="middle" class="sub">not on GPU</text>
+          <rect x="435" y="157" width="165" height="48" rx="12" class="box ok"/><text x="517.5" y="178" text-anchor="middle" class="label">B EOS</text><text x="517.5" y="197" text-anchor="middle" class="sub">retire + release</text>
+          <path d="M355 181 L425 181" class="wire reply"/><polygon points="435,181 425,186 425,176" class="head reply"/>
+          <rect x="435" y="85" width="165" height="48" rx="12" class="box"/><text x="517.5" y="106" text-anchor="middle" class="label">A decode</text><text x="517.5" y="125" text-anchor="middle" class="sub">next token</text>
+          <path d="M355 109 L425 109" class="wire"/><polygon points="435,109 425,114 425,104" class="head"/>
+          <rect x="435" y="229" width="165" height="48" rx="12" class="box"/><text x="517.5" y="250" text-anchor="middle" class="label">C decode</text><text x="517.5" y="269" text-anchor="middle" class="sub">next token</text>
+          <path d="M355 253 L425 253" class="wire"/><polygon points="435,253 425,258 425,248" class="head"/>
+          <rect x="435" y="301" width="165" height="48" rx="12" class="box"/><text x="517.5" y="322" text-anchor="middle" class="label">D prefill</text><text x="517.5" y="341" text-anchor="middle" class="sub">budget permits</text>
+          <path d="M355 325 L425 325" class="wire"/><polygon points="435,325 425,330 425,320" class="head"/>
+          <rect x="680" y="85" width="165" height="48" rx="12" class="box"/><text x="762.5" y="106" text-anchor="middle" class="label">A decode</text><text x="762.5" y="125" text-anchor="middle" class="sub">next token</text>
+          <path d="M600 109 L670 109" class="wire"/><polygon points="680,109 670,114 670,104" class="head"/>
+          <rect x="680" y="229" width="165" height="48" rx="12" class="box"/><text x="762.5" y="250" text-anchor="middle" class="label">C decode</text><text x="762.5" y="269" text-anchor="middle" class="sub">next token</text>
+          <path d="M600 253 L670 253" class="wire"/><polygon points="680,253 670,258 670,248" class="head"/>
+          <rect x="680" y="301" width="165" height="48" rx="12" class="box"/><text x="762.5" y="322" text-anchor="middle" class="label">D decode</text><text x="762.5" y="341" text-anchor="middle" class="sub">first suffix step</text>
+          <path d="M600 325 L670 325" class="wire"/><polygon points="680,325 670,330 670,320" class="head"/>
+          <g class="is-new">
+            <path d="M270 349 L270 361 Q270 369 278 369 L755 369 Q760 369 760 364 L760 359" class="wire fail"/><polygon points="760,349 765,359 755,359" class="head fail"/><text x="762.5" y="177" text-anchor="middle" class="tiny">rejected barrier:</text><text x="762.5" y="197" text-anchor="middle" class="tiny">D waits for all of A</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">完整图否决的是“D 等 A 整段结束”。逐轮凑批提高空位利用率，仍不能保证只等一轮，也不能消灭排队、长输出或 prefill 干扰。</span><span class="lang-en">The complete board rejects waiting for all of A. Iteration scheduling reuses capacity sooner, without guaranteeing one-iteration waiting or removing queueing, long output, or prefill interference.</span></figcaption>
+      </div>
+    </figure><div class="bilingual"><div class="lang-zh"><p>t轮A/B/C，B结束并退休引用；t+1可考虑D prefill，t+2 D decode。Orca的iteration-level scheduling消除整请求batch屏障；D仍会因页、计算或公平等待多轮。CPU选成员和chunk，attention内核执行；FlashAttention优化IO，不替调度器实现公平。<a href="#ref-1">[1]</a> <a href="#ref-4">[4]</a></p><p>每租户保留deficit和请求游标，成本由context、phase与token数计；余额跨轮累积、上限至少容纳最大合法chunk。轮转起点防同一租户总先占剩余预算。准入还限租户活动数/页份额；单轮选出每条请求最多一个chunk或一个decode步。高权重是相对份额，不是硬实时保证。</p></div><div class="lang-en"><p>Iteration t has A/B/C. B finishes and retires references; t+1 may admit D’s prefill and t+2 decodes D. Orca’s iteration scheduling removes the whole-request batch barrier, but pages, compute, and fairness may still delay D many rounds. CPU selects members/chunks and kernels execute. FlashAttention optimizes IO rather than scheduler fairness. <a href="#ref-1">[1]</a> <a href="#ref-4">[4]</a></p><p>Keep tenant deficits and request cursors. Charge by context, phase, and token count; carry balances across rounds with a cap large enough for the largest legal chunk. Rotate the first tenant so the same tenant does not always consume residual budget first. Admission also caps tenant active/page shares. Each request contributes at most one chunk or decode step per iteration. Weights are relative shares, not real-time guarantees.</p></div></div><pre data-language="Pseudocode · iteration planning" data-kind="pseudocode" data-source="iteration.pseudo"><code># Teaching pseudocode: issue at most one outstanding iteration per sequence.
+# Slots/page limits constrain admission; profile(context, batch, chunk) constrains compute.
+iteration(now):
+  retire_only_completed_gpu_tickets()       # apply phase/output progress once, then on_release
+  admit_waiters(now)
+  batch = []; budget = measured_iteration_envelope
+  for tenant in rotating_ready_tenant_ring:
+    deficit[tenant] = min(deficit_cap, deficit[tenant] + weight[tenant] * quantum)
+    # Each tenant&#x27;s request cursor survives across iterations.
+    for r in ready[tenant].one_round_from_cursor():
+      if r.state != RUNNING or r.in_flight: continue
+      if now &gt;= r.request_deadline or (not r.prefill_started and now &gt;= r.wait_deadline):
+        worker_ledger.stop(r.owner, DEADLINE); continue
+      if r.outputs &gt;= r.max_output:
+        worker_ledger.stop(r.owner, EOS); continue
+      if r.send_buffer &gt;= 64KiB or r.no_progress &gt;= 2s:
+        worker_ledger.stop(r.owner, CANCEL); continue
+      if r.prefill_remaining:
+        n = min(r.prefill_remaining, chunk_cap, budget.remaining_tokens)
+        n = largest_positive_chunk_fitting_profile(r, n, batch, budget)
+      else:
+        n = 1                             # one decode step, never entire output
+      if n == 0: continue
+      cost = profile_cost(r.context, n, r.phase)
+      if cost &gt; deficit[tenant] or not budget.fits(r, n, batch): continue
+      if not ensure_blocks_within_reserved_credit(r, n): fail_worker_accounting()
+      batch.append(r.owner, r.phase, n)
+      deficit[tenant] -= cost; budget.consume(r, n)
+      # This r can enter only once in this iteration.
+    advance_request_cursor(tenant)
+  rotate_ready_tenant_ring_start()
+  if batch:
+    ticket = worker_ledger.issue(batch.owners)  # snapshot refs and pin before launch
+    launch_gpu(batch, ticket)               # record all-stream/copy completion fence
+  # Deficits carry over; choose cap &gt;= largest legal chunk cost.
+  # No fit means wait/expire; this is no promise of a one-iteration bound.
+# On a fence, complete(ticket,eos) must return true before applying result progress.
+# Publish only matching owners without CANCEL/DEADLINE; count sampled outputs once.
+# Never accept output beyond max_output; complete() itself handles pins, refs and credits.</code></pre><div class="bilingual"><div class="lang-zh"><p>输入ready队列和经过测量的profile/envelope，输出batch和GPU ticket。<code>budget.fits</code>同时检查本轮token/序列数、上下文对应工作区与预测执行时长；<code>ensure_blocks</code>只在既有信用中扩页。profile是适配依赖，不能用它宣称已经测过GPU。decode优先或prefill保底份额都要测TTFT/停顿；vLLM v0.15.1也把chunk token预算列为ITL/TTFT取舍。<a href="#ref-7">[7]</a></p></div><div class="lang-en"><p>Inputs are ready queues and a measured profile/envelope; outputs are a batch and GPU ticket. <code>budget.fits</code> checks tokens/sequences, context-dependent workspace, and predicted duration. <code>ensure_blocks</code> grows pages within existing credits. The profile is an adapter dependency, not evidence of a GPU experiment. Measure TTFT and stalls when choosing decode priority or prefill shares; vLLM v0.15.1 also documents the token-budget tradeoff. <a href="#ref-7">[7]</a></p></div></div><h3><span class="lang-zh">延迟指标必须写清起止点</span><span class="lang-en">Latency metrics need explicit endpoints</span></h3><div class="bilingual"><div class="lang-zh"><p><strong>客户端TTFT</strong>从发送请求到收到首个内容，含排队、网络和flush；A6是单次条件预算50+等待+150≤800，分量p99不能相加。<strong>worker ITL</strong>统计相邻token-ready时间差；客户端SSE块可合并多个token，块到达间隔另报，不冒充GPU步时长。</p><p><strong>TPOT</strong>用同一worker时间轴的<code>(末token−首token)/(N−1)</code>，N=1无此平均值；它会掩盖单步停顿。256个输出有255个后续间隔，固定20ms例子是5.1s；另加假设200ms首段约5.3s。ITL p99=50ms不能当每步硬上限，也不能推整请求总时长。<strong>goodput</strong>计每秒联合达标的完成请求，分母/联合达标比例另报；TTFT和ITL各自p99不等于99%请求联合达标。</p></div><div class="lang-en"><p><strong>Client TTFT</strong> spans request send to first content, including queueing, network, and flush. A6’s 50+wait+150≤800 is a conditional per-request budget, not summed p99s. <strong>Worker ITL</strong> is the gap between adjacent token-ready times. SSE chunks may combine tokens, so separately report client chunk-arrival gaps rather than calling them GPU step times.</p><p><strong>TPOT</strong> is <code>(last token−first token)/(N−1)</code> on the same worker clock; it is undefined for N=1 and may hide a stall. 256 outputs have 255 later gaps: at fixed twenty ms, 5.1s, or approximately 5.3s with an assumed 200ms first-token path. A fifty-ms ITL p99 is no hard step or total-duration bound. <strong>Goodput</strong> counts jointly compliant completions/s; also report its denominator and joint attainment. Separate TTFT/ITL p99s do not establish 99% joint request attainment.</p></div></div></section>
+<section><h2><span class="lang-zh">取消与完成：先退休访问，再释放页</span><span class="lang-en">Cancel and completion: retire accesses before releasing pages</span></h2><figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d4s1t d4s1d">
+          <title id="d4s1t">Generation holds an explicit ownership reference</title>
+          <desc id="d4s1d">Client submits through API gateway and Scheduler to GPU worker; deltas return through every hop. A lower state-history row begins at RUNNING with generation-owned KV references.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <g class="is-new">
+            <rect x="120" y="18" width="824" height="364" rx="18" class="boundary"/><text x="136" y="38" class="tiny">CANCEL LIFECYCLE · edges below show ordered state transitions</text>
+            <circle cx="44" cy="91" r="12" class="box"/><path d="M24 137 Q44 105 64 137" class="wire"/><text x="44" y="159" text-anchor="middle" class="label">Client</text>
+            <rect x="160" y="80" width="150" height="70" rx="12" class="box"/><text x="235" y="112" text-anchor="middle" class="label">API gateway</text><text x="235" y="131" text-anchor="middle" class="sub">stream owner</text>
+            <rect x="430" y="80" width="150" height="70" rx="12" class="box"/><text x="505" y="112" text-anchor="middle" class="label">Scheduler</text><text x="505" y="131" text-anchor="middle" class="sub">attempt + epoch</text>
+            <rect x="710" y="80" width="175" height="70" rx="12" class="box"/><text x="797.5" y="112" text-anchor="middle" class="label">GPU worker</text><text x="797.5" y="131" text-anchor="middle" class="sub">shared iteration</text>
+            <path d="M70 106 L150 106" class="wire"/><polygon points="160,106 150,111 150,101" class="head"/><path d="M310 106 L420 106" class="wire"/><polygon points="430,106 420,111 420,101" class="head"/><path d="M580 106 L700 106" class="wire"/><polygon points="710,106 700,111 700,101" class="head"/><path d="M710 124 L590 124" class="wire reply"/><polygon points="580,124 590,119 590,129" class="head reply"/><path d="M430 124 L320 124" class="wire reply"/><polygon points="310,124 320,119 320,129" class="head reply"/><path d="M160 124 L80 124" class="wire reply"/><polygon points="70,124 80,119 80,129" class="head reply"/>
+            <rect x="160" y="235" width="160" height="60" rx="12" class="box"/><text x="240" y="262" text-anchor="middle" class="label">RUNNING</text><text x="240" y="281" text-anchor="middle" class="sub">holds KV refs</text>
+            <path d="M760 150 L760 177 Q760 185 752 185 L248 185 Q240 185 240 193 L240 225" class="wire async"/><polygon points="240,235 235,225 245,225" class="head async"/><text x="410" y="177" text-anchor="middle" class="tiny">generation ownership</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">先标所有权：运行中的请求持有页引用，本轮 kernel 也可能仍在访问这些页。取消不能只删 HTTP 连接就立即复用物理地址。</span><span class="lang-en">Mark ownership first: a generation holds page references and the current GPU kernel may still read them. Closing HTTP does not make physical addresses immediately reusable.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d4s2t d4s2d">
+          <title id="d4s2t">Cancel propagates to the assigned owner</title>
+          <desc id="d4s2d">Client abort reaches API gateway, which forwards cancel through Scheduler to GPU worker. The state moves RUNNING to CANCEL_PENDING under the same attempt and epoch. Cancel prevents another iteration, not instantaneous kernel interruption.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="18" width="824" height="364" rx="18" class="boundary"/><text x="136" y="38" class="tiny">CANCEL LIFECYCLE · edges below show ordered state transitions</text>
+          <circle cx="44" cy="91" r="12" class="box"/><path d="M24 137 Q44 105 64 137" class="wire"/><text x="44" y="159" text-anchor="middle" class="label">Client</text>
+          <rect x="160" y="80" width="150" height="70" rx="12" class="box"/><text x="235" y="112" text-anchor="middle" class="label">API gateway</text><text x="235" y="131" text-anchor="middle" class="sub">stream owner</text>
+          <rect x="430" y="80" width="150" height="70" rx="12" class="box"/><text x="505" y="112" text-anchor="middle" class="label">Scheduler</text><text x="505" y="131" text-anchor="middle" class="sub">attempt + epoch</text>
+          <rect x="710" y="80" width="175" height="70" rx="12" class="box"/><text x="797.5" y="112" text-anchor="middle" class="label">GPU worker</text><text x="797.5" y="131" text-anchor="middle" class="sub">shared iteration</text>
+          <path d="M70 106 L150 106" class="wire"/><polygon points="160,106 150,111 150,101" class="head"/><path d="M310 106 L420 106" class="wire"/><polygon points="430,106 420,111 420,101" class="head"/><path d="M580 106 L700 106" class="wire"/><polygon points="710,106 700,111 700,101" class="head"/><path d="M710 124 L590 124" class="wire reply"/><polygon points="580,124 590,119 590,129" class="head reply"/><path d="M430 124 L320 124" class="wire reply"/><polygon points="310,124 320,119 320,129" class="head reply"/><path d="M160 124 L80 124" class="wire reply"/><polygon points="70,124 80,119 80,129" class="head reply"/>
+          <rect x="160" y="235" width="160" height="60" rx="12" class="box"/><text x="240" y="262" text-anchor="middle" class="label">RUNNING</text><text x="240" y="281" text-anchor="middle" class="sub">holds KV refs</text>
+          <path d="M760 150 L760 177 Q760 185 752 185 L248 185 Q240 185 240 193 L240 225" class="wire async"/><polygon points="240,235 235,225 245,225" class="head async"/><text x="410" y="177" text-anchor="middle" class="tiny">generation ownership</text>
+          <g class="is-new">
+            <rect x="420" y="235" width="160" height="60" rx="12" class="box"/><text x="500" y="262" text-anchor="middle" class="label">CANCEL_PENDING</text><text x="500" y="281" text-anchor="middle" class="sub">no next iteration</text>
+            <path d="M70 106 L97 106 Q105 106 105 98 L105 70 Q105 62 113 62 L236 62 Q240 62 240 66 L240 70" class="wire fail"/><polygon points="240,80 235,70 245,70" class="head fail"/><path d="M310 137 L420 137" class="wire fail"/><polygon points="430,137 420,142 420,132" class="head fail"/><path d="M580 137 L700 137" class="wire fail"/><polygon points="710,137 700,142 700,132" class="head fail"/><text x="360" y="157" text-anchor="middle" class="tiny">cancel</text><path d="M320 263 L410 263" class="wire fail"/><polygon points="420,263 410,268 410,258" class="head fail"/><text x="370" y="251" text-anchor="middle" class="tiny">mark</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">取消沿 Client→API gateway→Scheduler→GPU worker 找到原 owner，状态转 CANCEL_PENDING。请求不能再进入下一轮，当前 kernel 可以跑到安全边界。</span><span class="lang-en">Cancel follows Client→API gateway→Scheduler→GPU worker to the assigned owner and marks CANCEL_PENDING. No new iteration begins; the current kernel may reach a safe boundary.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d4s3t d4s3d">
+          <title id="d4s3t">Wait for GPU accesses to retire</title>
+          <desc id="d4s3d">CANCEL_PENDING transitions to RETIRED only after the current GPU work and all relevant streams pass their completion fence. Other requests can remain active in the shared iteration.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="18" width="824" height="364" rx="18" class="boundary"/><text x="136" y="38" class="tiny">CANCEL LIFECYCLE · edges below show ordered state transitions</text>
+          <circle cx="44" cy="91" r="12" class="box"/><path d="M24 137 Q44 105 64 137" class="wire"/><text x="44" y="159" text-anchor="middle" class="label">Client</text>
+          <rect x="160" y="80" width="150" height="70" rx="12" class="box"/><text x="235" y="112" text-anchor="middle" class="label">API gateway</text><text x="235" y="131" text-anchor="middle" class="sub">stream owner</text>
+          <rect x="430" y="80" width="150" height="70" rx="12" class="box"/><text x="505" y="112" text-anchor="middle" class="label">Scheduler</text><text x="505" y="131" text-anchor="middle" class="sub">attempt + epoch</text>
+          <rect x="710" y="80" width="175" height="70" rx="12" class="box"/><text x="797.5" y="112" text-anchor="middle" class="label">GPU worker</text><text x="797.5" y="131" text-anchor="middle" class="sub">shared iteration</text>
+          <path d="M70 106 L150 106" class="wire"/><polygon points="160,106 150,111 150,101" class="head"/><path d="M310 106 L420 106" class="wire"/><polygon points="430,106 420,111 420,101" class="head"/><path d="M580 106 L700 106" class="wire"/><polygon points="710,106 700,111 700,101" class="head"/><path d="M710 124 L590 124" class="wire reply"/><polygon points="580,124 590,119 590,129" class="head reply"/><path d="M430 124 L320 124" class="wire reply"/><polygon points="310,124 320,119 320,129" class="head reply"/><path d="M160 124 L80 124" class="wire reply"/><polygon points="70,124 80,119 80,129" class="head reply"/>
+          <rect x="160" y="235" width="160" height="60" rx="12" class="box"/><text x="240" y="262" text-anchor="middle" class="label">RUNNING</text><text x="240" y="281" text-anchor="middle" class="sub">holds KV refs</text>
+          <path d="M760 150 L760 177 Q760 185 752 185 L248 185 Q240 185 240 193 L240 225" class="wire async"/><polygon points="240,235 235,225 245,225" class="head async"/><text x="410" y="177" text-anchor="middle" class="tiny">generation ownership</text>
+          <rect x="420" y="235" width="160" height="60" rx="12" class="box"/><text x="500" y="262" text-anchor="middle" class="label">CANCEL_PENDING</text><text x="500" y="281" text-anchor="middle" class="sub">no next iteration</text>
+          <path d="M70 106 L97 106 Q105 106 105 98 L105 70 Q105 62 113 62 L236 62 Q240 62 240 66 L240 70" class="wire fail"/><polygon points="240,80 235,70 245,70" class="head fail"/><path d="M310 137 L420 137" class="wire fail"/><polygon points="430,137 420,142 420,132" class="head fail"/><path d="M580 137 L700 137" class="wire fail"/><polygon points="710,137 700,142 700,132" class="head fail"/><text x="360" y="157" text-anchor="middle" class="tiny">cancel</text><path d="M320 263 L410 263" class="wire fail"/><polygon points="420,263 410,268 410,258" class="head fail"/><text x="370" y="251" text-anchor="middle" class="tiny">mark</text>
+          <g class="is-new">
+            <rect x="710" y="235" width="175" height="60" rx="12" class="box"/><text x="797.5" y="262" text-anchor="middle" class="label">RETIRED</text><text x="797.5" y="281" text-anchor="middle" class="sub">GPU fence passed</text>
+            <path d="M580 263 L700 263" class="wire"/><polygon points="710,263 700,268 700,258" class="head"/><text x="645" y="251" text-anchor="middle" class="tiny">finish kernel</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">CPU 看见函数返回不一定代表 GPU 已完成；必须等相关 stream 的完成事件。否则 Q1 重用旧页时，前一轮仍可能写进去。</span><span class="lang-en">A CPU function return need not mean GPU completion. Wait for relevant stream events, or Q1 may reuse a page while an earlier iteration is still writing it.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d4s4t d4s4d">
+          <title id="d4s4t">Release generation references exactly once</title>
+          <desc id="d4s4d">RETIRED transitions to RELEASED and decrements generation-owned references once. Only zero-reference uncached pages become reusable; a reusable prefix page may remain cached and evictable.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="18" width="824" height="364" rx="18" class="boundary"/><text x="136" y="38" class="tiny">CANCEL LIFECYCLE · edges below show ordered state transitions</text>
+          <circle cx="44" cy="91" r="12" class="box"/><path d="M24 137 Q44 105 64 137" class="wire"/><text x="44" y="159" text-anchor="middle" class="label">Client</text>
+          <rect x="160" y="80" width="150" height="70" rx="12" class="box"/><text x="235" y="112" text-anchor="middle" class="label">API gateway</text><text x="235" y="131" text-anchor="middle" class="sub">stream owner</text>
+          <rect x="430" y="80" width="150" height="70" rx="12" class="box"/><text x="505" y="112" text-anchor="middle" class="label">Scheduler</text><text x="505" y="131" text-anchor="middle" class="sub">attempt + epoch</text>
+          <rect x="710" y="80" width="175" height="70" rx="12" class="box"/><text x="797.5" y="112" text-anchor="middle" class="label">GPU worker</text><text x="797.5" y="131" text-anchor="middle" class="sub">shared iteration</text>
+          <path d="M70 106 L150 106" class="wire"/><polygon points="160,106 150,111 150,101" class="head"/><path d="M310 106 L420 106" class="wire"/><polygon points="430,106 420,111 420,101" class="head"/><path d="M580 106 L700 106" class="wire"/><polygon points="710,106 700,111 700,101" class="head"/><path d="M710 124 L590 124" class="wire reply"/><polygon points="580,124 590,119 590,129" class="head reply"/><path d="M430 124 L320 124" class="wire reply"/><polygon points="310,124 320,119 320,129" class="head reply"/><path d="M160 124 L80 124" class="wire reply"/><polygon points="70,124 80,119 80,129" class="head reply"/>
+          <rect x="160" y="235" width="160" height="60" rx="12" class="box"/><text x="240" y="262" text-anchor="middle" class="label">RUNNING</text><text x="240" y="281" text-anchor="middle" class="sub">holds KV refs</text>
+          <path d="M760 150 L760 177 Q760 185 752 185 L248 185 Q240 185 240 193 L240 225" class="wire async"/><polygon points="240,235 235,225 245,225" class="head async"/><text x="410" y="177" text-anchor="middle" class="tiny">generation ownership</text>
+          <rect x="420" y="235" width="160" height="60" rx="12" class="box"/><text x="500" y="262" text-anchor="middle" class="label">CANCEL_PENDING</text><text x="500" y="281" text-anchor="middle" class="sub">no next iteration</text>
+          <path d="M70 106 L97 106 Q105 106 105 98 L105 70 Q105 62 113 62 L236 62 Q240 62 240 66 L240 70" class="wire fail"/><polygon points="240,80 235,70 245,70" class="head fail"/><path d="M310 137 L420 137" class="wire fail"/><polygon points="430,137 420,142 420,132" class="head fail"/><path d="M580 137 L700 137" class="wire fail"/><polygon points="710,137 700,142 700,132" class="head fail"/><text x="360" y="157" text-anchor="middle" class="tiny">cancel</text><path d="M320 263 L410 263" class="wire fail"/><polygon points="420,263 410,268 410,258" class="head fail"/><text x="370" y="251" text-anchor="middle" class="tiny">mark</text>
+          <rect x="710" y="235" width="175" height="60" rx="12" class="box"/><text x="797.5" y="262" text-anchor="middle" class="label">RETIRED</text><text x="797.5" y="281" text-anchor="middle" class="sub">GPU fence passed</text>
+          <path d="M580 263 L700 263" class="wire"/><polygon points="710,263 700,268 700,258" class="head"/><text x="645" y="251" text-anchor="middle" class="tiny">finish kernel</text>
+          <g class="is-new">
+            <rect x="710" y="320" width="175" height="45" rx="12" class="box ok"/><text x="797.5" y="339.5" text-anchor="middle" class="label">RELEASED</text><text x="797.5" y="358.5" text-anchor="middle" class="sub">refs decremented</text>
+            <path d="M797 295 L797 310" class="wire reply"/><polygon points="797,320 792,310 802,310" class="head reply"/><text x="710" y="314" class="tiny">release once</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">再释放请求拥有的引用，重复 cancel 不能重复扣减。共享前缀还被别人使用就不能腾出来；零引用缓存页可以保留，物理擦除另算。</span><span class="lang-en">Release generation-owned references once; repeated cancel must not decrement twice. A shared prefix used elsewhere stays allocated. Zero-reference cached pages may remain evictable; physical erasure is separate.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d4s5t d4s5d">
+          <title id="d4s5t">New work may claim only released capacity</title>
+          <desc id="d4s5d">RELEASED returns capacity to NEXT ADMISSION, where Q1 may claim it through Scheduler. The lower row is the complete ordered lifecycle, not simultaneous request states. Terminal transport is best effort if Client has disconnected.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="18" width="824" height="364" rx="18" class="boundary"/><text x="136" y="38" class="tiny">CANCEL LIFECYCLE · edges below show ordered state transitions</text>
+          <circle cx="44" cy="91" r="12" class="box"/><path d="M24 137 Q44 105 64 137" class="wire"/><text x="44" y="159" text-anchor="middle" class="label">Client</text>
+          <rect x="160" y="80" width="150" height="70" rx="12" class="box"/><text x="235" y="112" text-anchor="middle" class="label">API gateway</text><text x="235" y="131" text-anchor="middle" class="sub">stream owner</text>
+          <rect x="430" y="80" width="150" height="70" rx="12" class="box"/><text x="505" y="112" text-anchor="middle" class="label">Scheduler</text><text x="505" y="131" text-anchor="middle" class="sub">attempt + epoch</text>
+          <rect x="710" y="80" width="175" height="70" rx="12" class="box"/><text x="797.5" y="112" text-anchor="middle" class="label">GPU worker</text><text x="797.5" y="131" text-anchor="middle" class="sub">shared iteration</text>
+          <path d="M70 106 L150 106" class="wire"/><polygon points="160,106 150,111 150,101" class="head"/><path d="M310 106 L420 106" class="wire"/><polygon points="430,106 420,111 420,101" class="head"/><path d="M580 106 L700 106" class="wire"/><polygon points="710,106 700,111 700,101" class="head"/><path d="M710 124 L590 124" class="wire reply"/><polygon points="580,124 590,119 590,129" class="head reply"/><path d="M430 124 L320 124" class="wire reply"/><polygon points="310,124 320,119 320,129" class="head reply"/><path d="M160 124 L80 124" class="wire reply"/><polygon points="70,124 80,119 80,129" class="head reply"/>
+          <rect x="160" y="235" width="160" height="60" rx="12" class="box"/><text x="240" y="262" text-anchor="middle" class="label">RUNNING</text><text x="240" y="281" text-anchor="middle" class="sub">holds KV refs</text>
+          <path d="M760 150 L760 177 Q760 185 752 185 L248 185 Q240 185 240 193 L240 225" class="wire async"/><polygon points="240,235 235,225 245,225" class="head async"/><text x="410" y="177" text-anchor="middle" class="tiny">generation ownership</text>
+          <rect x="420" y="235" width="160" height="60" rx="12" class="box"/><text x="500" y="262" text-anchor="middle" class="label">CANCEL_PENDING</text><text x="500" y="281" text-anchor="middle" class="sub">no next iteration</text>
+          <path d="M70 106 L97 106 Q105 106 105 98 L105 70 Q105 62 113 62 L236 62 Q240 62 240 66 L240 70" class="wire fail"/><polygon points="240,80 235,70 245,70" class="head fail"/><path d="M310 137 L420 137" class="wire fail"/><polygon points="430,137 420,142 420,132" class="head fail"/><path d="M580 137 L700 137" class="wire fail"/><polygon points="710,137 700,142 700,132" class="head fail"/><text x="360" y="157" text-anchor="middle" class="tiny">cancel</text><path d="M320 263 L410 263" class="wire fail"/><polygon points="420,263 410,268 410,258" class="head fail"/><text x="370" y="251" text-anchor="middle" class="tiny">mark</text>
+          <rect x="710" y="235" width="175" height="60" rx="12" class="box"/><text x="797.5" y="262" text-anchor="middle" class="label">RETIRED</text><text x="797.5" y="281" text-anchor="middle" class="sub">GPU fence passed</text>
+          <path d="M580 263 L700 263" class="wire"/><polygon points="710,263 700,268 700,258" class="head"/><text x="645" y="251" text-anchor="middle" class="tiny">finish kernel</text>
+          <rect x="710" y="320" width="175" height="45" rx="12" class="box ok"/><text x="797.5" y="339.5" text-anchor="middle" class="label">RELEASED</text><text x="797.5" y="358.5" text-anchor="middle" class="sub">refs decremented</text>
+          <path d="M797 295 L797 310" class="wire reply"/><polygon points="797,320 792,310 802,310" class="head reply"/><text x="710" y="314" class="tiny">release once</text>
+          <g class="is-new">
+            <rect x="420" y="320" width="160" height="45" rx="12" class="box ok"/><text x="500" y="339.5" text-anchor="middle" class="label">NEXT ADMISSION</text><text x="500" y="358.5" text-anchor="middle" class="sub">Q1 may claim</text>
+            <path d="M710 342 L590 342" class="wire reply"/><polygon points="580,342 590,337 590,347" class="head reply"/><text x="645" y="332" text-anchor="middle" class="tiny">capacity</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">完整生命周期是 RUNNING→CANCEL_PENDING→RETIRED→RELEASED→下一次准入。终止事件能发则发；已断开的客户端无法接收，不能把“尝试发送”算成送达。</span><span class="lang-en">Complete lifecycle: RUNNING→CANCEL_PENDING→RETIRED→RELEASED→next admission. Emit a terminal event when possible; a disconnected client cannot receive it, so an attempted send is not delivery.</span></figcaption>
+      </div>
+    </figure><div class="bilingual"><div class="lang-zh"><p>对应图的RUNNING → CANCEL_PENDING → RETIRED → RELEASED。Java把等待退休记作RETIRING；<code>inFlight==0</code>是进入RETIRED并立即释放的条件，不多存一个瞬态字段。发GPU前，ticket固定owner/页快照并pin；取消只标停止，EOS与取消用同一锁竞争首个停止原因。</p></div><div class="lang-en"><p>The diagram is RUNNING → CANCEL_PENDING → RETIRED → RELEASED. Java calls the waiting state RETIRING; <code>inFlight==0</code> allows RETIRED and immediate release without storing that transient phase. Before launch, a ticket snapshots owners/pages and pins them. Cancel marks stop; EOS and cancel contend for the first stop reason under the same lock.</p></div></div><pre data-language="Java17 · runnable model excerpt" data-kind="runnable" data-source="KvLedger.java#issue-stop"><code>public synchronized Ticket issue(List&lt;Owner&gt; batch) {
+    if (!healthy || batch.isEmpty() || new HashSet&lt;&gt;(batch).size() != batch.size())
+        throw new IllegalArgumentException(&quot;Invalid batch&quot;);
+    List&lt;Hold&gt; holds = new ArrayList&lt;&gt;();
+    for (Owner owner : batch) {
+        Generation gen = mutable(owner);
+        if (gen.pages.isEmpty()) throw new IllegalStateException(&quot;Missing KV&quot;);
+        holds.add(new Hold(owner, List.copyOf(gen.pages)));
+    }                                   // validate everything before mutating
+    long id = Math.incrementExact(nextTicket);
+    for (Hold hold : holds) {
+        generations.get(hold.owner()).inFlight++;
+        for (Handle h : hold.pages()) page(h).pins++;
+    }
+    nextTicket = id;
+    launches.put(id, List.copyOf(holds));
+    return new Ticket(boot, id);          // pin before submitting any GPU access
+}
+
+public synchronized boolean stop(Owner owner, Reason reason) {
+    Objects.requireNonNull(reason);
+    Generation gen = generations.get(owner);
+    if (!healthy || gen == null || gen.state != State.RUNNING) return false;
+    gen.reason = reason;                 // first stop/EOS wins
+    gen.state = State.RETIRING;           // prevents all later issue calls
+    releaseIfRetired(gen);
+    return true;
+}</code></pre><div class="bilingual"><div class="lang-zh"><p>真实适配器必须把所有读写KV、block table和相关copy的stream依赖纳入同一完成证据。CUDA event只证明其捕获工作/依赖完成；不能随手查一个不相关stream就还页。下面模型由测试手工调用<code>complete</code>模拟“证据已成立”，没有执行CUDA。<a href="#ref-10">[10]</a></p></div><div class="lang-en"><p>A real adapter must cover every stream dependency accessing KV, block tables, or related copies. A CUDA event proves completion only for the work/dependencies it captures; querying an unrelated stream cannot authorize release. Tests manually call <code>complete</code> to simulate established completion evidence. They do not execute CUDA. <a href="#ref-10">[10]</a></p></div></div><pre data-language="Java17 · runnable model excerpt" data-kind="runnable" data-source="KvLedger.java#retire"><code>public synchronized boolean complete(Ticket ticket, Set&lt;Owner&gt; eos) {
+    if (!healthy || !boot.equals(ticket.boot())) return false;
+    List&lt;Hold&gt; holds = launches.remove(ticket.id());
+    if (holds == null) return false;      // duplicate/old completion
+    for (Hold hold : holds) {
+        for (Handle h : hold.pages()) page(h).pins--;
+        Generation gen = generations.get(hold.owner());
+        gen.inFlight--;
+        if (eos.contains(hold.owner()) &amp;&amp; gen.state == State.RUNNING) {
+            gen.reason = Reason.EOS;
+            gen.state = State.RETIRING;
+        }
+        releaseIfRetired(gen);
+    }
+    return true;
+}
+
+private void releaseIfRetired(Generation gen) {
+    if (gen.state != State.RETIRING || gen.inFlight != 0) return;
+    for (Handle h : gen.pages) page(h).refs--;
+    gen.pages.clear();
+    reserved -= gen.credits;             // return promise exactly once
+    gen.state = State.RELEASED;
+    // A page is reusable only at refs==0 &amp;&amp; pins==0; cached data may remain.
+}</code></pre><div class="bilingual"><div class="lang-zh"><p><strong>危险反例：</strong>A持2页信用、只实占1页，kernel仍读P7；cancel到达后若立刻归还信用，B就能获准并覆盖P7，A仍可能读到B的KV。示例直到ticket完成才释放，重复完成先从launch表删除一次，旧Handle的incarnation也不能指向B的新分配。共享前缀即使A退出，B的refs/pins仍保护它。正常EOS走相同释放门。</p><p>慢读者按64 KiB待发送上限/2s无进展停止后续调度或取消，别条请求继续。128条流都顶格是8 MiB缓冲，只是该承载集合的教学上界。页不足是可控准入拒绝；激活峰值OOM能否局部回滚取决于引擎/context健康。illegal address等致命错误按整worker死亡，隔离旧池、新boot重建，不能把旧池“释放一个block”后继续用。<a href="#ref-8">[8]</a></p></div><div class="lang-en"><p><strong>Dangerous trace:</strong> A reserves two blocks but occupies one while its kernel still reads P7. Returning credits on cancel could admit B and overwrite P7 while A reads it. This example waits for the ticket, removes each launch once, and stamps reused handles with a new incarnation. A shared prefix remains protected by B’s refs/pins after A leaves. Normal EOS uses the same release gate.</p><p>Stop future scheduling or cancel a slow reader at 64 KiB pending sends or two seconds without progress, while others continue. At 128 capped streams this is 8 MiB for that serving set, not a global constant. Missing credits are controlled denial. Local recovery from activation OOM requires a healthy context and engine support. Fatal errors such as illegal addresses mean worker loss: quarantine the old pool and rebuild under a new boot, rather than freeing one block and continuing. <a href="#ref-8">[8]</a></p></div></div></section>
+<section><h2><span class="lang-zh">流中断：尝试幂等不等于token送达</span><span class="lang-en">Interrupted streams: attempt dedupe is not token delivery</span></h2><figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s1t d5s1d">
+          <title id="d5s1t">An attempt record is not a durable event replay log</title>
+          <desc id="d5s1d">Client sends an attempt through API gateway and Scheduler to GPU worker. Earlier deltas return through all three hops. API gateway recovers status from Attempt Store; that store has no durable token replay.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <g class="is-new">
+            <rect x="120" y="18" width="824" height="364" rx="18" class="boundary"/><text x="136" y="38" class="tiny">STREAM FAILURE · green = earlier deltas; red = terminal / denied retry</text>
+            <circle cx="44" cy="121" r="12" class="box"/><path d="M24 167 Q44 135 64 167" class="wire"/><text x="44" y="189" text-anchor="middle" class="label">Client</text>
+            <rect x="160" y="110" width="150" height="70" rx="12" class="box"/><text x="235" y="142" text-anchor="middle" class="label">API gateway</text><text x="235" y="161" text-anchor="middle" class="sub">seq is not delivery</text>
+            <rect x="430" y="110" width="150" height="70" rx="12" class="box"/><text x="505" y="142" text-anchor="middle" class="label">Scheduler</text><text x="505" y="161" text-anchor="middle" class="sub">prior epoch 7</text>
+            <rect x="710" y="110" width="175" height="70" rx="12" class="box"/><text x="797.5" y="142" text-anchor="middle" class="label">GPU worker</text><text x="797.5" y="161" text-anchor="middle" class="sub">attempt 7</text>
+            <path d="M180 260 V316 A65 12 0 0 0 310 316 V260" class="store"/><ellipse cx="245" cy="260" rx="65" ry="12" class="store"/><text x="245" y="306" text-anchor="middle" class="label">Attempt Store</text>
+            <path d="M70 136 L150 136" class="wire"/><polygon points="160,136 150,141 150,131" class="head"/><path d="M310 136 L420 136" class="wire"/><polygon points="430,136 420,141 420,131" class="head"/><path d="M580 136 L700 136" class="wire"/><polygon points="710,136 700,141 700,131" class="head"/>
+            <path d="M710 154 L590 154" class="wire reply"/><polygon points="580,154 590,149 590,159" class="head reply"/><path d="M430 154 L320 154" class="wire reply"/><polygon points="310,154 320,149 320,159" class="head reply"/><path d="M160 154 L80 154" class="wire reply"/><polygon points="70,154 80,149 80,159" class="head reply"/>
+            <path d="M210 180 L210 239.9" class="wire"/><polygon points="210,249.9 205,239.9 215,239.9" class="head"/><text x="200" y="222" text-anchor="end" class="tiny">recover key</text><path d="M280 249.9 L280 190" class="wire reply"/><polygon points="280,180 285,190 275,190" class="head reply"/><text x="294" y="222" class="tiny">saved result</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">先区分三件事：生成序号、网关 write 成功、客户端已处理的前缀。Attempt Store 只保存尝试身份和状态，不能证明某个 delta 已送达。</span><span class="lang-en">Separate generated sequence, successful gateway write, and client-processed prefix. Attempt Store persists identity and status, without proving delivery of a delta.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s2t d5s2d">
+          <title id="d5s2t">Worker loss terminates the assigned stream</title>
+          <desc id="d5s2d">GPU worker loss produces a terminal error along GPU worker to Scheduler to API gateway to Client if the socket remains usable. Previously drawn green paths represent earlier deltas; current KV is gone.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="18" width="824" height="364" rx="18" class="boundary"/><text x="136" y="38" class="tiny">STREAM FAILURE · green = earlier deltas; red = terminal / denied retry</text>
+          <circle cx="44" cy="121" r="12" class="box"/><path d="M24 167 Q44 135 64 167" class="wire"/><text x="44" y="189" text-anchor="middle" class="label">Client</text>
+          <rect x="160" y="110" width="150" height="70" rx="12" class="box"/><text x="235" y="142" text-anchor="middle" class="label">API gateway</text><text x="235" y="161" text-anchor="middle" class="sub">seq is not delivery</text>
+          <rect x="430" y="110" width="150" height="70" rx="12" class="box"/><text x="505" y="142" text-anchor="middle" class="label">Scheduler</text><text x="505" y="161" text-anchor="middle" class="sub">prior epoch 7</text>
+          <rect x="710" y="110" width="175" height="70" rx="12" class="box"/><text x="797.5" y="142" text-anchor="middle" class="label">GPU worker</text><text x="797.5" y="161" text-anchor="middle" class="sub">attempt 7</text>
+          <path d="M180 260 V316 A65 12 0 0 0 310 316 V260" class="store"/><ellipse cx="245" cy="260" rx="65" ry="12" class="store"/><text x="245" y="306" text-anchor="middle" class="label">Attempt Store</text>
+          <path d="M70 136 L150 136" class="wire"/><polygon points="160,136 150,141 150,131" class="head"/><path d="M310 136 L420 136" class="wire"/><polygon points="430,136 420,141 420,131" class="head"/><path d="M580 136 L700 136" class="wire"/><polygon points="710,136 700,141 700,131" class="head"/>
+          <path d="M710 154 L590 154" class="wire reply"/><polygon points="580,154 590,149 590,159" class="head reply"/><path d="M430 154 L320 154" class="wire reply"/><polygon points="310,154 320,149 320,159" class="head reply"/><path d="M160 154 L80 154" class="wire reply"/><polygon points="70,154 80,149 80,159" class="head reply"/>
+          <path d="M210 180 L210 239.9" class="wire"/><polygon points="210,249.9 205,239.9 215,239.9" class="head"/><text x="200" y="222" text-anchor="end" class="tiny">recover key</text><path d="M280 249.9 L280 190" class="wire reply"/><polygon points="280,180 285,190 275,190" class="head reply"/><text x="294" y="222" class="tiny">saved result</text>
+          <g class="is-new">
+            <path d="M750 180 L750 205 Q750 213 742 213 L558 213 Q550 213 550 205 L550 190" class="wire fail"/><polygon points="550,180 555,190 545,190" class="head fail"/><path d="M480 180 L480 242 Q480 250 472 250 L298 250 Q290 250 290 242 L290 190" class="wire fail"/><polygon points="290,180 295,190 285,190" class="head fail"/><path d="M160 166 L114 166 Q108 166 108 160 L108 160 Q108 154 102 154 L80 154" class="wire fail"/><polygon points="70,154 80,149 80,159" class="head fail"/><text x="650" y="205" text-anchor="middle" class="tiny">upstream dead</text><text x="400" y="275" text-anchor="middle" class="tiny">terminal if connected</text>
+            <rect x="710" y="65" width="175" height="20" rx="10" class="badge"/><text x="797.5" y="79" text-anchor="middle" class="badge-text">KV + sampling state lost</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">worker 消失后，红线逐跳结束原流。绿色表示此前的 delta；若 socket 也断了，只能由客户端检测失败，没有一条隐形的红线能送达已断连用户。</span><span class="lang-en">Worker loss ends the assigned stream hop by hop. Green shows earlier deltas. If the socket also fails, the client detects failure; no hidden path delivers to a disconnected user.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s3t d5s3d">
+          <title id="d5s3t">Same key recovers interruption, not a second generation</title>
+          <desc id="d5s3d">Attempt Store retains INTERRUPTED under the original key and payload hash. API gateway returns that status to a same-key retry without dispatching another worker. An ambiguous live owner is fenced before any new generation.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="18" width="824" height="364" rx="18" class="boundary"/><text x="136" y="38" class="tiny">STREAM FAILURE · green = earlier deltas; red = terminal / denied retry</text>
+          <circle cx="44" cy="121" r="12" class="box"/><path d="M24 167 Q44 135 64 167" class="wire"/><text x="44" y="189" text-anchor="middle" class="label">Client</text>
+          <rect x="160" y="110" width="150" height="70" rx="12" class="box"/><text x="235" y="142" text-anchor="middle" class="label">API gateway</text><text x="235" y="161" text-anchor="middle" class="sub">seq is not delivery</text>
+          <rect x="430" y="110" width="150" height="70" rx="12" class="box"/><text x="505" y="142" text-anchor="middle" class="label">Scheduler</text><text x="505" y="161" text-anchor="middle" class="sub">prior epoch 7</text>
+          <rect x="710" y="110" width="175" height="70" rx="12" class="box"/><text x="797.5" y="142" text-anchor="middle" class="label">GPU worker</text><text x="797.5" y="161" text-anchor="middle" class="sub">attempt 7</text>
+          <path d="M180 260 V316 A65 12 0 0 0 310 316 V260" class="store"/><ellipse cx="245" cy="260" rx="65" ry="12" class="store"/><text x="245" y="306" text-anchor="middle" class="label">Attempt Store</text>
+          <path d="M70 136 L150 136" class="wire"/><polygon points="160,136 150,141 150,131" class="head"/><path d="M310 136 L420 136" class="wire"/><polygon points="430,136 420,141 420,131" class="head"/><path d="M580 136 L700 136" class="wire"/><polygon points="710,136 700,141 700,131" class="head"/>
+          <path d="M710 154 L590 154" class="wire reply"/><polygon points="580,154 590,149 590,159" class="head reply"/><path d="M430 154 L320 154" class="wire reply"/><polygon points="310,154 320,149 320,159" class="head reply"/><path d="M160 154 L80 154" class="wire reply"/><polygon points="70,154 80,149 80,159" class="head reply"/>
+          <path d="M210 180 L210 239.9" class="wire"/><polygon points="210,249.9 205,239.9 215,239.9" class="head"/><text x="200" y="222" text-anchor="end" class="tiny">recover key</text><path d="M280 249.9 L280 190" class="wire reply"/><polygon points="280,180 285,190 275,190" class="head reply"/><text x="294" y="222" class="tiny">saved result</text>
+          <path d="M750 180 L750 205 Q750 213 742 213 L558 213 Q550 213 550 205 L550 190" class="wire fail"/><polygon points="550,180 555,190 545,190" class="head fail"/><path d="M480 180 L480 242 Q480 250 472 250 L298 250 Q290 250 290 242 L290 190" class="wire fail"/><polygon points="290,180 295,190 285,190" class="head fail"/><path d="M160 166 L114 166 Q108 166 108 160 L108 160 Q108 154 102 154 L80 154" class="wire fail"/><polygon points="70,154 80,149 80,159" class="head fail"/><text x="650" y="205" text-anchor="middle" class="tiny">upstream dead</text><text x="400" y="275" text-anchor="middle" class="tiny">terminal if connected</text>
+          <rect x="710" y="65" width="175" height="20" rx="10" class="badge"/><text x="797.5" y="79" text-anchor="middle" class="badge-text">KV + sampling state lost</text>
+          <g class="is-new">
+            <text x="155" y="355" class="clock">same key → INTERRUPTED / 409</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">同 key 恢复 INTERRUPTED 和原 owner 信息，示例返回 409；不会盲开第二条生成。网关宕机时旧 worker 也可能活着，必须取消或隔离旧 epoch 后才重分配。</span><span class="lang-en">A same-key retry recovers INTERRUPTED and the original owner, illustrated as 409, without creating a second generation. After gateway loss an old worker may still live, so cancel or fence its epoch before reassignment.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s4t d5s4d">
+          <title id="d5s4t">Explicit continuation starts a new prefill</title>
+          <desc id="d5s4d">A user-confirmed continuation uses a new attempt and new credits. Scheduler dispatches GPU worker 2, which prefills the chosen input token prefix. New deltas return to Scheduler, API gateway, and Client. It does not recover GPU worker’s old KV or sampling state.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="18" width="824" height="364" rx="18" class="boundary"/><text x="136" y="38" class="tiny">STREAM FAILURE · green = earlier deltas; red = terminal / denied retry</text>
+          <circle cx="44" cy="121" r="12" class="box"/><path d="M24 167 Q44 135 64 167" class="wire"/><text x="44" y="189" text-anchor="middle" class="label">Client</text>
+          <rect x="160" y="110" width="150" height="70" rx="12" class="box"/><text x="235" y="142" text-anchor="middle" class="label">API gateway</text><text x="235" y="161" text-anchor="middle" class="sub">seq is not delivery</text>
+          <rect x="430" y="110" width="150" height="70" rx="12" class="box"/><text x="505" y="142" text-anchor="middle" class="label">Scheduler</text><text x="505" y="161" text-anchor="middle" class="sub">prior epoch 7</text>
+          <rect x="710" y="110" width="175" height="70" rx="12" class="box"/><text x="797.5" y="142" text-anchor="middle" class="label">GPU worker</text><text x="797.5" y="161" text-anchor="middle" class="sub">attempt 7</text>
+          <path d="M180 260 V316 A65 12 0 0 0 310 316 V260" class="store"/><ellipse cx="245" cy="260" rx="65" ry="12" class="store"/><text x="245" y="306" text-anchor="middle" class="label">Attempt Store</text>
+          <path d="M70 136 L150 136" class="wire"/><polygon points="160,136 150,141 150,131" class="head"/><path d="M310 136 L420 136" class="wire"/><polygon points="430,136 420,141 420,131" class="head"/><path d="M580 136 L700 136" class="wire"/><polygon points="710,136 700,141 700,131" class="head"/>
+          <path d="M710 154 L590 154" class="wire reply"/><polygon points="580,154 590,149 590,159" class="head reply"/><path d="M430 154 L320 154" class="wire reply"/><polygon points="310,154 320,149 320,159" class="head reply"/><path d="M160 154 L80 154" class="wire reply"/><polygon points="70,154 80,149 80,159" class="head reply"/>
+          <path d="M210 180 L210 239.9" class="wire"/><polygon points="210,249.9 205,239.9 215,239.9" class="head"/><text x="200" y="222" text-anchor="end" class="tiny">recover key</text><path d="M280 249.9 L280 190" class="wire reply"/><polygon points="280,180 285,190 275,190" class="head reply"/><text x="294" y="222" class="tiny">saved result</text>
+          <path d="M750 180 L750 205 Q750 213 742 213 L558 213 Q550 213 550 205 L550 190" class="wire fail"/><polygon points="550,180 555,190 545,190" class="head fail"/><path d="M480 180 L480 242 Q480 250 472 250 L298 250 Q290 250 290 242 L290 190" class="wire fail"/><polygon points="290,180 295,190 285,190" class="head fail"/><path d="M160 166 L114 166 Q108 166 108 160 L108 160 Q108 154 102 154 L80 154" class="wire fail"/><polygon points="70,154 80,149 80,159" class="head fail"/><text x="650" y="205" text-anchor="middle" class="tiny">upstream dead</text><text x="400" y="275" text-anchor="middle" class="tiny">terminal if connected</text>
+          <rect x="710" y="65" width="175" height="20" rx="10" class="badge"/><text x="797.5" y="79" text-anchor="middle" class="badge-text">KV + sampling state lost</text>
+          <text x="155" y="355" class="clock">same key → INTERRUPTED / 409</text>
+          <g class="is-new">
+            <rect x="710" y="285" width="175" height="65" rx="12" class="box"/><text x="797.5" y="314.5" text-anchor="middle" class="label">GPU worker 2</text><text x="797.5" y="333.5" text-anchor="middle" class="sub">new prefill only</text>
+            <path d="M520 110 L520 98 Q520 90 528 90 L927 90 Q935 90 935 98 L935 309 Q935 317 927 317 L895 317" class="wire"/><polygon points="885,317 895,312 895,322" class="head"/><text x="645" y="80" text-anchor="middle" class="tiny">new key / epoch 8</text><path d="M710 335 L513 335 Q505 335 505 327 L505 190" class="wire reply"/><polygon points="505,180 510,190 500,190" class="head reply"/><text x="605" y="355" text-anchor="middle" class="tiny">new deltas</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">用户确认后，用自己确实收到的前缀发新请求、新 key，再 prefill。重建聊天模板后也未必复现旧 token 串，所以这是明确的续写，不能称为恢复原采样。</span><span class="lang-en">After user confirmation, a new request and key prefill the prefix actually received. Rebuilt chat templates may change token IDs, so this is explicit continuation rather than restoration of sampling.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s5t d5s5d">
+          <title id="d5s5t">No delivery guarantee is created by a socket write</title>
+          <desc id="d5s5d">The complete failure board distinguishes earlier deltas, terminal failure, saved attempt status, and explicit new prefill on GPU worker 2. No durable event log means no at-least-once or exactly-once delivery guarantee.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="18" width="824" height="364" rx="18" class="boundary"/><text x="136" y="38" class="tiny">STREAM FAILURE · green = earlier deltas; red = terminal / denied retry</text>
+          <circle cx="44" cy="121" r="12" class="box"/><path d="M24 167 Q44 135 64 167" class="wire"/><text x="44" y="189" text-anchor="middle" class="label">Client</text>
+          <rect x="160" y="110" width="150" height="70" rx="12" class="box"/><text x="235" y="142" text-anchor="middle" class="label">API gateway</text><text x="235" y="161" text-anchor="middle" class="sub">seq is not delivery</text>
+          <rect x="430" y="110" width="150" height="70" rx="12" class="box"/><text x="505" y="142" text-anchor="middle" class="label">Scheduler</text><text x="505" y="161" text-anchor="middle" class="sub">prior epoch 7</text>
+          <rect x="710" y="110" width="175" height="70" rx="12" class="box"/><text x="797.5" y="142" text-anchor="middle" class="label">GPU worker</text><text x="797.5" y="161" text-anchor="middle" class="sub">attempt 7</text>
+          <path d="M180 260 V316 A65 12 0 0 0 310 316 V260" class="store"/><ellipse cx="245" cy="260" rx="65" ry="12" class="store"/><text x="245" y="306" text-anchor="middle" class="label">Attempt Store</text>
+          <path d="M70 136 L150 136" class="wire"/><polygon points="160,136 150,141 150,131" class="head"/><path d="M310 136 L420 136" class="wire"/><polygon points="430,136 420,141 420,131" class="head"/><path d="M580 136 L700 136" class="wire"/><polygon points="710,136 700,141 700,131" class="head"/>
+          <path d="M710 154 L590 154" class="wire reply"/><polygon points="580,154 590,149 590,159" class="head reply"/><path d="M430 154 L320 154" class="wire reply"/><polygon points="310,154 320,149 320,159" class="head reply"/><path d="M160 154 L80 154" class="wire reply"/><polygon points="70,154 80,149 80,159" class="head reply"/>
+          <path d="M210 180 L210 239.9" class="wire"/><polygon points="210,249.9 205,239.9 215,239.9" class="head"/><text x="200" y="222" text-anchor="end" class="tiny">recover key</text><path d="M280 249.9 L280 190" class="wire reply"/><polygon points="280,180 285,190 275,190" class="head reply"/><text x="294" y="222" class="tiny">saved result</text>
+          <path d="M750 180 L750 205 Q750 213 742 213 L558 213 Q550 213 550 205 L550 190" class="wire fail"/><polygon points="550,180 555,190 545,190" class="head fail"/><path d="M480 180 L480 242 Q480 250 472 250 L298 250 Q290 250 290 242 L290 190" class="wire fail"/><polygon points="290,180 295,190 285,190" class="head fail"/><path d="M160 166 L114 166 Q108 166 108 160 L108 160 Q108 154 102 154 L80 154" class="wire fail"/><polygon points="70,154 80,149 80,159" class="head fail"/><text x="650" y="205" text-anchor="middle" class="tiny">upstream dead</text><text x="400" y="275" text-anchor="middle" class="tiny">terminal if connected</text>
+          <rect x="710" y="65" width="175" height="20" rx="10" class="badge"/><text x="797.5" y="79" text-anchor="middle" class="badge-text">KV + sampling state lost</text>
+          <text x="155" y="355" class="clock">same key → INTERRUPTED / 409</text>
+          <rect x="710" y="285" width="175" height="65" rx="12" class="box"/><text x="797.5" y="314.5" text-anchor="middle" class="label">GPU worker 2</text><text x="797.5" y="333.5" text-anchor="middle" class="sub">new prefill only</text>
+          <path d="M520 110 L520 98 Q520 90 528 90 L927 90 Q935 90 935 98 L935 309 Q935 317 927 317 L895 317" class="wire"/><polygon points="885,317 895,312 895,322" class="head"/><text x="645" y="80" text-anchor="middle" class="tiny">new key / epoch 8</text><path d="M710 335 L513 335 Q505 335 505 327 L505 190" class="wire reply"/><polygon points="505,180 510,190 500,190" class="head reply"/><text x="605" y="355" text-anchor="middle" class="tiny">new deltas</text>
+          <g class="is-new">
+            <text x="155" y="83" class="clock">seq 37 written ≠ seq 37 rendered</text>
+            <text x="710" y="370" class="tiny">no replay log · no delivery guarantee</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">完整图没有“write 成功就至少一次送达”的承诺。若产品要可重放，另做持久事件日志、保留期和客户端去重；日志能重放已存内容，仍不能自动复活旧 KV。</span><span class="lang-en">The complete board makes no at-least-once promise from a successful write. Replay requires a durable event log, retention, and client deduplication. A log replays stored content, without reviving old KV.</span></figcaption>
+      </div>
+    </figure><div class="bilingual"><div class="lang-zh"><p>worker死亡可能丢KV、采样状态和未保存输出；匹配owner的尝试记INTERRUPTED，连接尚通就逐跳返回终止事件。只有网关失联时worker未必死：先查询/取消旧owner，或隔离其输出与后续执行；不能仅凭没heartbeat就开第二份。同key不重新生成，即使记录“尚无write”。</p><p>下面伪代码的唯一行与条件更新在一个权威数据库；适用于D1受理/D5恢复。真实实现需NOT NULL字段、主体/key唯一、可靠提交结果读取与鉴权；正文哈希含模型、模板、采样参数与输出上限。它没有持久token日志，也没有跨卡续写。<a href="#ref-11">[11]</a></p></div><div class="lang-en"><p>Worker loss may erase KV, sampling state, and unsaved output. Mark the matching owner INTERRUPTED and return a terminal event if the stream survives. A lost gateway does not prove a dead worker: query/cancel the old owner or fence its output and future execution. Missing heartbeats alone cannot authorize a duplicate. Same-key retries do not regenerate even if no writes were recorded.</p><p>This pseudocode uses one authoritative row and conditional updates for D1 admission/D5 recovery. A real implementation requires NOT NULL fields, a principal/key unique constraint, reliable commit-result reads, and authorization. Hash model/template/sampling parameters/output cap with the body. It supplies neither a durable token log nor cross-worker continuation. <a href="#ref-11">[11]</a></p></div></div><pre data-language="Pseudocode · durable attempt transitions" data-kind="pseudocode" data-source="attempt.pseudo"><code># Teaching pseudocode: one authoritative DB; UNIQUE(principal, key), NOT NULL hash.
+claim(principal, key, canonical_body_hash, now):
+  BEGIN ISOLATION LEVEL READ COMMITTED
+  INSERT attempt(principal,key,body_hash,state,expires_at)
+    VALUES(principal,key,canonical_body_hash,&#x27;CLAIMED&#x27;,now + 24h)
+    ON CONFLICT(principal,key) DO NOTHING
+  row = SELECT ... WHERE principal=? AND key=? FOR UPDATE
+  if row.body_hash != canonical_body_hash: ROLLBACK; return CONFLICT
+  if row.expires_at &lt;= authority_now_after_lock(): ROLLBACK; return RETRY_WINDOW_CLOSED
+  COMMIT; return row                     # same key never starts a new generation
+
+bind_owner(principal, key, boot, generation):
+  UPDATE attempt SET state=&#x27;ASSIGNED&#x27;, owner_boot=boot, owner_gen=generation
+    WHERE principal=? AND key=? AND state=&#x27;CLAIMED&#x27; AND owner_boot IS NULL
+  # Exactly one changed row authorizes delivery; zero rows means recover saved state.
+  # Redeliver the SAME (attempt,boot,generation); worker deduplicates that identity.
+
+finish(principal, key, boot, generation, terminal_metadata):
+  UPDATE attempt SET state=&#x27;TERMINAL&#x27;, metadata=terminal_metadata
+    WHERE principal=? AND key=? AND owner_boot=boot AND owner_gen=generation
+      AND state=&#x27;ASSIGNED&#x27;                # old/duplicate terminal cannot overwrite
+
+retry(principal, key, hash):
+  row = claim(principal, key, hash, authority_now())
+  if conflict_or_expired(row): return row
+  if row.state in [CLAIMED, ASSIGNED]: return PENDING_WITHOUT_SECOND_STREAM
+  if row.metadata.reason == DONE: return COMPLETION_METADATA
+  return INTERRUPTED_REQUIRES_EXPLICIT_NEW_KEY
+# Unknown dispatch/terminal commits are queried by the same key, never guessed.
+# Crash after ASSIGNED before enqueue may fail closed as INTERRUPTED after fencing.
+# Token logs, replay, cross-worker live migration, and quota atomicity are separate.</code></pre><div class="bilingual"><div class="lang-zh"><p>正常：claim → 唯一bind → 同owner投递 → 匹配终态。同key异正文冲突；两Scheduler争bind只一个更新成功。bind成功却投递前崩溃，可查询旧owner，隔离后失败关闭为INTERRUPTED；不承诺每个受理都执行。终态回包未知就查原key，重复/旧终态不覆盖。24h保留覆盖客户端15min自动重试；活跃行不被TTL删除，终态到期后不提供无限去重保证。</p><p><strong>seq=37 write成功不证明客户端展示37。</strong>要重放需attempt/seq事件先持久再发送、客户端游标/去重与保留期，客户端ACK也不恢复死卡KV。基线同key只取状态/完成元数据，INTERRUPTED示例返回409；明确重新生成/续写用新key、新信用、新prefill，重新校验实际token长度。文本塞回assistant消息可能改模板，不保证等于旧token前缀。</p></div><div class="lang-en"><p>Normal: claim → one binding → same-owner delivery → matching terminal. Different body conflicts; only one of two schedulers binds successfully. A crash after binding but before delivery may query the owner, then fence and fail closed as INTERRUPTED; admission does not promise execution. Unknown terminal commits are queried by the original key; duplicate/old terminals do not overwrite. Twenty-four-hour retention covers fifteen-minute client retries. Active rows are not TTL-deleted; expired terminal rows do not promise unbounded deduplication.</p><p><strong>A successful seq=37 write does not prove client display.</strong> Replay needs attempt/seq events persisted before sending, client cursors/deduplication, and retention. Client ACK does not restore dead KV. Baseline same-key retries return status/completion metadata; INTERRUPTED illustratively returns 409. Explicit regeneration/continuation uses a new key, credits, and prefill with renewed token-length checks. Text reinserted as an assistant message may alter templates rather than match the old token prefix.</p></div></div></section>
+<section><h2><span class="lang-zh">阶段分离：先测干扰，再算搬运</span><span class="lang-en">Phase separation: measure interference and transfer cost</span></h2><figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d6s1t d6s1d">
+          <title id="d6s1t">Start with the colocated alternative</title>
+          <desc id="d6s1d">Client reaches API gateway then Scheduler. Alternative A dispatches a colocated GPU worker; replies return to Scheduler then API gateway then Client. Alternative B is not drawn yet.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <g class="is-new">
+            <rect x="120" y="18" width="824" height="364" rx="18" class="boundary"/><text x="136" y="38" class="tiny">PHASE CHOICE · alternative A or B, not two simultaneous request paths</text>
+            <circle cx="44" cy="156" r="12" class="box"/><path d="M24 202 Q44 170 64 202" class="wire"/><text x="44" y="224" text-anchor="middle" class="label">Client</text>
+            <rect x="145" y="145" width="135" height="80" rx="12" class="box"/><text x="212.5" y="182" text-anchor="middle" class="label">API gateway</text><text x="212.5" y="201" text-anchor="middle" class="sub">stream ingress</text>
+            <rect x="330" y="145" width="140" height="80" rx="12" class="box"/><text x="400" y="182" text-anchor="middle" class="label">Scheduler</text><text x="400" y="201" text-anchor="middle" class="sub">phase owner</text>
+            <rect x="550" y="55" width="380" height="60" rx="12" class="box"/><text x="740" y="82" text-anchor="middle" class="label">GPU worker · alternative A</text><text x="740" y="101" text-anchor="middle" class="sub">colocate + bounded chunks</text>
+            <path d="M70 171 L135 171" class="wire"/><polygon points="145,171 135,176 135,166" class="head"/><path d="M280 171 L320 171" class="wire"/><polygon points="330,171 320,176 320,166" class="head"/><path d="M330 189 L290 189" class="wire reply"/><polygon points="280,189 290,184 290,194" class="head reply"/><path d="M145 189 L80 189" class="wire reply"/><polygon points="70,189 80,184 80,194" class="head reply"/>
+            <path d="M380 145 L380 93 Q380 85 388 85 L540 85" class="wire"/><polygon points="550,85 540,90 540,80" class="head"/><text x="390" y="75" class="tiny">A</text><path d="M550 99 L508 99 Q500 99 500 107 L500 117 Q500 125 492 125 L435 125 Q430 125 430 130 L430 135" class="wire reply"/><polygon points="430,145 425,135 435,135" class="head reply"/>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">先用同卡方案跑通。输入 2,048、均值输出 256 的负载下，是否撑得住由基准测试决定，不能只凭显存没满就宣布两个 SLO 达标。</span><span class="lang-en">Start with colocation. For 2,048 input and mean 256 output tokens, benchmark whether it fits both SLOs. Free memory alone does not establish latency compliance.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d6s2t d6s2d">
+          <title id="d6s2t">Chunk prefill within a shared iteration</title>
+          <desc id="d6s2d">Alternative A admits bounded prefill chunks P1, P2, and P3 with decode work in successive iterations on the same GPU worker. Badges describe iteration work, not separate workers.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="18" width="824" height="364" rx="18" class="boundary"/><text x="136" y="38" class="tiny">PHASE CHOICE · alternative A or B, not two simultaneous request paths</text>
+          <circle cx="44" cy="156" r="12" class="box"/><path d="M24 202 Q44 170 64 202" class="wire"/><text x="44" y="224" text-anchor="middle" class="label">Client</text>
+          <rect x="145" y="145" width="135" height="80" rx="12" class="box"/><text x="212.5" y="182" text-anchor="middle" class="label">API gateway</text><text x="212.5" y="201" text-anchor="middle" class="sub">stream ingress</text>
+          <rect x="330" y="145" width="140" height="80" rx="12" class="box"/><text x="400" y="182" text-anchor="middle" class="label">Scheduler</text><text x="400" y="201" text-anchor="middle" class="sub">phase owner</text>
+          <rect x="550" y="55" width="380" height="60" rx="12" class="box"/><text x="740" y="82" text-anchor="middle" class="label">GPU worker · alternative A</text><text x="740" y="101" text-anchor="middle" class="sub">colocate + bounded chunks</text>
+          <path d="M70 171 L135 171" class="wire"/><polygon points="145,171 135,176 135,166" class="head"/><path d="M280 171 L320 171" class="wire"/><polygon points="330,171 320,176 320,166" class="head"/><path d="M330 189 L290 189" class="wire reply"/><polygon points="280,189 290,184 290,194" class="head reply"/><path d="M145 189 L80 189" class="wire reply"/><polygon points="70,189 80,184 80,194" class="head reply"/>
+          <path d="M380 145 L380 93 Q380 85 388 85 L540 85" class="wire"/><polygon points="550,85 540,90 540,80" class="head"/><text x="390" y="75" class="tiny">A</text><path d="M550 99 L508 99 Q500 99 500 107 L500 117 Q500 125 492 125 L435 125 Q430 125 430 130 L430 135" class="wire reply"/><polygon points="430,145 425,135 435,135" class="head reply"/>
+          <g class="is-new">
+            <rect x="560" y="120" width="80" height="20" rx="10" class="badge"/><text x="600" y="134" text-anchor="middle" class="badge-text">P1 + D</text><rect x="650" y="120" width="80" height="20" rx="10" class="badge"/><text x="690" y="134" text-anchor="middle" class="badge-text">P2 + D</text><rect x="740" y="120" width="80" height="20" rx="10" class="badge"/><text x="780" y="134" text-anchor="middle" class="badge-text">P3 + D</text><text x="840" y="134" class="tiny">short steps</text>
+            <text x="550" y="355" class="tiny">chunks reduce stalls; TTFT may grow</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">把长 prefill 拆成 P1/P2/P3，与 decode 组在受预算限制的轮次里。仍然共卡，减少单次停顿的代价是 prefill 完成更晚；内核 tile 不是这些调度 chunk。</span><span class="lang-en">Split long prefill into P1/P2/P3 and mix decode under an iteration budget. The phases still share a card; shorter stalls may delay prefill completion. Kernel tiles are not scheduler chunks.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d6s3t d6s3d">
+          <title id="d6s3t">Disaggregation adds a real KV transfer</title>
+          <desc id="d6s3d">Alternative B uses Prefill worker and Decode worker. Scheduler dispatches Prefill worker; prompt KV and initial generation metadata transfer to the reserved Decode worker. Colocation above remains an alternative, not a simultaneous duplicated generation.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="18" width="824" height="364" rx="18" class="boundary"/><text x="136" y="38" class="tiny">PHASE CHOICE · alternative A or B, not two simultaneous request paths</text>
+          <circle cx="44" cy="156" r="12" class="box"/><path d="M24 202 Q44 170 64 202" class="wire"/><text x="44" y="224" text-anchor="middle" class="label">Client</text>
+          <rect x="145" y="145" width="135" height="80" rx="12" class="box"/><text x="212.5" y="182" text-anchor="middle" class="label">API gateway</text><text x="212.5" y="201" text-anchor="middle" class="sub">stream ingress</text>
+          <rect x="330" y="145" width="140" height="80" rx="12" class="box"/><text x="400" y="182" text-anchor="middle" class="label">Scheduler</text><text x="400" y="201" text-anchor="middle" class="sub">phase owner</text>
+          <rect x="550" y="55" width="380" height="60" rx="12" class="box"/><text x="740" y="82" text-anchor="middle" class="label">GPU worker · alternative A</text><text x="740" y="101" text-anchor="middle" class="sub">colocate + bounded chunks</text>
+          <path d="M70 171 L135 171" class="wire"/><polygon points="145,171 135,176 135,166" class="head"/><path d="M280 171 L320 171" class="wire"/><polygon points="330,171 320,176 320,166" class="head"/><path d="M330 189 L290 189" class="wire reply"/><polygon points="280,189 290,184 290,194" class="head reply"/><path d="M145 189 L80 189" class="wire reply"/><polygon points="70,189 80,184 80,194" class="head reply"/>
+          <path d="M380 145 L380 93 Q380 85 388 85 L540 85" class="wire"/><polygon points="550,85 540,90 540,80" class="head"/><text x="390" y="75" class="tiny">A</text><path d="M550 99 L508 99 Q500 99 500 107 L500 117 Q500 125 492 125 L435 125 Q430 125 430 130 L430 135" class="wire reply"/><polygon points="430,145 425,135 435,135" class="head reply"/>
+          <rect x="560" y="120" width="80" height="20" rx="10" class="badge"/><text x="600" y="134" text-anchor="middle" class="badge-text">P1 + D</text><rect x="650" y="120" width="80" height="20" rx="10" class="badge"/><text x="690" y="134" text-anchor="middle" class="badge-text">P2 + D</text><rect x="740" y="120" width="80" height="20" rx="10" class="badge"/><text x="780" y="134" text-anchor="middle" class="badge-text">P3 + D</text><text x="840" y="134" class="tiny">short steps</text>
+          <text x="550" y="355" class="tiny">chunks reduce stalls; TTFT may grow</text>
+          <g class="is-new">
+            <rect x="550" y="145" width="150" height="80" rx="12" class="box"/><text x="625" y="182" text-anchor="middle" class="label">Prefill worker</text><text x="625" y="201" text-anchor="middle" class="sub">alternative B</text>
+            <rect x="780" y="145" width="150" height="80" rx="12" class="box"/><text x="855" y="182" text-anchor="middle" class="label">Decode worker</text><text x="855" y="201" text-anchor="middle" class="sub">reserved target</text>
+            <path d="M470 171 L540 171" class="wire"/><polygon points="550,171 540,176 540,166" class="head"/><text x="510" y="161" text-anchor="middle" class="tiny">B</text><path d="M700 171 L770 171" class="wire async"/><polygon points="780,171 770,176 770,166" class="head async"/><text x="740" y="161" text-anchor="middle" class="tiny">KV + start</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">证据指向同卡干扰时才加分离分支。先保留 decode 目标容量，再算 prefill 并搬 KV；本章 prompt KV = 2,048 × 128 KiB = 256 MiB。</span><span class="lang-en">Add the split branch when evidence points to colocated interference. Reserve decode capacity before prefill and KV transfer. Prompt KV here is 2,048 × 128 KiB = 256 MiB.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d6s4t d6s4d">
+          <title id="d6s4t">Accept transfer identity before releasing the source</title>
+          <desc id="d6s4d">Decode worker verifies transfer identity and accepts the matching epoch to Prefill worker. Only then may source references retire. Decode tokens return directly to Scheduler, then API gateway and Client, without passing back through Prefill worker.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="18" width="824" height="364" rx="18" class="boundary"/><text x="136" y="38" class="tiny">PHASE CHOICE · alternative A or B, not two simultaneous request paths</text>
+          <circle cx="44" cy="156" r="12" class="box"/><path d="M24 202 Q44 170 64 202" class="wire"/><text x="44" y="224" text-anchor="middle" class="label">Client</text>
+          <rect x="145" y="145" width="135" height="80" rx="12" class="box"/><text x="212.5" y="182" text-anchor="middle" class="label">API gateway</text><text x="212.5" y="201" text-anchor="middle" class="sub">stream ingress</text>
+          <rect x="330" y="145" width="140" height="80" rx="12" class="box"/><text x="400" y="182" text-anchor="middle" class="label">Scheduler</text><text x="400" y="201" text-anchor="middle" class="sub">phase owner</text>
+          <rect x="550" y="55" width="380" height="60" rx="12" class="box"/><text x="740" y="82" text-anchor="middle" class="label">GPU worker · alternative A</text><text x="740" y="101" text-anchor="middle" class="sub">colocate + bounded chunks</text>
+          <path d="M70 171 L135 171" class="wire"/><polygon points="145,171 135,176 135,166" class="head"/><path d="M280 171 L320 171" class="wire"/><polygon points="330,171 320,176 320,166" class="head"/><path d="M330 189 L290 189" class="wire reply"/><polygon points="280,189 290,184 290,194" class="head reply"/><path d="M145 189 L80 189" class="wire reply"/><polygon points="70,189 80,184 80,194" class="head reply"/>
+          <path d="M380 145 L380 93 Q380 85 388 85 L540 85" class="wire"/><polygon points="550,85 540,90 540,80" class="head"/><text x="390" y="75" class="tiny">A</text><path d="M550 99 L508 99 Q500 99 500 107 L500 117 Q500 125 492 125 L435 125 Q430 125 430 130 L430 135" class="wire reply"/><polygon points="430,145 425,135 435,135" class="head reply"/>
+          <rect x="560" y="120" width="80" height="20" rx="10" class="badge"/><text x="600" y="134" text-anchor="middle" class="badge-text">P1 + D</text><rect x="650" y="120" width="80" height="20" rx="10" class="badge"/><text x="690" y="134" text-anchor="middle" class="badge-text">P2 + D</text><rect x="740" y="120" width="80" height="20" rx="10" class="badge"/><text x="780" y="134" text-anchor="middle" class="badge-text">P3 + D</text><text x="840" y="134" class="tiny">short steps</text>
+          <text x="550" y="355" class="tiny">chunks reduce stalls; TTFT may grow</text>
+          <rect x="550" y="145" width="150" height="80" rx="12" class="box"/><text x="625" y="182" text-anchor="middle" class="label">Prefill worker</text><text x="625" y="201" text-anchor="middle" class="sub">alternative B</text>
+          <rect x="780" y="145" width="150" height="80" rx="12" class="box"/><text x="855" y="182" text-anchor="middle" class="label">Decode worker</text><text x="855" y="201" text-anchor="middle" class="sub">reserved target</text>
+          <path d="M470 171 L540 171" class="wire"/><polygon points="550,171 540,176 540,166" class="head"/><text x="510" y="161" text-anchor="middle" class="tiny">B</text><path d="M700 171 L770 171" class="wire async"/><polygon points="780,171 770,176 770,166" class="head async"/><text x="740" y="161" text-anchor="middle" class="tiny">KV + start</text>
+          <g class="is-new">
+            <path d="M780 205 L710 205" class="wire reply"/><polygon points="700,205 710,200 710,210" class="head reply"/><text x="740" y="243" text-anchor="middle" class="tiny">accept epoch</text>
+            <path d="M855 225 L855 257 Q855 265 847 265 L438 265 Q430 265 430 257 L430 235" class="wire reply"/><polygon points="430,225 435,235 425,235" class="head reply"/><text x="635" y="283" text-anchor="middle" class="tiny">Decode worker → Scheduler → API gateway → Client</text>
+            <rect x="550" y="295" width="380" height="20" rx="10" class="badge"/><text x="740" y="309" text-anchor="middle" class="badge-text">256 MiB / 10 GB/s ≈ 26.8 ms · ideal only</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">目的端确认 request、epoch、模型和 block manifest 后，源端才释放。token 不再绕 prefill；10 GB/s 有效带宽下纯传输约 26.8 ms，还没算排队、同步和复制。</span><span class="lang-en">The destination accepts request, epoch, model, and block manifest before source release. Tokens bypass prefill on return. At 10 GB/s effective bandwidth the ideal transfer is about 26.8 ms, before queues, synchronization, and copies.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d6s5t d6s5d">
+          <title id="d6s5t">Interrupted transfer has an explicit ownership cleanup</title>
+          <desc id="d6s5d">Alternative B’s transfer or Decode worker loss returns failure to Scheduler, then through the existing gateway and client status path. Matching-epoch abort cleans both owners; source release waits for acceptance or fenced cleanup. Earlier green arrows describe accepted transfer history.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="18" width="824" height="364" rx="18" class="boundary"/><text x="136" y="38" class="tiny">PHASE CHOICE · alternative A or B, not two simultaneous request paths</text>
+          <circle cx="44" cy="156" r="12" class="box"/><path d="M24 202 Q44 170 64 202" class="wire"/><text x="44" y="224" text-anchor="middle" class="label">Client</text>
+          <rect x="145" y="145" width="135" height="80" rx="12" class="box"/><text x="212.5" y="182" text-anchor="middle" class="label">API gateway</text><text x="212.5" y="201" text-anchor="middle" class="sub">stream ingress</text>
+          <rect x="330" y="145" width="140" height="80" rx="12" class="box"/><text x="400" y="182" text-anchor="middle" class="label">Scheduler</text><text x="400" y="201" text-anchor="middle" class="sub">phase owner</text>
+          <rect x="550" y="55" width="380" height="60" rx="12" class="box"/><text x="740" y="82" text-anchor="middle" class="label">GPU worker · alternative A</text><text x="740" y="101" text-anchor="middle" class="sub">colocate + bounded chunks</text>
+          <path d="M70 171 L135 171" class="wire"/><polygon points="145,171 135,176 135,166" class="head"/><path d="M280 171 L320 171" class="wire"/><polygon points="330,171 320,176 320,166" class="head"/><path d="M330 189 L290 189" class="wire reply"/><polygon points="280,189 290,184 290,194" class="head reply"/><path d="M145 189 L80 189" class="wire reply"/><polygon points="70,189 80,184 80,194" class="head reply"/>
+          <path d="M380 145 L380 93 Q380 85 388 85 L540 85" class="wire"/><polygon points="550,85 540,90 540,80" class="head"/><text x="390" y="75" class="tiny">A</text><path d="M550 99 L508 99 Q500 99 500 107 L500 117 Q500 125 492 125 L435 125 Q430 125 430 130 L430 135" class="wire reply"/><polygon points="430,145 425,135 435,135" class="head reply"/>
+          <rect x="560" y="120" width="80" height="20" rx="10" class="badge"/><text x="600" y="134" text-anchor="middle" class="badge-text">P1 + D</text><rect x="650" y="120" width="80" height="20" rx="10" class="badge"/><text x="690" y="134" text-anchor="middle" class="badge-text">P2 + D</text><rect x="740" y="120" width="80" height="20" rx="10" class="badge"/><text x="780" y="134" text-anchor="middle" class="badge-text">P3 + D</text><text x="840" y="134" class="tiny">short steps</text>
+          <text x="550" y="355" class="tiny">chunks reduce stalls; TTFT may grow</text>
+          <rect x="550" y="145" width="150" height="80" rx="12" class="box"/><text x="625" y="182" text-anchor="middle" class="label">Prefill worker</text><text x="625" y="201" text-anchor="middle" class="sub">alternative B</text>
+          <rect x="780" y="145" width="150" height="80" rx="12" class="box"/><text x="855" y="182" text-anchor="middle" class="label">Decode worker</text><text x="855" y="201" text-anchor="middle" class="sub">reserved target</text>
+          <path d="M470 171 L540 171" class="wire"/><polygon points="550,171 540,176 540,166" class="head"/><text x="510" y="161" text-anchor="middle" class="tiny">B</text><path d="M700 171 L770 171" class="wire async"/><polygon points="780,171 770,176 770,166" class="head async"/><text x="740" y="161" text-anchor="middle" class="tiny">KV + start</text>
+          <path d="M780 205 L710 205" class="wire reply"/><polygon points="700,205 710,200 710,210" class="head reply"/><text x="740" y="243" text-anchor="middle" class="tiny">accept epoch</text>
+          <path d="M855 225 L855 257 Q855 265 847 265 L438 265 Q430 265 430 257 L430 235" class="wire reply"/><polygon points="430,225 435,235 425,235" class="head reply"/><text x="635" y="283" text-anchor="middle" class="tiny">Decode worker → Scheduler → API gateway → Client</text>
+          <rect x="550" y="295" width="380" height="20" rx="10" class="badge"/><text x="740" y="309" text-anchor="middle" class="badge-text">256 MiB / 10 GB/s ≈ 26.8 ms · ideal only</text>
+          <g class="is-new">
+            <path d="M780 189 L710 189" class="wire fail"/><polygon points="700,189 710,184 710,194" class="head fail"/><path d="M550 207 L480 207" class="wire fail"/><polygon points="470,207 480,202 480,212" class="head fail"/><path d="M330 207 L290 207" class="wire fail"/><polygon points="280,207 290,202 290,212" class="head fail"/><path d="M145 207 L113 207 Q105 207 105 199 L105 197 Q105 189 97 189 L80 189" class="wire fail"/><polygon points="70,189 80,184 80,194" class="head fail"/><text x="635" y="328" text-anchor="middle" class="tiny">transfer / target loss → abort epoch; re-prefill explicitly</text>
+            <text x="136" y="371" class="clock">30/s × 256 MiB = 7.5 GiB/s ≈ 8.05 GB/s</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">完整图：接受握手和失败清理都带 epoch，超时不等于对方没收页。30 req/s 时仅 prompt KV 就约 8.05 GB/s；分池扩容必须同时买算力、目标页和互连余量。</span><span class="lang-en">Complete board: acceptance and cleanup carry epochs; timeout does not prove the destination received nothing. At 30 req/s prompt KV alone is about 8.05 GB/s. Split-pool scaling must cover compute, target pages, and interconnect headroom.</span></figcaption>
+      </div>
+    </figure><div class="bilingual"><div class="lang-zh"><p>先以chunk、逐轮预算与并发上限调优同卡。长prefill常偏计算、decode常偏带宽，但瓶颈随模型/上下文/batch/硬件变化；两种延迟仍不能同时满足且资源规模足够，才考虑两池。DistServe按延迟目标与达标比例优化goodput，不把论文倍数当本站容量。图A/B是互斥方案。<a href="#ref-3">[3]</a></p><p>分离先保留Decode目标页信用，再prefill/传输。目标收到KV字节与首个采样token或初始logits/采样元数据，验证模型/LoRA、request、epoch、长度、manifest后接受。源端等匹配接受或已隔离撤销后退休引用；发起copy或收到metadata都不代表可以释放。Decode直接回Scheduler，输出不绕Prefill。</p><p>prompt KV=<code>2,048×128 KiB=256 MiB=268,435,456 B</code>。假设有效10 GB/s，纯搬运26.84ms；30/s是7.5 GiB/s≈8.05 GB/s≈64.42 Gb/s，占80.53%。这不含排队、复制、握手、重传和两端暂存。目标不足时多加Prefill只会堆积KV。</p></div><div class="lang-en"><p>First tune colocation with chunks, iteration budgets, and active caps. Long prefill is often compute-heavy and decode bandwidth-heavy, but bottlenecks vary by model/context/batch/hardware. Split only when both latency goals still conflict at sufficient scale. DistServe optimizes goodput under latency and attainment goals; paper speedups are not our capacity. A/B in the diagram are mutually exclusive. <a href="#ref-3">[3]</a></p><p>Reserve destination Decode credits before prefill/transfer. The target receives KV bytes plus the first sampled token or initial logits/sampling metadata; it validates model/LoRA, request, epoch, length, and manifest before accepting. Retire source references only after matching acceptance or a fenced abort. Starting a copy or receiving metadata is insufficient. Decode returns directly to Scheduler rather than through Prefill.</p><p>Prompt KV is <code>2,048×128 KiB=256 MiB=268,435,456 B</code>. At assumed effective ten GB/s, ideal transfer is 26.84ms. Thirty/s is 7.5 GiB/s≈8.05 GB/s≈64.42 Gb/s, or 80.53%, excluding queues, copies, handshakes, retries, and duplicate staging. More Prefill without target capacity merely accumulates KV.</p></div></div><details><summary><span class="lang-zh">接受丢ACK、池死亡与扩缩容</span><span class="lang-en">Lost acceptance ACK, pool loss, and scaling</span></summary><div class="bilingual"><div class="lang-zh"><p>发送方超时可能只是接受ACK丢失；用transfer id/epoch查已有结果，重复接收不再占一份。撤销先隔离旧owner，再清两端引用。源prompt KV不包含后续decode/采样状态，目标死亡后仍按上一节明确中断或显式新prefill，不承诺无感恢复。</p><p>扩容一起看Prefill等待、Decode活页/间隔和互连；缩容摘新准入，drain或明确取消旧请求。多卡tensor parallel另算各rank权重、KV、通信。这里没有真实GPU、网络搬运或故障实验，Java内存模型不验证生产吞吐、CUDA正确性或分布式恢复。</p></div><div class="lang-en"><p>Sender timeout may follow accepted transfer with a lost ACK. Query by transfer ID/epoch and make repeated acceptance return the existing result. Abort fences the owner before cleaning both references. Source prompt KV omits subsequent decode/sampling state; target loss still means explicit interruption or new prefill, not seamless recovery.</p><p>Scale against Prefill wait, Decode pages/gaps, and interconnect together. Scale-in stops admission and drains or explicitly cancels old requests. Tensor-parallel ranks need separate weight/KV/communication accounting. No real GPU, transfer, or device-failure experiment was performed. The Java memory model proves neither production throughput, CUDA correctness, nor distributed recovery.</p></div></div></details></section>
+<section><h2><span class="lang-zh">面试复盘：用一条请求讲清边界</span><span class="lang-en">Review: follow one request through its boundaries</span></h2><table><thead><tr><th><span class="lang-zh">翻车说法</span><span class="lang-en">Failure claim</span></th><th><span class="lang-zh">正确推导或边界</span><span class="lang-en">Correction or boundary</span></th></tr>
+</thead><tbody><tr><td><span class="lang-zh">40 GiB 能放 128 条，所以单卡 21.3 req/s</span><span class="lang-en">Forty GiB fits 128, so the card serves 21.3 req/s</span></td><td><span class="lang-zh">128 是信用容量，目标联合达标比例下的接纳率和轮次需基准测试</span><span class="lang-en">128 is credit capacity; benchmark admissible rate at the joint attainment target and iteration timing</span></td></tr>
+<tr><td><span class="lang-zh">物理页没满就可以再接</span><span class="lang-en">Free physical pages imply more admission</span></td><td><span class="lang-zh">未来输出信用已承诺；不能重复出售</span><span class="lang-en">Future-output credits are already promised; do not sell them twice</span></td></tr>
+<tr><td><span class="lang-zh">weight-only 量化不改变准入</span><span class="lang-en">Weight-only quantization cannot change admission</span></td><td><span class="lang-zh">每 token 的 KV 不变，但权重变小可能腾出更大 KV 池；重算有效预算</span><span class="lang-en">KV bytes/token stay unchanged, but smaller weights may free a larger KV pool; recompute the usable budget</span></td></tr>
+<tr><td><span class="lang-zh">取消后马上复用地址</span><span class="lang-en">Reuse addresses immediately after cancel</span></td><td><span class="lang-zh">等待 GPU fence，退休请求引用；共享页不一定释放</span><span class="lang-en">Wait for GPU fences and retire request refs; shared pages may remain</span></td></tr>
+<tr><td><span class="lang-zh">write 成功保证至少一次</span><span class="lang-en">Successful write guarantees at-least-once</span></td><td><span class="lang-zh">没有持久事件日志与重放协议，就没有送达保证</span><span class="lang-en">Without durable events and replay, delivery is not guaranteed</span></td></tr>
+<tr><td><span class="lang-zh">任何 OOM 只影响一条</span><span class="lang-en">Every OOM affects one sequence</span></td><td><span class="lang-zh">健康分配拒绝可局部处理；context 致命错误终止整 worker</span><span class="lang-en">Healthy allocation denial may be local; fatal context errors terminate the worker</span></td></tr>
+<tr><td><span class="lang-zh">800 ms = TTFT 分量 p99 相加</span><span class="lang-en">Eight hundred ms is the sum of component p99s</span></td><td><span class="lang-zh">分量预算只是一次条件路径，联合尾部需端到端测量</span><span class="lang-en">Component budgets describe a conditional path; measure the joint tail end to end</span></td></tr>
+<tr><td><span class="lang-zh">KV 开始搬就可以释放源</span><span class="lang-en">Release source KV when copying starts</span></td><td><span class="lang-zh">等待匹配 epoch 接受确认或隔离撤销；超时可能已接收</span><span class="lang-en">Wait for matching-epoch acceptance or fenced abort; timeout may follow receipt</span></td></tr>
+</tbody></table><div class="bilingual"><div class="lang-zh"><p>复述顺序：持久尝试身份 → 有界租户队列 → 最大输出信用 → 本轮预算 → token逐跳返回 → 停止/退休/释放。先讲128条是显存承诺，再讲C=12是未测的容量假设；流中断不把同key偷偷变成新生成。</p><p>监控分层：客户端TTFT/块停顿；worker ITL/请求TPOT与联合goodput；排队年龄/到期/租户拒绝；信用、refs/pins、缓存/可复用页；取消退休时长、旧epoch丢弃与worker致命错误。利用率高而联合达标比例低，可能只是算出更多迟到token。<a href="../examples/ch29/README.md">示例与验证边界</a>。</p></div><div class="lang-en"><p>Retell: durable attempt identity → bounded tenant queues → output-cap credits → iteration budget → return hops → stop/retire/release. Explain that 128 is a memory commitment and C=12 is an unmeasured capacity assumption. Interrupted same-key requests never silently become a new generation.</p><p>Observe client TTFT/chunk stalls; worker ITL/request TPOT and joint goodput; queue age/expiry/tenant denials; credits, refs/pins, cached/reusable pages; cancellation retirement, rejected old epochs, and fatal errors. High utilization with poor joint attainment may merely produce late tokens. <a href="../examples/ch29/README.md">Examples and validation limits</a>.</p></div></div></section>
+<section><h2><span class="lang-zh">引用与延伸阅读</span><span class="lang-en">References and further reading</span></h2><ol class="references"><li id="ref-1">[1] Gyeong-In Yu et al., <a href="https://www.usenix.org/system/files/osdi22-yu.pdf"><em>Orca: A Distributed Serving System for Transformer-Based Generative Models</em></a>, OSDI 2022. <span class="lang-zh">iteration-level scheduling 与 selective batching；本章不把论文吞吐倍数当容量。</span><span class="lang-en">Iteration-level scheduling and selective batching; no paper speedup is used as our capacity.</span></li>
+<li id="ref-2">[2] Woosuk Kwon et al., <a href="https://arxiv.org/pdf/2309.06180"><em>Efficient Memory Management for Large Language Model Serving with PagedAttention</em></a>, SOSP 2023. <span class="lang-zh">逻辑/物理页映射、共享与抢占；128 KiB 和 128 条来自本章假设。</span><span class="lang-en">Logical/physical mapping, sharing, and preemption; 128 KiB and 128 requests are our assumptions.</span></li>
+<li id="ref-3">[3] Yinmin Zhong et al., <a href="https://www.usenix.org/system/files/osdi24-zhong-yinmin.pdf"><em>DistServe: Disaggregating Prefill and Decoding for Goodput-optimized Large Language Model Serving</em></a>, OSDI 2024. <span class="lang-zh">阶段干扰与 goodput；10 GB/s 为本章示例，不采用论文的 90% 作为本站 p99。</span><span class="lang-en">Phase interference and goodput; 10 GB/s is our illustration, and the paper’s 90% goal is not our p99 target.</span></li>
+<li id="ref-4">[4] Tri Dao et al., <a href="https://arxiv.org/pdf/2205.14135"><em>FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness</em></a>, 2022. <span class="lang-zh">HBM/SRAM 的 attention IO 优化，区别于服务调度。</span><span class="lang-en">Attention IO between HBM and SRAM, distinct from serving scheduling.</span></li>
+<li id="ref-5">[5] vLLM project, <a href="https://docs.vllm.ai/en/v0.15.1/design/prefix_caching/"><em>Automatic Prefix Caching · design</em></a>, v0.15.1. <span class="lang-zh">父哈希、token、额外身份、完整块与 cache salt；不承诺字节变化必 miss。</span><span class="lang-en">Parent hash, token IDs, extra identities, complete blocks, and cache salt; byte changes do not necessarily imply a miss.</span></li>
+<li id="ref-6">[6] vLLM project, <a href="https://docs.vllm.ai/en/v0.15.1/features/automatic_prefix_caching/"><em>Automatic Prefix Caching · features</em></a>, v0.15.1. <span class="lang-zh">APC 只减少重复 prefill，不缩短后缀 decode。</span><span class="lang-en">APC reduces repeated prefill without shortening suffix decode.</span></li>
+<li id="ref-7">[7] vLLM project, <a href="https://docs.vllm.ai/en/v0.15.1/configuration/optimization/"><em>Optimization and Tuning · Chunked Prefill</em></a>, v0.15.1. <span class="lang-zh">每轮 token 预算和 ITL/TTFT 取舍；本文不承诺固定 20 ms。</span><span class="lang-en">Iteration token budgets and ITL/TTFT tradeoffs; this chapter promises no fixed twenty-ms iteration.</span></li>
+<li id="ref-8">[8] NVIDIA, <a href="https://docs.nvidia.com/cuda/cuda-runtime-api/cuda_runtime_api/group__CUDART__TYPES.html"><em>CUDA Runtime API · Data types used by CUDA Runtime</em></a>, 13.4 · checked 2026-10-24. <span class="lang-zh">未完成异步操作、illegal address 与致命 context 的重启要求。</span><span class="lang-en">Incomplete asynchronous operations, illegal addresses, and fatal-context relaunch requirements.</span></li>
+<li id="ref-9">[9] WHATWG, <a href="https://html.spec.whatwg.org/multipage/server-sent-events.html"><em>HTML Standard · Server-sent events</em></a>, Living Standard · checked 2026-10-24. <span class="lang-zh">EventSource、事件 id 和 Last-Event-ID；不提供服务器持久重放或 KV 恢复。</span><span class="lang-en">EventSource, event IDs, and Last-Event-ID; no server-side durable replay or KV recovery is supplied.</span></li>
+<li id="ref-10">[10] NVIDIA, <a href="https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__EVENT.html">CUDA Runtime API 13.4 · Event Management</a> · checked 2026-10-24. <span class="lang-zh">event捕获的工作与依赖、查询和同步完成；Java模型不执行CUDA。</span><span class="lang-en">Captured work/dependencies, queries and synchronization; the Java model does not execute CUDA.</span></li><li id="ref-11">[11] PostgreSQL, <a href="https://www.postgresql.org/docs/18/sql-insert.html">PostgreSQL 18 · INSERT / ON CONFLICT</a> and <a href="https://www.postgresql.org/docs/18/explicit-locking.html#LOCKING-ROWS">row locks</a> · checked 2026-10-24. <span class="lang-zh">attempt唯一行与条件更新的数据库适配前提；本章没有运行PostgreSQL。</span><span class="lang-en">Database assumptions for unique attempt rows and conditional updates; PostgreSQL was not run.</span></li></ol><p class="cite"><a class="chip" href="ch03.html">Ch03</a> <a class="chip" href="ch04.html">Ch04</a> <a class="chip" href="ch30.html">Ch30</a> <a class="chip" href="ch32.html">Ch32</a> <a class="chip" href="ch35.html">Ch35</a> <a class="chip" href="ch40.html">Ch40</a></p></section>
+<section><h2><span class="lang-zh">闪卡</span><span class="lang-en">Flashcards</span></h2><p class="cite"><span class="lang-zh">点按或用Enter/Space翻面，回答时说出账本与失败边界。</span><span class="lang-en">Click or press Enter/Space; name the ledger and failure boundary.</span></p><div class="cards-grid"><button type="button" class="flip"><span class="q"><span class="lang-zh">128 条证明什么？</span><span class="lang-en">What does 128 establish?</span></span><span class="a"><span class="lang-zh">40,960 ÷ 320 = 128 条满额 KV 信用；吞吐与延迟仍需基准测试。</span><span class="lang-en">40,960 ÷ 320 = 128 full-cap KV reservations; benchmark throughput and latency separately.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">页信用和物理页一样吗？</span><span class="lang-en">Are credits physical pages?</span></span><span class="a"><span class="lang-zh">信用承诺未来上限，物理页按实际状态增长，空闲页不能重复承诺。</span><span class="lang-en">Credits commit future capacity; physical pages grow on demand and cannot be promised twice.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">单 token KV 怎么算？</span><span class="lang-en">KV bytes per token?</span></span><span class="a"><span class="lang-zh">2 × 层 × KV head × head dim × 元素字节；本章是 128 KiB。</span><span class="lang-en">2 × layers × KV heads × head dimension × bytes; 128 KiB here.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">256 个输出有多少间隔？</span><span class="lang-en">How many gaps for 256 outputs?</span></span><span class="a"><span class="lang-zh">首个已由 prefill 产生，后续是 255 个；20 ms 例子共 5.1 s。</span><span class="lang-en">Prefill already produces the first; 255 later gaps total 5.1 s at twenty ms.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">TPOT 与 ITL 为什么分报？</span><span class="lang-en">Why report TPOT and ITL separately?</span></span><span class="a"><span class="lang-zh">TPOT是N−1间隔均值；worker ITL统计token-ready间隔，客户端块间隔另报。</span><span class="lang-en">TPOT averages N−1 gaps; worker ITL measures token-ready gaps. Report client chunk gaps separately.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">新请求最多等一轮吗？</span><span class="lang-en">Does an arrival wait at most one iteration?</span></span><span class="a"><span class="lang-zh">只是下一轮可考虑；页信用、计算预算和公平仍可延迟。</span><span class="lang-en">It can be considered next iteration; credits, compute, and fairness may delay it.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">取消何时还页？</span><span class="lang-en">When does cancellation release pages?</span></span><span class="a"><span class="lang-zh">停后续调度；全部相关GPU访问完成才单次释放引用/信用，共享页仍看refs/pins。</span><span class="lang-en">Stop scheduling; retire all GPU accesses, then release refs/credits once. Shared pages still need zero refs/pins.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">每种 OOM 都局部处理吗？</span><span class="lang-en">Is every OOM local?</span></span><span class="a"><span class="lang-zh">健康分配拒绝可局部处理；致命 CUDA context 按 worker 死亡重启。</span><span class="lang-en">Healthy allocation denial may be local; fatal CUDA contexts require worker restart.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">write 成功证明送达吗？</span><span class="lang-en">Does write success prove delivery?</span></span><span class="a"><span class="lang-zh">不证明。无持久事件日志和重放，无法承诺至少一次或恰好一次。</span><span class="lang-en">No. Without durable events and replay, neither at-least-once nor exactly-once delivery is promised.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">同 key 怎样处理中断？</span><span class="lang-en">Same-key retry after interruption?</span></span><span class="a"><span class="lang-zh">恢复 INTERRUPTED 状态，不盲开第二条；明确续写用新 key 和 prefill。</span><span class="lang-en">Recover INTERRUPTED without a second generation; explicit continuation uses a new key and prefill.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">前缀缓存改变哪段？</span><span class="lang-en">Which phase benefits from prefix caching?</span></span><span class="a"><span class="lang-zh">只减少重复 prefill；固定 token 计算身份与信任域，后缀步数不变。</span><span class="lang-en">It reduces repeated prefill with fixed token identity and trust domain; suffix steps remain.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">分离至少搬多少 KV？</span><span class="lang-en">How much KV does separation transfer?</span></span><span class="a"><span class="lang-zh">prompt 256 MiB，30/s 约 8.05 GB/s；确认 epoch 接受后再释放源。</span><span class="lang-en">256 MiB/prompt; thirty/s is about 8.05 GB/s. Release source only after matching-epoch acceptance.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">两个p99能证明99%请求联合达标吗？</span><span class="lang-en">Do two p99s prove 99% joint request attainment?</span></span><span class="a"><span class="lang-zh">不能；逐请求核TTFT和最大worker ITL，再报达标完成率与分母。</span><span class="lang-en">No. Check each request’s TTFT and maximum worker ITL, then report compliant completions and the denominator.</span></span></button></div></section>
+  <p><button type="button" class="read-toggle"><span class="when-off"><span class="lang-zh">我已学完本章</span><span class="lang-en">Mark this chapter done</span></span><span class="when-on"><span class="lang-zh">已学完本章</span><span class="lang-en">Completed</span></span></button></p>
+  <p class="cite"><span class="lang-zh">进度存在这台浏览器里。</span><span class="lang-en">Saved in this browser only.</span></p>
+</article>
+</main>
+<script src="../assets/js/nav.js"></script>
+<script src="../assets/js/lang.js"></script>
+<script src="../assets/js/slides.js"></script>
+<script src="../assets/js/progress.js"></script>
+</body>
+</html>

@@ -1,0 +1,30 @@
+recover(run, action, newOwnerEpoch):
+  // Claim first; retain original action key, binding, budgets and revisions.
+  receipt = Ch33.query(action.key, action.exactBinding)  // outside RunStore TX
+  if receipt is absent or inconclusive:
+    if not cancelled and contract permits bounded same-key replay now:
+      BEGIN RunStore transaction; lock run and action
+        require recovery owner/epoch/version, live lease, not cancelled, before deadline
+        INSERT bounded replay attempt referencing original key and binding
+      COMMIT; confirm acknowledgment before sending
+      retry original action through Ch33; never change key/route/arguments
+    else:
+      persist UNKNOWN + NEEDS_REVIEW + escalation outbox; return
+  else:
+    BEGIN RunStore transaction; lock run and action
+      require current recovery owner/epoch/version and live lease
+      INSERT observation UNIQUE(run_id, action_id), or read matching prior one
+      UPDATE action with authenticated known outcome and receipt
+      if success: INSERT confirmed effect ledger entry
+      if cancelled: preserve cancel flag; never schedule a new model step
+      INSERT checkpoint + next legal recovery event; bump run version
+    COMMIT
+  if cancelled and confirmed effects require undo:
+    choose next action from persisted business dependencies
+    persist stable compensation key linked to original effect
+    dispatch through Ch33 with its own approval and bounded recovery budget
+    // UNKNOWN compensation blocks dependents; query the same compensation key.
+  if undo cannot safely finish:
+    persist NEEDS_REVIEW + stable case_key + outbox
+    relay to case system; checkpoint relay cursor only after durable case receipt
+  // COMPENSATED is a recovered business failure, never successful DONE.

@@ -1,0 +1,26 @@
+createPayment(authenticatedMerchant, key, body):
+  quote = verifyOrderAndPrice(authenticatedMerchant, body.order)
+  require body.businessVersion == quote.authorizedBusinessVersion else CONFLICT
+  require body.method == quote.authorizedMethod else CONFLICT
+  digest = canonicalHash(quote.orderRef, quote.amount, quote.currency,
+                         quote.authorizedMethod, quote.authorizedBusinessVersion)
+  begin transaction
+    old = findRequest(merchantScope, "CREATE", key)
+    if old exists:
+      require old.digest == digest else CONFLICT
+      commit; return accepted(old.payNo)
+    // UNIQUE arbitrates both request-key and business-intent races.
+    payment = insertOrReadIntent(merchantScope, quote.orderRef,
+                                quote.authorizedBusinessVersion, quote.amount, quote.currency)
+    require payment.immutableDigest == digest else CONFLICT
+    if payment was newly inserted:
+      a7 = insertAttempt(payment, chosenChannelAccount, freeze(quote))
+      insertOutbox("channel:" + a7, command(a7))
+    insertRequest(merchantScope, "CREATE", key, digest, payment.payNo)
+  commit
+  return 202(payment.payNo)  // acceptance, not capture
+on relevant UNIQUE conflict:
+  rollback; restart transaction and compare the winning record
+on lost commit response:
+  resolve by the same key/intent on the authoritative DB
+  // Never generate a different intent to escape uncertainty.

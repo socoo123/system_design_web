@@ -1,0 +1,96 @@
+{
+  "checkedAt": "2026-10-24",
+  "scope": "Primary sources rechecked for Ch43. Workload numbers and custom catalog/GC/replay contracts remain teaching assumptions.",
+  "sources": [
+    {
+      "ref": 1,
+      "url": "https://static.googleusercontent.com/media/research.google.com/en//pubs/archive/36632.pdf",
+      "title": "Dremel: Interactive Analysis of Web-Scale Datasets (2010)",
+      "location": "Section 7, Figure 8 and MR and Dremel / Figure 10",
+      "supports": "T1 has 85 billion records and 87 TB uncompressed; Q1 reads roughly 0.5 TB compressed with Dremel/MR on columns versus 87 TB with MR on records.",
+      "pageClaim": "Historical byte ratios illustrate that scan bytes and execution time are different quantities; no latency transfer to A3.",
+      "method": "Google primary landing page via web; PDF tool access failed, then original PDF fetched with curl and inspected with pdftotext. Figure 9 is local-disk access; corrected the page to Figure 10."
+    },
+    {
+      "ref": 2,
+      "url": "https://www.cs.umd.edu/~abadi/papers/abadi-sigmod08.pdf",
+      "title": "Column-Stores vs. Row-Stores: How Different Are They Really? (2008)",
+      "location": "Abstract, Section 1 and Section 5",
+      "supports": "Physical column layout alone does not provide the full execution benefits; compression, block processing and late materialization contribute.",
+      "pageClaim": "Splitting every row-store column into a table does not itself implement a complete column-oriented execution engine.",
+      "method": "Author-hosted paper opened through web."
+    },
+    {
+      "ref": 3,
+      "url": "https://parquet.apache.org/docs/file-format/",
+      "title": "Apache Parquet File Format",
+      "location": "File Format, file layout and reader description",
+      "supports": "Column chunks belong to row groups; file metadata records their locations and readers use it to find selected chunks.",
+      "pageClaim": "Projected reads use metadata to locate required columns, including predicate columns.",
+      "method": "Official documentation opened through web."
+    },
+    {
+      "ref": 4,
+      "url": "https://iceberg.apache.org/docs/1.10.0/evolution/",
+      "title": "Apache Iceberg 1.10.0 Evolution",
+      "location": "Schema evolution / Partition evolution",
+      "supports": "Stable field IDs preserve schema meaning; old and new partition layouts coexist, are planned separately, and evolution does not eagerly rewrite old files.",
+      "pageClaim": "Updating the default partition specification is distinct from physically rewriting historical layout.",
+      "method": "Version-pinned official documentation opened through web; not described as latest."
+    },
+    {
+      "ref": 5,
+      "url": "https://iceberg.apache.org/docs/1.10.0/reliability/",
+      "title": "Apache Iceberg 1.10.0 Reliability",
+      "location": "Concurrent write operations / Cost of retries / Retry validation",
+      "supports": "Writers atomically exchange table metadata pointers, refresh after conflicts and validate operation assumptions before reapplying actions.",
+      "pageClaim": "CAS alone does not validate stale compaction output. Atomic batch-result registration is this chapter's custom Catalog contract, not an Iceberg API guarantee.",
+      "method": "Version-pinned official documentation opened through web."
+    },
+    {
+      "ref": 6,
+      "url": "https://iceberg.apache.org/spec/",
+      "title": "Apache Iceberg Table Specification, v2-scoped claims",
+      "location": "Sequence Numbers / Row-level Deletes / Scan Planning / File System Operations",
+      "supports": "Data and metadata files remain immutable; v2 position/equality delete files have scope and sequence applicability that readers must honor.",
+      "pageClaim": "A snapshot's data files alone do not define correct live rows; applicable delete metadata must participate in planning/reading.",
+      "method": "Living official specification opened through web. Newer v3/v4 features are outside this chapter's v2 illustration."
+    },
+    {
+      "ref": 7,
+      "url": "https://iceberg.apache.org/docs/1.10.0/maintenance/",
+      "title": "Apache Iceberg 1.10.0 Maintenance",
+      "location": "Expire snapshots / Remove orphan files / Compact data files",
+      "supports": "Rewriting small files reduces metadata and file-open cost; overly short orphan retention can delete in-progress files.",
+      "pageClaim": "512 MB and 30 minutes are teaching values. Reachability, active readers and writer lifetime must be coordinated before cleanup.",
+      "method": "Version-pinned official documentation opened through web. Reader-pin/publication-fence protocol is a stated design contract rather than a claimed built-in maintenance API."
+    },
+    {
+      "ref": 8,
+      "url": "https://www.cidrdb.org/cidr2021/papers/cidr2021_paper17.pdf",
+      "title": "Lakehouse: A New Generation of Open Platforms that Unify Data Warehousing and Advanced Analytics (2021)",
+      "location": "Section 3 / Figure 2",
+      "supports": "Lakehouse combines low-cost directly accessible open files with data-management capabilities.",
+      "pageClaim": "Temperature, physical layout and storage medium are separate design axes; A4 prices are illustrative.",
+      "method": "Original conference paper opened through web."
+    },
+    {
+      "ref": 9,
+      "url": "https://www.oreilly.com/radar/questioning-the-lambda-architecture/",
+      "title": "Jay Kreps, Questioning the Lambda Architecture (2014)",
+      "location": "Reprocessing steps and per-partition offset description",
+      "supports": "A new processor can replay retained input into a separate output table, catch up and then switch the application to it.",
+      "pageClaim": "Isolated replay avoids adding history to live aggregates; half-open next-offset definitions and recoverable cutover barriers are explicit chapter contracts.",
+      "method": "Original author's article opened through web."
+    },
+    {
+      "ref": 10,
+      "url": "https://docs.aws.amazon.com/AmazonS3/latest/userguide/Welcome.html",
+      "title": "Amazon S3 User Guide: What is Amazon S3?",
+      "location": "Storage classes / Amazon S3 data consistency model",
+      "supports": "S3 offers differing access classes, strong object read-after-write consistency and atomic single-key updates, without atomic cross-key updates.",
+      "pageClaim": "Object medium alone does not determine access latency; object consistency cannot replace a table-level publication boundary.",
+      "method": "Official user guide opened through web."
+    }
+  ]
+}

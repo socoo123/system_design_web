@@ -1,0 +1,22 @@
+report(auth, request_id, intent):
+  authenticate owner; validate request shape and immutable intent hash
+  BEGIN on the authoritative entity shard
+  row = SELECT Entity WHERE id = intent.entity FOR UPDATE
+  require row.owner = auth.owner
+  receipt = SELECT Receipt WHERE (entity, request_id) = (...)
+  if receipt exists:
+    require receipt.intent_hash = hash(intent), otherwise 409
+    COMMIT; return receipt.original_response
+  require active device session, sequence > row.last_sequence
+  require bounded device clock, valid sample age and current sharing policy
+  require accepted_count_in_window < 4, otherwise ROLLBACK and 429
+  v = row.version + 1
+  UPDATE Entity SET point, observed_at, session, sequence, version = v
+  INSERT AcceptedReport(entity, accepted_at) // Same shard; charged once.
+  INSERT Outbox(event_id, entity, v, old_point, new_point, original_sample)
+  INSERT Receipt(entity, request_id, intent_hash, {version:v, index:"pending"})
+  COMMIT // Entity lock + unique(entity, request_id) + one DB transaction.
+  return 200 with stored response
+on unknown commit outcome: retry the SAME request_id and SAME intent
+// Authorization/read errors are 503, never absence. A rejected transaction charges nothing.
+// Session/sequence, quota, receipt and outbox share this DB. No cross-service atomic claim.

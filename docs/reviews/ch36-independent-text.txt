@@ -1,0 +1,285 @@
+ 
+ Ch36 · Trade-off：CAP / PACELC / SLO 
+ SD 系统设计面试 System Design Interview 
+ 课程地图 Map 
+ 中文 
+ 对照 Both 
+ EN 
+ 护眼 Paper 
+ 深色 Dark 
+ CHAPTER 36 · 基础深读 CHAPTER 36 · foundations Trade-off：CAP / PACELC / SLO Trade-offs: CAP / PACELC / SLO 
+ 约 35 分钟 · 前置：Ch02、Ch03、Ch06 · 7 组图，把选择写成操作契约 ~35 min · after Ch02, Ch03, Ch06 · 7 decks turn trade-offs into operation contracts 
+ 本章核心：承诺、等待、预算 Core: guarantees, waits, and budgets 
+ CAP 问分区时还能兑现什么，PACELC 问正常复制要等多久，SLO 问用户是否在期限内得到正确结果。 用寄存器、add-only 购物车与结账旅程，把标签变成操作契约。
+ 完成写后才发出的读，为什么不能返回旧值？
+ 多数派、远端持久 ACK、读版本屏障各自保证哪一步？
+ 怎样按同一事件口径算余额、burn，并拦住一次不该继续的放量？
+ CAP asks what survives a partition, PACELC asks what replication waits cost, and SLO asks whether the user gets a correct result on time. A register, add-only cart, and checkout journey turn labels into operation contracts.
+ Why must a read invoked after a completed write avoid the old value?
+ What do majority commit, remote durability ACK, and a read-version barrier each establish?
+ How do one event definition, budget, and burn stop an unsafe rollout step?
+ 需求与边界：先写操作与分母 Contract: operations and denominators first 
+ 同一系统可以让账本强读拒绝、购物车接纳分叉、Feed 展示有限旧值。决定落到 数据 × 操作 × 故障 ，不能用品牌代替。每组图是独立场景，A 编号都是教学假设；没有数据库压测或真实故障注入。
+ One system may refuse an unsafe ledger read, admit divergent cart additions, and show bounded-stale Feed data. Decide per data × operation × failure , rather than by product name. Decks are separate scenarios; A-numbers are teaching assumptions, without benchmarks or real fault injection.
+ 完整假设与边界（A1–A12） Full assumptions and boundaries (A1–A12) 假设 Assumption 取值与边界 Value and scope 它改的决定 Design consequence 
+ A1 · 寄存器反例 A1 · register 初值 x=0；A 完成 x=1 后 B 才读；无中间写 Initially x=0; B reads after A completes x=1; no intervening write 固定实时先后，不用并发写解释旧读 Fix real-time order; concurrency cannot excuse this stale read 
+ A2 · 两个独立三副本例子 A2 · distinct three-copy examples 共识 N=3、多数派 2；另一个固定 quorum 例 W=2、R=2 Consensus N=3, majority 2; separate fixed quorum W=2, R=2 成员稳定；日志共识与普通重叠不能混用 Stable members; consensus and simple overlap are different protocols 
+ A3 · 购物车 A3 · cart 仅并发加入 apple 与 bread，选集合并集 Concurrent add-only apple/bread, merged by union 有删除或减量时重设合并规则 Redefine merging for removes/decrements 
+ A4 · 日常延迟模型 A4 · latency model 接入/API 合计 2 ms；两端持久各 1 ms；并行；RTT 4 或 80 ms 2 ms overhead, 1 ms durability at each end, parallel work, RTT 4/80 ms 只算一轮复制，无排队与额外协调轮次 One replication round; no queuing or extra coordination rounds 
+ A5 · 延迟目标 A5 · target 写条件预算 20 ms Conditional write target 20 ms 7 ms 可放进，83 ms 放不进；p99 另测 7 ms fits and 83 ms does not; measure p99 separately 
+ A6 · 结账 SLI A6 · checkout SLI 一秒内给正确、持久的终态决策；按 checkout_id 与原始起点记一件事 Correct durable terminal decision within 1 s; one event per checkout_id and original start 超时、UNKNOWN 和 202 未完成算 bad；合法拒付按决策契约算 good Late/UNKNOWN/pending 202 are bad; valid decline is good for decision availability 
+ A7 · Feed 降级 A7 · feed degradation 展示允许已验证权限下 ≤30 s 旧值 Display may serve ≤30 s old data under validated permissions 超过年龄就失败；权限与账本没有这份豁免 Over-age data fails; permissions/ledger have no exemption 
+ A8 · 窗口和主目标 A8 · window/target 完整 cohort 滚动 30 天（落后 1 秒），SLO 99.9%；99.99%/99.999% 只作比较 Complete-cohort rolling 30 days (1 s lag), SLO 99.9%; 99.99%/ 99.999% are comparisons 真实余额同时更新 eligible 与 bad Recompute both eligible and bad in real windows 
+ A9 · 固定快照 A9 · fixed snapshot 一千万 eligible，已发生 6,000 bad Ten million eligible, 6,000 bad observed 允许 10,000，剩 4,000；与稳态例不混分母 Allow 10,000, retain 4,000; separate from steady traffic 
+ A10 · 稳态预算例 A10 · steady-budget scenario 持续 1,000/s；20 分钟里 10% 失败，另比较全失败 Constant 1,000/s; 10% bad for 20 min, compare complete failure 请求与时间换算只在均匀流量等条件下成立 Time/event equivalence needs uniform eligible traffic and related assumptions 
+ A11 · 依赖例 A11 · dependencies 两个依赖各 99.9%，独立且串行都必须成功；并联另假设可及时切换 Two independent 99.9% dependencies; series requires both, parallel assumes timely failover 共同电源、网络和切流失败另计 Count shared power/network and routing failure separately 
+ A12 · 发布政策 A12 · release policy 整事件余额 ≤0 冻结功能，审查后仍可安全/紧急修复；burn 预测假设流量稳定 Whole-event balance ≤0 freezes features; reviewed urgent/safety repair remains; burn forecasts assume stable rate 修复、健康度与窗口余额复评后恢复；双窗口参数按原文起点 Review repair/health/balance before reopening; source alert parameters are starting points 
+ CAP：完成写之后的旧读就是反例 CAP: a stale read after a completed write 
+ 两个活副本在分区两侧都返回本地结果，会产生违反实时先后的历史；等待或拒绝则让出 CAP A。 先看第 3 帧的写 OK，再看第 4 帧后来才调用的读；第 5 帧是替代选择。
+ Two live replicas serving local results across a partition can violate real-time order; waiting or refusing sacrifices CAP A. Frame 3 acknowledges the write, frame 4 invokes the later read, and frame 5 shows the alternative.
+ 先画同一个寄存器的两份副本，初值 x=0。CAP 的前提是副本间的消息无法送达。 Start with two copies of one register, both x=0. CAP concerns unavailable inter-replica messages. 
+ 第二笔切断 A、B 的消息，两个进程都活着。慢网络与真正分区在有限等待内可能无法区分；超时只是本次操作的决策点，不是证明对端已死亡。 Cut communication while both processes stay alive. A finite timeout may not distinguish slowness from a partition; it is an operation decision, not proof of death. 
+ 第三笔让 A 完成写 x=1，再给 Writer 成功。这里故意测试“两边继续本地服务”的主张；时间顺序钉死为写已返回之后，另一端才开始读。 Let A complete x=1 and acknowledge Writer, testing the claim that both sides continue local service. The next read starts strictly after this completed write. 
+ 再画 B 的本地读与回程。没有中间写，完成写之后的读仍返回 x=0，就无法放进遵守实时先后的单一顺序；最终追平也修不掉这次历史。 Add B’s local read and reply. With no intervening write, x=0 after completed x=1 cannot fit a real-time-respecting single history; later convergence cannot repair it. 
+ 最后补上另一条决策：B 拒绝或等待。错误响应能让工程客户端及时结束等待，却不满足定理中“每个非失败节点上的操作都完成”的 A；正确性保住，可用性让出。 Add refusal/waiting as the alternative. A fast error helps a client stop waiting but does not satisfy CAP A, which requires completion at every non-failed node. 
+ C 是历史的安全性，A 是操作的活性 C is history safety; A is operation liveness 
+ 共享读写寄存器初值 x=0；A 完成 x=1 后 B 才读，无中间写。线性一致要求操作看似发生在调用与返回之间，且遵守已经发生的先后，因此 x=0 不合法。B 无法区分“远端没写”与“远端写完但消息丢了”；最终追平修不掉这次历史。原始 CAP 证明使用 atomic / linearizable consistency。 [1] 
+ 这里使用异步网络模型，非失败进程仍获公平执行，消息可任意多次丢失，包括持续分区。要求是 所有允许执行 都同时满足两个保证；一个无法两全的执行就能反驳该主张。“不要 P”只能缩窄模型，不能修复仍需面对的跨副本分区。
+ The shared register starts at x=0. A completes x=1 before B invokes its read, without an intervening write. Linearizability places each operation between invocation and response, respecting real-time precedence: x=0 is illegal. B cannot distinguish no remote write from a completed one with lost messages. Convergence cannot repair this history. The original CAP proof uses atomic / linearizable consistency. [1] 
+ The asynchronous model gives non-failed processes fair execution while allowing arbitrary message loss, including a lasting split. Both guarantees must hold in every allowed execution ; one conflicting execution defeats the claim. Excluding P narrows the model without repairing partitions the design still has to handle.
+ “最终完成”没有一秒期限 Eventual completion has no one-second bound 
+ CAP A 要求非失败节点接到的操作最终完成，不给固定延迟上限。快速 503 没有完成寄存器读写；十分钟后正确返回也可能违反产品的一秒 SLO。有限超时不能证明对端已死。工程上按操作决定拒绝范围与恢复流程，不是“选 CP 就整站停”。 [1] [2] 
+ 线性一致不等于 ACID 的 C，也不自动给跨键事务。两次“强读余额，再分别扣款”仍可能越过余额不变量；扣款的原子条件与幂等身份见 Ch18 / Ch24。
+ CAP A requires eventual completion at each non-failed node without a fixed latency limit. Fast 503 does not complete a register operation; a correct ten-minute reply may fail a one-second SLO. A finite timeout cannot prove remote death. Specify per-operation refusal and recovery rather than assuming every CP split stops the whole site. [1] [2] 
+ Linearizability differs from ACID C and does not supply multi-key transactions. Two fresh balance reads followed by separate debits can still violate an invariant; Ch18 / Ch24 cover atomic debit and idempotent identity.
+ 保一致：提交与强读都需要证明 Preserve consistency: prove commit and strong reads 
+ A/B 多数派可继续提交，隔离 C 拒绝新写和没有屏障的强读。 第 2–3 帧展开一笔当前任期记录：A 持久、B 持久 ACK、按协议提交并应用，最后 A → API → Client 返回。
+ A/B can commit as a majority; isolated C refuses new writes and unproven strong reads. Frames 2–3 expand one current-term entry: A persists, B durably acknowledges, the protocol commits/applies, then replies A → API → Client.
+ 先画 Client → API → Replica A。写入 leader 本地日志还不是提交；客户端超时也不能直接推出失败，必须保留相同业务键查询结果。 Start Client → API → Replica A. A local leader log is not commit; a timeout requires checking the same business key rather than assuming failure. 
+ 加 B 的日志和持久 ACK：三票里的两票构成多数派。共识还要有任期、日志顺序与提交规则；这张图讲一笔当前任期写，不能只凭“两个 ACK”宣布实现了 Raft。 Add B’s durable ACK: two of three votes form a majority. Terms, log order and commit rules remain required; this depicts one current-term write, not all of Raft. 
+ 确认只从 A 经 API 逐跳回 Client。C 被隔离不妨碍 A、B 提交，保一致的系统仍可在多数派继续服务；CP 并不等于“一断网全站停机”。 The result returns A → API → Client. Isolated C does not stop majority A/B commit; preserving consistency need not stop the entire site. 
+ 补少数派入口和拒绝回程。C 不能发新写或无证明的强读；若允许 serializable 本地旧读，必须单独声明弱语义，不能算进线性一致的承诺。 Add minority refusal. C cannot serve new writes or an unproven strong read; optional stale local reads need an explicitly weaker contract. 
+ 完整图加恢复约束：旧 leader 被新任期挡住，未知写先查 k7。共识保提交历史，业务唯一键保一次扣款；网络恢复不会自动消掉已执行但丢回包的副作用。 Complete recovery with term rejection and k7 lookup. Consensus protects commit history; a business key protects one charge. Reconnection cannot erase a lost-result effect. 
+ 关键实现：成功、未知、不可用分开返回 Implementation: separate success, unknown, and unavailable 
+ 以下是 操作契约伪代码 ，覆盖第 3–5 帧并预告下一组购物车。 Consensus 是完整外部共识：任期、选举限制、日志匹配、当前任期提交规则由它执行，不是“两个 ACK”或本地锁。 proposeAndApplyOnce 在同一复制状态机内校验 id/payload，把业务效果与持久回执一起提交。真实账本若在另一数据库，必须使用那里的原子约束，不能借此接口跨事务域。 [5] 
+ This operation-contract pseudocode covers frames 3–5 and previews the cart. Consensus implements full terms, elections, log matching, and current-term commit rules rather than two ACKs or a local lock. proposeAndApplyOnce checks id/payload and commits effect/receipt in one replicated state machine. A separate business database needs its own atomic effect/receipt constraint; this interface does not span transaction domains. [5] 
+ # Teaching contract; Consensus is a real external protocol, not a local lock.
+strongWrite(id, payload, deadline):
+ # applyOnce checks id+payload and stores receipt+effect in one state machine.
+ result = Consensus.proposeAndApplyOnce(id, payload, deadline)
+ if result == COMMITTED:
+ return OK(result.receipt)
+ if result == ID_REUSED_WITH_OTHER_PAYLOAD:
+ return CONFLICT
+ # A timeout/no quorum does not prove that an earlier attempt did not commit.
+ return UNKNOWN(id) # retry/query with the same id and payload
+strongRead(key, deadline):
+ # Barrier validates current leadership and obtains a safe commit index.
+ index = Consensus.readBarrier(deadline)
+ if index is unavailable or not waitApplied(index, deadline):
+ return UNAVAILABLE
+ return StateMachine.readAtLeast(key, index)
+addOnlyCart(id, item):
+ # One local durable transaction: unique id+payload, add, and retry receipt.
+ # A failed/unknown local commit returns UNKNOWN, never a fabricated OK.
+ return LocalStore.commitOnce(id, ADD(item))
+healCart(left, right):
+ merged = left.items UNION right.items # add-only contract; no removes
+ persistAndRetryBoth(merged) # delivery may retry; union is idempotent 
+ 失败边界： 无多数派或超时可能掩盖已提交结果，因此写返回 UNKNOWN，保留原 id/payload 查询/重试。强读拿不到领导权与提交位点证明就 UNAVAILABLE；还必须等本地应用到该位点，不能只读本地最新行。恢复后旧任期被挡住，也不代表支付回包与外部效果已经对账。
+ etcd 3.6 的 KV 操作通常默认线性一致；显式 serializable 读可接受相对 quorum 的旧数据。Watch 另有语义，不能泛称所有 API 都是强读。本章未运行 etcd 集群。 [6] 
+ Failure boundary: no quorum or timeout can hide commit, so writes return UNKNOWN and retain the original id/payload for recovery. Strong reads without leadership/commit proof return UNAVAILABLE and await local application through that index. Reading the newest local row is insufficient. Term rejection does not reconcile external effects or lost payment replies.
+ etcd 3.6 KV operations normally default to linearizability; explicit serializable reads accept data stale relative to quorum. Watch has separate semantics, without a blanket strong-read guarantee for every API. No etcd cluster was run here. [6] 
+ 保服务：允许分叉，就定义合并 Preserve service: define how divergence merges 
+ 两侧接纳 add-only 购物车加入，恢复时并集并写回双方。 成功是本地持久接纳，尚未承诺所有端点立即看到同一列表。
+ Both sides admit add-only cart additions, then union and persist the merge to both copies on healing. Success means local durability without immediate agreement at every endpoint.
+ 先画允许本地成功的购物车契约。A 加 apple 即返回，副本间当前不通；它承诺保存本地版本，不承诺所有端点马上看到同一份列表。 Begin with a locally successful cart contract. A accepts apple despite blocked communication; it preserves a local version, not immediate agreement across endpoints. 
+ 再加 B 的 bread 与独立回程。两个成功并不等于产生一个总序；冲突处理要理解“同时加入不同商品”，不能按最后到达的字符串覆盖整份购物车。 Add B’s independent bread write/reply. Two successes do not create a total order; whole-cart last-arrival replacement could discard a valid item. 
+ 恢复后汇集两份版本。Merge 是应用合并步骤，图为本次并发加入选集合并集；如果操作含删除或数量减少，单纯 union 会复活商品，必须换规则。 On recovery, gather both versions. Merge is application reconciliation; union works for this add-only example, while remove/decrement needs a different rule. 
+ 补合并结果写回 A、B，闭合恢复流程。追平以通信恢复、重试和冲突规则为前提；“最终一致”没有自动给出五秒内追平，更不能把之前的分叉改称线性一致。 Return the merge to A/B. Convergence assumes restored communication, retries and a resolution rule; eventual consistency gives no automatic five-second bound or retroactive linearizability. 
+ 最后把 quorum 边界写在完整图旁：2+2−3=1 仅证明固定集合有交点；2+1 分区时，单节点一侧凑不齐 W=2/R=2，所以“掉一台还工作”不等于 CAP 的每个活节点都可用。 Add the quorum boundary: 2+2−3=1 proves fixed-set overlap only. In a 2+1 split the singleton cannot meet W=2/R=2, so surviving one failure does not imply CAP A. 
+ 第 3–4 帧闭合“收集版本 → 合并 → 写回”。 LocalStore.commitOnce 的本地事务绑定操作身份与加入效果；磁盘失败仍可能 UNKNOWN。union 仅适用于纯加入，删除会复活，数量减少还需其他规则。收敛依赖通信恢复、重试与合并规则，没有自动五秒保证。Dynamo 支持版本/应用协助合并，也说明 sloppy quorum 临时节点可能不在原偏好集合内。 [4] 
+ Frames 3–4 close collection, merge, and persistence. LocalStore.commitOnce binds operation identity and addition in one local transaction; failed persistence can remain UNKNOWN. Union fits additions but can resurrect removes; decrements need further rules. Convergence requires restored communication, retries, and merge rules, without a five-second bound. Dynamo describes versioning, application-assisted reconciliation, and sloppy-quorum temporary nodes outside the preferred set. [4] 
+ 交点不等于线性一致：读先新后旧 Overlap is insufficient: a newer read followed by an older read 
+ 固定 N=3、W=2、R=2，交点至少 2+2−3=1。下面 可运行 Python 反例 允许读到未凑齐 W 的版本，读在返回前不 writeback：R1 读 A/B 得 x=1；R1 返回后，R2 读 B/C 得 x=0。把未完成写排在 R1 前会让 R2 错，排在 R1 后会让 R1 错。交点始终存在，历史仍不合法。
+ Fixed N=3, W=2, R=2 ensures overlap ≥2+2−3=1. This runnable Python counterexample exposes a version before W completes and returns reads without writeback. R1 reads A/B and gets x=1; after R1 returns, R2 reads B/C and gets x=0. Placing the pending write before R1 makes R2 wrong, and placing it after R1 makes R1 wrong. Overlap persists but the history is illegal.
+ def quorum_without_writeback():
+ # N=3, W=2, R=2; one immutable version order, no failures of local memory.
+ replicas = {"A": (0, "x=0"), "B": (0, "x=0"), "C": (0, "x=0")}
+ replicas["A"] = (1, "x=1") # W has only one ACK: the write is pending
+ r1_members = {"A", "B"}
+ r2_members = {"B", "C"}
+ assert len(r1_members & r2_members) == 1
+ r1 = max(replicas[n] for n in r1_members)
+ # R1 responds x=1; it does NOT write that version back before returning.
+ r2 = max(replicas[n] for n in r2_members) # R2 starts after R1 responds
+ assert (r1[1], r2[1]) == ("x=1", "x=0")
+ # Place pending write before R1 and R2 is wrong; after R1 and R1 is wrong.
+ # There is no second write that could restore x=0.
+ return {"R1": r1[1], "R2_after_R1": r2[1], "linearizable": False} 
+ 边界： 这是确定性本地历史重放，不是分布式实现或不可能性证明。完整协议可组合版本规则、读屏障/返回前写回实现更强保证；这里只否定“一个交集公式就够了”。2+1 分区时单节点仍凑不齐 W=2 / R=2，从多数派可服务不等于每个活节点满足 CAP A。Ch06 固定/宽松 quorum 的边界与此一致。
+ Boundary: this deterministic local history is neither a distributed implementation nor an impossibility proof. A complete protocol can add version rules, barriers, or writeback before returning to establish stronger guarantees; overlap alone is insufficient. A 2+1 singleton cannot meet W=2 / R=2. Majority service does not establish CAP A at every live node, consistent with Ch06’s fixed/sloppy quorum boundaries.
+ PACELC：复制确认影响日常延迟 PACELC: replication barriers affect everyday latency 
+ P 时讨论可用/一致；Else 时，复制系统仍在延迟/一致性之间选择。 这是设计框架，不是产品出生标签。Abadi 的 2012 论文明确 Else 的复制背景；下面只比较持久屏障，远端 ACK 本身不能证明线性一致。 [3] 
+ P asks about availability/consistency; Else asks about latency/consistency in replicated systems. This framework is not a permanent product label. Abadi’s 2012 paper gives the replication context for Else. These durability barriers alone do not establish linearizability. [3] 
+ 先画本地持久成功的闭环。教学模型只计 API/接入合计 2 ms 与本地持久 1 ms，得到 3 ms；这是条件算术，不是某数据库 p99 的测量。 Start with local durability and the full return path. Assumed overhead 2 ms plus persistence 1 ms gives 3 ms, a conditional calculation rather than a measured p99. 
+ 加远端复制，早确认不等 B。代价是 B 可能尚无这笔写；若 A 在追平前永久丢失，故障切流还可能丢已确认写，单机持久并不代表跨地域零 RPO。 Add remote replication outside the acknowledgment barrier. B may lack the write; losing A before catch-up may lose acknowledged data during failover. 
+ 第三笔只改确认门槛：同步等 B。假设本地与远端并行，2+max(1,4+1)=7 ms；RTT 变 80 ms 后是 83 ms。若过程串行或协议多轮，就要重算，不能把这数说成通用上限。 Change the success barrier to B durability. Assuming parallel work, 2+max(1,4+1)=7 ms; RTT 80 gives 83 ms. Serial work or extra rounds requires a new calculation. 
+ 加读的版本门槛。写确认后随机打任何旧副本仍会读旧；携带 commit v 可等待追平或转权威读，但它首先提供会话内读己之写，完整线性一致还要证明排序与领导权。 Add the read token barrier. Reading an arbitrary lagging replica remains stale; commit v can wait/route for read-your-writes, while linearizability also needs ordering and leadership proof. 
+ 完整图把 20 ms 的目标接回选型：7 ms 的条件路径可行，83 ms 已超预算。可以把写归属与多数派放近用户，或给远端展示弱读；延迟与容灾损失要分别验收。 Connect the graph to the assumed 20 ms target: 7 fits and 83 does not. Move authority/quorum near users or permit weaker remote display reads; validate latency and loss separately. 
+ 持久、读屏障、容灾损失分开验收 Validate durability, reading, and failure loss separately 
+ 早确认只等 A，B 可能缺这笔写；A 永久丢失且 B 未追平时，切流可丢已确认尾部。等 B 持久增强耐久承诺，但 B 可能还没应用，随机旧副本/旧 leader 也仍能读旧。第 4 帧 commit v 仅为本会话等待/转路由实现读己之写；别的用户的后续写还需要完整排序与强读协议。
+ A4 并行模型 2+max(1,RTT+1) ms：RTT 4/80 ms 得 7/83 ms；20 ms 目标下分别剩 13 ms / 超 63 ms。写归属与副本放置会改变关键路径，增加 App 不能消掉远端等待。故障时不能悄悄把同步成功改异步成功；必须拒绝或事先另立弱契约。
+ Early ACK waits for A while B may lack the write. Permanent A loss before catch-up can lose acknowledged tail data. B persistence improves durability but does not prove application, arbitrary-replica freshness, or leadership. Frame 4’s commit v gives this session read-your-writes by waiting/routing; other users’ subsequent writes still require full ordering and strong-read rules.
+ A4’s parallel model 2+max(1,RTT+1) ms gives 7/83 ms at RTT 4/80. Against 20 ms, that leaves 13 ms or exceeds by 63 ms. Authority/replica placement changes the critical path; more Apps cannot remove remote waiting. A failure cannot silently turn synchronous success into asynchronous success: refuse or define a weaker contract beforehand.
+ 复算与 p99 反例 Arithmetic and the p99 counterexample 早确认 2+1=3 ms；若串行，2+1+RTT+1=8/84 ms。这是无排队、单轮、固定耗时假设。 tradeoffs.py 构造 100 个对齐请求：两个顺序依赖各 99 次 1 ms、一次 100 ms，慢样本错开。nearest-rank 各自 p99=1 ms；整链有 98 次 2 ms、两次 101 ms，p99=101 ms，不是 1+1=2 ms。真实尾延迟要测路径分布。
+ Early ACK is 2+1=3 ms; serial work gives 2+1+RTT+1=8/84 ms. Both assume one fixed-time round without queues. tradeoffs.py aligns 100 requests: each sequential dependency has 99 samples at 1 ms and one at 100 ms, with different slow requests. Nearest-rank gives each p99=1 ms; the path has 98 samples at 2 ms and two at 101 ms, so p99=101 ms rather than 1+1=2 ms. Measure the path distribution.
+ SLI：先定义一个旅程怎样算 good SLI: define a good journey first 
+ 一秒内得到正确、持久的结账终态决策才 good；同 checkout_id 的重试共享原期限。 合法拒付可满足“决策可用”，不是支付转化成功。UNKNOWN、503、202 pending、错误结果或超时都不是 good。
+ A good journey receives a correct, durable terminal decision within one second; retries share the original checkout_id deadline. A valid decline can satisfy decision availability without payment conversion. UNKNOWN, 503, pending 202, incorrect results, and late replies are not good.
+ 先画用户边界。一个实例健康不代表结账成功，Edge 拿到 200 也不代表正确入账；先规定一秒内给正确且持久的结果，再决定哪些事件算 good。 Start at the user boundary. Process health and HTTP 200 do not prove checkout success; define a correct durable outcome within one second before counting good events. 
+ 加入账本与逐跳回程。写已提交却回包丢失，业务仍可能成功，但本次用户旅程未知或超时；服务可用性与事后正确性要分开记录，重试保持同一 checkout_id。 Add Ledger and hop-by-hop replies. A lost post-commit response may leave the user journey bad while business settlement succeeded; preserve the checkout_id on retries. 
+ 加两个计数器：eligible 在看到结果前按契约确定，good 还需满足结果与期限。本例以 checkout_id 去重重试；若换成请求级 SLI，分母与告警都要一起换。 Add eligible/good counters. Eligibility is determined before outcome; good additionally satisfies result/deadline. This logical SLI deduplicates checkout_id retries. 
+ 补故障回程，账本错误经 API、Edge 到 Client。拒绝未知扣款保护正确性，但仍消耗可用性预算；既不能把 503 移出分母，也不能把 UNKNOWN 改名为成功来保报表。 Add the full failure return. Refusing an unconfirmed debit protects correctness but spends availability budget; neither exclude 503 nor relabel UNKNOWN as success. 
+ 最后划清降级边界。合法拒付可满足“得到有效决策”，但不等于“支付成功”；202 待处理不能冒充完成。Feed 在约定年龄内给旧值可算 good，余额和扣款不能借这条规则放松。 Complete degradation semantics. A valid decline may satisfy decision availability but not payment success; 202 pending is not completion. An age-bounded stale feed uses a separate contract. 
+ SLI 是测量定义，SLO 是目标，SLA 是带约定后果的对外协议，窗口/排除项可不同。 [7] eligible 在成败前固定，支持范围内过载拒绝也算。提交但丢回包可有正确账本和 bad 旅程。Feed ≤30 秒旧展示另需权限/年龄契约，不能套到授权/扣款上。
+ SLI defines measurement, SLO its target, and SLA an external agreement with consequences; windows/exclusions can differ. [7] Fix eligibility before outcome, including supported overload refusals. Lost post-commit replies can leave correct ledger state but a bad journey. Feed staleness ≤30 seconds needs a separate permission/age contract, without relaxing authorization/debit rules.
+ 关键实现：原始时间、去重、完整 cohort Implementation: original time, deduplication, complete cohorts 
+ Python 输入是可信入口的 Attempt ：原始 started_ms、固定 eligible、观测时间、终态与独立核实的 correct/durable 标志；不是凭 200 猜测。相同身份不同参数在业务入口拒绝。按 id 合并后，取 cutoff=now−1000 ms ，只数原起点在 (cutoff−W,cutoff] 的完整 cohort，报表落后一秒。重试改起点/eligibility 是数据质量错误。
+ Trusted ingress Attempt records retain original started_ms, fixed eligibility, observation time, outcome, and independently verified correct/durable flags; HTTP 200 supplies neither. Business ingress rejects identity reuse with different parameters. Group by id and count original starts in (cutoff−W,cutoff] , where cutoff=now−1000 ms , giving complete cohorts with one-second reporting lag. Changed start/eligibility is a data-quality error.
+ def counts(attempts, now_ms, window_ms):
+ if window_ms <= 0:
+ raise ValueError("window must be positive")
+ cutoff = now_ms - DEADLINE_MS # complete cohorts; one-deadline lag
+ groups = {}
+ for a in attempts:
+ groups.setdefault(a.checkout_id, []).append(a)
+ eligible = bad = 0
+ for rows in groups.values():
+ first = rows[0]
+ identity = (first.started_ms, first.eligible)
+ if any((r.started_ms, r.eligible) != identity for r in rows):
+ raise ValueError("retry changed original start or eligibility")
+ if not first.eligible or not cutoff - window_ms < first.started_ms <= cutoff:
+ continue
+ eligible += 1
+ good = any(r.outcome in {"APPROVED", "DECLINED"} and r.correct
+ and r.durable and r.observed_ms is not None
+ and first.started_ms <= r.observed_ms <= first.started_ms + DEADLINE_MS
+ for r in rows)
+ bad += int(not good)
+ return eligible, bad 
+ 失败边界： 无回复仍留入口记录，到期就 bad。丢入口/客户端测量不能被补成成功，也不能只数有结果的请求。门控另外接收 telemetry_complete ，零事件是无数据。示例假设同一测量时钟与可信观测，不解决跨机时钟、采样、覆盖率或监控存储。202 异步旅程需另建持久接纳和最终完成期限 SLI。
+ Failure boundary: retain ingress records without replies and count bad at deadline. Missing ingress/client telemetry cannot become successful samples or a denominator containing only replies. The gate separately requires telemetry_complete ; zero events means no data. This model assumes one observation clock and trusted data without solving distributed clocks, sampling, coverage, or storage. Async 202 needs separate durable-admission and completion-deadline SLIs.
+ Error budget：余额跟着事件窗移动 Error budget: balance moves with the event window 
+ 先定分母 E、bad 数 B、目标 S，再算允许量与余额。 图中一千万事件快照与每秒千次稳态例是两个场景，不能共享分母。
+ Fix denominator E, bad count B, and target S before allowance/balance. The ten-million snapshot and steady thousand-per-second example are separate scenarios.
+ 第一笔按事件算：一千万有效旅程、99.9% 目标，允许一万次 bad。1−SLO 是比例；乘上这条 SLI 的分母才得到可花的次数，不先写“可停机 43 分钟”。 Start with events: ten million eligible journeys at 99.9% allow ten thousand bad. Multiply 1−SLO by this SLI denominator; do not first claim forty-three downtime minutes. 
+ 加发布门读取余额：10,000−6,000=4,000，剩 40%。真实滚动窗口的总数也会变化，预算是当下窗口重新算的余额，不是一月一号发下去就永远不变的票据。 Add the gate’s balance input: 10,000−6,000=4,000, or 40%. A real rolling window changes both denominator and bad count, so recompute the balance. 
+ 第三笔另算稳态例：1,000/s、10% 失败、20 分钟，烧 120,000 次；30 天全窗口允许 2,592,000 次，约花 4.63%。这不能与前面的“一千万总事件”分母混算。 Use a separate steady scenario: 1,000/s at 10% bad for 20 minutes spends 120,000; the full-window allowance 2,592,000 makes that 4.63%. Do not mix the ten-million denominator. 
+ 再加独立时间口径：30×24×60=43,200 分钟，三档预算为 43.2 分钟、4.32 分钟和 25.92 秒。只有均匀流量等条件下，时间比例才可换成请求比例；大促停一秒与凌晨停一秒不同。 Add the separate time SLI: 43,200 minutes yields 43.2 minutes, 4.32 minutes and 25.92 seconds. Only conditions such as uniform traffic justify a request-time equivalence. 
+ 完整图补预算到动作：余额健康时仍受灰度门控制，耗尽进入稳定性修复。冻结功能是本章选定的团队政策；安全与紧急修复保留审查通道，不是所有改动一刀切。 Complete policy transitions: positive balance still uses canary gates; exhaustion enters reliability work. Feature freeze is this chapter’s policy, with reviewed urgent repairs retained. 
+ 达成率、预算比例与整事件余额分开 Separate achievement, budget fraction, and whole-event balance 
+ SLI=(E−B)/E ，比例预算 E(1−S) ；整数事件最多允许 floor(E(1−S)) 次 bad。A9：E=10,000,000、S=0.999、B=6,000，允许 10,000，剩 4,000=40%；达成率另为 99.94%。下节门控用整数避免浮点边界误判。
+ 旧 good / bad 都会离窗：事故离窗可改善余额，纯好流量离窗也可能降低允许量。A6 是“正确、持久且一秒内”的单一 good 谓词；若另设可用/延迟/新鲜度 SLO，各自算预算，不相加不同单位/分母，也不重复相加重叠 bad。Google SRE 推荐可解释的 good/total 事件指标。 [8] 
+ SLI=(E−B)/E ; proportional allowance is E(1−S) , at most floor(E(1−S)) whole bad events. A9 has E=10,000,000, S=0.999, B=6,000: allowance 10,000, remaining 4,000 or40%; achieved SLI is separately 99.94%. The next gate uses exact integers at boundaries.
+ Both old good/bad leave windows: expiring incidents can improve balance, while good traffic expiring can reduce allowance. A6 combines correct, durable, and on-time into one good predicate. Separate availability/latency/freshness SLOs need separate budgets, without adding different units/denominators or double-counting overlapping bad. Google SRE recommends interpretable good/total ratios. [8] 
+ 时间换算、峰值与依赖复算 Time, peaks, and dependency calculations 时间 SLI 的 30 天=43,200 分钟；99.9% / 99.99% / 99.999% 分别允许 43.2 分钟、4.32 分钟、25.92 秒。一千万事件则允许 10,000 / 1,000 / 100 次 bad。时间换请求需要均匀流量等条件，不能把分钟当随时停服许可证。
+ A10 持续 1,000/s：E=2,592,000,000，允许 2,592,000；20 分钟、10% 失败为 120,000，花 4.63%，全失败花 46.30%。只把事故流量提十倍，E 也变成 2,602,800,000，允许 2,602,800；12,000,000 bad 花 461.04%，必须重算分母。
+ A11 独立且两个都必需，0.999²=99.8001%，坏率 0.1999%，为 99.9% 允许坏率的 1.999 倍；独立且能及时安全切流的冗余，1−0.001²=99.9999%。同 AZ、电源、配置、入口或切流失败会破坏这些假设；这不是生产承诺。
+ A 30-day time SLI has 43,200 minutes; 99.9% / 99.99% / 99.999% allow 43.2 minutes,4.32 minutes,25.92 seconds. Ten million events instead allow 10,000 / 1,000 / 100 bad. Time/event conversion needs uniform traffic and other conditions, not arbitrary outage permission.
+ A10 holds 1,000/s throughout: E=2,592,000,000, allowance 2,592,000. Twenty minutes at10% bad yields 120,000 or4.63%; full failure spends 46.30%. A tenfold incident-only peak changes E to2,602,800,000 and allowance to2,602,800: 12,000,000 bad spends 461.04%. Recompute the denominator.
+ A11 independent mandatory dependencies yield 0.999²=99.8001%, with bad rate 1.999 times the 99.9% allowance. Independent timely safe redundancy gives 1−0.001²=99.9999%. Shared AZ, power, config, ingress, or failed switching can invalidate these assumptions, without a production promise.
+ 发布门：当前 burn 与实际余额一起算 Release gate: compute burn and actual balance 
+ 月余额为正也能因高 burn 暂停，回退不退还 bad。 每对长/短窗用 AND，两对用 OR。先 HOLD 放量，再判断安全回退，修复后复评。
+ Positive monthly balance can still be held by high burn; rollback refunds no bad. AND within each long/short pair, OR across pairs. Hold expansion, check safe rollback, then review repairs.
+ 先画有限灰度，预算门只允许当前一档放量。这里的箭头是发布控制，不是 RPC 回程；余额还有余量也不意味着能直接把新版本切到全部用户。 Start a bounded canary, admitting only the current expansion step. Arrows are release control, not RPC replies; remaining budget does not permit immediate full rollout. 
+ 加 burn rate：1%÷0.1%=10 倍，恒定流量下完整 30 天预算约三天烧完。若只剩 40%，同样速率约 1.2 天；这是条件预测，不能忽略窗口变化。 Add burn: 1%/0.1%=10×. Stable traffic spends a full 30-day budget in three days; 40% remaining predicts about 1.2 days, subject to window changes. 
+ 第三笔加双窗口：一小时与五分钟同时超 14.4 倍，或六小时与三十分钟同时超 6 倍。长窗对应已烧掉的量，短窗确认现在还在烧；两个窗用 AND，两档告警才用 OR。 Add pairs: one hour AND five minutes above 14.4×, or six hours AND thirty minutes above 6×. Long windows track spend; short windows confirm current burn. 
+ 补告警闭环：Burn monitor → HOLD → Release gate，先停继续扩张。错误预算尚未为负也能拦发布；“耗尽才行动”会错过快速故障的止损窗口。 Close alert control: Burn monitor → HOLD → Release gate. Stop expansion even with positive monthly balance; waiting for exhaustion misses the fast-failure window. 
+ 加回退前置检查。代码退到 v7 不会撤销 v8 已写的数据、迁移或外部扣款；不兼容时用前向修复或关功能，不能为了压 burn 制造第二次事故。 Add rollback safety. v7 cannot undo v8 data, migrations or charges; incompatibility calls for forward repair or disabling the feature rather than a second incident. 
+ 完整图加修复与复评回环。坏事件仍留在滚动窗口，回退不退还预算；恢复发布要同时看修复证据、当前健康度与政策，不能等一个固定日期自动开闸。 Complete repair/review feedback. Bad events remain in the rolling window; rollback refunds nothing. Reopen based on repair evidence, current health and policy. 
+ burn=(B/E)/(1−S) 。99.9% 下 1% bad 得 10 倍；稳定速率/完整预算时 30/10=3 天，剩 40% 约 1.2 天。流量/滚动窗会改变预测，仍要看真实余额。原文告警起点是 1h 与 5m 都 >14.4，或 6h 与 30m 都 >6；坏率阈值为 1.44% / 0.6%。稳定速率下，14.4×1/720=2%、6×6/720=5% 的 完整预算 。 [9] 
+ burn=(B/E)/(1−S) . At99.9%, 1% bad gives 10×: a full budget lasts 30/10=3 days at stable rate, or1.2 days with 40% remaining. Traffic/windows change forecasts; also read actual balance. Source starting rules use 1h AND 5m both > 14.4, OR 6h AND 30m both > 6, equivalent to bad-rate thresholds 1.44% /0.6%. At stable rate,14.4×1/720=2% and 6×6/720=5% of the full budget . [9] 
+ 关键实现：同口径计数与显式无数据 Implementation: consistent counts and explicit no-data 
+ 可运行 Python 消费上一函数的月窗与四个短窗 (eligible,bad) 。 BAD_PPM=1000 、 SCALE=1,000,000 表示 99.9%；整事件向下取整，burn 用有理数。它只门控功能放量；安全/紧急可靠性修复走另一个经审查的政策通道，不能把功能发布改名为修复绕过。
+ Runnable Python consumes monthly and four shorter (eligible,bad) windows from counts. BAD_PPM=1000 , SCALE=1,000,000 encode 99.9%; whole-event allowance rounds down and burn uses rational arithmetic. This gates feature expansion only; reviewed safety/urgent repairs use a separate policy path, without relabeling a feature as repair.
+ def budget(eligible, bad):
+ if not (0 <= bad <= eligible):
+ raise ValueError("invalid counts")
+ if eligible == 0:
+ return None # no data, never 100% success
+ allowed = eligible * BAD_PPM // SCALE # maximum whole bad events
+ return {"remaining": allowed - bad, "allowed": allowed,
+ "burn": Fraction(bad * SCALE, eligible * BAD_PPM)}
+def feature_gate(month, windows, telemetry_complete, canary_healthy, reviewed):
+ # All inputs use the same SLI, cohort cutoff, and service scope.
+ monthly = budget(*month)
+ rates = {name: budget(*windows[name])
+ for name in ("1h", "5m", "6h", "30m")}
+ if not telemetry_complete or monthly is None or any(v is None for v in rates.values()):
+ return "HOLD_NO_DATA"
+ if monthly["remaining"] <= 0:
+ return "FREEZE_FEATURES"
+ burn = {name: value["burn"] for name, value in rates.items()}
+ page = ((burn["1h"] > Fraction(72, 5) and burn["5m"] > Fraction(72, 5))
+ or (burn["6h"] > 6 and burn["30m"] > 6))
+ if page:
+ return "HOLD_BURN"
+ if not (canary_healthy and reviewed):
+ return "HOLD_REVIEW"
+ return "ALLOW_NEXT_CANARY_STEP" # reviewed repair uses a separate policy path 
+ 实际输入： 月窗 (10,000,000,6,000) 剩 4,000；1h/5m 各 (100,000,1,441)，burn=14.41，输出 HOLD_BURN 。长窗高但短窗归零不触发这一对；恰好 14.4 不满足严格 >。零事件窗/测量不完整是 HOLD_NO_DATA ；月 bad=10,000 是 FREEZE_FEATURES 。
+ 政策与边界： 本例整事件余额 ≤0 冻结功能；公开政策用四周并列例外，本章选择 30 天。低流量一个失败就能有大 burn，需按业务调整窗口/样本政策；最小模型只检查零分母。门不执行部署，也不检查 schema/外部扣款能否撤销。不能安全退 v7 就关功能或前向修复；恢复要复评修复证据、灰度与余额，不按日期自动开闸。 [10] 
+ Inputs: month (10,000,000,6,000) retains 4,000; 1h/5m each at (100,000,1,441) gives 14.41× and HOLD_BURN . A hot long/recovered short window does not trigger that pair; exactly 14.4 does not exceed the strict threshold. Zero traffic/incomplete telemetry gives HOLD_NO_DATA ; month bad 10,000 gives FREEZE_FEATURES .
+ Policy/boundary: freeze features at whole-event balance ≤ 0. The public example uses four weeks and exceptions; this chapter chooses 30 days. One failure can dominate low traffic, requiring tailored window/sample policies; this minimal model checks zero denominators only. It neither deploys nor validates reversibility of schemas/charges. Disable or forward-fix when v7 is unsafe. Review repair evidence, canary health, and balance before reopening, without calendar resets. [10] 
+ 运行与同源： python3 examples/ch36/run.py ，仅需 Python 3.10+ 标准库。完整 slo.py / tradeoffs.py 与 README 。页面四段代码逐字检查；确定性本地输入不证明真实分布式系统或监控后端。
+ Run/source: python 3 examples/ch36/run.py , Python 3.10+ standard library only. See full slo.py / tradeoffs.py and README . All four snippets are checked verbatim. Deterministic local inputs do not prove a real distributed system or monitoring backend.
+ 会翻车的说法：把缺的前提补回来 Failure traps: restore the missing assumptions 
+ 错误说法 Claim 为什么不成立 Why it fails 落到哪一笔 Concrete correction 
+ 503 很快，所以满足 CAP A Fast 503 satisfies CAP A 及时失败不等于完成寄存器操作 Fast refusal does not complete the register operation 按操作说明拒绝范围，另量产品期限 Specify refusal by operation; measure product deadlines separately 
+ CP 一断网全站都停 CP stops the whole site on any split A/B 多数派仍能提交，C 被拒绝 Majority A/B can commit while C refuses 按成员、组与读模式讨论 Discuss members/groups/read modes 
+ W+R>N 就是线性一致 W+R>N proves linearizability 只证明固定集合交点，不证明顺序或恢复 Only fixed-set overlap, not ordering/recovery 检查并发版本、读屏障、成员变化 Check version order, read barriers and membership 
+ 同步 ACK 之后任意副本都新 Any replica is fresh after synchronous ACK 持久、应用、可查询和领导权不同 Durability, application, searchability and leadership differ 标 commit v 和强读验证 Specify commit v and strong-read validation 
+ 购物车用 union 就永远能合并 Union always solves cart conflicts 删除会被复活，减量会丢意图 Removes may resurrect and decrements lose intent 规则随操作改变，明确可能舍弃的更新 Choose operation-specific merge rules and disclose loss 
+ 99.9% 想停 43 分钟就停 99.9% permits any 43-minute outage 时间与事件不同，峰值还会改分母 Time/event denominators differ; peaks change the denominator 先写 SLI，再算 bad 次数或时间 Define SLI before counting bad events/time 
+ 未知扣款不记失败，就保住可用 Exclude unknown charges to retain availability 掩盖用户旅程失败，且可能重复扣款 Hides journey failure and may repeat charges UNKNOWN 纳入契约，原键核账 Keep UNKNOWN in the contract; reconcile original key 
+ 回退后预算自动归零 Rollback resets budget 旧 bad 仍在窗口，数据也不自动撤销 Bad events remain; data/effects are not undone 检查回退安全，修复后复评窗口 Check rollback safety and review the repaired current window 
+ 依赖 p99 相加就是整链 p99 Adding dependency p99 gives path p99 慢样本落在不同请求时，整链分位改变 Tail alignment changes the path quantile 对齐请求测路径，各 SLO 各算预算 Measure aligned paths and separate SLO budgets 
+ 带回设计题：按数据和操作选 Take it back to design problems 
+ Ch06：问固定 quorum 还是 sloppy quorum、并发写怎么排序、分区的一边凑不够票会怎样。Ch08：锁的强读与 leader 安全之外，受保护资源还要检查 fencing，不能把“拿到锁”当成远端副作用只发生一次。Ch11：把 Feed 新鲜度与账户权限分开，旧展示可降级，权限不能按同一旧值继续授权。Ch18/Ch24：订单与钱的幂等身份、事务与未知回执恢复，不能被一个 CP 标签替代。
+ Ch02 写归属、复制和容灾损失，Ch03 写依赖独立性。Ch29/Ch35 按用户结果量 good，发布接预算门与兼容性检查。Ch37 再讨论存储模型与引擎。
+ Ch06: fixed versus sloppy quorum, concurrent ordering and insufficient votes. Ch08: safe locks still need resource-enforced fencing for effects. Ch11: separate feed freshness from account authorization. Ch18/Ch24: idempotent identity, transactions and unknown-receipt recovery cannot be replaced by a CP label.
+ Ch02 needs ownership/replication/loss contracts; Ch03 needs dependency assumptions. Ch29/Ch35 measure user outcomes and gate safe releases. Ch37 then chooses storage models/engines.
+ 引用与延伸 References and follow-ups 
+ 本轮重新浏览以下一手原文，访问日期 2026-10-24。定义/告警有就近引用；毫秒、事件与依赖数字是本章教学推导。未做数据库吞吐、真实网络 p99、线上结账或分区实验。
+ These primary sources were revisited on2026-10-24. Citations support definitions/alert starting points; latency, event, and dependency numbers are teaching calculations. No database throughput, real network-p99, live-checkout, or partition experiment was performed.
+ [1] Seth Gilbert and Nancy Lynch, Brewer’s Conjecture and the Feasibility of Consistent, Available, Partition-Tolerant Web Services , 2002. 原始证明、atomic consistency 与非失败节点的可用性定义；x=0/1 是本章反例。 Original proof and atomic/availability definitions; x=0/1 is this chapter’s example. 
+ [2] Eric Brewer, CAP Twelve Years Later: How the “Rules” Have Changed , 2012; IEEE article republished by InfoQ. 按操作管理分区与恢复；不引用其中产品分组作为当前默认配置。 Operation-specific partition/recovery reasoning; no current product-default claim. 
+ [3] Daniel J. Abadi, Consistency Tradeoffs in Modern Distributed Database System Design , 2012. PACELC 的 P 与 Else；7/83 ms 是 A4 推导，不是论文性能数据。 PACELC P/Else; 7/83 ms are A4 calculations, not paper measurements. 
+ [4] Giuseppe DeCandia et al., Amazon, Dynamo: Amazon’s Highly Available Key-value Store , 2007. 版本冲突、应用合并与 sloppy quorum；并集只用于本章 add-only 例子。 Version conflicts, application reconciliation and sloppy quorum; union is our add-only example. 
+ [5] Diego Ongaro and John Ousterhout, In Search of an Understandable Consensus Algorithm (Extended Version) , 2014. 多数派、任期和当前任期提交规则；图只展开一笔提交。 Majorities, terms and current-term commit rules; the diagram expands one commit. 
+ [6] etcd, etcd 3.6 — API guarantees , version 3.6; accessed 2026-10-24. 默认线性一致相关操作与 serializable 旧读的区别，不泛称所有 API 强读。 Default linearized operations versus stale serializable reads; no blanket guarantee for every API. 
+ [7] Google SRE, Service Level Objectives , 2016. SLI、SLO、SLA 定义；一秒、30 天与目标 99.9% 都是 A6/A8。 SLI/SLO/SLA definitions; one second, 30 days and 99.9% are A6/A8. 
+ [8] Google SRE Workbook, Implementing SLOs , 2018. good/total 事件比率与可执行政策；千万事件及事故流量为本章假设。 Good/total ratios and actionable policy; event/incident counts are our assumptions. 
+ [9] Google SRE Workbook, Alerting on SLOs , 2018. 核过 14.4 倍一小时/五分钟、6 倍六小时/三十分钟及 2%/5% 参数；需按流量适配。 Verified 14.4× 1h/5m, 6× 6h/30m and 2%/5% starting points; adapt to traffic. 
+ [10] Google SRE Workbook, Example Error Budget Policy , 2018. 原文用四周、99.9% 和一百万请求允许一千错误；本章改用 30 天并明确政策假设。 Source uses four weeks and 1,000 bad per million at 99.9%; this chapter explicitly uses 30 days. 
+ 站内延伸： Course follow-ups: Ch02 Ch03 Ch06 Ch08 Ch11 Ch18 Ch24 Ch29 Ch37 Ch41 Ch41 
+ 闪卡 Flashcards 
+ 点一下翻面；先讲操作和分母，再报标签或几个 9。 Click to flip; state the operation and denominator before labels or nines. 
+ CAP 的 C 具体是什么？ What is CAP C? 遵守实时先后的原子读写历史；不是最终一样，也不是 ACID C。 An atomic read/write history respecting real time, not eventual agreement or ACID C. 
+ 快速 503 满足 CAP A 吗？ Does fast 503 satisfy CAP A? 不能完成寄存器操作；它只让客户端及时知道不能服务。 No; refusal does not complete the register operation, though it informs the client promptly. 
+ CP 分区时全站都停吗？ Does a CP split halt the entire site? 三成员的 A/B 两票仍能提交；隔离 C 的新写与无证明强读拒绝。 Two of three A/B can commit; isolated C refuses new writes and unproven strong reads. 
+ 写超时能换一个业务键重试吗？ May a timeout retry use a new business key? 先查原键，可能已提交但丢回包；新键可能重复副作用。 Query the original key: a lost reply may hide commit, and a new key can repeat effects. 
+ W=2、R=2、N=3 证明了什么？ What does W=2/R=2/N=3 prove? 固定集合交点至少 1；无返回前修复仍可先新后旧，不证明线性一致或少数派可用。 Fixed-set overlap ≥1; without return-time repair reads can regress. It proves neither linearizability nor minority availability. 
+ 购物车为什么不总用 union？ Why not always union carts? 只加入可合并；删除会复活，数量变化要另定因果规则。 Add-only merges work; removes may resurrect and quantity changes need causal rules. 
+ 并行同步复制的条件延迟？ Conditional parallel replication latency? 2+max(1,RTT+1)，RTT 4/80 ms 对应 7/83 ms；不是 p99 实测。 2+max(1,RTT+1): 4/80 ms RTT gives 7/83 ms, not measured p99. 
+ 202 待处理算完成结账吗？ Does 202 pending complete checkout? 不算；若改异步旅程，另立持久接单与完成期限的 SLI。 No; an async journey needs separate durable admission and completion-deadline SLI. 
+ 一千万事件、99.9%、6,000 bad 剩多少？ 10M events, 99.9%, 6,000 bad: balance? 允许 10,000，剩 4,000=40%；达成率另为 99.94%。 Allow 10,000, retain 4,000=40%; achieved SLI is separately 99.94%. 
+ 43.2 分钟适用于什么？ When does 43.2 minutes apply? 30 天时间 SLI；请求预算要按事件，峰值不能直接换分钟。 A 30-day time SLI; request budgets use events and cannot ignore traffic peaks. 
+ 99.9% 下 1% 错误的 burn？ Burn at 1% bad for 99.9% SLO? 10 倍；稳态完整预算三天，剩 40% 约 1.2 天。 10×; stable-rate full budget lasts three days, 40% about 1.2 days. 
+ 双窗口怎样组合，回退退预算吗？ How combine windows; does rollback refund budget? 每对 AND、两档 OR；坏事件仍在窗口，回退先验兼容，修复后复评。 AND within pairs, OR across pairs; bad remains, check rollback compatibility and review repairs. 
+ 重试能重新起一秒时钟吗？ Can retry restart the one-second clock? 不能；同 checkout_id 保留原起点。完整 cohort 窗落后一秒，缺回包到期算 bad。 No. Preserve original start. Complete cohorts lag one second; missing replies become bad at deadline. 
+ 月余额40%，1h/5m burn14.41能放量吗？ 40% monthly balance, 1h/5m burn 14.41: expand? HOLD_BURN；两窗都超过14.4。零分母为HOLD_NO_DATA；不同SLO预算不能相加。 HOLD_BURN: both exceed 14.4. Zero denominator means HOLD_NO_DATA; separate SLO budgets cannot be added. 
+ 我已学完本章 Mark this chapter done 已学完本章 Completed 
+ 进度存在这台浏览器里。 Saved in this browser only. 

@@ -31,34 +31,13 @@
     <p class="ch-meta-line"><span class="lang-zh">约 40 分钟 · 前置：Ch03、Ch29 · 6 组 / 32 帧渐进白板图</span><span class="lang-en">~40 min · after Ch03, Ch29 · 6 decks / 32 progressive frames</span></p>
   </header>
 
-<section class="goal"><h2><span class="lang-zh">这一章结束你能做什么</span><span class="lang-en">What you can do after this chapter</span></h2>
-<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>用两张完整白板讲清摄取与查询：文档从持久任务走到可搜索版本，问题从鉴权走到有证据的答案，回程逐跳闭合。</p>
-<p>把文档数算成块数、向量字节和 rerank 对数；每个上限都能说明省掉了哪份工作、失败时保留什么。</p>
-<p>走通两路索引部分成功、父块越权、伪引用、删除与旧查询竞争、换 embedding 五个窗口；用检索和答案两层评测决定方案。</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>Explain complete ingest and query boards: durable work publishes searchable revisions, while authenticated questions become evidence-grounded answers with full return paths.</p>
-<p>Derive chunks, vector bytes, and rerank pairs. Explain what each cap saves and what remains available during failure.</p>
-<p>Walk partial index success, parent access, invalid citations, deletion races, and embedding migration. Evaluate retrieval and answers separately.</p>
-</div></div></section>
-
-  <section>
-<h2><span class="lang-zh">30 秒开场：先定答案的契约</span><span class="lang-en">Opening: define the answer contract</span></h2>
-<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>我设计闭库企业问答，语料是内部 wiki 与 PDF。Connector 把源版本和摄取任务写进 Catalog；Ingest 保留布局、切分、嵌入，等 Chunk Store 和两路 Hybrid Index 都可用才发布 current。在线 RAG 根据已验证身份绑定一份 query bundle，BM25 与稠密召回并行，用 RRF 合并，再对有界短名单 rerank。证据按 token 预算拼给现有推理服务，答案按句校验来源与支持关系后返回。删除先隐藏再清理，换 embedding 用新池回填和整份 bundle 切流。</p>
-<p>先问七件事：文档类型、文档和权限变更频率、用户要完整答案还是第一句、来源是否必须可点击、租户与文档 ACL 是否都存在、中英术语是否很多、是否允许公网搜索。本章固定闭库，不靠联网填缺失证据；引用必须能点到本轮用过的原文版本。没有足够证据时允许说不知道，这是一项可测试的产品行为。</p>
-<p>RAG 把外部检索证据和生成结合起来，原始论文展示了参数模型与非参数记忆的结合 [1]。本章的持久任务、权限复查和版本发布是工程设计，不能说成论文已经给出这些服务边界。生成的队列与 GPU 状态见 <a class="chip" href="ch29.html">Ch29</a>；本章把推理当服务调用，索引算法留给 Ch31。编排框架可以替换，服务责任仍须成立。</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>This closed-corpus enterprise Q&A service reads wiki and PDF revisions. Connector durably records revisions and jobs in Catalog. Ingest preserves layout, splits, and embeds; current publishes only after Chunk Store and both Hybrid Index lanes are ready. RAG authenticates, pins a query bundle, recalls lexical and dense evidence in parallel, fuses by RRF, and reranks a bounded shortlist. Evidence fits a token budget and goes to existing inference. Sentences pass source and support checks before release. Deletion hides first; embedding migration backfills another pool and switches the whole bundle.</p>
-<p>Clarify document types, content and permission update rates, complete-answer versus first-sentence targets, clickable citations, tenant and document ACLs, terminology/languages, and public-web search. Here the corpus is closed, citations resolve to the exact used revision, and insufficient evidence permits an explicit refusal.</p>
-<p>The original RAG paper combines parametric models and nonparametric retrieval memory [1]. Durable jobs, access checks, and version publication here are engineering design choices rather than services specified by that paper. <a class="chip" href="ch29.html">Ch29</a> owns generation queues and GPU state; Ch31 opens the retrieval engine. Framework choice does not replace service ownership.</p>
-</div></div><h3><span class="lang-zh">所有数字都是 assumption</span><span class="lang-en">All numbers below are assumptions</span></h3>
-<table><thead><tr><th><span class="lang-zh">编号与约束</span><span class="lang-en">ID and constraint</span></th><th><span class="lang-zh">本章取值</span><span class="lang-en">Value</span></th><th><span class="lang-zh">它改变的决定</span><span class="lang-en">Design consequence</span></th></tr>
+<section class="goal"><h2><span class="lang-zh">本章核心：版本能发布，证据有边界</span><span class="lang-en">Core: publish versions and bound evidence</span></h2><div class="bilingual"><div class="lang-zh"><p>设计一个闭库企业问答后端：先把文档变成可查询的已发布版本，再把有权限的证据变成可追溯的回答。推理队列与GPU交给 <a class="chip" href="ch29.html">Ch29</a>，索引算法留给Ch31。</p><p>三个关键决定：摄取先持久接收、两路可查再发布；查询固定整份bundle但不冻结权限；引用身份用规则检查，语义支持仍要承认判断误差。</p><p>本章沿六组原有动态图走正常路径，再用部分索引成功、父块越权、慢判断期间撤权和双池回退说明失败边界。六段代码在第一次需要它们的地方出现。</p></div><div class="lang-en"><p>Build closed-corpus enterprise Q&amp;A: publish searchable document revisions, then turn authorized evidence into traceable answers. <a class="chip" href="ch29.html">Ch29</a> owns inference queues and GPUs; Ch31 covers indexing algorithms.</p><p>Make three decisions: persist ingest before acceptance and publish after both lanes are visible; pin the whole query bundle without freezing access; check citation identity mechanically while treating semantic support as fallible.</p><p>Follow the six retained decks, then test partial indexing, unauthorized parents, revocation during a slow judge, and rollback. Six nearby code blocks expose the deciding operations.</p></div></div></section>
+<section><h2><span class="lang-zh">30秒开场：先定成功与撤销的契约</span><span class="lang-en">Opening: define success and revocation</span></h2><div class="bilingual"><div class="lang-zh"><p>语料来自内部wiki和PDF，不使用公网填补证据。先问文档类型、内容/权限变更频率、第一句还是完整答案的目标、是否要点击到原版本，以及同租户内是否有文档/段落ACL。tenant相同不代表有权读所有材料；证据不足允许明确拒答。</p><p>RAG原论文结合参数模型与外部非参数记忆 [<a href="#ref-1">1</a>]。本章的Catalog、权限复查和发布事务是工程选择。成功不是“模型吐了token”，而是RAG已经释放一条通过身份规则及支持门槛的句子。检查后仍可能发生撤销；已发送的字节无法收回。</p><p>教学基线：10万篇×2,000 token；512/64切分；40 req/s；两路各100、rerank最多80；证据最多8块/4,096 token，其他输入1,024、输出512；第一句合格输出p95目标3秒。这些是本题假设，不是厂商能力。</p></div><div class="lang-en"><p>The corpus is internal wiki/PDF, without public-web gap filling. Clarify document formats, content/policy changes, first-sentence versus completion targets, exact-version citations, and document/span ACLs within a tenant. Same-tenant access is insufficient; missing evidence may yield refusal.</p><p>The RAG paper combines parametric and nonparametric memory [<a href="#ref-1">1</a>]. Catalog, policy checks and publication transactions here are engineering choices. Success means RAG releases an approved sentence, beyond model token production. Revocation may race with sending; emitted bytes cannot be recalled.</p><p>Teaching baseline: 100,000 documents × 2,000 tokens, 512/64 splitting, 40 req/s, 100 hits per lane and 80 rerank pairs; up to eight spans/4,096 serialized evidence tokens, 1,024 other input and 512 output; a three-second p95 first-approved-sentence target. These are assumptions, not vendor capacity.</p></div></div><details><summary><span class="lang-zh">展开A1–A12：完整教学假设</span><span class="lang-en">Expand A1–A12: all teaching assumptions</span></summary><table><thead><tr><th><span class="lang-zh">编号与约束</span><span class="lang-en">ID and constraint</span></th><th><span class="lang-zh">本章取值</span><span class="lang-en">Value</span></th><th><span class="lang-zh">它改变的决定</span><span class="lang-en">Design consequence</span></th></tr>
 </thead><tbody><tr><td><span class="lang-zh">A1 · 语料</span><span class="lang-en">A1 · corpus</span></td><td><span class="lang-zh">10 万篇，每篇恰好 2,000 token 的估算模型；中英混合</span><span class="lang-en">100,000 documents, each exactly 2,000 tokens in the sizing model; mixed Chinese/English</span></td><td><span class="lang-zh">逐篇算尾块；真实分布重做清点</span><span class="lang-en">Count final chunks per document; recount real lengths</span></td></tr>
 <tr><td><span class="lang-zh">A2 · 切分</span><span class="lang-en">A2 · splitting</span></td><td><span class="lang-zh">块上限 512、overlap 64 token；演示步长 448</span><span class="lang-en">512-token cap, 64-token overlap; illustrative stride 448</span></td><td><span class="lang-zh">结构优先，12.5% 是实验起点</span><span class="lang-en">Preserve structure; 12.5% is an experiment starting point</span></td></tr>
 <tr><td><span class="lang-zh">A3 · 向量</span><span class="lang-en">A3 · vectors</span></td><td><span class="lang-zh">768 维、float32 每元素 4 B、每子块一条；父块不另建向量</span><span class="lang-en">768 dimensions, 4 B/float32, one vector per child; no extra parent vectors</span></td><td><span class="lang-zh">1.536 GB 裸向量；元数据、索引与副本另算</span><span class="lang-en">1.536 GB raw vectors; metadata, indexes, and replicas separate</span></td></tr>
-<tr><td><span class="lang-zh">A4 · 在线工作</span><span class="lang-en">A4 · online work</span></td><td><span class="lang-zh">峰值 40 req/s；两路各 100，融合后最多 80 对 rerank</span><span class="lang-en">40 peak req/s; 100 per lane, at most 80 rerank pairs</span></td><td><span class="lang-zh">最多 3,200 对/秒，超时可以回退 RRF</span><span class="lang-en">At most 3,200 pairs/s; tested fallback uses RRF</span></td></tr>
-<tr><td><span class="lang-zh">A5 · prompt</span><span class="lang-en">A5 · prompt</span></td><td><span class="lang-zh">证据最多 8 块且总计 4,096 token；其余输入预算 1,024</span><span class="lang-en">At most 8 spans and 4,096 evidence tokens; 1,024 for other input</span></td><td><span class="lang-zh">最多 5,120 输入 token，父块扩展后再量</span><span class="lang-en">At most 5,120 input tokens; recount expanded parents</span></td></tr>
+<tr><td><span class="lang-zh">A4 · 在线工作</span><span class="lang-en">A4 · online work</span></td><td><span class="lang-zh">峰值 40 req/s；两路各 100，融合后最多 80 对 rerank</span><span class="lang-en">40 peak req/s; 100 per lane, at most 80 rerank pairs</span></td><td><span class="lang-zh">最多 3,200 对/秒，超时仅走已评测的RRF回退</span><span class="lang-en">At most 3,200 pairs/s; only an evaluated fallback uses RRF</span></td></tr>
+<tr><td><span class="lang-zh">A5 · prompt</span><span class="lang-en">A5 · prompt</span></td><td><span class="lang-zh">证据最多8块，含编号/来源/分隔符最多4,096 token；其余输入最多1,024</span><span class="lang-en">At most 8 spans; serialized evidence up to 4,096 tokens, other input up to 1,024</span></td><td><span class="lang-zh">最多 5,120 输入 token，父块扩展后再量</span><span class="lang-en">At most 5,120 input tokens; recount expanded parents</span></td></tr>
 <tr><td><span class="lang-zh">A6 · 输出</span><span class="lang-en">A6 · output</span></td><td><span class="lang-zh">输出最多 512 token；模型上下文至少 5,632 token</span><span class="lang-en">512 output tokens; model context at least 5,632 tokens</span></td><td><span class="lang-zh">输入与预留输出一起校验</span><span class="lang-en">Validate input plus reserved output</span></td></tr>
 <tr><td><span class="lang-zh">A7 · 延迟</span><span class="lang-en">A7 · latency</span></td><td><span class="lang-zh">第一句合格输出目标 p95 ≤ 3 s；检索准备截止 700 ms</span><span class="lang-en">First approved sentence target p95 ≤ 3 s; retrieval-preparation deadline 700 ms</span></td><td><span class="lang-zh">端到端测量；700 ms 是单次条件预算</span><span class="lang-en">Measure end to end; 700 ms is a conditional request budget</span></td></tr>
 <tr><td><span class="lang-zh">A8 · 摄取</span><span class="lang-en">A8 · ingest</span></td><td><span class="lang-zh">每日 1% 文档变更；单池持久 job、稳定键、有租约代次</span><span class="lang-en">1% of documents change daily; durable jobs, stable keys, lease epochs</span></td><td><span class="lang-zh">每天示例 5,000 新块，失败可重试</span><span class="lang-en">5,000 new chunks/day in the example; retry safely</span></td></tr>
@@ -66,15 +45,8 @@
 <tr><td><span class="lang-zh">A10 · 检索预算</span><span class="lang-en">A10 · retrieval budget</span></td><td><span class="lang-zh">鉴权/绑定 30、query embed 60、两路 80/100、融合/取证 40、rerank 250、打包 20 ms</span><span class="lang-en">Auth/pinning 30, query embed 60, lanes 80/100, fusion/fetch 40, rerank 250, packing 20 ms</span></td><td><span class="lang-zh">单次保守预算 500 ms；剩 200 ms 给排队与补召回</span><span class="lang-en">500-ms conservative path budget; 200 ms for queues/refill</span></td></tr>
 <tr><td><span class="lang-zh">A11 · 实验</span><span class="lang-en">A11 · evaluation</span></td><td><span class="lang-zh">冻结 200 个带权限与源版本的标注问题；保留独立回归集</span><span class="lang-en">Freeze 200 labeled queries with identity and source revisions; keep held-out regressions</span></td><td><span class="lang-zh">分层比较，不能拿调参集宣布泛化</span><span class="lang-en">Compare slices; tuning-set wins do not establish generalization</span></td></tr>
 <tr><td><span class="lang-zh">A12 · 迁移</span><span class="lang-en">A12 · migration</span></td><td><span class="lang-zh">切分/embedding 改版建 g2；保留变更、快照 watermark、回放屏障</span><span class="lang-en">Build g2 for splitter/embedding changes; retain changes, snapshot watermark, replay barrier</span></td><td><span class="lang-zh">m1/g1 与 m2/g2 单次查询各自绑定</span><span class="lang-en">Pin m1/g1 or m2/g2 for each request</span></td></tr>
-</tbody></table><div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>表中的维度、QPS、时延和规模没有对应某家厂商的标称能力。目标块长与 overlap 要用自己的文档和问题比较；来源可以提供实践起点，不能替你证明 64 token 最优。权限方面也不只问租户：同一租户里离职员工和普通员工可能看不同文档，tenant_id 相同仍然可能越权。</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>Dimensions, QPS, timings, and sizes do not claim vendor capacity. Evaluate chunk and overlap settings on your corpus; guidance cannot prove sixty-four tokens optimal. Tenant identity is also insufficient for document authorization within that tenant.</p>
-</div></div></section>
-
-  <section>
-<h2><span class="lang-zh">查询闭环：每个后端都回到 RAG</span><span class="lang-en">Query loop: each backend returns to RAG</span></h2>
-<figure class="deck">
+</tbody></table></details></section>
+<section><h2><span class="lang-zh">查询闭环：固定bundle，权限保持实时</span><span class="lang-en">Query loop: pin bundles, keep policy live</span></h2><div class="bilingual"><div class="lang-zh"><p>图1中三次调用都归RAG：索引回候选ID，Reranker回排序，Inference回draft；答案沿RAG→Gateway→Client释放。bundle包含encoder的完整身份、splitter、BM25/Dense池、rerank/prompt/tokenizer版本，单次问题不在中途换代。</p><p>Gateway只传已验证的tenant/subject，组成员资格由权威权限服务读取。两路检索带相同范围，取原文前再核对tenant、该池current revision、已发布manifest内的精确ID/hash/角色和文档/整跨度ACL。普通security filter只比较principal字符串，本身不完成认证授权 [<a href="#ref-6">6</a>]。</p></div><div class="lang-en"><p>RAG owns all deck-one calls: indexes return IDs, Reranker returns order, and Inference returns a draft. Approved output travels RAG→Gateway→Client. One immutable bundle pins encoder identity, splitter, both index pools, and rerank/prompt/tokenizer versions throughout a question.</p><p>Gateway passes verified tenant/subject; authoritative policy supplies current membership. Both lanes carry the same scope. Before text reads, verify tenant, pool-specific current revision, published-manifest ID/hash/role and document/whole-span ACLs. Ordinary principal-string security filters do not perform authentication or authorization [<a href="#ref-6">6</a>].</p></div></div><figure class="deck">
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d1s1t d1s1d">
           <title id="d1s1t">Authenticate before retrieval</title>
@@ -185,23 +157,38 @@
         </svg>
         <figcaption><span class="lang-zh">推理服务返回 draft；RAG 校验后才沿 RAG → Gateway → Client 释放答案。流式时按句缓冲的细节在第五组，不能边发边撤回。</span><span class="lang-en">Inference returns a draft. RAG validates before releasing through Gateway to Client; deck five defines sentence buffering for streaming.</span></figcaption>
       </div>
-    </figure><div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>一条 <code>POST /v1/rag/query</code> 包含 question、客户端 request_id 和展示偏好。Gateway 解析身份、按租户限制并发与输入长度，把可信 principal 交给 RAG；tenant_id 和 groups 不从正文照抄。RAG 分配 trace_id，读 query bundle，保存本轮的模型、索引代次和配置版本。超长问题先拒绝，避免 embedding 服务和生成服务各自截断成不同问题。</p>
-<p>第一组不是 Hybrid Index 把结果直接推给 Reranker，也不是 Reranker 把 prompt 交给 Inference。三次调用的 owner 都是 RAG：召回返回候选 ID，rerank 返回排序，生成返回 draft。这样取消、截止时间、证据映射和输出状态有同一归属。生成完成后沿 RAG → Gateway → Client 回程；如果网关已经关闭连接，RAG 取消下游，不再花算力生成无人读取的答案。</p>
-<p>权限必须同时落在 BM25 与 Dense 两路，而且从可信身份构造过滤。Microsoft 的 security trimming 文档明确说，普通 principal 字符串比较本身不负责认证授权 [6]。这是索引表达范围的方法，认证和权威 ACL 校验仍由本设计承担。任一检索返回别的租户 ID，都在读原文之前丢弃并记录隔离错误；不会把它交给模型后再要求模型忽略。</p>
-<p>A10 的路径预算按 <code>30 + 60 + max(80, 100) + 40 + 250 + 20 = 500 ms</code> 算。实际 BM25 可以在 query embedding 期间先启动，这里为易口算按等 embedding 后同时发两路估，属于保守条件预算。700 − 500 = 200 ms 给有界排队与补召回。它不是“各组件 p95 相加等于端到端 p95”，上线须按同一 trace 测首句、完整回答和失败比例。</p>
-<p>检索或 Reranker 队列必须有长度与时间上限。预算已耗尽就不要启动生成；一条请求取消后，尚在队列里的 embedding、rerank 和生成工作都应带同一取消身份。检索失败只能在经过评测的降级路线内处理：稠密不可用时可用 BM25，rerank 超时时可用 RRF；证据和权限不足则返回拒答或服务错误，不能回到模型裸答当作成功。</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>The illustrative <code>POST /v1/rag/query</code> carries question, request ID, and display preferences. Gateway verifies identity, limits tenant concurrency and input length, and passes a trusted principal. RAG creates a trace, pins model/index/configuration, and rejects oversized questions before downstream services truncate differently.</p>
-<p>RAG owns all three calls: retrieval returns candidate IDs, reranking returns order, and inference returns a draft. Cancellation, deadlines, evidence maps, and output share one owner. Released answers return RAG → Gateway → Client; a closed upstream connection cancels downstream work.</p>
-<p>Both BM25 and Dense carry scope derived from trusted identity. Microsoft’s security-filter pattern performs string comparison rather than authentication/authorization [6]; this design supplies those responsibilities and authoritative ACL checks. Discard cross-tenant IDs before reading text or invoking the model.</p>
-<p>A10 budgets <code>30 + 60 + max(80,100) + 40 + 250 + 20 = 500 ms</code>. BM25 could start during query embedding; the illustration conservatively waits and then starts both lanes. The remaining 200 ms cover bounded queues/refill. This is not a sum of component p95s; measure first sentence, completion, and failures on end-to-end traces.</p>
-<p>Bound queues by both count and deadline. Do not start generation after the preparation budget expires. Propagate cancellation to embedding, rerank, and inference. Tested degradation may use BM25 alone or RRF order; insufficient authorized evidence yields refusal/error rather than an ungrounded model answer.</p>
-</div></div></section>
-
-  <section>
-<h2><span class="lang-zh">估算：算尾块，也算每次查询的工作</span><span class="lang-en">Estimate final chunks and work per query</span></h2>
-<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
+    </figure><div class="bilingual"><div class="lang-zh"><p>下列是编排伪代码：输入为可信身份、原问题和单调截止时间，输出为有证据的句子或拒答/错误。Authority.filter_ids不是模型判断：它在权威库将候选关联到published(tenant,doc,pool)及其manifest中child的ID/hash、当前成员和所有覆盖跨度的ACL；跨租户ID在读正文前丢弃。远程重排、生成和判断服务必须位于允许处理该租户数据的边界内。</p></div><div class="lang-en"><p>This orchestration pseudocode takes verified identity, the original question and a monotonic deadline; it returns grounded sentences or refusal/error. Authority.filter_ids joins candidates to authoritative published(tenant,doc,pool) and its manifest child ID/hash, current membership and every covered span ACL; it rejects foreign-tenant IDs before reading text. Rerank, generation and judge services must be approved processors for that tenant.</p></div></div><pre data-language="Pseudocode · scoped query" data-kind="pseudocode" data-source="query.pseudo"><code>query(verified_identity, question, deadline):
+  # Identity comes from authentication; body tenant/groups are never trusted.
+  principal = (verified_identity.tenant, verified_identity.subject)
+  bundle = Catalog.read_whole_bundle()       # immutable model/splitter/lanes/pack
+  scope = Authority.current_membership(principal)  # timeout =&gt; deny
+  key = (principal, scope.epoch, bundle.id, hash(exact_question_and_options))
+  hits = candidate_cache.get(key)             # IDs only; no authorization proof
+  if hits is absent:
+    vector = embed(bundle.encoder, question, deadline)
+    hits = parallel_search(
+      bundle.bm25, bundle.dense, vector, question,
+      tenant=principal.tenant, groups=scope.groups,
+      pool=bundle.pool, limit_per_lane=100, deadline=deadline)
+    candidate_cache.put(key, hits, bounded_ttl)
+  # Read primary authority, not cached ACLs or a lagging replica.
+  # Join published manifest ID/hash/child role + tenant/doc/pool/current_rev,
+  # live membership + whole-span ACL. Parents must be manifest text entries.
+  eligible = Authority.filter_ids(principal, bundle, hits)
+  # Preserve original lane ranks; discard duplicates within each lane.
+  order = rrf(eligible).take(80)
+  text = ChunkStore.read_exact_ids_and_verify_hashes(order)
+  if any returned tenant/revision/hash differs: fail_closed()
+  ranked = rerank(question, text, max_pairs=80, deadline=deadline)
+  if rerank times out: ranked = evaluated_RRF_fallback(order)
+  pack = pack_with_parent_checks_and_full_token_count(ranked, bundle)
+  if deadline expired or pack is empty: return insufficient_evidence()
+  Authority.check_all_pack_dependencies(principal, bundle, pack)
+  # Any failure discards pack; no generator sees unauthorized text.
+  draft = Inference.generate(question, pack, tools=NONE, deadline=deadline)
+  return release_buffered_sentences(principal, bundle, pack, draft)
+  # Cancellation/deadline propagates to every child call; raw answers never cache.</code></pre><div class="bilingual"><div class="lang-zh"><p>候选缓存仅存ID，键包含tenant/subject、成员代次、完整bundle和原问题/选项摘要；命中仍重走权威检查。正文缓存只能按tenant/doc/revision/span/hash取不可变内容，并先鉴权。本章关闭答案缓存；若启用，须保存整个Evidence Pack依赖并在每次命中/释放时复查，语义相似或TTL未到都不证明权限有效。</p><p>A10路径预算为30+60+max(80,100)+40+250+20=500 ms，700−500=200 ms留给有界排队/补召回。BM25实际可与query embed重叠；这里保守地顺排。它不是组件p95相加。队列、pair数、长度和截止时间都要有界；检索不足不启动裸模型回答，取消传播到全部子调用。</p></div><div class="lang-en"><p>Candidate caches store IDs only, keyed by tenant/subject, membership epoch, full bundle and exact question/options digest; every hit still reauthorizes. Immutable text caches use tenant/document/revision/span/hash and require authorization first. Answer caching is disabled here. Enabling it requires retaining and rechecking all pack dependencies; similarity and TTL never prove access.</p><p>The A10 conditional budget is 30+60+max(80,100)+40+250+20=500 ms, leaving 200 of 700 ms for bounded queues/refill. BM25 can overlap query embedding. This conservative budget is not a sum of component p95s. Bound queues, pairs, lengths and deadlines, propagate cancellation, and refuse rather than generate without evidence.</p></div></div></section>
+<section><h2><span class="lang-zh">估算：尾块和每次工作都要算</span><span class="lang-en">Sizing: count final chunks and request work</span></h2><div class="bilingual"><div class="lang-zh"><p>2,000-token文档按512上限、448步长切成5块，尾块208；10万篇合计50万块。裸向量50万×768×4=1.536 GB≈1.431 GiB。rerank上限40×80=3,200对/秒；这减少工作，不证明某GPU达到吞吐。</p><p>证据的4,096包括编号、来源和分隔符；并不保证8个512-token原文块都装得下。完整prompt还须用生成tokenizer重计到≤5,120，另留512输出，即上下文至少5,632。父块扩展与中英文token差异不能靠字符数代替。</p></div><div class="lang-en"><p>A 2,000-token document yields five 512-cap/448-stride chunks, ending with 208 tokens; 100,000 documents yield 500,000 chunks. Raw vectors occupy 1.536 GB≈1.431 GiB. Reranking caps at 40×80=3,200 pairs/s; less work does not establish GPU throughput.</p><p>The 4,096-token evidence allowance includes IDs, provenance and delimiters, so eight full 512-token text spans may not fit. Recount the complete prompt with the generation tokenizer to ≤5,120 and reserve 512 output tokens, requiring at least 5,632 context. Characters cannot replace tokens for expanded parents or multilingual content.</p></div></div><details><summary><span class="lang-zh">展开推导：重复token、每日摄取、双池与工作量</span><span class="lang-en">Expand: overlap, daily ingest, dual pools and work</span></summary><div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
 <p>A1 总正文为 <code>100,000 × 2,000 = 200,000,000 token</code>。但每篇文档都要收一个尾块，不能把所有正文连起来除步长。若长度 L ≤ 512 就一块，否则 <code>1 + ceil((L − 512) / 448)</code>。2,000-token 示例得到 5 块，起点依次 0、448、896、1,344、1,792，最后一块只有 208 token。10 万篇 × 5 = 50 万块；结构切分、标题重复与短文分布会改变这个数，真实容量要从 manifest 汇总。</p>
 <p>每篇实际嵌入的正文是 <code>4 × 512 + 208 = 2,256 token</code>，比 2,000 多 256，即 12.8%；overlap 比例 64/512 = 12.5% 和语料膨胀比例不是同一个分母。全量示例嵌入 2.256 亿 token，标题、提示前缀和失败重试还没算。每日变更 1,000 篇，生成 5,000 新块、嵌入 225.6 万 token；若不清旧版本，索引会每天继续涨，不是每天只覆盖 1%。</p>
 <p>A3 的向量体积是 <code>500,000 × 768 × 4 = 1,536,000,000 B = 1.536 GB ≈ 1.431 GiB</code>。这里 GB 用十进制，GiB 用 2<sup>30</sup>。两份副本是 3.072 GB；迁移双池且每池两份是 6.144 GB 裸向量。原文跨度、BM25 倒排、ANN 结构、元数据和暂存空间另外清点，不能给全部存储套一个没有出处的“乘 1.5”。float16 只把元素字节减半，检索质量是否接受仍要测。</p>
@@ -213,11 +200,8 @@
 <p>Raw vectors occupy <code>500,000 × 768 × 4 = 1,536,000,000 B = 1.536 GB ≈ 1.431 GiB</code>. Two copies use 3.072 GB; two migration pools with two copies each use 6.144 GB. Account separately for text, inverted and ANN indexes, metadata, and staging. Float16 halves element bytes, while quality still needs evaluation.</p>
 <p>Peak reranking is 3,200 pairs/s versus 20 million pairs/s over the whole corpus, a 6,250× work difference rather than a GPU capacity claim. At 40 requests/s, 5,120 input tokens imply at most 204,800 input tokens/s and 512 output tokens imply at most 20,480 output tokens/s. Benchmark means and SLO attainment separately in Ch29.</p>
 <p>A million vectors is not a universal engine threshold. Colocated business metadata can simplify transactions, but filtering, update rates, tenant selectivity, and latency remain workload constraints [5]. Dedicated engines buy independent scaling and add version/delete coordination. Use measurements, not stale API prices or comparisons between one-time ingest and daily serving bills.</p>
-</div></div></section>
-
-  <section>
-<h2><span class="lang-zh">摄取：已接收、已写入、可搜索是三件事</span><span class="lang-en">Ingest: accepted, written, and searchable differ</span></h2>
-<figure class="deck">
+</div></div></details></section>
+<section><h2><span class="lang-zh">摄取：持久接收，两路可查后才发布</span><span class="lang-en">Ingest: durable acceptance, visible publication</span></h2><div class="bilingual"><div class="lang-zh"><p>Catalog同事务写源版本、稳定事件回执和持久job，提交后才回202。accepted不代表可查。已发布指针是published(tenant,doc,pool)；迁移时g1和g2各有自己的current revision，全局tombstone与ACL另存，内容发布不能恢复旧权限。源cursor必须能排序或由连接器维护单调版本；相同事件键携带不同输入报冲突。</p></div><div class="lang-en"><p>Catalog commits the source revision, stable event receipt and durable job before returning 202; accepted is not searchable. Publication is per published(tenant,doc,pool), with separate current revisions for g1/g2. Tombstones and ACLs remain global; content publication never restores old policy. Require an ordered source cursor or connector-maintained monotonic version; reuse of an event key with different input conflicts.</p></div></div><figure class="deck">
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d2s1t d2s1d">
           <title id="d2s1t">Read a source revision</title>
@@ -354,30 +338,54 @@
           <text x="850" y="215" text-anchor="middle" class="tiny">Both lanes must be visible</text>
           <g class="is-new">
             <path d="M635 174 L635 212 Q635 220 627 220 L493 220 Q485 220 485 212 L485 186" class="wire"/><polygon points="485,176 490,186 480,186" class="head"/><text x="550" y="210" text-anchor="middle" class="tiny">CAS publish rev7</text>
-            <rect x="392" y="250" width="186" height="20" rx="10" class="badge"/><text x="485" y="264" text-anchor="middle" class="badge-text">rev7 + ACL version</text>
+            <rect x="392" y="250" width="186" height="20" rx="10" class="badge"/><text x="485" y="264" text-anchor="middle" class="badge-text">rev7 / pool g1</text>
           </g>
         </svg>
         <figcaption><span class="lang-zh">全部 receipt 到齐后才 CAS current。Catalog 事务不是跨索引事务，查询仍须核对 active revision；进程在发布前死掉只会留下可清理的 staging。</span><span class="lang-en">Publish current by CAS after every receipt. Catalog does not create a cross-index transaction; queries still verify active revisions.</span></figcaption>
       </div>
-    </figure><div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>Connector 读取源系统的一份 revision，保存 source locator、内容 hash、ACL version 和删除事件。Catalog 同事务写源版本状态与持久 job，提交后返回 accepted。任务可以直接由 Ingest 轮询领取，不必为这个量级另画一个 Queue。若后来换成消息队列，仍要由持久 job/outbox 驱动通知，不能“先回 202，再异步 enqueue”；那段进程崩溃会让用户等一个不存在的任务。</p>
-<p>Ingest 领取 job 后保存 lease_epoch、重试次数与截止时间。写入采用 <code>tenant/doc/revision/splitter/span</code> 的稳定键，重复执行覆盖同一内容；内容不同而键相同属于错误。租约过期的 worker 仍可能写出 staging，因此发布 current 必须 CAS 源 revision 和有效租约代次。CAS 条件还包括文档未删除、源 revision 仍是待发布目标；tombstone 后旧 worker 只能留下不可见 staging。仅靠锁超时不能阻止旧进程恢复后把 rev6 写成最新，异步索引也不是能帮你拒绝所有陈旧写的权威存储。</p>
-<p>新 revision 先写不可变 Chunk Store，再写 BM25 与 Dense 条目。manifest 列出预期 chunk_id、数量、内容 hash 和两路回执。引擎的写入成功可能还没对搜索可见，要定义 receipt 是已持久、已刷新可搜索，还是仅进入内部队列；若引擎没有对应屏障，就轮询查询 canary 和 manifest 对账。几条 canary 只能证明探针可见，不能替代全量条目核对。</p>
-<p>只有预期条目全部可读、两路索引可见，才把 manifest 标 READY 并 CAS Catalog.current。Catalog 的 current 与 source job 完成状态在本库同事务更新；这是发布控制点，不是跨三个存储的原子提交。旧 rev7 在 rev8 准备时继续可用。正文 hash 未变化也不一定跳过任务：权限、source locator、切分配置变化分别维护，ACL 更新必须传播和立即约束查询。</p>
-<p>索引尚有旧条目时，查询先做索引范围过滤，再在取原文时批量核对 Catalog.current；不匹配的条目不进入 rerank 与 prompt。若两路索引是最终一致，过滤旧条目可能让前 100 个候选不足，必须在预算内多取或返回“暂无足够证据”，不能承诺 READY 后每个查询副本立刻达到同一召回率。若要求查询看到全语料同一快照，需要整份索引代次与发布屏障，不能把单 doc 的 CAS 扩大解释。</p>
-<p>故障时分别收尾：Chunk Store 成功但索引失败，重试索引且 current 不变；两路成功但发布前崩溃，重领读取 receipt 后再 CAS；发布成功而任务 ACK 丢失，重复处理读到既有结果。定期从源清单对 Catalog、manifest 和索引做差集，发现漏删、少块和孤儿 staging。清理旧原文还须等活跃请求引用与保留期限结束，不能把引用链接变成同名最新页。</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>Connector persists source locator, content hash, ACL revision, and deletes. Catalog commits source metadata and durable job together before accepted. Ingest can poll jobs at this scale. A future queue should be driven by durable jobs/outbox, avoiding acknowledgement-before-enqueue loss.</p>
-<p>Leases carry epochs, retries, and deadlines. Stable tenant/document/revision/splitter/span keys make retries idempotent. An expired worker may still write staging, so publishing current CAS-checks both source revision and lease epoch. CAS also requires an undeleted document and the still-expected source revision. A tombstoned document admits only invisible stale staging, never publication. Lease expiry alone cannot fence stale workers in every external index.</p>
-<p>Stage immutable text, then BM25 and dense entries. Manifest records expected IDs/counts/hashes and receipts. Distinguish durable write acknowledgement from search visibility. Use supported barriers or visibility probes plus full manifest reconciliation; a few canaries do not prove all entries ready.</p>
-<p>Publish only after all expected entries are readable and both lanes searchable. Current and job completion update atomically within Catalog, without a cross-store atomic commit. Rev7 remains active during rev8 preparation. Unchanged text hash does not suppress ACL, locator, or splitter changes.</p>
-<p>Scope-filter indexes and verify Catalog.current when fetching text. Discard inactive revisions before rerank/prompt. Eventual search visibility may reduce eligible candidates; bounded refill or insufficient-evidence behavior is required. Per-document CAS does not promise a corpus-wide snapshot. Such a requirement needs a complete index-generation publication barrier.</p>
-<p>Retry partial indexing without changing current; recover receipts after prepublication crashes; return saved results after a lost job acknowledgement. Periodically reconcile source, Catalog, manifests, and indexes for missing chunks, deletes, and orphan staging. Retain exact old text while pinned requests and retention policy require it.</p>
-</div></div></section>
+    </figure><pre data-language="Pseudocode · durable ingest and publication" data-kind="pseudocode" data-source="ingest.pseudo"><code>accept(source_event):                         # trusted connector, monotone cursor
+  BEGIN Catalog
+  LOCK doc(tenant, doc_id)                    # same lock order in every writer
+  if event_key exists:
+    require stored canonical_event == source_event; return saved_job_ids
+  require source_event.cursor &gt; doc.source_cursor  # older events cannot revive
+  UPDATE doc SET target_rev=event.rev, source_cursor=event.cursor
+  INSERT immutable_revision AND jobs_for_live_pools AND event_receipt
+  COMMIT                                     # only now send 202 + job IDs
 
-  <section>
-<h2><span class="lang-zh">切分：检索单位、上下文和来源一起保留</span><span class="lang-en">Chunking: retain retrieval units, context, and provenance</span></h2>
-<figure class="deck">
+work(job_id, owner):
+  BEGIN Catalog; LOCK doc THEN job
+  t = database_clock_after_locks()
+  if job.done: COMMIT; return job.saved_result
+  require job.ready OR job.lease_until &lt;= t
+  UPDATE job SET owner=owner, epoch=epoch+1, lease_until=t+lease
+  COMMIT                                     # lost ACK =&gt; reread this claim
+  expected = deterministic_split(job.source_bytes, job.splitter)
+  manifest = create_or_read_canonical_manifest(expected, job.encoder)
+  # Unique manifest key chooses persistent embedding bytes; retries reuse them.
+  for span in manifest.text:
+    id = (tenant, doc, rev, pool, splitter, span.offsets)
+    ChunkStore.put_if_absent_or_identical(id, span.bytes_and_metadata)
+    if span.is_child:
+      BM25.put_if_absent_or_identical(id, span.hash_and_terms)
+      Dense.put_if_absent_or_identical(id, span.hash_and_vector)
+  # Manifest.text covers children + parents; both index lanes cover child IDs.
+  # Outside Catalog locks: exact IDs/hashes, correct generation, both lanes.
+  receipts = verify_manifest_visibility(manifest, pool.search_reader_contract)
+  # A write ACK or a few successful canaries are insufficient receipts.
+  BEGIN Catalog; LOCK doc THEN job
+  t = database_clock_after_locks()
+  require owner/epoch still match AND job.lease_until &gt; t
+  require NOT doc.tombstone AND doc.target_rev == job.rev
+  require text receipt == manifest.text IDs/hashes
+  require BM25 receipt == Dense receipt == manifest.children IDs/hashes
+  require receipts.pool == job.pool AND receipts.splitter == job.splitter
+  UPSERT published(tenant, doc, pool) SET current_rev=job.rev, manifest=receipts
+  UPDATE job SET done=true, saved_result=manifest_id  # same transaction
+  COMMIT                                     # unknown COMMIT =&gt; reread, no blind undo
+  # Old workers may finish identical staging writes, never publish after takeover.
+  # ACL authority is separate: publishing content cannot restore an old ACL.</code></pre><div class="bilingual"><div class="lang-zh"><p>这是事务伪代码，外部写入与可见性核对都在Catalog锁外。doc→job采用固定锁顺序；租约时间在获得锁后采样，owner/epoch、未过期、未删除、目标revision仍匹配才允许发布。租约只保护发布，不会让外部索引自动拒绝旧进程；不可变版本键和“相同才复用”承担陈旧staging写的边界。实际行锁语义参考PostgreSQL18 [<a href="#ref-12">12</a>]。</p><p>manifest含全部期望ID、原文hash、向量产物hash、模型/切分/池身份和两路receipt。text集合包含child与可引用parent，两路索引只要求child集合。候选或父块即使同tenant/rev/pool，若ID/hash不在该已发布manifest对应角色内也拒绝，不能把额外staging当证据。embedding可能有数值不确定性，因此先按唯一manifest键持久选择一份规范产物，重试复用同一字节；同键不同产物不能静默覆盖。verify_manifest_visibility须逐项核对并满足服务读者的可见性契约，不能用一个canary冒充全量。以Elasticsearch为例，refresh使写入可搜索；它与写入ack不同 [<a href="#ref-11">11</a>]。本地模型不实现该厂商屏障。</p><p>任一路失败留staging，旧current继续服务；发布与job完成在同一Catalog事务，ACK丢失重读结果。索引可能残留旧rev，取证前剔除并在预算内补召回；不能放松ACL凑数，也不承诺单文档CAS提供全语料快照。READY只说明已验证的可见性条件，不代表索引永远无故障。</p></div><div class="lang-en"><p>This is transaction pseudocode. External writes/visibility checks run outside Catalog locks. All writers lock doc→job; sample lease time after locks, then require matching owner/epoch, unexpired lease, live document and current target revision. The lease fences publication, not every external write; immutable versioned keys and identical-only reuse bound stale staging. See PostgreSQL18 row-lock semantics [<a href="#ref-12">12</a>].</p><p>A manifest records every expected ID, text/vector artifact hash, model/splitter/pool identity and both receipts. Text includes children and citable parents; index sets contain children only. Reject IDs/hashes outside the published manifest and required role, even for same-tenant/revision/pool staging. Persist one canonical embedding artifact under a unique manifest key and reuse its bytes across retries, since recomputation may differ numerically. Visibility verification checks every item against the serving-reader contract, beyond a canary. Elasticsearch refresh is one example of making writes searchable separately from write acknowledgements [<a href="#ref-11">11</a>]; our local model does not implement that vendor barrier.</p><p>Partial failures stay staged while old current serves. Publication and saved completion share the Catalog transaction; lost ACKs reread it. Reject old-revision candidates and refill within budget without relaxing ACLs. Per-document CAS does not provide a corpus-wide snapshot, and READY cannot promise perpetual index availability.</p></div></div></section>
+<section><h2><span class="lang-zh">切分：先保留来源，再考虑父块</span><span class="lang-en">Chunking: provenance before parent expansion</span></h2><div class="bilingual"><div class="lang-zh"><p>Parser保留PDF页码/坐标、标题路径、表格列名和单位，再按结构、句子与token缩小。只有“12”的表格格子不能证明允许值为12。512/64只是实验基线；Microsoft指南给出512/25%起始建议，设置要按语料评测 [<a href="#ref-2">2</a>]。overlap补相邻边界但会复制token，也不保证跨页前提齐全。</p></div><div class="lang-en"><p>Preserve PDF pages/coordinates, heading paths and table columns/units before structure-, sentence- and token-based splitting. A contextless cell containing “12” cannot establish an allowed value. Our 512/64 is an experimental baseline; Microsoft offers a 512/25% starting recommendation, to be evaluated on the corpus [<a href="#ref-2">2</a>]. Overlap costs tokens and does not guarantee distant premises.</p></div></div><figure class="deck">
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d3s1t d3s1d">
           <title id="d3s1t">Preserve document structure</title>
@@ -424,7 +432,7 @@
           <text x="310" y="72" text-anchor="middle" class="clock">512 cap / 64 overlap / 448 stride</text>
           <text x="630" y="76" text-anchor="middle" class="tiny">5 children: starts 0, 448, 896, 1344, 1792</text>
           <g class="is-new">
-            <text x="30" y="368" text-anchor="start" class="clock">chunk_id = tenant + doc + rev + splitter + span</text>
+            <text x="30" y="368" text-anchor="start" class="clock">chunk_id = tenant + doc + rev + pool + splitter + span</text>
             <rect x="754" y="125" width="175" height="20" rx="10" class="badge"/><text x="841.5" y="139" text-anchor="middle" class="badge-text">provenance / ACL</text>
           </g>
         </svg>
@@ -443,7 +451,7 @@
           <path d="M435 145 L545 145" class="wire async"/><polygon points="555,145 545,150 545,140" class="head async"/><text x="495" y="136" text-anchor="middle" class="tiny">stable IDs</text>
           <text x="310" y="72" text-anchor="middle" class="clock">512 cap / 64 overlap / 448 stride</text>
           <text x="630" y="76" text-anchor="middle" class="tiny">5 children: starts 0, 448, 896, 1344, 1792</text>
-          <text x="30" y="368" text-anchor="start" class="clock">chunk_id = tenant + doc + rev + splitter + span</text>
+          <text x="30" y="368" text-anchor="start" class="clock">chunk_id = tenant + doc + rev + pool + splitter + span</text>
           <rect x="754" y="125" width="175" height="20" rx="10" class="badge"/><text x="841.5" y="139" text-anchor="middle" class="badge-text">provenance / ACL</text>
           <g class="is-new">
             <rect x="285" y="274" width="150" height="60" rx="12" class="box"/><text x="360" y="301" text-anchor="middle" class="label">RAG</text><text x="360" y="320" text-anchor="middle" class="sub">eligible child hit</text>
@@ -466,7 +474,7 @@
           <path d="M435 145 L545 145" class="wire async"/><polygon points="555,145 545,150 545,140" class="head async"/><text x="495" y="136" text-anchor="middle" class="tiny">stable IDs</text>
           <text x="310" y="72" text-anchor="middle" class="clock">512 cap / 64 overlap / 448 stride</text>
           <text x="630" y="76" text-anchor="middle" class="tiny">5 children: starts 0, 448, 896, 1344, 1792</text>
-          <text x="30" y="368" text-anchor="start" class="clock">chunk_id = tenant + doc + rev + splitter + span</text>
+          <text x="30" y="368" text-anchor="start" class="clock">chunk_id = tenant + doc + rev + pool + splitter + span</text>
           <rect x="754" y="125" width="175" height="20" rx="10" class="badge"/><text x="841.5" y="139" text-anchor="middle" class="badge-text">provenance / ACL</text>
           <rect x="285" y="274" width="150" height="60" rx="12" class="box"/><text x="360" y="301" text-anchor="middle" class="label">RAG</text><text x="360" y="320" text-anchor="middle" class="sub">eligible child hit</text>
           <path d="M315 274 L315 248 Q315 240 323 240 L512 240 Q520 240 520 232 L520 166 Q520 158 528 158 L545 158" class="wire"/><polygon points="555,158 545,163 545,153" class="head"/><text x="402" y="230" text-anchor="middle" class="tiny">child ID / rev7</text>
@@ -478,25 +486,8 @@
         </svg>
         <figcaption><span class="lang-zh">small-to-big 多了一次读和更多 token。父块必须属于同版本且全部可访问；超出 A5 的 4,096-token 证据预算，就退回子块。</span><span class="lang-en">Small-to-big adds a read and more tokens. The entire parent must share the revision and permissions; use the child if it exceeds the evidence budget.</span></figcaption>
       </div>
-    </figure><div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>Parser 先做版面提取，再切文本。PDF 要保留页码与文字坐标，移掉反复出现的页眉页脚，但不能把表格标题和单位删掉；OCR 不确定的文字带质量标记。wiki 保留标题层级、列表与链接。代码按符号和函数边界，表格带列名和相关行；一个只剩“12”的格子，即使 embedding 很相似，也不能证明某产品允许值就是 12。解析失真会同时污染 BM25、向量和来源展示。</p>
-<p>先按段落、标题分，再在过长结构内递归按句和 token 缩小。A2 的 512/64 是演示参数，不是“2026 通用标准”。Microsoft 的当前指南同时列出 10–15% overlap 的固定切分例子，并在起始建议中用 512 token、25% overlap [2]；两者是不同实践建议。这里选择 12.5% 作为受控实验基线，比较零 overlap、更大 overlap 和结构切分，不能引用指南替自己宣布最优。</p>
-<p>小块让相关信号集中，却可能丢掉标题、定义或前提；大块减少缺上下文，却把多个主题压进一个向量，并挤掉其他证据。overlap 能覆盖相邻边界，不能保证跨两页的关系都在一个块里；还会复制 token、造成多个近重复命中。评价要包含跨边界问题、表格问题和专有名词，不能只挑每段开头那种问题。</p>
-<p>Chunk Store 保留 chunk_id、doc_id、source_revision、splitter_version、span offsets、heading、page、parent_id 与 ACL version。向量模型及 tokenizer/pooling 等坐标定义属于 query bundle。citation 显示 source locator 与精确跨度；用户点开时服务端重新鉴权，不能把旧 URL 当永久公开凭证。来源页面已经改版时，展示“用于回答的 rev7”，而不是让用户看到一篇内容不一致的 rev8。</p>
-<p>父子块把小块检索与大段上下文分开。索引只放子块向量，命中后按 parent_id 批量读同版本父段。多个子块指向同父段只扩一次。父段权限按全部跨度复查；若一个大节混入另一权限区，不能用子块可见性推导整节可见。超出证据预算、版本已失效或父块不可读时退回子块，必要时拒答；不会用最新父段去拼旧 child。</p>
-<p>本章允许普通结构块作为起点，不强制语义切分和父子块。语义边界检测增加离线模型工作，且会随模型变化，必须记录切分版本；父子块增加存储、回表和权限逻辑。选它们的理由应是黄金集里“相关子块已经命中但缺前提”的错误下降。若失败是根本没召回相关块，先改解析、召回和过滤，扩父块并不能补回一个从未出现的 ID。</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>Parser preserves layout before splitting. Keep PDF pages/coordinates, table headings/units, wiki heading paths, and code boundaries. Remove repeated headers carefully and flag uncertain OCR. Contextless table cells cannot establish a numeric claim; parsing errors contaminate all retrieval and citation layers.</p>
-<p>Split by structure, then recursively bound oversized sections by sentences/tokens. A2 is illustrative rather than a universal current standard. Microsoft lists a 10–15% fixed-size overlap example and separately recommends 512 tokens with 25% starting overlap [2]. Our 12.5% baseline is a controlled experiment, compared against other settings.</p>
-<p>Small chunks focus retrieval but can omit definitions or premises. Large chunks dilute relevance and consume evidence space. Overlap covers adjacent boundaries without guaranteeing distant relationships, and adds duplicates/tokens. Include boundary, table, and identifier questions in evaluation.</p>
-<p>Store chunk/document IDs, source and splitter revisions, offsets, headings, pages, parent ID, and ACL revision. The query bundle defines model, tokenizer, and pooling identity. Citation clicks reauthorize and show the exact used revision rather than a mismatching newer page.</p>
-<p>Small-to-big retrieves child vectors and batch-fetches same-revision parents. Expand each parent once and authorize every span. Child access does not grant an entire mixed-permission section. If budgets, visibility, or access fail, use children or refuse rather than substitute a newer parent.</p>
-<p>Semantic splitting and parent expansion are optional measured choices. They add offline work, versioning, reads, and policy complexity. Use them when relevant children are already recalled but lack premises; expansion cannot rescue a never-recalled ID.</p>
-</div></div></section>
-
-  <section>
-<h2><span class="lang-zh">Hybrid：融合的是排名，rerank 有明确上限</span><span class="lang-en">Hybrid: fuse ranks and bound reranking</span></h2>
-<figure class="deck">
+    </figure><div class="bilingual"><div class="lang-zh"><p>来源身份至少包含tenant/doc/revision/pool/splitter/span及内容hash，另存page、parent和source locator。查询只取精确版本，不用最新父段补旧child；来源点击重新鉴权并遵守tombstone。</p><p>small-to-big是可选回表：先命中child，再取同版本且在已发布manifest.text中的parent；父段全部跨度重新授权，多个child指向同parent只扩一次。父块混入私密段、超过预算或版本不匹配就退回已授权child，必要时拒答。权限不按“这段看起来相关”决定。只有黄金集中“child已命中但缺前提”的错误下降，才值得增加父块读取/存储/ACL成本。</p></div><div class="lang-en"><p>Source identity includes tenant/document/revision/pool/splitter/span and content hash, with page, parent and locator. Read exact revisions rather than replacing old children with latest parents. Citation clicks reauthorize and honor tombstones.</p><p>Optional small-to-big fetches a same-revision parent after a child hit, requiring published-manifest text membership. Authorize every parent span and expand each parent once. Mixed-permission, oversized or mismatched parents fall back to authorized children, then refusal if needed. Relevance never grants access. Add parent reads/storage/policy complexity only when labeled errors show recalled children missing premises.</p></div></div></section>
+<section><h2><span class="lang-zh">Hybrid：保留原排名，去重后有界重排</span><span class="lang-en">Hybrid: preserve ranks and bound reranking</span></h2><div class="bilingual"><div class="lang-zh"><p>BM25补术语/错误码，dense补经过评测的语言改写；精确短语仍要显式短语条件。两路各100，先权威筛选，再按完整来源ID去重。RRF按每路1/(60+rank)求和，缺席为0，排名从1起；60沿用Elastic默认当起点 [<a href="#ref-3">3</a>]。过滤不把原rank99改成rank1；同一路重复结果只计第一次/最好原rank。</p></div><div class="lang-en"><p>BM25 covers terms/codes, while evaluated dense models cover paraphrases/languages; exact phrases still need explicit constraints. Retrieve 100 per lane, authorize and deduplicate qualified identities. RRF sums 1/(60+rank), starting at one, with zero for absence; 60 follows Elastic’s default as a starting point [<a href="#ref-3">3</a>]. Filtering retains rank 99 as 99, and duplicates contribute once per lane.</p></div></div><figure class="deck">
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d4s1t d4s1d">
           <title id="d4s1t">Recall lexical evidence</title>
@@ -597,27 +588,62 @@
             <text x="705" y="360" text-anchor="middle" class="clock">reject: raw-score sum / all-corpus rerank</text>
           </g>
         </svg>
-        <figcaption><span class="lang-zh">8 × 512 = 4,096 是证据上限，不是固定必须塞满。父块扩展后重算实际 token，去重后编号，这一集合才是引用可用的 Evidence Pack。</span><span class="lang-en">8 × 512 = 4,096 is a ceiling, not a quota to fill. Retokenize expanded parents, deduplicate, and assign citations to this actual Evidence Pack.</span></figcaption>
+        <figcaption><span class="lang-zh">Evidence Pack最多8段，编号、来源和分隔符都计入4,096 token；父块扩展后完整重计，不保证装下8个512-token原文块。</span><span class="lang-en">Evidence Pack has at most eight spans; IDs, provenance and delimiters share 4,096 tokens. Recount after parent expansion; eight full 512-token spans may not fit.</span></figcaption>
       </div>
-    </figure><div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>BM25 对错误码、名称和确切词串有用，但它不是精确短语过滤器；用户明确要引号内的短语时，还要使用引擎的短语条件。稠密模型补改写和跨语言，前提是模型确实覆盖本章的语言与领域。两路各取 100 是 A4，去重后最多 200，交给融合的是可访问且 active 的 chunk；重名不同版本不被视作同一证据。</p>
-<p>RRF 不用原始分数相加，公式为 <code>score(d) = Σ 1 / (k + rank_i(d))</code>，排名从 1 起，某路缺席贡献 0。Elastic 官方实现的 rank_constant 默认 60 [3]，本章沿用当起点。第一路第 1、第二路第 10 的 A 得 0.03068；两路都第 5 的 B 得 0.03077，B 略前。常数影响后排的贡献，融合窗口也会限制可能入选的集合，增大窗口不等于无成本提高质量。</p>
-<p>不能把“BM25 和余弦量纲不同”说成永远不能线性融合。未经校准的裸加不成立；有标注集时可以做标准化、权重学习或其他融合，与 RRF 在独立集上比较。RRF 的代价是丢弃分数差距，而且无法救回两路都漏掉的段落。图上的默认选择是一个稳健的起点，结论靠评测，而不是算法名字本身。</p>
-<p>带过滤不保证内部 pre-filter。pgvector v0.8.0 原文说明近似索引扫描后执行过滤，可能不足目标条数，iterative scans 会继续扫描直到够数或触及上限 [5]。所以“WHERE tenant_id”并不自动带来足量召回。租户只占少量数据时，可考虑分区、局部索引或精确过滤后的检索，并分别测 Recall、扫描量和延迟；不能用放松 ACL 来凑齐 100 条。</p>
-<p>Reranker 将 question 与候选文本联合打分，先召回再对短名单处理是 Sentence Transformers 展示的用法 [4]。候选必须已经通过权限与版本校验，模型服务本身也是受信数据处理边界。限制 pair 数、单段长度和批等待，超过截止时间取消并使用已评测的 RRF 顺序；降级比例要计入质量报表，不混进正常 rerank 的指标掩盖。</p>
-<p>最后按证据跨度去重与 token 总数取至多 8 块。A5 的 <code>4,096 + 1,024 = 5,120</code> 输入，再留 512 输出，需要至少 5,632 上下文；实际模型 tokenization 不一致时按生成模型重新数。重要证据排序和长上下文利用需要实验，Lost in the Middle 展示过位置改变对所测模型的影响 [9]，不能据此断言所有新模型都只能看开头结尾。增加上下文仍需看支持率与成本是否改善。</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>BM25 supports codes and literal terms but does not replace explicit phrase constraints. Dense retrieval supports paraphrases/languages when the chosen model covers them. Each A4 lane returns 100; up to 200 unique eligible active chunks enter fusion. Distinct revisions are not identical evidence.</p>
-<p>RRF uses <code>Σ 1/(k + rank_i(d))</code>, ranks starting at one and zero contribution for a missing lane. Elastic defaults rank_constant to 60 [3]. A at ranks 1/10 scores 0.03068; B at 5/5 scores 0.03077. The constant and retrieval windows affect lower-ranked influence and eligible recall.</p>
-<p>Uncalibrated raw-score addition is unjustified, but normalized/learned weighted fusion can be evaluated on held-out labels. RRF discards score margins and cannot recover chunks missed by both lanes. The chosen default remains a measured starting point.</p>
-<p>Filtering does not imply internal prefiltering. pgvector v0.8.0 applies filtering after approximate index scans; iterative scans continue until enough results or a scan cap [5]. Measure filtered recall and latency, considering partitioning, partial indexes, or exact filtered search without weakening access.</p>
-<p>Sentence Transformers demonstrates retrieving before cross-encoder reranking [4]. Apply it only to authorized, active candidates, and bound pair count, span length, and batch wait. Cancel at deadline and use a tested RRF fallback, reporting degradation separately.</p>
-<p>Deduplicate spans and choose at most eight within 4,096 evidence tokens. Adding 1,024 other input and 512 reserved output requires at least 5,632 context tokens; recount with the generation tokenizer. Lost in the Middle studied position sensitivity in tested models [9], not a universal law for all newer models. Evaluate evidence ordering, support, and cost.</p>
-</div></div></section>
-
-  <section>
-<h2><span class="lang-zh">引用：先验证证据身份，再判断支持关系</span><span class="lang-en">Citations: evidence identity precedes support</span></h2>
-<figure class="deck">
+    </figure><pre data-language="Java 17 · RRF excerpt" data-kind="teaching" data-source="RagCore.java#rrf"><code>public record Hit(String qualifiedId, int originalRank) {}
+public record Scored(String qualifiedId, double score) {}
+public static List&lt;Scored&gt; rrf(List&lt;List&lt;Hit&gt;&gt; lanes, int cap) {
+  if (cap &lt; 1 || cap &gt; 80) throw new IllegalArgumentException(&quot;cap 1..80&quot;);
+  Map&lt;String, Double&gt; score = new HashMap&lt;&gt;();
+  for (List&lt;Hit&gt; lane : lanes) {
+    Map&lt;String, Integer&gt; best = new HashMap&lt;&gt;();
+    for (Hit hit : lane) {
+      if (hit.originalRank() &lt; 1 || hit.originalRank() &gt; 100)
+        throw new IllegalArgumentException(&quot;rank 1..100&quot;);
+      best.merge(hit.qualifiedId(), hit.originalRank(), Math::min);
+    }
+    // Eligibility filtering preserves original ranks; duplicates count once/lane.
+    best.forEach((id, rank) -&gt; score.merge(id, 1.0 / (60 + rank), Double::sum));
+  }
+  return score.entrySet().stream()
+    .map(e -&gt; new Scored(e.getKey(), e.getValue()))
+    .sorted(Comparator.comparingDouble(Scored::score).reversed()
+      .thenComparing(Scored::qualifiedId))
+    .limit(cap).toList();
+}</code></pre><div class="bilingual"><div class="lang-zh"><p>Java17标准库摘录，完整可运行类在examples/ch30/RagCore.java。输入Hit必须已通过权限/版本检查，qualifiedId包含租户和版本；本函数不做鉴权。相同分数按ID稳定排序，最多返回80。A排1/10得0.03068，B排5/5得0.03077，B稍前。RRF丢掉分差且救不回两路都漏的证据；有标注时可另测校准的加权融合。</p><p>向量过滤不必然发生在ANN之前：pgvector固定v0.8.0文档说明近似扫描后过滤，iterative scans继续扫描到够数或上限 [<a href="#ref-5">5</a>]。小租户要测分区/精确过滤后的检索和有界补召回；不能去掉tenant或ACL。CrossEncoder只处理有界短名单 [<a href="#ref-4">4</a>]，超时仅使用已评测RRF降级，权限/证据不足仍拒答。</p></div><div class="lang-en"><p>This Java17 standard-library excerpt is part of runnable examples/ch30/RagCore.java. Hits must already be authorized/current, and qualified IDs include tenant and revision; this function does not authorize. Ties sort by ID, with at most 80 results. A at ranks 1/10 scores 0.03068; B at 5/5 scores 0.03077. RRF loses score margins and cannot recover evidence both lanes missed; calibrated weighted fusion is another measured option.</p><p>ANN filtering need not precede scanning: pinned pgvector v0.8.0 documents post-scan filtering and capped iterative scans [<a href="#ref-5">5</a>]. Measure partitioning, exact filtered search and bounded refill for small tenants, retaining all access conditions. CrossEncoder operates only on a bounded shortlist [<a href="#ref-4">4</a>]. A timeout may use evaluated RRF fallback; missing authorized evidence still refuses.</p></div></div><h3><span class="lang-zh">Evidence Pack按完整token预算装包</span><span class="lang-en">Pack evidence with the complete token budget</span></h3><pre data-language="Java 17 · evidence budget excerpt" data-kind="teaching" data-source="RagCore.java#pack"><code>public record Span(String tenant, String doc, long rev, String pool,
+                   int start, int end, String text) {}
+public record Pack(List&lt;Span&gt; spans, String prompt, int inputTokens) {}
+public interface Renderer {
+  String evidence(List&lt;Span&gt; spans);           // includes IDs/locators/delimiters
+  String prompt(List&lt;Span&gt; spans);             // complete roles + question + evidence
+}
+public static Optional&lt;Pack&gt; pack(List&lt;Span&gt; ranked, Renderer render,
+    ToIntFunction&lt;String&gt; generationTokens, int contextLimit) {
+  List&lt;Span&gt; chosen = new ArrayList&lt;&gt;();
+  if (generationTokens.applyAsInt(render.prompt(List.of())) &gt; 1024)
+    return Optional.empty();                  // no silent question truncation
+  for (Span candidate : ranked) {             // already authorized exact revisions
+    if (candidate.start() &lt; 0 || candidate.end() &lt;= candidate.start())
+      throw new IllegalArgumentException(&quot;invalid span&quot;);
+    boolean overlaps = chosen.stream().anyMatch(s -&gt;
+      s.tenant().equals(candidate.tenant()) &amp;&amp; s.doc().equals(candidate.doc())
+      &amp;&amp; s.rev() == candidate.rev() &amp;&amp; s.pool().equals(candidate.pool())
+      &amp;&amp; s.start() &lt; candidate.end() &amp;&amp; candidate.start() &lt; s.end());
+    if (overlaps) continue;                    // conservative: keep higher-ranked span
+    List&lt;Span&gt; trial = new ArrayList&lt;&gt;(chosen); trial.add(candidate);
+    int evidence = generationTokens.applyAsInt(render.evidence(trial));
+    int input = generationTokens.applyAsInt(render.prompt(trial));
+    if (evidence &gt; 4096 || input &gt; 5120 || (long) input + 512 &gt; contextLimit)
+      continue;                               // try a smaller later span, no truncation
+    chosen = trial;
+    if (chosen.size() == 8) break;
+  }
+  if (chosen.isEmpty()) return Optional.empty();
+  String prompt = render.prompt(chosen);
+  return Optional.of(new Pack(List.copyOf(chosen), prompt,
+    generationTokens.applyAsInt(prompt)));
+}</code></pre><div class="bilingual"><div class="lang-zh"><p>输入ranked是父块检查后仍有权使用的同池版本跨度；重叠跨度保守保留排前者，空隙不合并，可能牺牲召回。Renderer产生含编号/来源/分隔符的证据和完整role/prompt；generationTokens须使用部署模型的tokenizer及聊天模板，重新计算整串，不能把逐段token数直接相加。本地运行只用字符计数fixture验证分支，不证明模型tokenizer行为。</p><p>依次尝试最多8段，超大的段跳过并继续看后面的小段；不截断句子或表格来“刚好塞满”。证据≤4,096、完整输入≤5,120、输入+512≤context三个约束同时成立。装包后再次复查全包权限，再交推理。长上下文中证据位置会影响所测模型表现 [<a href="#ref-9">9</a>]，多塞材料不能替代质量评测。</p></div><div class="lang-en"><p>Ranked input contains authorized, same-pool revision spans after parent checks. Conservatively keep the higher-ranked overlapping span without merging gaps; this can lose recall. Renderer serializes IDs/provenance/delimiters and the complete role/prompt. generationTokens must use the deployed model tokenizer/chat template on complete strings, beyond summing individual counts. Local execution uses a character-count fixture to test branches, not model tokenization.</p><p>Try at most eight spans, skipping oversized ones while considering smaller later spans; do not truncate claims/tables to fill the budget. Enforce evidence ≤4,096, complete input ≤5,120 and input + 512 ≤context together. Reauthorize the whole pack before inference. Evidence position affected models tested in Lost in the Middle [<a href="#ref-9">9</a>]; additional context needs evaluation.</p></div></div></section>
+<section><h2><span class="lang-zh">引用与释放：规则能查身份，不能证明语义</span><span class="lang-en">Citations and release: identity is not semantic proof</span></h2><div class="bilingual"><div class="lang-zh"><p>Evidence Pack是实际进入prompt的集合，编号只在本请求内稳定；召回但没入包的第9块不能引用。按句缓冲draft，先查解析、编号、来源版本与条件，再查陈述支持。ALCE区分引用支持/质量 [<a href="#ref-7">7</a>]；模型判断仍会误接收。要求证据的句子不得只删假脚注后保留断言。</p></div><div class="lang-en"><p>Evidence Pack is exactly what entered the prompt, with request-local IDs. A recalled but unpacked ninth chunk is not citable. Buffer draft sentences; check parsing, IDs and source identity/conditions before support. ALCE distinguishes citation support/quality [<a href="#ref-7">7</a>], but model judgments remain fallible. Never retain an unsupported claim after merely removing its fake footnote.</p></div></div><figure class="deck">
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s1t d5s1d">
           <title id="d5s1t">Own the output connection</title>
@@ -628,7 +654,7 @@
             <rect x="170" y="144" width="140" height="80" rx="12" class="box"/><text x="240" y="181" text-anchor="middle" class="label">RAG</text><text x="240" y="200" text-anchor="middle" class="sub">request owner</text>
             <path d="M70 175 L160 175" class="wire"/><polygon points="170,175 160,180 160,170" class="head"/><text x="116" y="166" text-anchor="middle" class="tiny">query</text>
             <path d="M170 193 L80 193" class="wire reply"/><polygon points="70,193 80,188 80,198" class="head reply"/>
-            <text x="30" y="35" text-anchor="start" class="label">ANSWER RELEASE · Gateway omitted in this detail</text>
+            <text x="30" y="35" text-anchor="start" class="label">ANSWER RELEASE · Gateway omitted</text>
           </g>
         </svg>
         <figcaption><span class="lang-zh">这一组放大 RAG 内的释放边界，入口网关省略已在标题注明。客户端只读 RAG 的输出，不直接接模型流。</span><span class="lang-en">This detail omits the deck-one Gateway explicitly. Client reads RAG output and has no direct model stream.</span></figcaption>
@@ -642,7 +668,7 @@
           <rect x="170" y="144" width="140" height="80" rx="12" class="box"/><text x="240" y="181" text-anchor="middle" class="label">RAG</text><text x="240" y="200" text-anchor="middle" class="sub">request owner</text>
           <path d="M70 175 L160 175" class="wire"/><polygon points="170,175 160,180 160,170" class="head"/><text x="116" y="166" text-anchor="middle" class="tiny">query</text>
           <path d="M170 193 L80 193" class="wire reply"/><polygon points="70,193 80,188 80,198" class="head reply"/>
-          <text x="30" y="35" text-anchor="start" class="label">ANSWER RELEASE · Gateway omitted in this detail</text>
+          <text x="30" y="35" text-anchor="start" class="label">ANSWER RELEASE · Gateway omitted</text>
           <g class="is-new">
             <rect x="390" y="40" width="140" height="60" rx="12" class="box"/><text x="460" y="67" text-anchor="middle" class="label">Evidence Pack</text><text x="460" y="86" text-anchor="middle" class="sub">IDs 1..8</text>
             <path d="M200 144 L200 78 Q200 70 208 70 L380 70" class="wire"/><polygon points="390,70 380,75 380,65" class="head"/><text x="295" y="61" text-anchor="middle" class="tiny">freeze set</text>
@@ -660,7 +686,7 @@
           <rect x="170" y="144" width="140" height="80" rx="12" class="box"/><text x="240" y="181" text-anchor="middle" class="label">RAG</text><text x="240" y="200" text-anchor="middle" class="sub">request owner</text>
           <path d="M70 175 L160 175" class="wire"/><polygon points="170,175 160,180 160,170" class="head"/><text x="116" y="166" text-anchor="middle" class="tiny">query</text>
           <path d="M170 193 L80 193" class="wire reply"/><polygon points="70,193 80,188 80,198" class="head reply"/>
-          <text x="30" y="35" text-anchor="start" class="label">ANSWER RELEASE · Gateway omitted in this detail</text>
+          <text x="30" y="35" text-anchor="start" class="label">ANSWER RELEASE · Gateway omitted</text>
           <rect x="390" y="40" width="140" height="60" rx="12" class="box"/><text x="460" y="67" text-anchor="middle" class="label">Evidence Pack</text><text x="460" y="86" text-anchor="middle" class="sub">IDs 1..8</text>
           <path d="M200 144 L200 78 Q200 70 208 70 L380 70" class="wire"/><polygon points="390,70 380,75 380,65" class="head"/><text x="295" y="61" text-anchor="middle" class="tiny">freeze set</text>
           <path d="M390 85 L238 85 Q230 85 230 93 L230 134" class="wire reply"/><polygon points="230,144 225,134 235,134" class="head reply"/>
@@ -682,7 +708,7 @@
           <rect x="170" y="144" width="140" height="80" rx="12" class="box"/><text x="240" y="181" text-anchor="middle" class="label">RAG</text><text x="240" y="200" text-anchor="middle" class="sub">request owner</text>
           <path d="M70 175 L160 175" class="wire"/><polygon points="170,175 160,180 160,170" class="head"/><text x="116" y="166" text-anchor="middle" class="tiny">query</text>
           <path d="M170 193 L80 193" class="wire reply"/><polygon points="70,193 80,188 80,198" class="head reply"/>
-          <text x="30" y="35" text-anchor="start" class="label">ANSWER RELEASE · Gateway omitted in this detail</text>
+          <text x="30" y="35" text-anchor="start" class="label">ANSWER RELEASE · Gateway omitted</text>
           <rect x="390" y="40" width="140" height="60" rx="12" class="box"/><text x="460" y="67" text-anchor="middle" class="label">Evidence Pack</text><text x="460" y="86" text-anchor="middle" class="sub">IDs 1..8</text>
           <path d="M200 144 L200 78 Q200 70 208 70 L380 70" class="wire"/><polygon points="390,70 380,75 380,65" class="head"/><text x="295" y="61" text-anchor="middle" class="tiny">freeze set</text>
           <path d="M390 85 L238 85 Q230 85 230 93 L230 134" class="wire reply"/><polygon points="230,144 225,134 235,134" class="head reply"/>
@@ -696,7 +722,7 @@
             <path d="M680 224 L680 292 Q680 300 672 300 L238 300 Q230 300 230 292 L230 234" class="wire reply"/><polygon points="230,224 235,234 225,234" class="head reply"/><text x="460" y="322" text-anchor="middle" class="tiny">validated sentence / refusal</text>
           </g>
         </svg>
-        <figcaption><span class="lang-zh">按句缓冲再校验 ID、来源权限和支持关系，合格才发 SSE。第一个合格句预算 3 s；不能把模型第一个 token 当用户可见首句。</span><span class="lang-en">Buffer a sentence, validate IDs, access, and support, then send SSE. The 3-second first-approved-sentence target differs from model TTFT.</span></figcaption>
+        <figcaption><span class="lang-zh">Answer Gate把判定返回RAG，RAG在支持判断后复查整个Evidence Pack再经Gateway发送；本细图省略网关。第一合格句目标3秒，区别于模型TTFT。</span><span class="lang-en">Answer Gate returns to RAG. After support judging, RAG rechecks the entire pack and sends via Gateway, omitted here. The 3-second approved-sentence target differs from model TTFT.</span></figcaption>
       </div>
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s5t d5s5d">
@@ -707,7 +733,7 @@
           <rect x="170" y="144" width="140" height="80" rx="12" class="box"/><text x="240" y="181" text-anchor="middle" class="label">RAG</text><text x="240" y="200" text-anchor="middle" class="sub">request owner</text>
           <path d="M70 175 L160 175" class="wire"/><polygon points="170,175 160,180 160,170" class="head"/><text x="116" y="166" text-anchor="middle" class="tiny">query</text>
           <path d="M170 193 L80 193" class="wire reply"/><polygon points="70,193 80,188 80,198" class="head reply"/>
-          <text x="30" y="35" text-anchor="start" class="label">ANSWER RELEASE · Gateway omitted in this detail</text>
+          <text x="30" y="35" text-anchor="start" class="label">ANSWER RELEASE · Gateway omitted</text>
           <rect x="390" y="40" width="140" height="60" rx="12" class="box"/><text x="460" y="67" text-anchor="middle" class="label">Evidence Pack</text><text x="460" y="86" text-anchor="middle" class="sub">IDs 1..8</text>
           <path d="M200 144 L200 78 Q200 70 208 70 L380 70" class="wire"/><polygon points="390,70 380,75 380,65" class="head"/><text x="295" y="61" text-anchor="middle" class="tiny">freeze set</text>
           <path d="M390 85 L238 85 Q230 85 230 93 L230 134" class="wire reply"/><polygon points="230,144 225,134 235,134" class="head reply"/>
@@ -726,25 +752,35 @@
         </svg>
         <figcaption><span class="lang-zh">编号 9 不在 1..8，整句不能放行；仅删脚注会留下无依据断言。超时或证据不足返回明确的未完成/不知道，已发句不能假装回滚。</span><span class="lang-en">Citation 9 is outside IDs 1..8, so block the sentence. Removing just the footnote leaves an unsupported claim; emitted sentences cannot be rolled back.</span></figcaption>
       </div>
-    </figure><div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>Evidence Pack 是去重、授权、版本检查与预算裁剪之后，实际放入 prompt 的内容。保存本轮 ID → doc/revision/span 的映射，例如 1..8；召回过但没放进 prompt 的第 9 块不能引用。每块用明确的数据边界隔开，指令要求根据材料作答且不执行材料中的命令，遇到冲突来源注明冲突。只加一行“请引用来源”不能让这些身份约束自动成立。</p>
-<p>机械校验能确定编号在集合内、source_revision 和 span 可读、权限在复查点成立。它无法确定“这段材料是否支持这句话”。ALCE 把引用支持与引用质量单独评估，而不是把有脚注当正确 [7]。本设计为需要证据的陈述建立 cited spans，使用领域规则、支持判断器并抽样人工核对；自动判断器会误判，因此 Answer Gate 是有测量误差的质量门槛，不是无幻觉的证明器。</p>
-<p>流式释放选择按句缓冲：RAG 接模型 draft，句子完整后调用 Answer Gate，连同实际证据映射做检查。合格句才发给 Gateway。编号非法或无支持时拦整句，有限次重写后仍失败就说不知道，禁止只删掉假脚注留下断言。按句需要额外等待与判断成本，所以本章 SLO 是第一句合格输出 ≤ 3 s，和模型 TTFT 分报；若要求最终整篇都验证完，再用完整答案缓冲，首响应会更晚。</p>
-<p>权限与删除在取证和每句释放前复查，Catalog 不可用则失败关闭。复查与网络发送之间仍有竞争，本章契约是：检查线性化在撤销之后的句子不能继续用该证据；已经检查完并发送中的句子可能仍到达。要“删除确认后连已在途句子都不能再到用户”，必须定义查询与撤销的串行协议或 drain，而网络上已发的字节仍无法收回。这个边界要在接口文档里写清，不用 TTL 秒数冒充强即时撤销。</p>
-<p>检索文字里出现“忽略此前命令”“发送秘密”属于文档攻击风险，Microsoft 的 Prompt Shields 文档专门区分文档攻击 [10]。这里把材料作为数据，限制 prompt 边界，保留源信任和异常记录；闭库问答不授予生成器外部工具权限。过滤、提示分隔和检测都有局限，测试集中要含恶意材料，不把一个检测通过标志当作材料已可信的证明。</p>
-<p>用户点来源时重新鉴权并读取精确版本，删除后可以返回“来源已撤销”，不能绕过 tombstone 展示保留的旧原文。回答日志只记必要的 request 身份、配置版本、选中证据标识、拒答原因与时延；敏感原文和答案按访问权限与保留政策管理。追溯需要的是可重建当时决策的记录，不是把所有租户内容复制进一个公开调试页面。</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>Evidence Pack contains only text that survives deduplication, access/version checks, and prompt budgeting. Freeze IDs 1..8 to document/revision/span; a recalled but unprompted ninth chunk is not citable. Mark material as data, handle conflicting sources, and do not assume a citation instruction enforces identity constraints.</p>
-<p>Mechanical checks establish ID membership, readable revision/span, and access at the check point, not semantic support. ALCE evaluates citation support and quality separately [7]. Use domain rules/support judges with human calibration. Judges can fail, so Answer Gate is a measured quality threshold, not a proof of hallucination freedom.</p>
-<p>Buffer sentences from the draft and validate before releasing through Gateway. Block invalid/unsupported sentences; bound rewrites and refuse if still unsupported. Never remove just a fake footnote. Sentence buffering adds latency and judge cost, so report first approved sentence separately from model TTFT. Full-answer validation requires longer buffering.</p>
-<p>Recheck access/deletes at evidence fetch and before each sentence release; authority failure denies release. A race remains between check and send: checks linearized after revocation cannot approve affected evidence, but already approved/in-flight bytes may arrive. A stronger acknowledgement contract needs serialized queries/revocation or drain and still cannot retract sent network bytes.</p>
-<p>Prompt Shields distinguishes document attacks [10]. Treat material as data, bound instruction separation, retain source trust/alerts, and give this closed-corpus generator no external tools. Detection and delimiters are imperfect; include malicious documents in evaluation.</p>
-<p>Citation clicks reauthorize exact revisions and honor tombstones. Logs retain needed request/config/evidence identities, refusal causes, and timing, with access and retention controls for sensitive content. Traceability does not require public copies of all tenant text.</p>
-</div></div></section>
-
-  <section>
-<h2><span class="lang-zh">新鲜度与换模型：发布指针能恢复，空间不能混搜</span><span class="lang-en">Freshness and migration: publish pointers, never mix spaces</span></h2>
-<figure class="deck">
+    </figure><pre data-language="Pseudocode · support and release boundary" data-kind="pseudocode" data-source="release.pseudo"><code>release_buffered_sentences(principal, bundle, pack, draft):
+  for sentence in bounded_sentence_buffer(draft):
+    parsed = parse_structured_claims_and_citation_ids(sentence)
+    if parse fails OR any ID not in pack.actual_ids: block_whole_sentence()
+    for claim in parsed.claims:
+      if claim.requires_evidence AND claim.citation_ids is empty: block_sentence()
+      cited = pack.exact_spans(claim.citation_ids)
+      if a structured_domain_fact(claim):
+        require source_entity == claim.entity AND source_unit == claim.unit
+        require source_value == claim.value AND source_conditions == claim.conditions
+      else:
+        verdict = support_judge(claim, cited, pinned_judge_version, deadline)
+        require verdict == SUPPORTED           # UNKNOWN/timeout =&gt; block
+        # A fallible statistical judgment; calibrate false acceptance with humans.
+    # Recheck AFTER potentially slow judge work, before every network release.
+    BEGIN authoritative_read                 # shared locks, canonical doc order
+    lock current membership AND every pack doc/current/ACL dependency
+    require principal tenant matches every pack tenant AND membership still valid
+    for span in pack.ALL_spans:              # not just this sentence&#x27;s citations
+      require NOT tombstone AND published[bundle.pool].rev == span.rev
+      require manifest.text[span.id].hash == span.hash
+      require live document ACL AND every covered span ACL allow principal
+      require policy epochs == pack.recorded_policy_epochs
+    COMMIT                                   # failure =&gt; cancel and DISCARD draft
+    send_via_RAG_Gateway(sentence)            # check/send gap is explicit
+  # Invalid/unsupported: at most one bounded rewrite using the same checked pack.
+  # A changed/revoked pack invalidates ALL draft text; never just remove its cite.
+  # Already sent bytes cannot be retracted. Citation clicks authorize exact rev.</code></pre><div class="bilingual"><div class="lang-zh"><p>这段伪代码刻意展开两层。结构化领域事实核对实体/数值/单位/条件，例如“报销上限120元”不能引用“满120元免运费”。这只适用于受控schema与可确定规则；自由文本交给固定版本判断器，UNKNOWN/超时拦句并最多重写一次，不能声称无幻觉证明。句子拆分/“是否需要证据”本身也是解析与模型契约，必须测绕过和误判。</p><p>最危险反例：包中A公开、B私密；模型用过B，但本句只标A。慢支持判断期间撤销B权限，若只重查A就可能泄漏。故在判断结束后、每句发送前，按固定顺序锁读当前成员及<strong>整个包</strong>的doc/current/整跨度ACL，任一代次变更、撤销或删除均取消并丢弃整份draft；改用新包必须重新生成，不能从旧回答删一个引用继续流。</p><p>这是保守产品策略：同池current更新也使旧draft失效，且只在检查线性化点承诺权限有效。检查后、send前仍有空隙；撤销后才完成的检查不通过，但已通过检查/已发字节可能抵达。更强撤销确认须定义与活跃查询串行/drain，网络字节不能追回。Catalog超时不释放，来源点击也复查精确版本。</p></div><div class="lang-en"><p>The pseudocode separates two layers. Controlled facts compare entity/value/unit/conditions: a 120-unit expense cap cannot cite a free-shipping threshold of 120. This requires a controlled schema and deterministic rules. Free text uses a pinned fallible judge; UNKNOWN/timeouts block, with at most one rewrite. Claim segmentation/evidence requirements also need bypass and error tests.</p><p>Dangerous counterexample: public A and private B entered the prompt; the model used B but cites only A. B is revoked while support judgment is slow. Rechecking A alone can leak. After judging and before every send, lock/read current membership and <strong>all pack</strong> document/current/whole-span ACL dependencies in canonical order. Any changed epoch, revocation or delete cancels and discards the entire draft; a new pack requires regeneration.</p><p>This conservative product policy also invalidates drafts on pool-current changes. Authorization holds at the check’s linearization point; a check/send gap remains. Checks after revocation fail, while previously approved/in-flight bytes may arrive. Stronger revocation acknowledgement needs query serialization/drain and cannot retract sent bytes. Authority timeouts stop release, and citation clicks reauthorize exact revisions.</p></div></div><details><summary><span class="lang-zh">展开信任边界：文档攻击、模型与日志</span><span class="lang-en">Expand trust boundaries: document attacks and logs</span></summary><div class="bilingual"><div class="lang-zh"><p>检索到的“忽略此前指令/发送秘密”是文档攻击；Microsoft Prompt Shields区分此类攻击，也不独立验证材料来源 [<a href="#ref-10">10</a>]。材料只能是带来源的数据，不能提升成system指令。本题生成器无外部工具；分隔符、检测器和提示都不是绝对防护，不把检测通过视为可信。</p><p>模型、重排和判断服务只接已授权内容；若调用外部托管处理器，必须有租户允许的数据处理/保留配置。最小化日志里的敏感正文和答案，按租户/权限管访问与保留期限；trace保存bundle、精确证据ID、失败原因和时延，调试页不能跨租户复制原文。</p></div><div class="lang-en"><p>Retrieved commands that override instructions or request secrets are document attacks. Microsoft Prompt Shields distinguishes them and does not independently verify provenance [<a href="#ref-10">10</a>]. Evidence is sourced data, never elevated system instructions. This generator has no external tools; delimiters, detectors and prompts remain imperfect, and a clean detector result does not establish trust.</p><p>Inference, rerank and judge processors receive only authorized content. Hosted processors require tenant-approved data handling/retention. Minimize sensitive text in logs, enforce tenant/policy access and retention, and retain bundle/exact evidence IDs, reasons and timing without copying cross-tenant content into debugging pages.</p></div></div></details></section>
+<section><h2><span class="lang-zh">新鲜度与迁移：双池还要能安全回退</span><span class="lang-en">Freshness and migration: dual pools must support rollback</span></h2><div class="bilingual"><div class="lang-zh"><p>更新先stage后发布，旧版本在准备期间服务；不先删旧造成空窗，也不把所有revision混进prompt。5分钟可查是A9教学目标，测源变更到发布的lag及最老失败job。删除/撤权先提交权威tombstone或ACL新代次，再异步清所有revision、两路索引和原文；0搜索命中不证明物理擦除或备份清理。</p><p>即使维度相同，embedding的tokenizer、前缀、pooling/归一化变化也可能改变坐标含义。新bundle绑定m2/g2和对应切分、两路索引；切分改变时BM25也要换代。图6两条查询路径是不同请求群，每条只用一份bundle，权限仍查全局最新状态。</p></div><div class="lang-en"><p>Stage updates before publication, allowing old current to serve during preparation. Do not delete first or mix revisions into prompts. The five-minute A9 target measures source-to-publication lag and oldest failed jobs. Deletes/revocations commit authority first, then purge every revision, both lanes and text. Zero search hits do not prove physical/backup erasure.</p><p>Even equal-dimensional embeddings may change coordinates through tokenizers, prefixes, pooling or normalization. New bundles pin m2/g2, splitter and both lanes; changed chunks also require new BM25 documents. Deck six’s paths are separate request cohorts, each using one bundle while policy remains globally live.</p></div></div><figure class="deck">
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d6s1t d6s1d">
           <title id="d6s1t">Pin a complete query bundle</title>
@@ -882,96 +918,62 @@
         </svg>
         <figcaption><span class="lang-zh">删除先提交 tombstone/ACL 代次，再异步清两路索引与原文。查询取证和每句释放前复查；撤销后线性化的复查不再通过，已发送文本不能追回。</span><span class="lang-en">Commit tombstones/policy first, then purge both indexes and text. Recheck at evidence fetch and each release; already sent text cannot be revoked.</span></figcaption>
       </div>
-    </figure><div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>内容更新采用第二组的 staging → READY → current。先删旧再写新会出现搜索空窗；只 insert 新块会把两个版本都送入 prompt。发布时旧向量可以暂留，但 current 核对让它失去资格，清理按 manifest 删除两路条目和旧 span。内容 5 min 可查是 A9 目标，应测源版本到可见发布的 lag，失败任务年龄不能只看队列平均值。</p>
-<p>删除和 ACL 撤销走更早的控制点：Catalog 先提交 tombstone 或新权限代次，查询从权威状态拒绝该证据，物理清理异步进行。删除任务必须列出该 doc 的全部 revision/manifest，而不是只清当前 5 个块。正文删除、向量删除、BM25 删除和来源点击都要验收；索引 0 命中不证明对象存储已经清空，物理擦除还有独立期限与备份策略。</p>
-<p>换 embedding 不只可能改变维度，tokenizer、pooling、归一化和输入前缀也可能改坐标含义。维度相同也不能混搜。新 bundle 带 model identity、splitter、两路 index generation 和打包配置。虽然 BM25 不用向量模型，切分变化会改它的文档统计与 chunk_id，因此也绑定到同一代；变更只影响 query model 时则按兼容性判断是否需重建。</p>
-<p>迁移先记录变更游标，再读取带 watermark 的源快照，离线生成 m2/g2。快照期间的增量按版本顺序回放，包括删除与 ACL；越过发布屏障后继续追增量。若源不提供一致快照和可保留的变更日志，选择冻结写入窗口或多轮全量对账并明示保证，不编造一个系统没有提供的原子 watermark。两路索引 READY 和 golden set 达标只是切流条件的一部分，源变更覆盖也必须验证。</p>
-<p>Catalog 原子切整份 bundle。请求开始 pin，整个 question → query embedding → Dense → rerank → prompt 都用这一份。切换前已开始的请求仍走 m1/g1，新请求走 m2/g2；图中两条绿色回程代表两个请求群，不是一个查询并行两种空间。请求 pin 不冻结权限，ACL/tombstone 总是按 A9 的权威复查，不能用“它是旧请求”逃过撤销。</p>
-<p>双池运行需要保留增量给两池，定时测 lag 与覆盖；只双写新 upsert 而不双写 delete，会让回退重新露出已删除的文档。切流失败可继续 g1，切后回退必须先确保旧池追上变更，并保持旧 query 模型可用。等待活跃请求 drain 和回退期限结束，再停止旧池增量、删旧向量与过期原文。别把回退当作仅切回一个 index alias。</p>
-<p>本章的“恢复”是从持久 job、源快照、manifest 和 query bundle 重建服务，不是从一段模型回答猜回丢掉的版本状态。即使 Index g2 全丢，也可以重建并继续让 g1 服务；若 Catalog 权威丢失且无法确认权限，查询必须停止释放相关内容。RAG 的可用性不能以丢掉文档权限为代价，这一项在正常压测和故障演练都要覆盖。</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>Updates stage, become READY, then publish current. Delete-before-insert creates a gap; insert-only leaves duplicate versions. Retained old entries become ineligible through current checks and later manifest-driven cleanup. Measure source-to-publication lag and oldest failed jobs against the A9 five-minute target.</p>
-<p>Commit tombstone/policy before asynchronous cleanup. Delete all document revisions/manifests, not only five current chunks. Verify both indexes, text, and citation access separately. Zero search hits do not prove physical erasure, which has its own deadline and backup policy.</p>
-<p>Model changes can alter tokenizer, pooling, normalization, or prefixes even at equal dimension. Pin model/splitter/index/packing identity. BM25 also needs a new generation when chunking changes its documents/statistics; query-only changes need compatibility analysis.</p>
-<p>Retain a change cursor before a watermarked source snapshot, backfill m2/g2, replay versioned additions/deletes/ACL changes through a barrier, and continue incrementals. Sources without consistent snapshots/logs require a write freeze or declared reconciliation guarantee. Index readiness and evaluation do not establish source coverage alone.</p>
-<p>Atomically switch the whole bundle. Existing requests use m1/g1 and new requests m2/g2 throughout. These are separate cohorts. A pinned request configuration never freezes access; authoritative policy/tombstone checks still apply.</p>
-<p>Feed both pools with updates and deletes through the rollback horizon. Upsert-only dual writes can resurrect deleted documents on rollback. Ensure old data and encoder remain current before switching back. Drain requests and expire rollback retention before retiring old indexes/text.</p>
-<p>Recovery rebuilds from durable jobs, snapshots, manifests, and bundles. Lost g2 can rebuild while g1 serves; uncertain Catalog authority stops affected output. Fault recovery must retain document authorization, not trade it for availability.</p>
-</div></div></section>
+    </figure><pre data-language="Pseudocode · backfill, switch and rollback" data-kind="pseudocode" data-source="migration.pseudo"><code>migrate(g1, g2):
+  start_retaining_change_log()                 # before the consistent snapshot
+  snapshot, watermark = source.snapshot_with_cursor()
+  backfill(snapshot, g2.model, g2.splitter, g2.bm25, g2.dense)
+  replay_in_source_order(g2, after=watermark)   # upserts, deletes AND ACL events
+  barrier = source.current_cursor()
+  wait_until_both_lanes_visible_and_reconciled(g2, through=barrier)
+  require evaluation_passes(g2) AND all_source_partitions_covered(barrier)
+  BEGIN Catalog; LOCK bundle_pointer
+  require current_bundle == g1 AND g2.complete_through &gt;= barrier
+  CAS bundle_pointer FROM g1 TO g2              # all immutable fields together
+  COMMIT
+  continue_replay(g1 AND g2)                    # retain old encoder too
+  # New requests pin g2; old requests keep g1. ACL/tombstone stays live globally.
 
-  <section>
-<h2><span class="lang-zh">评测：先定位哪一层掉了证据</span><span class="lang-en">Evaluation: locate the layer that lost evidence</span></h2>
-<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>A11 的 200 个问题都带 principal、固定源快照、标注相关跨度与可接受答案；按错误码、改写、中英跨语言、表格、跨段、冲突材料、无答案和权限变化分层。修改切分后 chunk_id 变了，人标以 doc/revision/span 保存，再映射新块，不然“旧 chunk id 没命中”只是标注过期。调参集和回归集分开，模型、配置、裁判版本以及人工抽查规则一起记录。</p>
-<p>检索层先看相关证据是否进入候选，再看 rerank 后和最终 Evidence Pack。一次相关集合有 5 段，实际取到 4 段，Recall@k = 4/5 = 0.8；k 表示当次截断位置，平均要说明按问题等权还是按段数加权。MRR 看第一个相关结果的位置，多个证据必须合在一起才能作答时，只看 MRR 会隐藏缺段问题。nDCG 适合分级相关性；不把三项揉成一个无法解释的“RAG 总分”。</p>
-<p>答案层看正确性、对上下文的忠实、引用支持与拒答行为。RAGAS 论文把答案拆陈述，估计被上下文支持的比例 [8]；裁判判断 5 条中 4 条有支持就是 0.8，这不是检索 Recall，也不证明陈述对真实世界正确。若材料本身过时，回答可以忠实但错误。每轮回归还要人工抽看裁判误接收与误拒绝，不重复原料里“某项和人标一定更齐”的无条件说法。</p>
-<p>引用指标分开看：编号有效率检查可机械确定的 ID，citation support 看被引跨度是否支持陈述，覆盖率看需要证据的陈述是否得到支持 [7]。这三项不能用“引用数很多”代替。无答案问题要报告拒答召回与错误拒答，故意不给权限的相关文档必须是零泄漏；判断器准确率不能成为放松 ACL 的借口。</p>
-<p>最后用同一流量形状评测首句 p95、全答时长、拒答/超时比例、候选 pair 数、输入输出 token 和摄取 lag。把 80 改为 160 候选，40 × 160 = 6,400 对/秒，若最终证据 Recall 没涨但首句破 3 s，就撤回这个改动。只有离线集合和有界线上实验都过门槛，才发布 query bundle；本轮页面提供白板预算与验证方法，没有实际语料检索或模型服务压测。</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>The 200 A11 queries carry identities, fixed source snapshots, relevant spans, and acceptable answers. Slice identifiers, paraphrases, languages, tables, multi-span evidence, contradictions, absent answers, and permission changes. Label document/revision/spans so splitter changes can remap labels. Keep tuning and regression sets separate and record judge/configuration versions.</p>
-<p>Measure recall at initial candidates, after rerank, and in final evidence. Four of five relevant spans yields Recall@k = 0.8; state cutoff and averaging. MRR measures the first relevant rank and may hide missing multi-span evidence; graded relevance can use nDCG. Keep layer-specific measures interpretable.</p>
-<p>Assess correctness, faithfulness, citation support, and refusals separately. RAGAS estimates the fraction of statements supported by context [8]; four of five is 0.8, distinct from retrieval recall or real-world correctness. Stale material can produce faithful but wrong answers. Human-calibrate judge false acceptance and rejection.</p>
-<p>Separate mechanical citation-ID validity, semantic support, and coverage of evidence-requiring statements [7]. Evaluate refusal on absent answers and false refusal. Inaccessible relevant documents must not leak; judge quality does not excuse weakened ACL checks.</p>
-<p>Measure first-sentence p95, full completion, refusals/timeouts, pairs, tokens, and ingest lag under the same workload. Doubling the cap to 160 yields 6,400 pairs/s; revert if evidence recall does not improve and the three-second target fails. Publish only after offline and bounded online checks. This page provides budgets and validation methods without live retrieval/model benchmarks.</p>
-</div></div></section>
+rollback(g2, g1):
+  barrier = source.current_cursor()
+  require g1.model_available AND log_retention_covers(g1.cursor, barrier)
+  replay_and_reconcile_all_changes(g1, through=barrier)  # especially deletes
+  require g1.searchable_through &gt;= barrier AND g1.evaluation_passes
+  CAS Catalog.bundle_pointer FROM g2 TO g1
+  # Missing logs/encoder/coverage =&gt; do not claim rollback is safe; rebuild instead.
 
-  <section>
-<h2><span class="lang-zh">翻车点与面试追问</span><span class="lang-en">Failure claims and interview follow-ups</span></h2>
-<table><thead><tr><th><span class="lang-zh">翻车说法</span><span class="lang-en">Failure claim</span></th><th><span class="lang-zh">修正后的边界</span><span class="lang-en">Correct boundary</span></th></tr>
-</thead><tbody><tr><td><span class="lang-zh">202 以后再 enqueue</span><span class="lang-en">Enqueue after 202</span></td><td><span class="lang-zh">先提交持久 job，再确认；否则进程崩溃丢摄取任务</span><span class="lang-en">Commit durable job before acknowledgement or crashes lose work</span></td></tr>
-<tr><td><span class="lang-zh">两路写成功就是可查</span><span class="lang-en">Two successful writes mean searchable</span></td><td><span class="lang-zh">等待可搜索回执与 manifest 核对，再发布 current</span><span class="lang-en">Wait for search visibility and manifest reconciliation</span></td></tr>
-<tr><td><span class="lang-zh">正文 hash 没变可跳过</span><span class="lang-en">Unchanged text hash means skip</span></td><td><span class="lang-zh">ACL、locator 与切分配置变化单独处理</span><span class="lang-en">Handle ACL, locator, and splitter changes separately</span></td></tr>
-<tr><td><span class="lang-zh">过滤后不足就少带权限条件</span><span class="lang-en">Relax access filters to fill candidates</span></td><td><span class="lang-zh">有界补召回，仍不足拒答；权威检查始终成立</span><span class="lang-en">Bound refill and refuse if needed; retain authoritative access</span></td></tr>
-<tr><td><span class="lang-zh">小块可读则父块也可读</span><span class="lang-en">Child access grants parent access</span></td><td><span class="lang-zh">父块全跨度同版本且单独复查权限</span><span class="lang-en">Check the whole same-revision parent separately</span></td></tr>
-<tr><td><span class="lang-zh">有真编号就是真引用</span><span class="lang-en">Valid IDs prove citations</span></td><td><span class="lang-zh">实际 Evidence Pack 的 ID 校验与陈述支持分开</span><span class="lang-en">Separate actual Evidence Pack IDs from statement support</span></td></tr>
-<tr><td><span class="lang-zh">先流出再校验</span><span class="lang-en">Stream then validate</span></td><td><span class="lang-zh">释放前按句校验；已发内容不能回滚</span><span class="lang-en">Validate before release; sent content cannot roll back</span></td></tr>
-<tr><td><span class="lang-zh">alias 切了迁移就完了</span><span class="lang-en">Alias switch completes migration</span></td><td><span class="lang-zh">整份 bundle 绑定，两池增量含删除，等 drain 后回收</span><span class="lang-en">Pin full bundles, replay deletes to both, then drain and retire</span></td></tr>
-</tbody></table><h3><span class="lang-zh">四个追问要能指着图回答</span><span class="lang-en">Four questions to answer on the board</span></h3>
-<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>为什么不先只做向量？可以把纯向量当实验基线，但本题有错误码、术语与中英改写，需要比较互补两路。增加 BM25 的代价是倒排存储、过滤一致性与删除协调；若黄金集证明单路已经达标，可以少一条路，而不是用“主流”两个字代替论证。</p>
-<p>文档更新后为什么仍看到旧内容？区分源更新尚未摄取、索引写入尚未可查、current 尚未发布、活跃查询已经 pin 的证据。查 trace 的 doc/revision、manifest 状态与源版本，不能只刷新浏览器。如果产品要求每个回答使用回答开始时的最新文档，就在取证时按 current；如果要回答整个过程中绝不变旧，就必须定义版本变化时取消或重检索，增加时延和重试。</p>
-<p>Rerank 贵怎么办？先看 3,200 对/秒和候选长度、模型批形状及排队，实验减少候选、更小判断模型或回退 RRF。它不能修复召回遗漏；若相关段落从未进名单，投入更贵 rerank 只是更仔细地给错误候选排序。拒答率与支持率也要一起看，不能只靠少发答案提高“准确率”。</p>
-<p>最后 20 秒收尾：摄取先持久接收，再 staging、两路可查、CAS 发布；查询由 RAG 拿身份与 bundle，hybrid、RRF、有界 rerank、Evidence Pack、校验释放，回程经过网关。失败不靠裸答补洞，删除先 deny 后 purge，模型改版用双池加整份配置切流。合上页重新画出两条闭环，再用第三组解释小块和父块、第五组解释真编号为什么仍可能不支持答案。</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>Pure dense retrieval is a valid experimental baseline. This workload motivates testing complementary lexical and multilingual semantic lanes; BM25 costs storage, consistent filtering, and delete coordination. Remove it if labeled evidence supports a simpler design.</p>
-<p>Staleness may occur before ingest, search visibility, current publication, or in already pinned evidence. Inspect doc/revision, manifest, and source state. “Latest at evidence fetch” differs from “never becomes stale during an answer”; the latter needs cancellation/retrieval on version change.</p>
-<p>For costly reranking, measure 3,200 pairs/s, lengths, batch shapes, and queues. Test smaller candidate caps/models or RRF fallback. Expensive reranking cannot recover omitted evidence; evaluate refusals and support together rather than increasing accuracy by answering fewer queries.</p>
-<p>Close with durable acceptance, staged readiness, and CAS publication; RAG-owned authenticated hybrid/RRF/rerank/evidence/validated release with Gateway returns. Refuse missing evidence, deny before purge, and migrate complete bundles across current dual pools. Redraw both loops, then explain parent access and why valid IDs can still cite unsupported claims.</p>
-</div></div></section>
-
-  <section>
-<h2><span class="lang-zh">引用与延伸</span><span class="lang-en">References and follow-ups</span></h2>
-<ol class="references"><li id="ref-1">[1] Patrick Lewis et al., <a href="https://arxiv.org/abs/2005.11401v4"><em>Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks</em></a>, NeurIPS 2020, arXiv v4 (2021). <span class="lang-zh">参数与非参数记忆的结合；本章服务边界是自行推导。</span><span class="lang-en">Parametric/nonparametric memory; service boundaries here are design choices.</span></li>
-<li id="ref-2">[2] Microsoft, <a href="https://learn.microsoft.com/en-us/azure/search/vector-search-how-to-chunk-documents"><em>Chunk large documents for RAG and vector search in Azure AI Search</em></a>, documentation, checked 2026-10-07. <span class="lang-zh">结构切分；10–15% 示例与 512/25% 起始建议；本章 64 overlap 是假设。</span><span class="lang-en">Structure-aware splitting; 10–15% example and 512/25% starting recommendation; sixty-four-token overlap is our assumption.</span></li>
-<li id="ref-3">[3] Elastic, <a href="https://www.elastic.co/docs/reference/elasticsearch/rest-apis/reciprocal-rank-fusion"><em>Reciprocal rank fusion</em></a>, documentation, checked 2026-10-07. <span class="lang-zh">排名从 1 开始、缺席为零，rank_constant 默认 60。</span><span class="lang-en">Ranks start at one, missing lists contribute zero, default rank_constant sixty.</span></li>
-<li id="ref-4">[4] Sentence Transformers project, <a href="https://sbert.net/examples/sentence_transformer/applications/retrieve_rerank/README.html"><em>Retrieve & Re-Rank</em></a>, documentation, checked 2026-10-07. <span class="lang-zh">召回后对候选用 CrossEncoder；80 候选是本章预算。</span><span class="lang-en">CrossEncoder after retrieval; eighty candidates is our budget.</span></li>
+retire(g1):
+  require no_active_g1_requests AND rollback_retention_expired
+  stop_g1_replay(); purge_g1_indexes_and_unpinned_text_by_manifest()
+  # Without consistent snapshots + retained logs, choose a write freeze or declare
+  # a weaker reconciliation contract. An index alias cannot create a source barrier.</code></pre><div class="bilingual"><div class="lang-zh"><p>输入是两套完整配置和支持快照/保留日志的源契约，输出是一次CAS切流或明确失败。屏障覆盖所有源分区，回放包含delete/ACL而非只upsert；可见性、源覆盖和黄金集都满足才切。源无一致快照/可保留日志时，选择冻结写入窗口或明示较弱对账保证，不能凭空造watermark。</p><p>切后继续喂两池并保留旧encoder；回退前旧池必须追到新屏障、删除对账通过。日志缺口或旧模型已下线则重建，不能只切alias宣称恢复。等旧请求drain且回退期结束才回收；引用所需的版本原文另遵保留政策，撤销后不可凭旧URL绕过。</p></div><div class="lang-en"><p>The inputs are complete old/new configurations and source snapshot/retained-log contracts; output is a CAS switch or explicit failure. The barrier covers every source partition and replays deletes/ACL events alongside upserts. Require search visibility, source coverage and labeled evaluation. Without consistent snapshots/log retention, freeze writes or declare weaker reconciliation.</p><p>After switching, feed both pools and retain the old encoder. Rollback requires catching the old pool up to a new barrier and reconciling deletes. Log gaps or a retired encoder require rebuilding; aliases alone do not recover correctness. Retire only after request drain and rollback expiry; exact citation text follows its own retention, always honoring revocation.</p></div></div></section>
+<section><h2><span class="lang-zh">评测与反例：定位哪层丢了证据</span><span class="lang-en">Evaluation and counterexamples: locate lost evidence</span></h2><div class="bilingual"><div class="lang-zh"><p>A11冻结200个带principal、doc/revision/span及答案标签的问题，调参与独立回归集分开。按术语、改写、中英、表格、多段、冲突、无答案和撤权分层；换切分后重新映射跨度标签。检索分别报召回→rerank→最终pack的Recall@k；5段中取到4段为0.8，MRR只看首个相关项，可能掩盖缺另一前提。</p><p>答案分报正确性、上下文忠实、有效ID、引用支持/覆盖和拒答。RAGAS按陈述估计上下文支持 [<a href="#ref-8">8</a>]：判断4/5有支持也是0.8，却不是检索Recall，更不证明材料本身正确。人工校准判断器误接收/误拒绝，权限隔离不交给模型打分。</p><p>同时测首个合格句p95、全答时长、超时/降级比例、pair数、输入输出token及摄取lag。80→160会把40QPS下的rerank上限3,200→6,400对/秒；若最终证据没改善且超SLO，就回退。这一章没有实际语料/厂商检索或LLM压测。</p></div><div class="lang-en"><p>Freeze 200 labeled queries with principals, document/revision/spans and answers; separate tuning from held-out regression. Slice terms, paraphrases, languages, tables, multiple spans, conflicts, absent answers and revocation. Remap span labels after splitter changes. Measure Recall@k at recall, rerank and final-pack stages; four of five is 0.8. First-relevant MRR may hide another missing premise.</p><p>Report correctness, faithfulness, ID validity, citation support/coverage and refusals separately. RAGAS estimates statement support from context [<a href="#ref-8">8</a>]; four of five is also 0.8, distinct from retrieval recall or source truth. Human-calibrate judge false acceptance/rejection; models never decide access.</p><p>Measure first-approved-sentence p95, completion, timeouts/degradation, pairs, tokens and ingest lag. Raising 80→160 doubles the 40-QPS cap from 3,200→6,400 pairs/s; revert without evidence gains if the SLO fails. No live corpus, vendor retrieval or LLM benchmark is claimed.</p></div></div></section>
+<section><h2><span class="lang-zh">面试复盘：把承诺落到控制点</span><span class="lang-en">Interview recap: identify the control points</span></h2><table><thead><tr><th><span class="lang-zh">翻车说法</span><span class="lang-en">Failure claim</span></th><th><span class="lang-zh">正确边界</span><span class="lang-en">Boundary</span></th></tr></thead><tbody><tr><td><span class="lang-zh">先回202再enqueue</span><span class="lang-en">202 before durable enqueue</span></td><td><span class="lang-zh">版本、job和回执先同事务提交</span><span class="lang-en">Commit revision, job and receipt first</span></td></tr><tr><td><span class="lang-zh">写成功就是可查</span><span class="lang-en">Write success means searchable</span></td><td><span class="lang-zh">全manifest与服务读者可见性核对后，按pool发布</span><span class="lang-en">Reconcile the whole manifest and serving visibility, then publish per pool</span></td></tr><tr><td><span class="lang-zh">只按tenant过滤</span><span class="lang-en">Tenant filtering is sufficient</span></td><td><span class="lang-zh">成员、文档及父块全跨度ACL；在读/打包/释放复查</span><span class="lang-en">Check membership, document and whole-parent ACLs at read/pack/release</span></td></tr><tr><td><span class="lang-zh">只复查本句引用</span><span class="lang-en">Recheck only cited spans</span></td><td><span class="lang-zh">包中任何依赖撤销均丢整份draft，重新生成</span><span class="lang-en">Any invalid pack dependency discards the draft and requires regeneration</span></td></tr><tr><td><span class="lang-zh">8×512就是完整prompt</span><span class="lang-en">8×512 is the entire prompt</span></td><td><span class="lang-zh">来源包装也计token，完整prompt与输出预留重计</span><span class="lang-en">Count provenance/wrappers and recount complete prompt plus output</span></td></tr><tr><td><span class="lang-zh">缓存命中不用鉴权</span><span class="lang-en">Cache hits bypass authorization</span></td><td><span class="lang-zh">ID缓存只优化召回；每次仍核对权威状态</span><span class="lang-en">ID caches optimize retrieval, with fresh authority checks</span></td></tr><tr><td><span class="lang-zh">回退只切alias</span><span class="lang-en">Rollback only switches aliases</span></td><td><span class="lang-zh">旧池/编码器保留，追平含delete的变更屏障</span><span class="lang-en">Retain old pool/encoder and catch up through a delete-inclusive barrier</span></td></tr></tbody></table><div class="bilingual"><div class="lang-zh"><p>正常路径：持久接收→领取代次→不可变产物→两路可见→发布current；鉴权与bundle→两路/RRF→有界rerank→全包预算→支持与权威复查→RAG释放。完整代码、运行方式与实际验证边界见 <a href="../examples/ch30/README.md">examples/ch30</a>。</p><p>重点口述三个反例：一条索引lane失败为何不发布；child可读为何不代表parent可读；私密B被撤销而回答只标公开A为何仍须丢整份draft。最后讲清检查/send空隙与双池回滚条件，避免把“有引用”当成安全和正确的总证明。</p></div><div class="lang-en"><p>Normal path: durable acceptance→claim epoch→immutable artifacts→both lanes visible→publish current; identity/bundle→hybrid/RRF→bounded rerank→pack budget→support and authority checks→RAG release. See <a href="../examples/ch30/README.md">examples/ch30</a> for sources, execution and verification limits.</p><p>Explain three counterexamples: one failed index lane prevents publication; readable children do not authorize parents; revoking private B invalidates a draft even when it cites only public A. State the check/send gap and rollback conditions, without treating citations as a universal correctness or security proof.</p></div></div></section>
+<section><h2><span class="lang-zh">引用与延伸</span><span class="lang-en">References and follow-ups</span></h2><ol class="references"><li id="ref-1">[1] Patrick Lewis et al., <a href="https://arxiv.org/abs/2005.11401v4"><em>Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks</em></a>, NeurIPS 2020, arXiv v4 (2021). <span class="lang-zh">参数与非参数记忆的结合；本章服务边界是自行推导。</span><span class="lang-en">Parametric/nonparametric memory; service boundaries here are design choices.</span></li>
+<li id="ref-2">[2] Microsoft, <a href="https://learn.microsoft.com/en-us/azure/search/vector-search-how-to-chunk-documents"><em>Chunk large documents for RAG and vector search in Azure AI Search</em></a>, documentation, checked 2026-10-24. <span class="lang-zh">结构切分与512/25%起点；64 overlap是本章假设。</span><span class="lang-en">Structure-aware splitting and 512/25% starting point; sixty-four-token overlap is our assumption.</span></li>
+<li id="ref-3">[3] Elastic, <a href="https://www.elastic.co/docs/reference/elasticsearch/rest-apis/reciprocal-rank-fusion"><em>Reciprocal rank fusion</em></a>, documentation, checked 2026-10-24. <span class="lang-zh">排名从 1 开始、缺席为零，rank_constant 默认 60。</span><span class="lang-en">Ranks start at one, missing lists contribute zero, default rank_constant sixty.</span></li>
+<li id="ref-4">[4] Sentence Transformers project, <a href="https://sbert.net/examples/sentence_transformer/applications/retrieve_rerank/README.html"><em>Retrieve & Re-Rank</em></a>, documentation, checked 2026-10-24. <span class="lang-zh">召回后对候选用 CrossEncoder；80 候选是本章预算。</span><span class="lang-en">CrossEncoder after retrieval; eighty candidates is our budget.</span></li>
 <li id="ref-5">[5] pgvector project, <a href="https://github.com/pgvector/pgvector/blob/v0.8.0/README.md"><em>README · Filtering and Iterative Index Scans</em></a>, v0.8.0 (2024). <span class="lang-zh">近似扫描后过滤，迭代扫描补足或触及上限；不证明百万条容量阈值。</span><span class="lang-en">Post-scan filtering and capped iterative scans; no universal million-row threshold.</span></li>
-<li id="ref-6">[6] Microsoft, <a href="https://learn.microsoft.com/en-us/azure/search/search-security-trimming-for-azure-search"><em>Security filters for trimming results in Azure AI Search</em></a>, documentation, checked 2026-10-07. <span class="lang-zh">principal 字符串过滤本身不做认证授权。</span><span class="lang-en">Principal-string filtering does not authenticate or authorize.</span></li>
+<li id="ref-6">[6] Microsoft, <a href="https://learn.microsoft.com/en-us/azure/search/search-security-trimming-for-azure-search"><em>Security filters for trimming results in Azure AI Search</em></a>, documentation, checked 2026-10-24. <span class="lang-zh">principal 字符串过滤本身不做认证授权。</span><span class="lang-en">Principal-string filtering does not authenticate or authorize.</span></li>
 <li id="ref-7">[7] Tianyu Gao, Howard Yen, Jiatong Yu, Danqi Chen, <a href="https://aclanthology.org/2023.emnlp-main.398/"><em>Enabling Large Language Models to Generate Text with Citations</em></a>, EMNLP 2023. <span class="lang-zh">ALCE 引用支持/覆盖与精度，不把集合包含性当支持。</span><span class="lang-en">ALCE support/coverage and precision; ID membership does not establish support.</span></li>
 <li id="ref-8">[8] Shahul Es, Jithin James, Luis Espinosa-Anke, Steven Schockaert, <a href="https://aclanthology.org/2024.eacl-demo.16/"><em>RAGAs: Automated Evaluation of Retrieval Augmented Generation</em></a>, EACL 2024. <span class="lang-zh">拆陈述后估计上下文支持比例，裁判仍需校准。</span><span class="lang-en">Estimate supported statements; calibrate automated judges.</span></li>
 <li id="ref-9">[9] Nelson F. Liu et al., <a href="https://arxiv.org/abs/2307.03172v3"><em>Lost in the Middle: How Language Models Use Long Contexts</em></a>, arXiv v3 (2023). <span class="lang-zh">所测模型的上下文位置效应，不推广到所有新模型。</span><span class="lang-en">Context-position effects in tested models, not every newer model.</span></li>
-<li id="ref-10">[10] Microsoft, <a href="https://learn.microsoft.com/en-us/azure/foundry/openai/concepts/content-filter-prompt-shields"><em>Prompt Shields in Microsoft Foundry</em></a>, documentation, checked 2026-10-07. <span class="lang-zh">文档攻击与不可信材料；检测不能作为绝对保证。</span><span class="lang-en">Document attacks and untrusted evidence; detection is not a guarantee.</span></li>
-</ol><p class="cite"><span class="lang-zh">站内延伸：</span><span class="lang-en">Course follow-ups:</span> <a class="chip" href="ch03.html">Ch03</a> <a class="chip" href="ch29.html">Ch29</a> <a class="chip" href="ch31.html"><span class="lang-zh">Ch31</span><span class="lang-en">Ch31</span></a> <a class="chip" href="ch32.html"><span class="lang-zh">Ch32</span><span class="lang-en">Ch32</span></a> <a class="chip" href="ch37.html">Ch37</a> <a class="chip" href="ch38.html">Ch38</a> <a class="chip" href="ch41.html"><span class="lang-zh">Ch41</span><span class="lang-en">Ch41</span></a></p>
-</section>
-
-  <section>
-<h2><span class="lang-zh">闪卡</span><span class="lang-en">Flashcards</span></h2>
-<p class="cite"><span class="lang-zh">点一下翻面；先把路径和算式说出来。</span><span class="lang-en">Click to flip; explain paths and calculations first.</span></p>
-<div class="cards-grid"><button type="button" class="flip"><span class="q"><span class="lang-zh">为什么先写持久 job？</span><span class="lang-en">Why persist the job first?</span></span><span class="a"><span class="lang-zh">accepted 之后连接器崩溃，Ingest 仍能从 Catalog 领取，不丢任务。</span><span class="lang-en">After acceptance, Ingest can claim the Catalog job even if Connector crashes.</span></span></button>
-<button type="button" class="flip"><span class="q"><span class="lang-zh">2,000 token 有几块？</span><span class="lang-en">How many chunks for 2,000 tokens?</span></span><span class="a"><span class="lang-zh">1 + ceil((2,000 − 512)/448) = 5；尾块 208 token。</span><span class="lang-en">1 + ceil((2,000 − 512)/448) = 5; final span 208 tokens.</span></span></button>
-<button type="button" class="flip"><span class="q"><span class="lang-zh">裸向量有多大？</span><span class="lang-en">Raw vector size?</span></span><span class="a"><span class="lang-zh">50 万 × 768 × 4 = 1.536 GB ≈ 1.431 GiB，索引与副本另算。</span><span class="lang-en">500,000 × 768 × 4 = 1.536 GB ≈ 1.431 GiB, before indexes/copies.</span></span></button>
-<button type="button" class="flip"><span class="q"><span class="lang-zh">overlap 与膨胀比例一样吗？</span><span class="lang-en">Does overlap equal corpus growth?</span></span><span class="a"><span class="lang-zh">64/512 = 12.5%；示例 2,256/2,000 − 1 = 12.8%，分母不同。</span><span class="lang-en">64/512 = 12.5%; 2,256/2,000 − 1 = 12.8%, different denominators.</span></span></button>
-<button type="button" class="flip"><span class="q"><span class="lang-zh">RRF 怎么算？</span><span class="lang-en">How is RRF calculated?</span></span><span class="a"><span class="lang-zh">按路求 1/(60+rank)；缺席为零，不裸加原始分数。</span><span class="lang-en">Sum 1/(60+rank); missing-lane contribution zero, no raw-score addition.</span></span></button>
-<button type="button" class="flip"><span class="q"><span class="lang-zh">rerank 峰值工作量？</span><span class="lang-en">Peak reranking work?</span></span><span class="a"><span class="lang-zh">40 × 80 = 3,200 对/秒；容量要对实际模型压测。</span><span class="lang-en">40 × 80 = 3,200 pairs/s; benchmark actual model capacity.</span></span></button>
-<button type="button" class="flip"><span class="q"><span class="lang-zh">READY 在哪里发布？</span><span class="lang-en">Where does READY publish?</span></span><span class="a"><span class="lang-zh">原文与两路索引可查后 CAS Catalog.current，并核对租约代次。</span><span class="lang-en">CAS Catalog.current after text and both lanes are visible; verify lease epoch.</span></span></button>
-<button type="button" class="flip"><span class="q"><span class="lang-zh">父块扩展检查什么？</span><span class="lang-en">Checks for parent expansion?</span></span><span class="a"><span class="lang-zh">同 revision、全跨度 ACL、去重、生成 tokenizer 的证据预算。</span><span class="lang-en">Same revision, whole-span access, deduplication, generation-tokenizer budget.</span></span></button>
-<button type="button" class="flip"><span class="q"><span class="lang-zh">真编号证明什么？</span><span class="lang-en">What does a valid ID prove?</span></span><span class="a"><span class="lang-zh">实际 Evidence Pack 有此来源；还要判断陈述支持，自动判断会误判。</span><span class="lang-en">Source membership in actual Evidence Pack; semantic support remains fallible.</span></span></button>
-<button type="button" class="flip"><span class="q"><span class="lang-zh">流式为什么先缓冲句子？</span><span class="lang-en">Why buffer streaming sentences?</span></span><span class="a"><span class="lang-zh">校验发生在释放前；已经发送的内容不能靠后处理撤回。</span><span class="lang-en">Validate before release; sent text cannot be retracted by postprocessing.</span></span></button>
-<button type="button" class="flip"><span class="q"><span class="lang-zh">删除先做哪一步？</span><span class="lang-en">First step of deletion?</span></span><span class="a"><span class="lang-zh">权威 tombstone/ACL 撤销，再异步清全部版本；复查与发送有竞争边界。</span><span class="lang-en">Commit tombstone/access change, then purge all versions; checks/send have a race boundary.</span></span></button>
-<button type="button" class="flip"><span class="q"><span class="lang-zh">换模型只切 alias 够吗？</span><span class="lang-en">Is switching an alias enough?</span></span><span class="a"><span class="lang-zh">整份 query bundle 绑定；双池回放含删除，旧模型保留到 drain 与回退期结束。</span><span class="lang-en">Pin full bundles; replay deletes to both pools; retain old encoder through drain/rollback.</span></span></button>
+<li id="ref-10">[10] Microsoft, <a href="https://learn.microsoft.com/en-us/azure/foundry/openai/concepts/content-filter-prompt-shields"><em>Prompt Shields in Microsoft Foundry</em></a>, documentation, checked 2026-10-24. <span class="lang-zh">文档攻击与不可信材料；检测不能作为绝对保证。</span><span class="lang-en">Document attacks and untrusted evidence; detection is not a guarantee.</span></li>
+<li id="ref-11">[11] Elastic, <a href="https://www.elastic.co/docs/api/doc/elasticsearch/operation/operation-indices-refresh"><em>Refresh an index</em></a>, checked 2026-10-24. <span class="lang-zh">refresh与搜索可见性，非跨库发布事务。</span><span class="lang-en">Refresh and search visibility, beyond a cross-store transaction claim.</span></li><li id="ref-12">[12] PostgreSQL18, <a href="https://www.postgresql.org/docs/18/explicit-locking.html"><em>Explicit Locking</em></a>, checked 2026-10-24. <span class="lang-zh">行锁、锁顺序与事务边界；本地SQLite不验证PG执行。</span><span class="lang-en">Row locks, ordering and transaction boundaries; SQLite does not verify PG execution.</span></li></ol><p class="cite"><a class="chip" href="ch03.html">Ch03</a> <a class="chip" href="ch29.html">Ch29</a> <a class="chip" href="ch31.html">Ch31</a> <a class="chip" href="ch32.html">Ch32</a></p></section>
+<section><h2><span class="lang-zh">闪卡</span><span class="lang-en">Flashcards</span></h2><p class="cite"><span class="lang-zh">先说控制点，再说失败边界；点击翻面。</span><span class="lang-en">Name the control point and failure boundary, then flip.</span></p><div class="cards-grid"><button type="button" class="flip"><span class="q"><span class="lang-zh">202承诺什么？</span><span class="lang-en">What does 202 promise?</span></span><span class="a"><span class="lang-zh">Catalog已持久提交源版本/job/回执，不代表可查。</span><span class="lang-en">Catalog committed revision/job/receipt, not searchability.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">2,000 token有几块？</span><span class="lang-en">Chunks for 2,000 tokens?</span></span><span class="a"><span class="lang-zh">1+ceil((2,000−512)/448)=5，尾块208。</span><span class="lang-en">1+ceil((2,000−512)/448)=5, final 208.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">裸向量大小？</span><span class="lang-en">Raw vector size?</span></span><span class="a"><span class="lang-zh">50万×768×4=1.536GB≈1.431GiB；索引/副本另算。</span><span class="lang-en">500,000 × 768 × 4 = 1.536 GB ≈ 1.431 GiB, before indexes/copies.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">overlap等于膨胀吗？</span><span class="lang-en">Overlap equals growth?</span></span><span class="a"><span class="lang-zh">64/512=12.5%；2,256/2,000−1=12.8%，分母不同。</span><span class="lang-en">64/512 = 12.5%; 2,256/2,000 − 1 = 12.8%, different denominators.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">RRF如何去重？</span><span class="lang-en">How does RRF deduplicate?</span></span><span class="a"><span class="lang-zh">同路同来源只计一次，保留原rank，再按路加1/(60+rank)。</span><span class="lang-en">Once per qualified ID/lane, preserving original rank; sum 1/(60+rank).</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">rerank工作量？</span><span class="lang-en">Rerank work?</span></span><span class="a"><span class="lang-zh">40×80=3,200对/秒；不证明GPU达标。</span><span class="lang-en">40 × 80 = 3,200 pairs/s; no GPU capacity claim.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">current按什么维护？</span><span class="lang-en">How is current scoped?</span></span><span class="a"><span class="lang-zh">按tenant/doc/pool发布；全局ACL/tombstone独立，不被旧内容恢复。</span><span class="lang-en">Publish per tenant/doc/pool; independent global ACL/tombstone cannot be restored by content.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">父块检查什么？</span><span class="lang-en">Parent checks?</span></span><span class="a"><span class="lang-zh">同版本同池，全部跨度ACL，去重与完整token预算。</span><span class="lang-en">Same revision/pool, whole-span ACLs, deduplication and complete token budget.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">8×512能装满吗？</span><span class="lang-en">Can eight 512-token spans fit?</span></span><span class="a"><span class="lang-zh">编号、来源、分隔符也占4,096预算；完整prompt≤5,120，另留512输出。</span><span class="lang-en">IDs/provenance/delimiters share 4,096; complete prompt ≤5,120 plus 512 output.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">真编号证明支持吗？</span><span class="lang-en">Do valid IDs prove support?</span></span><span class="a"><span class="lang-zh">只证明实际包有该来源；规则核条件，自由文本判断器会误判。</span><span class="lang-en">Only actual pack membership; rules check conditions, while free-text judges can fail.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">只标A，撤销B怎么办？</span><span class="lang-en">Only A is cited; B is revoked?</span></span><span class="a"><span class="lang-zh">B若已入prompt，整份draft作废；只查A或删B脚注都不够。</span><span class="lang-en">If B entered the prompt, discard the whole draft; checking A or deleting B’s cite is insufficient.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">检查后撤销能追回吗？</span><span class="lang-en">Revoke after the check?</span></span><span class="a"><span class="lang-zh">检查/send有空隙，已通过或已发字节可能到达；更强确认须串行/drain。</span><span class="lang-en">A check/send gap remains; approved/in-flight bytes may arrive. Stronger acknowledgement needs serialization/drain.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">缓存TTL能证明权限？</span><span class="lang-en">Does cache TTL prove access?</span></span><span class="a"><span class="lang-zh">不能；ID缓存命中仍权威复查，答案缓存本题关闭。</span><span class="lang-en">No; cached IDs still reauthorize. Answer caching is disabled here.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">回退只切alias够吗？</span><span class="lang-en">Is alias rollback enough?</span></span><span class="a"><span class="lang-zh">旧编码器与双池追平含delete的屏障，drain/回退期后才回收。</span><span class="lang-en">Retain old encoder and replay deletes through the barrier; retire after drain/rollback expiry.</span></span></button>
 </div></section>
-
   <p><button type="button" class="read-toggle"><span class="when-off"><span class="lang-zh">我已学完本章</span><span class="lang-en">Mark this chapter done</span></span><span class="when-on"><span class="lang-zh">已学完本章</span><span class="lang-en">Completed</span></span></button></p>
   <p class="cite"><span class="lang-zh">进度存在这台浏览器里。</span><span class="lang-en">Saved in this browser only.</span></p>
 </article>

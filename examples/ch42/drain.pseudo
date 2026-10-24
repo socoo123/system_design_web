@@ -1,0 +1,19 @@
+on preStop drain request or TERM:
+    under the same local lock as HTTP admission:
+        if already draining: return existing drain task
+        close admission; fix monotonic drain cutoff once
+    report not-ready
+    stop dispatching new queue work
+    pause every assigned partition           // poll thread only
+    disable new retries; keep existing durable obligations
+    while before local drain cutoff:
+        poll paused consumer; process completion notifications
+        commit only safe fetched-record prefixes still owned
+        if actual local I/O == 0 and no dispatched work remains: break
+    final bounded commit of safe positions if still assigned
+    close consumer within remaining budget
+    exit; unfinished effects/unknown commits replay with original keys
+// Queue ownership loss invalidates the old completion generation.
+// Endpoint propagation and TERM run in parallel: late routes are refused.
+// preStop consumes the Pod grace period; reserve time for close/exit.
+// SIGKILL may cut any step; neither exit nor cancellation proves rollback.

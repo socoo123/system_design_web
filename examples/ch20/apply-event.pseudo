@@ -1,0 +1,24 @@
+# PostgreSQL 18 READ COMMITTED; one authoritative database, bound parameters.
+# Input: trusted handler/event_id + COMPLETE effect intent (account_id, delta_cents).
+# Output: APPLIED/ALREADY_APPLIED(result) or failure; no Kafka commit inside this DB txn.
+applyEvent(handler, event_id, account_id, delta_cents):
+  BEGIN
+  inserted = INSERT INTO inbox(handler,event_id,account_id,delta_cents)
+    VALUES(:handler,:event_id,:account_id,:delta_cents)
+    ON CONFLICT (handler,event_id) DO NOTHING RETURNING event_id
+  if inserted is empty:
+    old = SELECT account_id,delta_cents,result_balance FROM inbox
+      WHERE handler=:handler AND event_id=:event_id
+    if old missing or old.result_balance is NULL: ROLLBACK; fail invariant
+    if old.account_id != account_id or old.delta_cents != delta_cents:
+      ROLLBACK; fail EVENT_ID_REUSED_WITH_DIFFERENT_INTENT
+    COMMIT; return ALREADY_APPLIED(old.result_balance)
+  result = UPDATE ledger SET balance_cents=balance_cents+:delta_cents
+    WHERE account_id=:account_id RETURNING balance_cents
+  if result is empty: ROLLBACK; fail UNKNOWN_ACCOUNT
+  UPDATE inbox SET result_balance=:result WHERE handler=:handler AND event_id=:event_id
+  COMMIT                               # only confirmed commit completes this work
+  return APPLIED(result)
+# Any statement error: ROLLBACK; do not complete the worker ticket.
+# COMMIT timeout/connection loss: discard connection; retry SAME event + full intent.
+# Never commit the inbox row separately or call an external bank in this transaction.

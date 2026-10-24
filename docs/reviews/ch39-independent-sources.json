@@ -1,0 +1,113 @@
+{
+  "checked": "2026-10-24",
+  "method": "independent web open/find of official standards, original papers and project docs",
+  "envoyDocsHeader": "1.41.0-dev-7d393e latest docs at retrieval",
+  "sources": [
+    {
+      "reference": 1,
+      "url": "https://www.usenix.org/system/files/conference/nsdi16/nsdi16-paper-eisenbud.pdf",
+      "supports": [
+        "§2.1 encapsulation / direct server return",
+        "§3.3 finite local connection tracking evicts only expired entries; full table reselects unrecorded traffic",
+        "§3.4 fixed-table lookup and deterministic population; full configuration must agree"
+      ]
+    },
+    {
+      "reference": 2,
+      "url": "https://www.rfc-editor.org/rfc/rfc9113.html",
+      "supports": [
+        "§6.8 GOAWAY last-stream-ID separates potentially processed streams from higher unprocessed streams",
+        "Multiplexed streams share a connection; GOAWAY stops new streams but does not undo work"
+      ]
+    },
+    {
+      "reference": 3,
+      "url": "https://grpc.io/blog/grpc-load-balancing/",
+      "supports": [
+        "Official 2017 article distinguishes proxy and client-side RPC choices",
+        "Historical product list is not reused; new RPC selection does not migrate active streams"
+      ]
+    },
+    {
+      "reference": 4,
+      "url": "https://www.envoyproxy.io/docs/envoy/latest/intro/arch_overview/upstream/load_balancing/load_balancers",
+      "supports": [
+        "Equal weights default N=2 random available hosts and choose least active",
+        "Unequal weights use a separate dynamic branch; example intentionally narrower"
+      ]
+    },
+    {
+      "reference": 5,
+      "url": "https://redis.io/docs/latest/operate/oss_and_stack/management/replication/",
+      "supports": [
+        "Default asynchronous replication",
+        "WAIT acknowledged copies are not strong consistency/CP; failover write loss remains possible"
+      ]
+    },
+    {
+      "reference": 6,
+      "url": "https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html",
+      "supports": [
+        "Secure/HttpOnly/SameSite session-cookie policy",
+        "Server invalidation and session-ID renewal on authentication/privilege changes"
+      ]
+    },
+    {
+      "reference": 7,
+      "url": "https://www.envoyproxy.io/docs/envoy/latest/intro/arch_overview/upstream/health_checking",
+      "supports": [
+        "Active checks are configurable, including interval/failure thresholds and HTTP/gRPC/L3-L4",
+        "Identity/representative app check versus mere TCP connect is a stated design consequence; no 4.5s vendor default asserted"
+      ]
+    },
+    {
+      "reference": 8,
+      "url": "https://www.envoyproxy.io/docs/envoy/latest/intro/arch_overview/operations/draining",
+      "supports": [
+        "Default server shutdown closes listeners immediately; graceful drain is a separate sequence",
+        "Drain depends on supported network filters; HTTP2 uses GOAWAY"
+      ]
+    },
+    {
+      "reference": 9,
+      "url": "https://www.rfc-editor.org/rfc/rfc9110.html",
+      "supports": [
+        "§9.2.2 client safe-retry conditions and proxy prohibition on automatic non-idempotent retries",
+        "Persistent dedupe/effect-result binding belongs to the business protocol, not the RFC guarantee"
+      ]
+    },
+    {
+      "reference": 10,
+      "url": "https://people.csail.mit.edu/karger/Papers/web.pdf",
+      "supports": [
+        "Original consistent hashing work targets World Wide Web distributed caching; ring is not KV-only"
+      ]
+    },
+    {
+      "reference": 11,
+      "url": "https://www.envoyproxy.io/docs/envoy/latest/api-v3/extensions/load_balancing_policies/maglev/v3/maglev.proto",
+      "supports": [
+        "Default table_size=65537; prime-size constraint",
+        "Minimal disruption is not an absolute guarantee; 4-byte slots are A11 assumptions"
+      ]
+    },
+    {
+      "reference": 12,
+      "url": "https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/#pod-termination",
+      "supports": [
+        "Kubelet shutdown and control-plane EndpointSlice evaluation happen concurrently",
+        "Terminating endpoints keep ready=false and separate serving condition",
+        "Inference explicitly checked: this async lifecycle does not itself implement the chapter custom all-relevant-ingress ACK barrier"
+      ]
+    },
+    {
+      "reference": 13,
+      "url": "https://www.envoyproxy.io/docs/envoy/latest/intro/arch_overview/upstream/load_balancing/panic_threshold",
+      "supports": [
+        "Default panic threshold50%; panic may select all hosts disregarding health or fail per configuration",
+        "The local model no-host rejection is explicit policy, not default panic behavior"
+      ]
+    }
+  ],
+  "noTransferredMeasurements": "All chapter capacities/timings/memory slot widths are A1–A12 teaching assumptions."
+}

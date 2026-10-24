@@ -1,0 +1,910 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="parchment" data-locale="zh">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ch27 · 即时配送</title>
+  <link rel="icon" href="../favicon.ico" sizes="48x48">
+  <link rel="stylesheet" href="../assets/css/style.css">
+  <script src="../assets/js/boot.js"></script>
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="../index.html"><span class="brand-logo">SD</span><span class="lang-zh">系统设计面试</span><span class="lang-en">System Design Interview</span></a>
+  <span class="spacer"></span>
+  <a class="map-link" href="../index.html"><span class="lang-zh">课程地图</span><span class="lang-en">Map</span></a>
+  <div class="seg" role="group" aria-label="language">
+    <button type="button" data-locale-set="zh">中文</button>
+    <button type="button" data-locale-set="both"><span class="lang-zh">对照</span><span class="lang-en">Both</span></button>
+    <button type="button" data-locale-set="en">EN</button>
+  </div>
+  <div class="seg" role="group" aria-label="theme">
+    <button type="button" data-theme-set="parchment"><span class="lang-zh">护眼</span><span class="lang-en">Paper</span></button>
+    <button type="button" data-theme-set="dracula"><span class="lang-zh">深色</span><span class="lang-en">Dark</span></button>
+  </div>
+</header>
+<main class="wrap">
+<article class="chapter" id="ch27" data-ch="ch27">
+<header><div class="ch-kicker"><span class="lang-zh">CHAPTER 27 · 系统设计题</span><span class="lang-en">CHAPTER 27 · case</span></div><h1><span class="lang-zh">即时配送</span><span class="lang-en">Instant delivery</span></h1><p class="ch-meta-line"><span class="lang-zh">约 40 分钟 · 前置：Ch19、Ch20、Ch24、Ch25 · 6 组 / 31 帧演进图</span><span class="lang-en">~40 min · after Ch19, Ch20, Ch24, Ch25 · 6 evolution decks / 31 frames</span></p></header>
+<section class="goal">
+<h2><span class="lang-zh">本章主线：先守住双方占位，再优化匹配</span><span class="lang-en">Core: preserve bilateral occupancy before optimizing matching</span></h2>
+<div class="bilingual"><div class="lang-zh"><ul><li><strong>一个订单只有一个当前执行者。</strong>每个骑手槽位只绑一单；本章每人最多两个槽位，offered 也占位。</li><li><strong>派单事实放进一个事务。</strong>预占、accept、到期、取消都经过同一订单与容量权威；旧代次不能恢复执行权。</li><li><strong>位置是投影，履约是事实。</strong>新鲜点用于召回，掉线与 GPS 过期不能自动撤回已经取走的餐。</li></ul></div><div class="lang-en"><ul><li><strong>One current assignee per order.</strong> Each courier slot binds one order; this example allows two slots, including unanswered offers.</li><li><strong>One transaction authority.</strong> Reservation, accept, expiry and cancellation use the same order/capacity authority. Old generations cannot regain execution rights.</li><li><strong>Location is a projection; fulfillment is fact.</strong> Fresh points support recall. Disconnection or stale GPS cannot revoke physical custody.</li></ul></div></div>
+</section>
+
+<section>
+<h2><span class="lang-zh">30 秒开场与必要假设</span><span class="lang-en">A 30-second opening and assumptions</span></h2>
+<div class="bilingual"><div class="lang-zh"><p class="say">我设计一城外卖履约：支付确认后，先持久保存 pending_match；召回附近候选，过滤新鲜度、资质和容量，再比较到店路耗与迟到风险。选人后原子预占订单和骑手槽位，提交 offer 与 Outbox，骑手 accept 成功才 assigned。服务端到期扫描释放未接 offer 并推进 generation；旧消息重试只能查询原结果。高峰按区域控制新承诺，保住存量履约。</p><p>先澄清配送类型、平台接受订单的时刻、多单上限、准时目标与取餐后交接权限。本章选外卖、准时优先、每个 offer 只发给一个骑手；同一骑手可占两个不同槽位。广播抢单也要经过相同的事务约束。</p></div><div class="lang-en"><p class="say">Design one-city food fulfillment. After confirmed payment, persist pending_match, recall nearby couriers, filter freshness/eligibility/capacity, then compare pickup travel and lateness. Atomically reserve order and courier slot with offer/outbox; assigned requires committed business acceptance. Server expiry releases unanswered offers and advances generation. Retried old messages query original results. Gate new zone commitments while protecting existing work.</p><p>Clarify delivery type, platform acceptance, multi-order limit, punctuality and post-pickup handoff authority. This example prioritizes punctuality and sends each offer to one courier; a courier may occupy two distinct slots. Broadcast grabbing still needs the same transactional constraints.</p></div></div>
+<details><summary><span class="lang-zh">展开 A1–A12：容量、时间与故障前提</span><span class="lang-en">A1–A12: capacity, timing and failure premises</span></summary><table><thead><tr><th><span class="lang-zh">假设编号</span><span class="lang-en">Assumption</span></th><th><span class="lang-zh">教学取值</span><span class="lang-en">Teaching value</span></th><th><span class="lang-zh">改变的决定</span><span class="lang-en">Design consequence</span></th></tr></thead><tbody>
+<tr><td><span class="lang-zh">A1 · 城市与峰值</span><span class="lang-en">A1 · city and peak</span></td><td><span class="lang-zh">50 万单/天；峰值系数 10；一天 86,400 秒</span><span class="lang-en">500,000 orders/day; 10× peak; 86,400 s/day</span></td><td><span class="lang-zh">平均 5.79/s，峰值 57.87/s；不全国扫描</span><span class="lang-en">5.79/s average, 57.87/s peak; local recall</span></td></tr>
+<tr><td><span class="lang-zh">A2 · 骑手位置</span><span class="lang-en">A2 · courier location</span></td><td><span class="lang-zh">在线 10,000；常态间隔 5 秒；硬上限每人 1/s</span><span class="lang-en">10,000 online; nominal 5 s; hard cap 1/s per courier</span></td><td><span class="lang-zh">常态 2,000/s，突发 10,000/s 另预算</span><span class="lang-en">2,000/s nominal; budget 10,000/s burst separately</span></td></tr>
+<tr><td><span class="lang-zh">A3 · 包与留存</span><span class="lang-en">A3 · bytes and retention</span></td><td><span class="lang-zh">位置负载 200 B；最新详情 500 B；履约行 2 KB，保留 30 天、3 份拷贝</span><span class="lang-en">200 B point; 500 B latest detail; 2 KB fulfillment, 30 days, 3 copies</span></td><td><span class="lang-zh">负载与整条日志分开，KB/GB 按十进制</span><span class="lang-en">Separate payload from logs; decimal KB/GB</span></td></tr>
+<tr><td><span class="lang-zh">A4 · 召回和路耗</span><span class="lang-en">A4 · recall and routes</span></td><td><span class="lang-zh">示例召回 20 人、过滤后 8 人；取货点 1 个；打分窗口 1 秒</span><span class="lang-en">Recall 20, retain 8; one pickup; 1 s scoring window</span></td><td><span class="lang-zh">先过滤再算 8×1 个路耗元素；短窗可批量配对</span><span class="lang-en">Filter before eight route elements; optional batch matching</span></td></tr>
+<tr><td><span class="lang-zh">A5 · offer 与上限</span><span class="lang-en">A5 · offer and limits</span></td><td><span class="lang-zh">offer 20 秒；最多 3 次自动尝试；待匹配期限 120 秒；骑手最多 2 个占用</span><span class="lang-en">20 s offer; ≤3 automatic attempts; 120 s match deadline; 2 occupied slots</span></td><td><span class="lang-zh">offered 算占用；assigned 不重复加负载</span><span class="lang-en">offered consumes a slot; assigned does not add another</span></td></tr>
+<tr><td><span class="lang-zh">A6 · 位置新鲜度</span><span class="lang-en">A6 · freshness</span></td><td><span class="lang-zh">采集年龄保守上界 ≤30 秒；时钟偏差界 ±5 秒；定位精度 ≤50 米；回收 TTL 60 秒</span><span class="lang-en">Capture-age upper bound ≤30 s; clock bound ±5 s; accuracy ≤50 m; cleanup TTL 60 s</span></td><td><span class="lang-zh">不满足时间/精度/在线门限就不作为候选</span><span class="lang-en">Exclude candidates failing age, accuracy or online gates</span></td></tr>
+<tr><td><span class="lang-zh">A7 · 可解释成本</span><span class="lang-en">A7 · explainable cost</span></td><td><span class="lang-zh">J=到店分钟+4×迟到风险+2×负载；A=(2,0.5,1)，B=(4,0.1,0)</span><span class="lang-en">J=pickup minutes+4×late risk+2×load; A=(2,0.5,1), B=(4,0.1,0)</span></td><td><span class="lang-zh">A=6，B=4.4；较小者优先；公平额外约束</span><span class="lang-en">A=6, B=4.4; lower cost wins; fairness is a constraint</span></td></tr>
+<tr><td><span class="lang-zh">A8 · 热区压力场景</span><span class="lang-en">A8 · hot-zone stress case</span></td><td><span class="lang-zh">到达 20/s；可行派单 12/s；空位 600；邻区最多借 2/s</span><span class="lang-en">20/s arrivals; 12/s feasible assignments; 600 free queue slots; borrow ≤2/s</span></td><td><span class="lang-zh">净积压 8/s，75 秒满；借人后仍 6/s</span><span class="lang-en">8/s growth, full in 75 s; 6/s after borrowing</span></td></tr>
+<tr><td><span class="lang-zh">A9 · 观看轨迹</span><span class="lang-en">A9 · tracking</span></td><td><span class="lang-zh">同时 3,000 个观看连接；每 5 秒最多推 1 个最新点，200 B/点</span><span class="lang-en">3,000 watchers; at most one latest point per 5 s; 200 B/point</span></td><td><span class="lang-zh">600 推送/s，原始负载 120 KB/s；连接数另算</span><span class="lang-en">600 pushes/s; 120 KB/s payload; connections are separate</span></td></tr>
+<tr><td><span class="lang-zh">A10 · ETA 示例</span><span class="lang-en">A10 · ETA example</span></td><td><span class="lang-zh">到店 4 分钟，出餐剩 6 分钟，到户路耗 8 分钟；无额外取餐停留</span><span class="lang-en">4 min to pickup; food ready in 6 min; 8 min to dropoff; no extra dwell</span></td><td><span class="lang-zh">max(4,6)+8=14 分钟；是示例预测，不是保证</span><span class="lang-en">max(4,6)+8=14 min; a prediction, not a guarantee</span></td></tr>
+<tr><td><span class="lang-zh">A11 · 权威与隔离</span><span class="lang-en">A11 · authority and isolation</span></td><td><span class="lang-zh">订单、attempt、骑手容量同一地域事务；已确认提交不回退；跨区借人仍回同一容量权威</span><span class="lang-en">Order, attempt and capacity share regional transactions; committed receipts survive failover; borrowed slots share authority</span></td><td><span class="lang-zh">无法证明权威时停新派；位置与队列隔离资源</span><span class="lang-en">Stop new assignments without authority; isolate location and queue resources</span></td></tr>
+<tr><td><span class="lang-zh">A12 · 投递、权限与降级</span><span class="lang-en">A12 · delivery, permissions and fallback</span></td><td><span class="lang-zh">控制消息至少一次；轨迹允许丢中间点；单人单 offer；重试带抖动并封顶；看点要验订单归属</span><span class="lang-en">Control delivery at least once; intermediate points may drop; one courier per offer; capped jittered retries; order-owner authorization</span></td><td><span class="lang-zh">传输 ACK 不算 accept；丢推送重拉当前快照</span><span class="lang-en">Transport ACK is not accept; recover with the current snapshot</span></td></tr>
+</tbody></table></details>
+<div class="bilingual"><div class="lang-zh"><p>全部数字都是<strong>教学假设</strong>。A8 是单独的热区压力变体；三份拷贝只用于存储估算，不证明已确认派单不丢。A11 额外要求确认提交在切换后仍存在；无法确认权威就暂停新派。20 秒 offer、三次尝试和 120 秒匹配期限都是产品选择。</p></div><div class="lang-en"><p>All numbers are <strong>teaching assumptions</strong>. A8 is a separate stress variant. Three copies size storage without proving durable dispatch; A11 separately requires confirmed commits to survive failover. Pause new assignments without authority. The 20 s offer, three-attempt cap and 120 s match deadline are product choices.</p></div></div>
+</section>
+
+<section>
+<h2><span class="lang-zh">先分别估订单、位置与用户出口</span><span class="lang-en">Size orders, location and viewer egress separately</span></h2>
+<div class="bilingual"><div class="lang-zh"><p>订单平均 <code>500,000÷86,400≈5.79/s</code>，10 倍峰值约 <strong>57.87/s</strong>。首轮每单召回 20 人是约 1,157 人次/s，过滤后 8 人去一个取货点是约 463 个路耗元素/s；元素不是 HTTP 调用数，重试另算。</p><p>10,000 名在线骑手每 5 秒上报一次是 <strong>2,000 点/s</strong>；200 B/点给出 0.4 MB/s = 3.2 Mb/s 原始负载。若到每人 1 Hz，变成 10,000/s 和 2 MB/s，均为五倍；是否承受得住要压测写放大和连接开销，位置和业务控制分别留配额。</p><p>3,000 名观看者每 5 秒最多推一票是 <strong>600 推送/s、120 KB/s</strong>。骑手与观看连接合计 13,000 条，连接预算不能用消息速率代替。按订单订阅，避免全城 2,000×3,000 = 600 万次点投递/s。</p></div><div class="lang-en"><p>Orders average 500,000/86,400≈5.79/s, about <strong>57.87/s</strong> at 10× peak. Twenty recalled couriers give 1,157 candidate visits/s; eight retained origins to one pickup give about 463 route elements/s. Elements are not HTTP calls; retries add load.</p><p>10,000 couriers reporting every 5 s produce <strong>2,000 points/s</strong>. At 200 B, payload is 0.4 MB/s = 3.2 Mb/s. One Hz produces 10,000/s and 2 MB/s, both 5×. Measure index amplification and connection costs; isolate location and control quotas.</p><p>3,000 viewers limited to one point per 5 s require <strong>600 pushes/s and 120 KB/s</strong>. The 13,000 courier/viewer connections need a separate budget. Order-scoped subscriptions avoid 2,000×3,000 = six million citywide point deliveries/s.</p></div></div>
+<details><summary><span class="lang-zh">最新点与历史留存：展开存储算式</span><span class="lang-en">Latest points versus history: storage arithmetic</span></summary><div class="bilingual"><div class="lang-zh"><p>最新详情负载 10,000×500 B = 5 MB，不含索引、对象开销和复制。若在线数全天不变并全量留点，2,000×86,400×200 B = 34.56 GB/天；真实在线数应按时间积分。履约行 500,000×2 KB = 1 GB/天，30 天三份为 90 GB；attempt、Outbox、日志、备份另算。均用十进制 KB/GB。</p></div><div class="lang-en"><p>Latest details are 10,000×500 B = 5 MB before indexes, object overhead and replication. Constant all-day online count with complete retention gives 34.56 GB/day; integrate real online counts over time. Fulfillment rows are 1 GB/day, or 90 GB for 30 days and three copies. Attempts, outbox, logs and backups are extra. Units are decimal.</p></div></div>
+</details></section>
+
+<section>
+<h2><span class="lang-zh">履约入口：持久事实先于通知</span><span class="lang-en">Fulfillment: durable facts precede delivery</span></h2>
+<figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d1s1t d1s1d">
+          <title id="d1s1t">Create recoverable fulfillment</title>
+          <desc id="d1s1d">Client sends a paid order to Fulfillment API, which writes the order and pending-match outbox in Fulfillment DB.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <g class="is-new">
+            <rect x="96" y="18" width="848" height="364" rx="18" class="boundary"/><text x="112" y="38" class="tiny">FULFILLMENT · durable intent before dispatch</text>
+            <circle cx="44" cy="102" r="12" class="box"/><path d="M24 148 Q44 116 64 148" class="wire"/><text x="44" y="170" text-anchor="middle" class="label">Client</text>
+            <rect x="180" y="90" width="140" height="76" rx="12" class="box"/><text x="250" y="125" text-anchor="middle" class="label">Fulfillment API</text><text x="250" y="144" text-anchor="middle" class="sub">idempotent create</text>
+            <path d="M385 84 V178 A85 12 0 0 0 555 178 V84" class="store"/><ellipse cx="470" cy="84" rx="85" ry="12" class="store"/><text x="470" y="141" text-anchor="middle" class="label">Fulfillment DB</text><text x="470" y="159" text-anchor="middle" class="sub">orders + outbox</text>
+            <path d="M70 117 L170 117" class="wire"/><polygon points="180,117 170,122 170,112" class="head"/><text x="135" y="109" text-anchor="middle" class="tiny">POST o7</text><path d="M320 117 L375 117" class="wire"/><polygon points="385,117 375,122 375,112" class="head"/><text x="352" y="109" text-anchor="middle" class="tiny">create</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">第一笔只保存履约单与待匹配意图。支付确认是前置条件；落库失败就不能承诺后面一定会派。</span><span class="lang-en">First persist fulfillment and its pending-match intent. Payment is a prerequisite; a failed commit cannot promise dispatch.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d1s2t d1s2d">
+          <title id="d1s2t">Acknowledge the durable order</title>
+          <desc id="d1s2d">Fulfillment DB returns commit to Fulfillment API, which returns 202 pending to Client.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="96" y="18" width="848" height="364" rx="18" class="boundary"/><text x="112" y="38" class="tiny">FULFILLMENT · durable intent before dispatch</text>
+          <circle cx="44" cy="102" r="12" class="box"/><path d="M24 148 Q44 116 64 148" class="wire"/><text x="44" y="170" text-anchor="middle" class="label">Client</text>
+          <rect x="180" y="90" width="140" height="76" rx="12" class="box"/><text x="250" y="125" text-anchor="middle" class="label">Fulfillment API</text><text x="250" y="144" text-anchor="middle" class="sub">idempotent create</text>
+          <path d="M385 84 V178 A85 12 0 0 0 555 178 V84" class="store"/><ellipse cx="470" cy="84" rx="85" ry="12" class="store"/><text x="470" y="141" text-anchor="middle" class="label">Fulfillment DB</text><text x="470" y="159" text-anchor="middle" class="sub">orders + outbox</text>
+          <path d="M70 117 L170 117" class="wire"/><polygon points="180,117 170,122 170,112" class="head"/><text x="135" y="109" text-anchor="middle" class="tiny">POST o7</text><path d="M320 117 L375 117" class="wire"/><polygon points="385,117 375,122 375,112" class="head"/><text x="352" y="109" text-anchor="middle" class="tiny">create</text>
+          <g class="is-new">
+            <path d="M385 135 L330 135" class="wire reply"/><polygon points="320,135 330,130 330,140" class="head reply"/><text x="351" y="151" text-anchor="middle" class="tiny">commit</text><path d="M180 135 L80 135" class="wire reply"/><polygon points="70,135 80,130 80,140" class="head reply"/><text x="135" y="151" text-anchor="middle" class="tiny">202</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">202 沿 Fulfillment DB → Fulfillment API → Client 回来，表示工作可恢复。它没有承诺已经找到骑手。</span><span class="lang-en">202 returns Fulfillment DB → Fulfillment API → Client and promises recoverable work, without claiming a courier is assigned.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d1s3t d1s3d">
+          <title id="d1s3t">Recover matching from the database</title>
+          <desc id="d1s3d">Fulfillment DB supplies the durable pending order to Match. Match uses its reserve route to commit an offer and outbox in Fulfillment DB; DB returns commit along the lower green route.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="96" y="18" width="848" height="364" rx="18" class="boundary"/><text x="112" y="38" class="tiny">FULFILLMENT · durable intent before dispatch</text>
+          <circle cx="44" cy="102" r="12" class="box"/><path d="M24 148 Q44 116 64 148" class="wire"/><text x="44" y="170" text-anchor="middle" class="label">Client</text>
+          <rect x="180" y="90" width="140" height="76" rx="12" class="box"/><text x="250" y="125" text-anchor="middle" class="label">Fulfillment API</text><text x="250" y="144" text-anchor="middle" class="sub">idempotent create</text>
+          <path d="M385 84 V178 A85 12 0 0 0 555 178 V84" class="store"/><ellipse cx="470" cy="84" rx="85" ry="12" class="store"/><text x="470" y="141" text-anchor="middle" class="label">Fulfillment DB</text><text x="470" y="159" text-anchor="middle" class="sub">orders + outbox</text>
+          <path d="M70 117 L170 117" class="wire"/><polygon points="180,117 170,122 170,112" class="head"/><text x="135" y="109" text-anchor="middle" class="tiny">POST o7</text><path d="M320 117 L375 117" class="wire"/><polygon points="385,117 375,122 375,112" class="head"/><text x="352" y="109" text-anchor="middle" class="tiny">create</text>
+          <path d="M385 135 L330 135" class="wire reply"/><polygon points="320,135 330,130 330,140" class="head reply"/><text x="351" y="151" text-anchor="middle" class="tiny">commit</text><path d="M180 135 L80 135" class="wire reply"/><polygon points="70,135 80,130 80,140" class="head reply"/><text x="135" y="151" text-anchor="middle" class="tiny">202</text>
+          <g class="is-new">
+            <rect x="405" y="265" width="150" height="72" rx="12" class="box"/><text x="480" y="298" text-anchor="middle" class="label">Match</text><text x="480" y="317" text-anchor="middle" class="sub">reserve a courier</text>
+            <path d="M555 164 L592 164 Q600 164 600 172 L600 217 Q600 225 592 225 L488 225 Q480 225 480 233 L480 255" class="wire async"/><polygon points="480,265 475,255 485,255" class="head async"/><text x="608" y="205" class="tiny">pending order</text><path d="M435 265 L435 228 Q435 220 427 220 L373 220 Q365 220 365 212 L365 175 Q365 170 370 170 L375 170" class="wire"/><polygon points="385,170 375,175 375,165" class="head"/><text x="365" y="245" class="tiny">reserve</text><path d="M385 155 L353 155 Q345 155 345 163 L345 342 Q345 350 353 350 L428.5 350 Q430 350 430 348.5 L430 347" class="wire reply"/><polygon points="430,337 435,347 425,347" class="head reply"/>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">进程死在 202 后，Match 仍能从持久记录恢复。reserve 路径在候选产生后执行，把 offer 与通知意图一起提交。</span><span class="lang-en">After an API crash, Match recovers the durable order. Its reserve route commits the offer and notification intent after selecting a candidate.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d1s4t d1s4d">
+          <title id="d1s4t">Read location as an advisory branch</title>
+          <desc id="d1s4d">Match queries Loc Store for candidates near pickup; Loc Store returns fresh IDs to Match.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="96" y="18" width="848" height="364" rx="18" class="boundary"/><text x="112" y="38" class="tiny">FULFILLMENT · durable intent before dispatch</text>
+          <circle cx="44" cy="102" r="12" class="box"/><path d="M24 148 Q44 116 64 148" class="wire"/><text x="44" y="170" text-anchor="middle" class="label">Client</text>
+          <rect x="180" y="90" width="140" height="76" rx="12" class="box"/><text x="250" y="125" text-anchor="middle" class="label">Fulfillment API</text><text x="250" y="144" text-anchor="middle" class="sub">idempotent create</text>
+          <path d="M385 84 V178 A85 12 0 0 0 555 178 V84" class="store"/><ellipse cx="470" cy="84" rx="85" ry="12" class="store"/><text x="470" y="141" text-anchor="middle" class="label">Fulfillment DB</text><text x="470" y="159" text-anchor="middle" class="sub">orders + outbox</text>
+          <path d="M70 117 L170 117" class="wire"/><polygon points="180,117 170,122 170,112" class="head"/><text x="135" y="109" text-anchor="middle" class="tiny">POST o7</text><path d="M320 117 L375 117" class="wire"/><polygon points="385,117 375,122 375,112" class="head"/><text x="352" y="109" text-anchor="middle" class="tiny">create</text>
+          <path d="M385 135 L330 135" class="wire reply"/><polygon points="320,135 330,130 330,140" class="head reply"/><text x="351" y="151" text-anchor="middle" class="tiny">commit</text><path d="M180 135 L80 135" class="wire reply"/><polygon points="70,135 80,130 80,140" class="head reply"/><text x="135" y="151" text-anchor="middle" class="tiny">202</text>
+          <rect x="405" y="265" width="150" height="72" rx="12" class="box"/><text x="480" y="298" text-anchor="middle" class="label">Match</text><text x="480" y="317" text-anchor="middle" class="sub">reserve a courier</text>
+          <path d="M555 164 L592 164 Q600 164 600 172 L600 217 Q600 225 592 225 L488 225 Q480 225 480 233 L480 255" class="wire async"/><polygon points="480,265 475,255 485,255" class="head async"/><text x="608" y="205" class="tiny">pending order</text><path d="M435 265 L435 228 Q435 220 427 220 L373 220 Q365 220 365 212 L365 175 Q365 170 370 170 L375 170" class="wire"/><polygon points="385,170 375,175 375,165" class="head"/><text x="365" y="245" class="tiny">reserve</text><path d="M385 155 L353 155 Q345 155 345 163 L345 342 Q345 350 353 350 L428.5 350 Q430 350 430 348.5 L430 347" class="wire reply"/><polygon points="430,337 435,347 425,347" class="head reply"/>
+          <g class="is-new">
+            <rect x="692" y="272" width="185" height="72" rx="8" class="cache"/><rect x="685" y="265" width="185" height="72" rx="8" class="cache"/><text x="777.5" y="298" text-anchor="middle" class="label">Loc Store</text><text x="777.5" y="317" text-anchor="middle" class="sub">advisory candidates</text>
+            <path d="M555 291 L675 291" class="wire"/><polygon points="685,291 675,296 675,286" class="head"/><text x="620" y="283" text-anchor="middle" class="tiny">near pickup</text><path d="M685 313 L565 313" class="wire reply"/><polygon points="555,313 565,308 565,318" class="head reply"/><text x="620" y="329" text-anchor="middle" class="tiny">fresh IDs</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">位置从旁支读回来：它决定召回谁，不能替代事务里的运力检查。位置库不会替订单直接派单。</span><span class="lang-en">Location is a side query for recall. It cannot replace the transactional capacity check or dispatch on behalf of the order.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d1s5t d1s5d">
+          <title id="d1s5t">Deliver only a committed offer</title>
+          <desc id="d1s5d">Offer Gateway scans and marks Fulfillment DB; Fulfillment DB supplies committed offers to Gateway, then Gateway delivers to Courier. Courier returns a transport receipt to Gateway.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="96" y="18" width="848" height="364" rx="18" class="boundary"/><text x="112" y="38" class="tiny">FULFILLMENT · durable intent before dispatch</text>
+          <circle cx="44" cy="102" r="12" class="box"/><path d="M24 148 Q44 116 64 148" class="wire"/><text x="44" y="170" text-anchor="middle" class="label">Client</text>
+          <rect x="180" y="90" width="140" height="76" rx="12" class="box"/><text x="250" y="125" text-anchor="middle" class="label">Fulfillment API</text><text x="250" y="144" text-anchor="middle" class="sub">idempotent create</text>
+          <path d="M385 84 V178 A85 12 0 0 0 555 178 V84" class="store"/><ellipse cx="470" cy="84" rx="85" ry="12" class="store"/><text x="470" y="141" text-anchor="middle" class="label">Fulfillment DB</text><text x="470" y="159" text-anchor="middle" class="sub">orders + outbox</text>
+          <path d="M70 117 L170 117" class="wire"/><polygon points="180,117 170,122 170,112" class="head"/><text x="135" y="109" text-anchor="middle" class="tiny">POST o7</text><path d="M320 117 L375 117" class="wire"/><polygon points="385,117 375,122 375,112" class="head"/><text x="352" y="109" text-anchor="middle" class="tiny">create</text>
+          <path d="M385 135 L330 135" class="wire reply"/><polygon points="320,135 330,130 330,140" class="head reply"/><text x="351" y="151" text-anchor="middle" class="tiny">commit</text><path d="M180 135 L80 135" class="wire reply"/><polygon points="70,135 80,130 80,140" class="head reply"/><text x="135" y="151" text-anchor="middle" class="tiny">202</text>
+          <rect x="405" y="265" width="150" height="72" rx="12" class="box"/><text x="480" y="298" text-anchor="middle" class="label">Match</text><text x="480" y="317" text-anchor="middle" class="sub">reserve a courier</text>
+          <path d="M555 164 L592 164 Q600 164 600 172 L600 217 Q600 225 592 225 L488 225 Q480 225 480 233 L480 255" class="wire async"/><polygon points="480,265 475,255 485,255" class="head async"/><text x="608" y="205" class="tiny">pending order</text><path d="M435 265 L435 228 Q435 220 427 220 L373 220 Q365 220 365 212 L365 175 Q365 170 370 170 L375 170" class="wire"/><polygon points="385,170 375,175 375,165" class="head"/><text x="365" y="245" class="tiny">reserve</text><path d="M385 155 L353 155 Q345 155 345 163 L345 342 Q345 350 353 350 L428.5 350 Q430 350 430 348.5 L430 347" class="wire reply"/><polygon points="430,337 435,347 425,347" class="head reply"/>
+          <rect x="692" y="272" width="185" height="72" rx="8" class="cache"/><rect x="685" y="265" width="185" height="72" rx="8" class="cache"/><text x="777.5" y="298" text-anchor="middle" class="label">Loc Store</text><text x="777.5" y="317" text-anchor="middle" class="sub">advisory candidates</text>
+          <path d="M555 291 L675 291" class="wire"/><polygon points="685,291 675,296 675,286" class="head"/><text x="620" y="283" text-anchor="middle" class="tiny">near pickup</text><path d="M685 313 L565 313" class="wire reply"/><polygon points="555,313 565,308 565,318" class="head reply"/><text x="620" y="329" text-anchor="middle" class="tiny">fresh IDs</text>
+          <g class="is-new">
+            <rect x="685" y="90" width="130" height="76" rx="12" class="box"/><text x="750" y="125" text-anchor="middle" class="label">Offer Gateway</text><text x="750" y="144" text-anchor="middle" class="sub">relay + delivery</text>
+            <rect x="850" y="90" width="80" height="76" rx="12" class="box"/><text x="890" y="125" text-anchor="middle" class="label">Courier</text><text x="890" y="144" text-anchor="middle" class="sub">receive only</text>
+            <path d="M555 117 L675 117" class="wire async"/><polygon points="685,117 675,122 675,112" class="head async"/><text x="620" y="105" text-anchor="middle" class="tiny">committed offer</text><path d="M685 139 L565 139" class="wire"/><polygon points="555,139 565,134 565,144" class="head"/><text x="620" y="155" text-anchor="middle" class="tiny">scan / mark</text><path d="M815 117 L840 117" class="wire async"/><polygon points="850,117 840,122 840,112" class="head async"/><path d="M850 139 L825 139" class="wire reply"/><polygon points="815,139 825,134 825,144" class="head reply"/><text x="112" y="363" class="tiny">202 means recoverable work; transport receipt is not business acceptance.</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">最后才加投递出口：数据库里已有 offer，Gateway 才发。传输回执只到 Gateway；业务 accept 会走下一组的权威事务。</span><span class="lang-en">Add delivery after a committed offer exists. Transport receipt stops at Gateway; business acceptance uses the authoritative transaction in deck three.</span></figcaption>
+      </div>
+    </figure><div class="bilingual"><div class="lang-zh"><p>用已认证上游的 <code>(scope, upstream_order)</code> 创建履约，绑定规范化订单摘要；同身份同内容回原单，改内容则冲突。支付确认来自服务端持久事实。一个事务写 pending_match、generation=7、匹配期限与待匹配 Outbox，提交后 202 只表示工作可恢复。提交响应丢失是未知，重试固定身份，不能新建第二笔。</p><p>Match 读新鲜位置只是旁支；Fulfillment DB 才保存当前 attempt 和槽位。Gateway 合并画出 Outbox relay 与设备通道，只发已提交 offer，重复投递仍需消费者去重。设备重连先拉当前快照；传输 ACK 不等于业务接单。<a href="#ref5">[5]</a></p></div><div class="lang-en"><p>Create with authenticated upstream (scope, upstream_order), bound to a canonical order digest. Identical retries return the original order; changed content conflicts. Payment confirmation comes from durable server facts. One transaction stores pending_match, generation 7, deadline and match outbox. A committed 202 means recoverable work. A lost commit reply is unknown: retry the fixed identity.</p><p>Fresh location is an advisory branch; Fulfillment DB owns current attempts and slots. Gateway combines the outbox relay/device channel, sends committed offers and tolerates duplicates with consumer deduplication. Reconnect fetches the current snapshot. Transport ACK is not acceptance. <a href="#ref5">[5]</a></p></div></div>
+<h3><span class="lang-zh">双边唯一落在哪个键上</span><span class="lang-en">Where bilateral uniqueness lives</span></h3>
+<div class="bilingual"><div class="lang-zh"><p>订单保留 state、generation、current_attempt、attempt_count 和 match_deadline；attempt 保留骑手、截止点、原回执与配置版本。<code>active_slot</code> 把槽位绑定到当前单：同一订单只能有一个活动占位，同一骑手的同一槽位只能有一单。骑手可有两个槽位，所以不能直接给 courier_id 加唯一约束。occupied 与槽位计数必须同事务维护；行内 CHECK 不能证明跨表一致。<a href="#ref2">[2]</a></p></div><div class="lang-en"><p>Orders retain state, generation, current attempt, attempt count and match deadline; attempts retain courier, deadline, original receipts and configuration version. active_slot uniquely binds both order and courier slot. A courier has two slots, so courier_id alone is not unique. Maintain occupied with slot rows in one transaction; a row CHECK cannot prove cross-table consistency. <a href="#ref2">[2]</a></p></div></div>
+<pre data-language="SQL · executable SQLite constraints" data-kind="runnable" data-source="keys.sql"><code>-- Executable SQLite subset of the teaching model; parent tables in schema.sql.
+CREATE UNIQUE INDEX order_identity ON orders(scope, upstream_order);
+CREATE UNIQUE INDEX attempt_generation ON attempts(order_id, generation);
+CREATE TABLE active_slot (
+  courier_id TEXT NOT NULL REFERENCES courier_capacity(courier_id),
+  slot INTEGER NOT NULL CHECK(slot &gt;= 0),
+  order_id TEXT NOT NULL UNIQUE REFERENCES orders(order_id),
+  attempt_id TEXT NOT NULL UNIQUE REFERENCES attempts(attempt_id),
+  PRIMARY KEY(courier_id, slot)
+);
+CREATE UNIQUE INDEX event_identity ON outbox(event_key);
+-- One live slot per order; one order per courier slot. A courier has two slots.
+-- A transaction also checks slot &lt; capacity and changes occupied with the slot.
+-- CHECK(0 &lt;= occupied AND occupied &lt;= capacity) is only a row-local guard.
+-- All reserve/release writers lock order, then the same courier_capacity row.</code></pre>
+<div class="bilingual"><div class="lang-zh"><p>代码是教学约束；完整父表和可执行适配见 <a href="../examples/ch27/README.md">examples/ch27</a>。生产需限制所有写者走相同路径，批量操作按固定顺序锁全部订单再锁骑手行，死锁/序列化中止整笔重试。位置详情是另一份可重建投影，不能替代这些键。</p></div><div class="lang-en"><p>These teaching constraints have complete parent tables and an executable adapter in <a href="../examples/ch27/README.md">examples/ch27</a>. All production writers must follow the same path. Batch operations lock orders then courier rows consistently and retry whole aborted transactions. Location details remain a separate rebuildable projection.</p></div></div>
+</section>
+
+<section>
+<h2><span class="lang-zh">候选与打分：分数之后仍要预占</span><span class="lang-en">Recall and scoring still end in a reservation</span></h2>
+<figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d2s1t d2s1d">
+          <title id="d2s1t">Recall local candidates</title>
+          <desc id="d2s1d">Match queries Loc Store for couriers near pickup and receives twenty candidate IDs.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <g class="is-new">
+            <rect x="96" y="18" width="848" height="364" rx="18" class="boundary"/><text x="112" y="38" class="tiny">MATCH · recall first, enforce hard constraints, then compare ETA</text>
+            <rect x="165" y="135" width="150" height="80" rx="12" class="box"/><text x="240" y="172" text-anchor="middle" class="label">Match</text><text x="240" y="191" text-anchor="middle" class="sub">order o7 · pickup</text>
+            <rect x="512" y="132" width="175" height="96" rx="8" class="cache"/><rect x="505" y="125" width="175" height="96" rx="8" class="cache"/><text x="592.5" y="170" text-anchor="middle" class="label">Loc Store</text><text x="592.5" y="189" text-anchor="middle" class="sub">current session + seq</text>
+            <path d="M315 163 L495 163" class="wire"/><polygon points="505,163 495,168 495,158" class="head"/><text x="410" y="154" text-anchor="middle" class="tiny">local cells</text><path d="M505 187 L325 187" class="wire reply"/><polygon points="315,187 325,182 325,192" class="head reply"/><text x="410" y="204" text-anchor="middle" class="tiny">20 recalled IDs</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">先从取货点附近召回 20 人。地理距离仅是低成本召回；还没有授予任何人订单。</span><span class="lang-en">Recall twenty couriers near pickup. Geographic distance is a cheap recall signal, not an assignment.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d2s2t d2s2d">
+          <title id="d2s2t">Filter hard violations</title>
+          <desc id="d2s2d">Loc Store supplies details to Filter, which keeps eight candidates after freshness and capacity checks.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="96" y="18" width="848" height="364" rx="18" class="boundary"/><text x="112" y="38" class="tiny">MATCH · recall first, enforce hard constraints, then compare ETA</text>
+          <rect x="165" y="135" width="150" height="80" rx="12" class="box"/><text x="240" y="172" text-anchor="middle" class="label">Match</text><text x="240" y="191" text-anchor="middle" class="sub">order o7 · pickup</text>
+          <rect x="512" y="132" width="175" height="96" rx="8" class="cache"/><rect x="505" y="125" width="175" height="96" rx="8" class="cache"/><text x="592.5" y="170" text-anchor="middle" class="label">Loc Store</text><text x="592.5" y="189" text-anchor="middle" class="sub">current session + seq</text>
+          <path d="M315 163 L495 163" class="wire"/><polygon points="505,163 495,168 495,158" class="head"/><text x="410" y="154" text-anchor="middle" class="tiny">local cells</text><path d="M505 187 L325 187" class="wire reply"/><polygon points="315,187 325,182 325,192" class="head reply"/><text x="410" y="204" text-anchor="middle" class="tiny">20 recalled IDs</text>
+          <g class="is-new">
+            <rect x="510" y="280" width="175" height="65" rx="12" class="box"/><text x="597.5" y="309.5" text-anchor="middle" class="label">Filter</text><text x="597.5" y="328.5" text-anchor="middle" class="sub">fresh + capacity</text>
+            <path d="M605 221 L605 270" class="wire"/><polygon points="605,280 600,270 610,270" class="head"/><text x="520" y="258" class="tiny">details gate</text><text x="112" y="244" class="tiny">20 -&gt; 8 feasible; reject stale / full</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">新加硬过滤：20→8。过期、满载、资质不符直接剔除；朝向一般是软特征，避免一刀切误杀能掉头的人。</span><span class="lang-en">Hard filters reduce 20 to 8: stale, full or ineligible candidates leave. Heading is normally a soft feature.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d2s3t d2s3d">
+          <title id="d2s3t">Compare road travel times</title>
+          <desc id="d2s3d">Filter sends eight feasible origins to Routing; Routing returns road durations to Filter along the right side.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="96" y="18" width="848" height="364" rx="18" class="boundary"/><text x="112" y="38" class="tiny">MATCH · recall first, enforce hard constraints, then compare ETA</text>
+          <rect x="165" y="135" width="150" height="80" rx="12" class="box"/><text x="240" y="172" text-anchor="middle" class="label">Match</text><text x="240" y="191" text-anchor="middle" class="sub">order o7 · pickup</text>
+          <rect x="512" y="132" width="175" height="96" rx="8" class="cache"/><rect x="505" y="125" width="175" height="96" rx="8" class="cache"/><text x="592.5" y="170" text-anchor="middle" class="label">Loc Store</text><text x="592.5" y="189" text-anchor="middle" class="sub">current session + seq</text>
+          <path d="M315 163 L495 163" class="wire"/><polygon points="505,163 495,168 495,158" class="head"/><text x="410" y="154" text-anchor="middle" class="tiny">local cells</text><path d="M505 187 L325 187" class="wire reply"/><polygon points="315,187 325,182 325,192" class="head reply"/><text x="410" y="204" text-anchor="middle" class="tiny">20 recalled IDs</text>
+          <rect x="510" y="280" width="175" height="65" rx="12" class="box"/><text x="597.5" y="309.5" text-anchor="middle" class="label">Filter</text><text x="597.5" y="328.5" text-anchor="middle" class="sub">fresh + capacity</text>
+          <path d="M605 221 L605 270" class="wire"/><polygon points="605,280 600,270 610,270" class="head"/><text x="520" y="258" class="tiny">details gate</text><text x="112" y="244" class="tiny">20 -&gt; 8 feasible; reject stale / full</text>
+          <g class="is-new">
+            <rect x="755" y="125" width="170" height="96" rx="12" class="box"/><text x="840" y="170" text-anchor="middle" class="label">Routing</text><text x="840" y="189" text-anchor="middle" class="sub">road time matrix</text>
+            <path d="M685 305 L727 305 Q735 305 735 297 L735 210 Q735 205 740 205 L745 205" class="wire"/><polygon points="755,205 745,210 745,200" class="head"/><path d="M755 180 L728 180 Q720 180 720 188 L720 247 Q720 255 712 255 L657.5 255 Q650 255 650 262.5 L650 270" class="wire reply"/><polygon points="650,280 645,270 655,270" class="head reply"/><text x="702" y="103" class="tiny">8 origins × 1 pickup</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">只给 8 个可行候选估到店路耗，矩阵 8×1=8 个元素。Routing 把路耗回给 Filter，再连同负载送去打分；不让 GPS 距离冒充路耗。</span><span class="lang-en">Request eight feasible origins to one pickup: 8×1=8 elements. Routing returns durations to Filter for scoring alongside load; GPS distance is not road time.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d2s4t d2s4d">
+          <title id="d2s4t">Use an explainable lower-is-better cost</title>
+          <desc id="d2s4d">Filter sends eight candidate costs to Score. Cost J equals pickup minutes plus four times late risk plus twice load; A costs 6 and B costs 4.4.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="96" y="18" width="848" height="364" rx="18" class="boundary"/><text x="112" y="38" class="tiny">MATCH · recall first, enforce hard constraints, then compare ETA</text>
+          <rect x="165" y="135" width="150" height="80" rx="12" class="box"/><text x="240" y="172" text-anchor="middle" class="label">Match</text><text x="240" y="191" text-anchor="middle" class="sub">order o7 · pickup</text>
+          <rect x="512" y="132" width="175" height="96" rx="8" class="cache"/><rect x="505" y="125" width="175" height="96" rx="8" class="cache"/><text x="592.5" y="170" text-anchor="middle" class="label">Loc Store</text><text x="592.5" y="189" text-anchor="middle" class="sub">current session + seq</text>
+          <path d="M315 163 L495 163" class="wire"/><polygon points="505,163 495,168 495,158" class="head"/><text x="410" y="154" text-anchor="middle" class="tiny">local cells</text><path d="M505 187 L325 187" class="wire reply"/><polygon points="315,187 325,182 325,192" class="head reply"/><text x="410" y="204" text-anchor="middle" class="tiny">20 recalled IDs</text>
+          <rect x="510" y="280" width="175" height="65" rx="12" class="box"/><text x="597.5" y="309.5" text-anchor="middle" class="label">Filter</text><text x="597.5" y="328.5" text-anchor="middle" class="sub">fresh + capacity</text>
+          <path d="M605 221 L605 270" class="wire"/><polygon points="605,280 600,270 610,270" class="head"/><text x="520" y="258" class="tiny">details gate</text><text x="112" y="244" class="tiny">20 -&gt; 8 feasible; reject stale / full</text>
+          <rect x="755" y="125" width="170" height="96" rx="12" class="box"/><text x="840" y="170" text-anchor="middle" class="label">Routing</text><text x="840" y="189" text-anchor="middle" class="sub">road time matrix</text>
+          <path d="M685 305 L727 305 Q735 305 735 297 L735 210 Q735 205 740 205 L745 205" class="wire"/><polygon points="755,205 745,210 745,200" class="head"/><path d="M755 180 L728 180 Q720 180 720 188 L720 247 Q720 255 712 255 L657.5 255 Q650 255 650 262.5 L650 270" class="wire reply"/><polygon points="650,280 645,270 655,270" class="head reply"/><text x="702" y="103" class="tiny">8 origins × 1 pickup</text>
+          <g class="is-new">
+            <rect x="235" y="280" width="180" height="65" rx="12" class="box"/><text x="325" y="309.5" text-anchor="middle" class="label">Score</text><text x="325" y="328.5" text-anchor="middle" class="sub">ETA + risk + load</text>
+            <path d="M510 305 L425 305" class="wire"/><polygon points="415,305 425,300 425,310" class="head"/><text x="462" y="292" text-anchor="middle" class="tiny">8 costs</text><text x="112" y="72" class="tiny">J = pickup_minutes + 4 × late_risk + 2 × load</text><text x="112" y="93" class="tiny">A: 2 + 4×0.5 + 2×1 = 6; B: 4 + 4×0.1 + 2×0 = 4.4</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">新加统一量纲的成本：A=6，B=4.4，选更小的 B。离商家最近的 A 未必更合适，负载与迟到风险会改变决定。</span><span class="lang-en">Add a common-unit cost: A=6, B=4.4, so choose lower-cost B. The nearest courier can lose on workload and lateness risk.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d2s5t d2s5d">
+          <title id="d2s5t">Reserve against authoritative capacity</title>
+          <desc id="d2s5d">Score sends B along the lower reserve route to Fulfillment DB. The commit reply returns to Score along the outer lower green route.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="96" y="18" width="848" height="364" rx="18" class="boundary"/><text x="112" y="38" class="tiny">MATCH · recall first, enforce hard constraints, then compare ETA</text>
+          <rect x="165" y="135" width="150" height="80" rx="12" class="box"/><text x="240" y="172" text-anchor="middle" class="label">Match</text><text x="240" y="191" text-anchor="middle" class="sub">order o7 · pickup</text>
+          <rect x="512" y="132" width="175" height="96" rx="8" class="cache"/><rect x="505" y="125" width="175" height="96" rx="8" class="cache"/><text x="592.5" y="170" text-anchor="middle" class="label">Loc Store</text><text x="592.5" y="189" text-anchor="middle" class="sub">current session + seq</text>
+          <path d="M315 163 L495 163" class="wire"/><polygon points="505,163 495,168 495,158" class="head"/><text x="410" y="154" text-anchor="middle" class="tiny">local cells</text><path d="M505 187 L325 187" class="wire reply"/><polygon points="315,187 325,182 325,192" class="head reply"/><text x="410" y="204" text-anchor="middle" class="tiny">20 recalled IDs</text>
+          <rect x="510" y="280" width="175" height="65" rx="12" class="box"/><text x="597.5" y="309.5" text-anchor="middle" class="label">Filter</text><text x="597.5" y="328.5" text-anchor="middle" class="sub">fresh + capacity</text>
+          <path d="M605 221 L605 270" class="wire"/><polygon points="605,280 600,270 610,270" class="head"/><text x="520" y="258" class="tiny">details gate</text><text x="112" y="244" class="tiny">20 -&gt; 8 feasible; reject stale / full</text>
+          <rect x="755" y="125" width="170" height="96" rx="12" class="box"/><text x="840" y="170" text-anchor="middle" class="label">Routing</text><text x="840" y="189" text-anchor="middle" class="sub">road time matrix</text>
+          <path d="M685 305 L727 305 Q735 305 735 297 L735 210 Q735 205 740 205 L745 205" class="wire"/><polygon points="755,205 745,210 745,200" class="head"/><path d="M755 180 L728 180 Q720 180 720 188 L720 247 Q720 255 712 255 L657.5 255 Q650 255 650 262.5 L650 270" class="wire reply"/><polygon points="650,280 645,270 655,270" class="head reply"/><text x="702" y="103" class="tiny">8 origins × 1 pickup</text>
+          <rect x="235" y="280" width="180" height="65" rx="12" class="box"/><text x="325" y="309.5" text-anchor="middle" class="label">Score</text><text x="325" y="328.5" text-anchor="middle" class="sub">ETA + risk + load</text>
+          <path d="M510 305 L425 305" class="wire"/><polygon points="415,305 425,300 425,310" class="head"/><text x="462" y="292" text-anchor="middle" class="tiny">8 costs</text><text x="112" y="72" class="tiny">J = pickup_minutes + 4 × late_risk + 2 × load</text><text x="112" y="93" class="tiny">A: 2 + 4×0.5 + 2×1 = 6; B: 4 + 4×0.1 + 2×0 = 4.4</text>
+          <g class="is-new">
+            <path d="M765 277 V339 A75 12 0 0 0 915 339 V277" class="store"/><ellipse cx="840" cy="277" rx="75" ry="12" class="store"/><text x="840" y="318" text-anchor="middle" class="label">Fulfillment DB</text><text x="840" y="336" text-anchor="middle" class="sub">order + capacity</text>
+            <path d="M325 345 L325 350 Q325 355 330 355 L717 355 Q725 355 725 347 L725 329 Q725 321 733 321 L755 321" class="wire"/><polygon points="765,321 755,326 755,316" class="head"/><text x="462" y="347" text-anchor="middle" class="tiny">T_reserve</text><path d="M915 310 L922.5 310 Q930 310 930 317.5 L930 362 Q930 370 922 370 L292.5 370 Q285 370 285 362.5 L285 355" class="wire reply"/><polygon points="285,345 290,355 280,355" class="head reply"/><rect x="112" y="252" width="230" height="20" rx="10" class="badge"/><text x="227" y="266" text-anchor="middle" class="badge-text">location is not authority</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">打分后还要到 Fulfillment DB 重验容量并预占。两个 Match 读到同一个 B 时，由事务决定谁成功，另一笔重新选。</span><span class="lang-en">After scoring, recheck and reserve in Fulfillment DB. If two Match workers choose B, the transaction selects a winner and the other rematches.</span></figcaption>
+      </div>
+    </figure><div class="bilingual"><div class="lang-zh"><p>按取货点附近格子或 GEO 限量召回、去重、批读详情，排除旧会话、过期点、资质不符、暂停与满载者。Redis GEOSEARCH 提供半径/方框召回，没有配送运力语义；地理最近也可能在河对岸。<a href="#ref3">[3]</a> 朝向一般是软特征，过期位置则是硬门限。</p><p>先过滤到 8 人再计算 8×1 个路耗元素；Google Routes 支持整请求或单元素错误。gRPC 流式结果明确不保证顺序，REST 不支持该流式方式；按返回的起终点索引归位，缺失/失败元素不能当零。<a href="#ref6">[6]</a> 成本 <code>J=到店分钟+4×迟到风险+2×负载</code>：A 为 2+2+2=6，B 为 4+0.4+0=4.4，选 B；系数是分钟等价惩罚的教学取值。</p><p><strong>评分不是锁。</strong>路耗返回时 B 的名额可能已被别的区占走。下面重新锁订单和同一骑手容量行，检查当前代次、预算与槽位，然后提交双方占位、offer 与事件。候选详情在预占前重读，其服务端新鲜度截止点带进事务，等锁后已过期就重选。位置是读时快照，断线仍可能发生在检查之后；它不与履约跨库原子提交。发生冲突重新选人；不要拿着数据库锁调用 Routing。<a href="#ref1">[1]</a></p></div><div class="lang-en"><p>Bound recall around pickup through cells/GEO, deduplicate and batch-load details. Reject wrong sessions, stale, ineligible, paused or full couriers. GEOSEARCH supplies radius/box recall without delivery capacity semantics; nearby can mean across a river. <a href="#ref3">[3]</a> Heading is usually soft; stale location is a hard gate.</p><p>Filter to eight before calculating eight route elements. Google Routes can fail a whole request or individual elements. gRPC streaming explicitly permits unordered results; REST does not support that streaming mode. Map origin/destination indexes and never treat missing/error elements as zero. <a href="#ref6">[6]</a> J=pickup minutes+4×late risk+2×load gives A=6 and B=4.4. The minute-equivalent weights are teaching choices.</p><p><strong>Scoring is not locking.</strong> Another zone can occupy B while Routing runs. Lock order and the same capacity row, recheck generation/budget/slots and commit reservation, offer and event together. Re-read candidate details before reservation and carry server-derived validUntil into the transaction; reject if lock waits exhaust it. This is a read-time location snapshot: disconnection can still follow the check, without a cross-store atomic promise. Rematch on conflict; never hold DB locks across Routing calls. <a href="#ref1">[1]</a></p></div></div>
+<pre data-language="Pseudocode · PostgreSQL-shaped reservation" data-kind="pseudocode" data-source="reserve.pseudo"><code>reserve(orderId, expectedGeneration, courierId, attemptId):
+  point = readCurrentCandidateSnapshot(courierId)         // before DB locks; server-derived validity
+  begin transaction
+    o = SELECT order FOR UPDATE                         // lock order first
+    old = SELECT attempt WHERE id = attemptId
+    if old exists:
+      require old binds (orderId, expectedGeneration, courierId) else CONFLICT
+      commit; return old.offerReceipt, currentSnapshot(o) // no new occupation
+    c = SELECT courier_capacity FOR UPDATE             // same authority in all zones
+    now = SELECT clock_timestamp()                     // after both locks, not now()
+    require o.state == pending_match and o.currentAttempt == null else CONFLICT
+    require o.generation == expectedGeneration else CONFLICT
+    require now &lt; o.matchDeadline and o.attemptCount &lt; 3 else EXHAUSTED
+    require point exists and now &lt;= point.validUntil else REMATCH
+    require not c.paused and c.occupied &lt; c.capacity else REMATCH
+    require courierId not in this order&#x27;s persisted cooldown set else REMATCH
+    slot = smallest unused slot in [0, c.capacity)
+    deadline = min(now + 20 seconds, o.matchDeadline)
+    INSERT attempt(attemptId, orderId, o.generation, courierId, deadline, offered)
+    INSERT active_slot(courierId, slot, orderId, attemptId) // UNIQUE both sides
+    UPDATE courier_capacity SET occupied = occupied + 1 WHERE id = courierId
+    UPDATE order SET state = offered, currentAttempt = attemptId,
+                     attemptCount = attemptCount + 1
+    INSERT outbox(eventKey = &quot;offer:&quot; + attemptId, immutableOfferPayload)
+  commit; return offerReceipt, currentSnapshot(o)
+  // Any statement/constraint failure rolls back every write; do not send yet.
+  // Retry deadlock/serialization aborts with the same identity and fresh reads.</code></pre>
+<div class="bilingual"><div class="lang-zh"><p>所有区域借来的 B 都回同一容量权威。offer 已占位，accept 不再加一；完成或合法释放才减一。固定 attempt 重投回原回执和当前快照，已经过期的 offer 不会复活。公平可在满足硬门限后按等待年龄打破同分；一秒批量窗口可改善贪心匹配，但等待也要计入 120 秒期限。</p></div><div class="lang-en"><p>Borrowed B always uses the same capacity authority. Offer consumes a slot; accept does not add another. Completion or valid release decrements once. Same-attempt retries return the original receipt and current snapshot without reviving an expired offer. Fairness can tie-break by age; a one-second batch can improve greedy matching but consumes the 120 s budget.</p></div></div>
+</section>
+
+<section>
+<h2><span class="lang-zh">accept 与到期：同一事务决定谁赢</span><span class="lang-en">Acceptance and expiry serialize in one authority</span></h2>
+<figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d3s1t d3s1d">
+          <title id="d3s1t">Offer reserves capacity before delivery</title>
+          <desc id="d3s1d">pending_match transitions to offered, attempt a1 version seven for B, reserving capacity in Fulfillment DB.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <g class="is-new">
+            <rect x="18" y="18" width="926" height="364" rx="18" class="boundary"/><text x="34" y="38" class="tiny">OFFER STATE · accept and expiry serialize in Fulfillment DB</text>
+            <rect x="60" y="105" width="155" height="75" rx="12" class="box"/><text x="137.5" y="139.5" text-anchor="middle" class="label">pending_match</text><text x="137.5" y="158.5" text-anchor="middle" class="sub">order o7</text>
+            <rect x="305" y="105" width="170" height="75" rx="12" class="box"/><text x="390" y="139.5" text-anchor="middle" class="label">offered</text><text x="390" y="158.5" text-anchor="middle" class="sub">a1 · v=7 · B</text>
+            <path d="M215 135 L295 135" class="wire"/><polygon points="305,135 295,140 295,130" class="head"/><text x="260" y="122" text-anchor="middle" class="tiny">reserve</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">先提交 pending_match→offered，并占住 B 的一个名额。通知消息带 a1、版本 7 与截止点；这还不是 assigned。</span><span class="lang-en">Commit pending_match→offered and reserve one slot for B. Delivery carries a1, version 7 and deadline, without declaring assigned.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d3s2t d3s2d">
+          <title id="d3s2t">Accept is a business transaction</title>
+          <desc id="d3s2d">offered transitions to assigned only when accept a1 version seven validates before its deadline in Fulfillment DB.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="18" y="18" width="926" height="364" rx="18" class="boundary"/><text x="34" y="38" class="tiny">OFFER STATE · accept and expiry serialize in Fulfillment DB</text>
+          <rect x="60" y="105" width="155" height="75" rx="12" class="box"/><text x="137.5" y="139.5" text-anchor="middle" class="label">pending_match</text><text x="137.5" y="158.5" text-anchor="middle" class="sub">order o7</text>
+          <rect x="305" y="105" width="170" height="75" rx="12" class="box"/><text x="390" y="139.5" text-anchor="middle" class="label">offered</text><text x="390" y="158.5" text-anchor="middle" class="sub">a1 · v=7 · B</text>
+          <path d="M215 135 L295 135" class="wire"/><polygon points="305,135 295,140 295,130" class="head"/><text x="260" y="122" text-anchor="middle" class="tiny">reserve</text>
+          <g class="is-new">
+            <rect x="570" y="105" width="160" height="75" rx="12" class="box"/><text x="650" y="139.5" text-anchor="middle" class="label">assigned</text><text x="650" y="158.5" text-anchor="middle" class="sub">B owns o7</text>
+            <path d="M475 132 L560 132" class="wire"/><polygon points="570,132 560,137 560,127" class="head"/><text x="522" y="113" text-anchor="middle" class="tiny">accept(a1,v7)</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">骑手主动 accept 才触发业务事务：同 attempt、同版本、未过期，三者都成立才 assigned。收到推送不算接单。</span><span class="lang-en">Business accept validates the same attempt, version and an unexpired deadline. Receiving a push does not accept the order.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d3s3t d3s3d">
+          <title id="d3s3t">Pickup records physical custody</title>
+          <desc id="d3s3d">assigned transitions to picked_up with a pickup event for the current courier and attempt.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="18" y="18" width="926" height="364" rx="18" class="boundary"/><text x="34" y="38" class="tiny">OFFER STATE · accept and expiry serialize in Fulfillment DB</text>
+          <rect x="60" y="105" width="155" height="75" rx="12" class="box"/><text x="137.5" y="139.5" text-anchor="middle" class="label">pending_match</text><text x="137.5" y="158.5" text-anchor="middle" class="sub">order o7</text>
+          <rect x="305" y="105" width="170" height="75" rx="12" class="box"/><text x="390" y="139.5" text-anchor="middle" class="label">offered</text><text x="390" y="158.5" text-anchor="middle" class="sub">a1 · v=7 · B</text>
+          <path d="M215 135 L295 135" class="wire"/><polygon points="305,135 295,140 295,130" class="head"/><text x="260" y="122" text-anchor="middle" class="tiny">reserve</text>
+          <rect x="570" y="105" width="160" height="75" rx="12" class="box"/><text x="650" y="139.5" text-anchor="middle" class="label">assigned</text><text x="650" y="158.5" text-anchor="middle" class="sub">B owns o7</text>
+          <path d="M475 132 L560 132" class="wire"/><polygon points="570,132 560,137 560,127" class="head"/><text x="522" y="113" text-anchor="middle" class="tiny">accept(a1,v7)</text>
+          <g class="is-new">
+            <rect x="790" y="105" width="135" height="75" rx="12" class="box"/><text x="857.5" y="139.5" text-anchor="middle" class="label">picked_up</text><text x="857.5" y="158.5" text-anchor="middle" class="sub">custody B</text>
+            <path d="M730 140 L780 140" class="wire"/><polygon points="790,140 780,145 780,135" class="head"/><text x="760" y="94" text-anchor="middle" class="tiny">pickup</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">取餐再新增 picked_up：订单已经有实物归属。手机离线不能让系统自动把同一餐派给另一人。</span><span class="lang-en">Pickup records physical custody. A disconnected phone must not automatically assign the same food to a second courier.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d3s4t d3s4d">
+          <title id="d3s4t">Server expiry returns an unanswered offer</title>
+          <desc id="d3s4d">The alternative offered branch reaches expired at the DB deadline and returns to pending_match with version eight and a cooldown for B.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="18" y="18" width="926" height="364" rx="18" class="boundary"/><text x="34" y="38" class="tiny">OFFER STATE · accept and expiry serialize in Fulfillment DB</text>
+          <rect x="60" y="105" width="155" height="75" rx="12" class="box"/><text x="137.5" y="139.5" text-anchor="middle" class="label">pending_match</text><text x="137.5" y="158.5" text-anchor="middle" class="sub">order o7</text>
+          <rect x="305" y="105" width="170" height="75" rx="12" class="box"/><text x="390" y="139.5" text-anchor="middle" class="label">offered</text><text x="390" y="158.5" text-anchor="middle" class="sub">a1 · v=7 · B</text>
+          <path d="M215 135 L295 135" class="wire"/><polygon points="305,135 295,140 295,130" class="head"/><text x="260" y="122" text-anchor="middle" class="tiny">reserve</text>
+          <rect x="570" y="105" width="160" height="75" rx="12" class="box"/><text x="650" y="139.5" text-anchor="middle" class="label">assigned</text><text x="650" y="158.5" text-anchor="middle" class="sub">B owns o7</text>
+          <path d="M475 132 L560 132" class="wire"/><polygon points="570,132 560,137 560,127" class="head"/><text x="522" y="113" text-anchor="middle" class="tiny">accept(a1,v7)</text>
+          <rect x="790" y="105" width="135" height="75" rx="12" class="box"/><text x="857.5" y="139.5" text-anchor="middle" class="label">picked_up</text><text x="857.5" y="158.5" text-anchor="middle" class="sub">custody B</text>
+          <path d="M730 140 L780 140" class="wire"/><polygon points="790,140 780,145 780,135" class="head"/><text x="760" y="94" text-anchor="middle" class="tiny">pickup</text>
+          <g class="is-new">
+            <rect x="305" y="280" width="170" height="65" rx="12" class="box"/><text x="390" y="309.5" text-anchor="middle" class="label">expired</text><text x="390" y="328.5" text-anchor="middle" class="sub">release a1</text>
+            <path d="M382 180 L382 270" class="wire fail"/><polygon points="382,280 377,270 387,270" class="head fail"/><text x="397" y="231" class="tiny">DB time &gt;= deadline</text>
+            <path d="M305 310 L145 310 Q137 310 137 302 L137 190" class="wire async"/><polygon points="137,180 142,190 132,190" class="head async"/><text x="206" y="299" text-anchor="middle" class="tiny">v8 · cooldown B</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">从 offered 分出到期分支，由服务端扫描触发。释放 a1 的名额、版本 7→8、B 冷却，回到候选池；与 accept 锁同一订单。</span><span class="lang-en">Server expiry is an alternative branch from offered: release a1, advance 7→8, cool down B and rematch. It locks the same order as accept.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d3s5t d3s5d">
+          <title id="d3s5t">Fence the delayed old acceptance</title>
+          <desc id="d3s5d">expired leads to Reject old accept for a1 version seven; the result is 409 and never assigned.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="18" y="18" width="926" height="364" rx="18" class="boundary"/><text x="34" y="38" class="tiny">OFFER STATE · accept and expiry serialize in Fulfillment DB</text>
+          <rect x="60" y="105" width="155" height="75" rx="12" class="box"/><text x="137.5" y="139.5" text-anchor="middle" class="label">pending_match</text><text x="137.5" y="158.5" text-anchor="middle" class="sub">order o7</text>
+          <rect x="305" y="105" width="170" height="75" rx="12" class="box"/><text x="390" y="139.5" text-anchor="middle" class="label">offered</text><text x="390" y="158.5" text-anchor="middle" class="sub">a1 · v=7 · B</text>
+          <path d="M215 135 L295 135" class="wire"/><polygon points="305,135 295,140 295,130" class="head"/><text x="260" y="122" text-anchor="middle" class="tiny">reserve</text>
+          <rect x="570" y="105" width="160" height="75" rx="12" class="box"/><text x="650" y="139.5" text-anchor="middle" class="label">assigned</text><text x="650" y="158.5" text-anchor="middle" class="sub">B owns o7</text>
+          <path d="M475 132 L560 132" class="wire"/><polygon points="570,132 560,137 560,127" class="head"/><text x="522" y="113" text-anchor="middle" class="tiny">accept(a1,v7)</text>
+          <rect x="790" y="105" width="135" height="75" rx="12" class="box"/><text x="857.5" y="139.5" text-anchor="middle" class="label">picked_up</text><text x="857.5" y="158.5" text-anchor="middle" class="sub">custody B</text>
+          <path d="M730 140 L780 140" class="wire"/><polygon points="790,140 780,145 780,135" class="head"/><text x="760" y="94" text-anchor="middle" class="tiny">pickup</text>
+          <rect x="305" y="280" width="170" height="65" rx="12" class="box"/><text x="390" y="309.5" text-anchor="middle" class="label">expired</text><text x="390" y="328.5" text-anchor="middle" class="sub">release a1</text>
+          <path d="M382 180 L382 270" class="wire fail"/><polygon points="382,280 377,270 387,270" class="head fail"/><text x="397" y="231" class="tiny">DB time &gt;= deadline</text>
+          <path d="M305 310 L145 310 Q137 310 137 302 L137 190" class="wire async"/><polygon points="137,180 142,190 132,190" class="head async"/><text x="206" y="299" text-anchor="middle" class="tiny">v8 · cooldown B</text>
+          <g class="is-new">
+            <rect x="570" y="280" width="160" height="65" rx="12" class="box bad"/><text x="650" y="309.5" text-anchor="middle" class="label">Reject old accept</text><text x="650" y="328.5" text-anchor="middle" class="sub">a1 / v7 -&gt; 409</text>
+            <path d="M475 313 L560 313" class="wire fail"/><polygon points="570,313 560,318 560,308" class="head fail"/><text x="523" y="300" text-anchor="middle" class="tiny">late</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">补上迟到 accept 的红线：版本已到 8，a1/v7 返回 409。不能因为旧手机显示“已接”就覆盖新指派。</span><span class="lang-en">Fence late acceptance: after version 8, a1/v7 returns 409. An old phone screen cannot overwrite a new offer.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d3s6t d3s6d">
+          <title id="d3s6t">Complete custody without reusing the offer</title>
+          <desc id="d3s6d">picked_up transitions to delivered with delivery proof. Automatic expiry remains restricted to offered; its late acceptance branch is rejected.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="18" y="18" width="926" height="364" rx="18" class="boundary"/><text x="34" y="38" class="tiny">OFFER STATE · accept and expiry serialize in Fulfillment DB</text>
+          <rect x="60" y="105" width="155" height="75" rx="12" class="box"/><text x="137.5" y="139.5" text-anchor="middle" class="label">pending_match</text><text x="137.5" y="158.5" text-anchor="middle" class="sub">order o7</text>
+          <rect x="305" y="105" width="170" height="75" rx="12" class="box"/><text x="390" y="139.5" text-anchor="middle" class="label">offered</text><text x="390" y="158.5" text-anchor="middle" class="sub">a1 · v=7 · B</text>
+          <path d="M215 135 L295 135" class="wire"/><polygon points="305,135 295,140 295,130" class="head"/><text x="260" y="122" text-anchor="middle" class="tiny">reserve</text>
+          <rect x="570" y="105" width="160" height="75" rx="12" class="box"/><text x="650" y="139.5" text-anchor="middle" class="label">assigned</text><text x="650" y="158.5" text-anchor="middle" class="sub">B owns o7</text>
+          <path d="M475 132 L560 132" class="wire"/><polygon points="570,132 560,137 560,127" class="head"/><text x="522" y="113" text-anchor="middle" class="tiny">accept(a1,v7)</text>
+          <rect x="790" y="105" width="135" height="75" rx="12" class="box"/><text x="857.5" y="139.5" text-anchor="middle" class="label">picked_up</text><text x="857.5" y="158.5" text-anchor="middle" class="sub">custody B</text>
+          <path d="M730 140 L780 140" class="wire"/><polygon points="790,140 780,145 780,135" class="head"/><text x="760" y="94" text-anchor="middle" class="tiny">pickup</text>
+          <rect x="305" y="280" width="170" height="65" rx="12" class="box"/><text x="390" y="309.5" text-anchor="middle" class="label">expired</text><text x="390" y="328.5" text-anchor="middle" class="sub">release a1</text>
+          <path d="M382 180 L382 270" class="wire fail"/><polygon points="382,280 377,270 387,270" class="head fail"/><text x="397" y="231" class="tiny">DB time &gt;= deadline</text>
+          <path d="M305 310 L145 310 Q137 310 137 302 L137 190" class="wire async"/><polygon points="137,180 142,190 132,190" class="head async"/><text x="206" y="299" text-anchor="middle" class="tiny">v8 · cooldown B</text>
+          <rect x="570" y="280" width="160" height="65" rx="12" class="box bad"/><text x="650" y="309.5" text-anchor="middle" class="label">Reject old accept</text><text x="650" y="328.5" text-anchor="middle" class="sub">a1 / v7 -&gt; 409</text>
+          <path d="M475 313 L560 313" class="wire fail"/><polygon points="570,313 560,318 560,308" class="head fail"/><text x="523" y="300" text-anchor="middle" class="tiny">late</text>
+          <g class="is-new">
+            <rect x="790" y="280" width="135" height="65" rx="12" class="box"/><text x="857.5" y="309.5" text-anchor="middle" class="label">delivered</text><text x="857.5" y="328.5" text-anchor="middle" class="sub">terminal</text>
+            <path d="M858 180 L858 270" class="wire"/><polygon points="858,280 853,270 863,270" class="head"/><text x="869" y="241" class="tiny">proof</text><text x="34" y="365" class="tiny">Only offered can expire automatically; picked_up requires a controlled custody handoff.</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">最后闭合送达：当前骑手与 attempt 上报凭据才进入 delivered。超时改派与实物交接是两条路径，终图同时说明边界。</span><span class="lang-en">Close delivery with evidence from the current courier and attempt. Offer expiry and physical handoff have distinct boundaries.</span></figcaption>
+      </div>
+    </figure><div class="bilingual"><div class="lang-zh"><p>图中的 v7 就是订单 generation。accept、拒绝和到期都先锁同一订单，再锁相同容量行；数据库提交才决定状态。<strong>先校验 attempt 绑定与骑手身份，再回放原成功。</strong>历史 accept 回执附带当前快照：后来取消、完成或改派时，它只证明曾接受，不能让旧设备继续取送。</p><p>锁后读取实际数据库时间。PostgreSQL 的 <code>now()/CURRENT_TIMESTAMP</code> 固定在事务开始，等锁后可能已过期；<code>clock_timestamp()</code> 才取调用时刻。<a href="#ref11">[11]</a> 普通 Read Committed SELECT 也不是互斥锁。<a href="#ref10">[10]</a> 权威墙钟需监控与误差约束，时间异常时暂停相关转换；generation 的单调性独立于墙钟。截止点约定 <code>accept: now&lt;deadline</code>，<code>expire: now≥deadline</code>，没有双方都能成功的间隙。</p></div><div class="lang-en"><p>Diagram v7 is the order generation. Accept, reject and expiry lock the same order then capacity row; DB commit decides state. <strong>Validate attempt bindings and courier identity before replaying success.</strong> A historical acceptance includes the current snapshot. After cancellation/completion/reassignment, it proves prior acceptance without renewing execution rights.</p><p>Read actual DB time after locking. PostgreSQL now()/CURRENT_TIMESTAMP retain transaction-start time, possibly before a lock wait crosses the deadline; clock_timestamp() observes call time. <a href="#ref11">[11]</a> A plain Read Committed SELECT is not mutual exclusion. <a href="#ref10">[10]</a> Monitor and bound authoritative wall-clock error; pause time-sensitive transitions when uncertain. Generation monotonicity is independent of wall time. Accept uses now&lt;deadline and expiry now≥deadline.</p></div></div>
+<pre data-language="Pseudocode · accept / reject / expire" data-kind="pseudocode" data-source="decide.pseudo"><code>decideOffer(op, orderId, attemptId, generation, authenticatedCourier):
+  begin transaction
+    o = SELECT order FOR UPDATE
+    a = SELECT attempt WHERE id = attemptId
+    require a binds (orderId, generation) else CONFLICT
+    if op in {ACCEPT, REJECT}: require a.courier == authenticatedCourier else FORBIDDEN
+    if op == ACCEPT and a.acceptReceipt exists:
+      commit; return a.acceptReceipt, currentSnapshot(o) // historical, no reactivation
+    require o.currentAttempt == a.id and o.generation == generation else STALE
+    require o.state == offered and a.result == offered else STALE
+    c = SELECT courier_capacity WHERE id = a.courier FOR UPDATE
+    now = SELECT clock_timestamp()
+    if op == ACCEPT:
+      require now &lt; a.deadline else CONFLICT
+      receipt = fixedAcceptReceipt(a)
+      UPDATE attempt SET result = assigned, acceptReceipt = receipt
+      UPDATE order SET state = assigned
+      INSERT outbox(&quot;assigned:&quot; + a.id, currentAssignment)
+    else:
+      require op == REJECT or (op == EXPIRE and now &gt;= a.deadline) else NOT_DUE
+      DELETE active_slot WHERE attempt_id = a.id        // require one deleted row
+      UPDATE courier_capacity SET occupied = occupied - 1 WHERE id = a.courier
+      UPDATE attempt SET result = (op == REJECT ? rejected : expired)
+      next = now &gt;= o.matchDeadline or o.attemptCount &gt;= 3 ? failed : pending_match
+      UPDATE order SET state = next, currentAttempt = null, generation = generation + 1
+      INSERT outbox(keyFor(orderId, generation + 1, next), nextWorkOrFailure)
+      // Persist courier cooldown with the retry work; retries do not reset budgets.
+      receipt = fixedDecisionReceipt(a, op)
+  commit; return receipt, currentSnapshot(o)
+  // Only this offered branch expires. Assigned/picked_up keep their slot.</code></pre>
+<div class="bilingual"><div class="lang-zh"><p>accept 先赢：offered→assigned，占用仍为 1，后续到期扫描无效。到期先赢：a1=expired，订单 pending_match、v7→v8，释放一次并写重匹配事件；旧 a1/v7 接单返回冲突。每次新派用新 attempt；三次 20 秒仅是 60 秒等待，召回、路耗、队列还消耗剩余匹配预算。</p></div><div class="lang-en"><p>Acceptance first changes offered→assigned, keeps one occupied slot and makes expiry a no-op. Expiry first marks a1 expired, releases once, advances 7→8 and persists rematching; old a1/v7 conflicts. New dispatch gets a new attempt. Three 20 s waits consume 60 s before recall, routing and queue time.</p></div></div>
+<h3><span class="lang-zh">取消和改派必须先确认实物归属</span><span class="lang-en">Cancellation and reassignment require custody control</span></h3>
+<div class="bilingual"><div class="lang-zh"><p>未接 offered 可直接取消；pending_match 取消只需锁订单、写终态和事件。assigned 之后的取消不能只看数据库“还没报 pickup”：骑手可能已拿餐而回报延迟。先由有权限的运营流程核实撤销/交接、取得绑定本单/attempt/代次的可信凭据，再释放槽位。已取餐更要完成实物交接。GPS 断线和工作租约到期都不是这种凭据。</p></div><div class="lang-en"><p>An unanswered offer can be cancelled; pending cancellation only locks the order and commits terminal state/event. After acceptance, absence of a pickup upload does not prove food remains at the restaurant. Authorized operations must verify cancellation/handoff with evidence bound to order/attempt/generation before releasing capacity. GPS loss and worker lease expiry are not custody evidence.</p></div></div>
+<pre data-language="Pseudocode · custody transitions and release" data-kind="pseudocode" data-source="release.pseudo"><code>finishOrRelease(orderId, attemptId, generation, action, authenticatedActor, verifiedEvidence):
+  require action in {PICKUP, DELIVER, CANCEL, REASSIGN} else INVALID
+  begin transaction
+    o = SELECT order FOR UPDATE
+    a = SELECT attempt WHERE id = attemptId
+    require a binds (orderId, generation) else CONFLICT
+    require authorizedActorAndEvidence(action, authenticatedActor, o, a, verifiedEvidence) else FORBIDDEN
+    if storedReceipt(action, a) exists:
+      require same evidence binding else CONFLICT
+      commit; return storedReceipt, currentSnapshot(o)
+    require o.currentAttempt == a.id and o.generation == generation else STALE
+    if action == PICKUP:
+      require o.state == assigned else CONFLICT
+      UPDATE order, attempt SET state/result = picked_up
+    else:
+      if action == DELIVER: require o.state == picked_up and deliveryProof else CONFLICT
+      if action == CANCEL: require o.state == offered else CONTROLLED_HANDOFF_REQUIRED
+      if action == REASSIGN:
+        require o.state in {assigned, picked_up} and verifiedCustodyClear else REVIEW
+      c = SELECT courier_capacity WHERE id = a.courier FOR UPDATE
+      DELETE active_slot WHERE attempt_id = a.id         // require one deleted row
+      UPDATE courier_capacity SET occupied = occupied - 1 WHERE id = a.courier
+      UPDATE attempt SET result = terminalResult(action)
+      next = action == REASSIGN ? pending_match : terminalResult(action)
+      UPDATE order SET state = next, currentAttempt = null, generation = generation + 1
+    INSERT operation_receipt(action, a.id, evidenceBinding, fixedReceipt)
+    INSERT outbox(fixedEventKey(action, a.id), stateOrRematchIntent)
+  commit; return fixedReceipt, currentSnapshot(o)
+  // Verified custody evidence is a trusted operations dependency, never stale GPS.</code></pre>
+<div class="bilingual"><div class="lang-zh"><p>本地事务把凭据去重、状态、槽位释放和持久事件绑在一起，不能替外部世界保证交接。例子的可信凭据由显式适配契约提供。attempt、原回执和 generation 不随短 TTL 清除；归档也须让未知旧身份只能查询/拒绝，防止备份恢复或晚到命令被当成新工作。</p></div><div class="lang-en"><p>The transaction binds evidence deduplication, state, release and durable event; it cannot itself prove a physical handoff. Trusted evidence is an explicit adapter dependency. Do not expire attempt identities, original receipts or generations with short TTLs. Archived unknown old identities must query/reject rather than become new work after delayed commands or backup restoration.</p></div></div>
+</section>
+
+<section>
+<h2><span class="lang-zh">位置：会话、排序与新鲜度分别验证</span><span class="lang-en">Location: validate session, order and freshness separately</span></h2>
+<figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d4s1t d4s1d">
+          <title id="d4s1t">Authenticate a location session</title>
+          <desc id="d4s1d">Courier sends epoch twelve sequence forty-one to Location Ingest, where session identity is verified.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <g class="is-new">
+            <rect x="96" y="18" width="848" height="364" rx="18" class="boundary"/><text x="112" y="38" class="tiny">LOCATION WRITE · session epoch + sequence + freshness gate</text>
+            <circle cx="44" cy="168" r="12" class="box"/><path d="M24 214 Q44 182 64 214" class="wire"/><text x="44" y="236" text-anchor="middle" class="label">Courier</text>
+            <rect x="190" y="150" width="165" height="88" rx="12" class="box"/><text x="272.5" y="191" text-anchor="middle" class="label">Location Ingest</text><text x="272.5" y="210" text-anchor="middle" class="sub">authenticate + throttle</text>
+            <path d="M70 183 L180 183" class="wire"/><polygon points="190,183 180,188 180,178" class="head"/><text x="148" y="174" text-anchor="middle" class="tiny">e12 / seq41</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">新建上传路径，先验证服务端发的 session epoch，再接受 seq41。手机重连可以继续序号；新会话要换 epoch。</span><span class="lang-en">Start with server-issued session epoch and sequence 41. Reconnect preserves sequence; a new session gets a new epoch.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d4s2t d4s2d">
+          <title id="d4s2t">Bound the arrival rate</title>
+          <desc id="d4s2d">Location Ingest applies nominal five-second sampling and a hard one-per-second cap; capture time and accuracy are validated.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="96" y="18" width="848" height="364" rx="18" class="boundary"/><text x="112" y="38" class="tiny">LOCATION WRITE · session epoch + sequence + freshness gate</text>
+          <circle cx="44" cy="168" r="12" class="box"/><path d="M24 214 Q44 182 64 214" class="wire"/><text x="44" y="236" text-anchor="middle" class="label">Courier</text>
+          <rect x="190" y="150" width="165" height="88" rx="12" class="box"/><text x="272.5" y="191" text-anchor="middle" class="label">Location Ingest</text><text x="272.5" y="210" text-anchor="middle" class="sub">authenticate + throttle</text>
+          <path d="M70 183 L180 183" class="wire"/><polygon points="190,183 180,188 180,178" class="head"/><text x="148" y="174" text-anchor="middle" class="tiny">e12 / seq41</text>
+          <g class="is-new">
+            <text x="395" y="86" class="tiny">5 s nominal; hard cap 1/s</text><text x="395" y="108" class="tiny">captured_at + accuracy checked</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">加采样与硬门限：常态 5 秒一次，位移触发也最多 1/s。10,000÷5=2,000/s；短时上限 10,000/s，要单独做预算。</span><span class="lang-en">Add sampling and a hard cap: nominally every 5 seconds, at most 1/s even on displacement. 10,000/5=2,000/s; the 10,000/s burst needs its own budget.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d4s3t d4s3d">
+          <title id="d4s3t">Store before acknowledging</title>
+          <desc id="d4s3d">Location Ingest writes validated points to Loc Store; Loc Store replies to Ingest, which replies to Courier.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="96" y="18" width="848" height="364" rx="18" class="boundary"/><text x="112" y="38" class="tiny">LOCATION WRITE · session epoch + sequence + freshness gate</text>
+          <circle cx="44" cy="168" r="12" class="box"/><path d="M24 214 Q44 182 64 214" class="wire"/><text x="44" y="236" text-anchor="middle" class="label">Courier</text>
+          <rect x="190" y="150" width="165" height="88" rx="12" class="box"/><text x="272.5" y="191" text-anchor="middle" class="label">Location Ingest</text><text x="272.5" y="210" text-anchor="middle" class="sub">authenticate + throttle</text>
+          <path d="M70 183 L180 183" class="wire"/><polygon points="190,183 180,188 180,178" class="head"/><text x="148" y="174" text-anchor="middle" class="tiny">e12 / seq41</text>
+          <text x="395" y="86" class="tiny">5 s nominal; hard cap 1/s</text><text x="395" y="108" class="tiny">captured_at + accuracy checked</text>
+          <g class="is-new">
+            <rect x="587" y="147" width="200" height="108" rx="8" class="cache"/><rect x="580" y="140" width="200" height="108" rx="8" class="cache"/><text x="680" y="191" text-anchor="middle" class="label">Loc Store</text><text x="680" y="210" text-anchor="middle" class="sub">latest point + cell</text>
+            <path d="M355 177 L570 177" class="wire"/><polygon points="580,177 570,182 570,172" class="head"/><text x="468" y="165" text-anchor="middle" class="tiny">validated point</text>
+            <path d="M580 205 L365 205" class="wire reply"/><polygon points="355,205 365,200 365,210" class="head reply"/><text x="468" y="223" text-anchor="middle" class="tiny">accepted seq41</text><path d="M190 201 L80 201" class="wire reply"/><polygon points="70,201 80,196 80,206" class="head reply"/><text x="128" y="220" text-anchor="middle" class="tiny">ACK</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">Loc Store 原子比较 (epoch,seq) 并存最新点后，确认逐跳返回。带 seq42 的旧采集点仍可能不够新，不能只看序号。</span><span class="lang-en">Atomically compare epoch and sequence and store before replying Loc Store→Ingest→Courier. A higher sequence can still contain stale capture data.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d4s4t d4s4d">
+          <title id="d4s4t">Maintain a derived membership index</title>
+          <desc id="d4s4d">Loc Store publishes membership updates to Cell Index. Match queries Cell Index and receives candidate IDs, then revalidates details.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="96" y="18" width="848" height="364" rx="18" class="boundary"/><text x="112" y="38" class="tiny">LOCATION WRITE · session epoch + sequence + freshness gate</text>
+          <circle cx="44" cy="168" r="12" class="box"/><path d="M24 214 Q44 182 64 214" class="wire"/><text x="44" y="236" text-anchor="middle" class="label">Courier</text>
+          <rect x="190" y="150" width="165" height="88" rx="12" class="box"/><text x="272.5" y="191" text-anchor="middle" class="label">Location Ingest</text><text x="272.5" y="210" text-anchor="middle" class="sub">authenticate + throttle</text>
+          <path d="M70 183 L180 183" class="wire"/><polygon points="190,183 180,188 180,178" class="head"/><text x="148" y="174" text-anchor="middle" class="tiny">e12 / seq41</text>
+          <text x="395" y="86" class="tiny">5 s nominal; hard cap 1/s</text><text x="395" y="108" class="tiny">captured_at + accuracy checked</text>
+          <rect x="587" y="147" width="200" height="108" rx="8" class="cache"/><rect x="580" y="140" width="200" height="108" rx="8" class="cache"/><text x="680" y="191" text-anchor="middle" class="label">Loc Store</text><text x="680" y="210" text-anchor="middle" class="sub">latest point + cell</text>
+          <path d="M355 177 L570 177" class="wire"/><polygon points="580,177 570,182 570,172" class="head"/><text x="468" y="165" text-anchor="middle" class="tiny">validated point</text>
+          <path d="M580 205 L365 205" class="wire reply"/><polygon points="355,205 365,200 365,210" class="head reply"/><text x="468" y="223" text-anchor="middle" class="tiny">accepted seq41</text><path d="M190 201 L80 201" class="wire reply"/><polygon points="70,201 80,196 80,206" class="head reply"/><text x="128" y="220" text-anchor="middle" class="tiny">ACK</text>
+          <g class="is-new">
+            <rect x="580" y="296" width="200" height="58" rx="12" class="box"/><text x="680" y="322" text-anchor="middle" class="label">Cell Index</text><text x="680" y="341" text-anchor="middle" class="sub">derived IDs</text><rect x="840" y="296" width="90" height="58" rx="12" class="box"/><text x="885" y="331" text-anchor="middle" class="label">Match</text>
+            <path d="M670 248 L670 286" class="wire async"/><polygon points="670,296 665,286 675,286" class="head async"/><text x="687" y="278" class="tiny">move membership</text><path d="M840 314 L790 314" class="wire"/><polygon points="780,314 790,309 790,319" class="head"/><path d="M780 336 L830 336" class="wire reply"/><polygon points="840,336 830,341 830,331" class="head reply"/>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">加可重建的格子成员索引。跨格异步更新可短暂漏召回或重复，所以候选去重并复查详情；删除详情不等于删 GEO 成员。</span><span class="lang-en">Add a rebuildable membership index. Cross-cell updates can briefly omit or duplicate recall, so deduplicate IDs and recheck details; detail expiry does not remove GEO members.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d4s5t d4s5d">
+          <title id="d4s5t">Reject reordered uploads without refreshing freshness</title>
+          <desc id="d4s5d">Location Ingest rejects older sequence forty in epoch twelve back to Courier. Match always rechecks session, capture age, accuracy and online state.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="96" y="18" width="848" height="364" rx="18" class="boundary"/><text x="112" y="38" class="tiny">LOCATION WRITE · session epoch + sequence + freshness gate</text>
+          <circle cx="44" cy="168" r="12" class="box"/><path d="M24 214 Q44 182 64 214" class="wire"/><text x="44" y="236" text-anchor="middle" class="label">Courier</text>
+          <rect x="190" y="150" width="165" height="88" rx="12" class="box"/><text x="272.5" y="191" text-anchor="middle" class="label">Location Ingest</text><text x="272.5" y="210" text-anchor="middle" class="sub">authenticate + throttle</text>
+          <path d="M70 183 L180 183" class="wire"/><polygon points="190,183 180,188 180,178" class="head"/><text x="148" y="174" text-anchor="middle" class="tiny">e12 / seq41</text>
+          <text x="395" y="86" class="tiny">5 s nominal; hard cap 1/s</text><text x="395" y="108" class="tiny">captured_at + accuracy checked</text>
+          <rect x="587" y="147" width="200" height="108" rx="8" class="cache"/><rect x="580" y="140" width="200" height="108" rx="8" class="cache"/><text x="680" y="191" text-anchor="middle" class="label">Loc Store</text><text x="680" y="210" text-anchor="middle" class="sub">latest point + cell</text>
+          <path d="M355 177 L570 177" class="wire"/><polygon points="580,177 570,182 570,172" class="head"/><text x="468" y="165" text-anchor="middle" class="tiny">validated point</text>
+          <path d="M580 205 L365 205" class="wire reply"/><polygon points="355,205 365,200 365,210" class="head reply"/><text x="468" y="223" text-anchor="middle" class="tiny">accepted seq41</text><path d="M190 201 L80 201" class="wire reply"/><polygon points="70,201 80,196 80,206" class="head reply"/><text x="128" y="220" text-anchor="middle" class="tiny">ACK</text>
+          <rect x="580" y="296" width="200" height="58" rx="12" class="box"/><text x="680" y="322" text-anchor="middle" class="label">Cell Index</text><text x="680" y="341" text-anchor="middle" class="sub">derived IDs</text><rect x="840" y="296" width="90" height="58" rx="12" class="box"/><text x="885" y="331" text-anchor="middle" class="label">Match</text>
+          <path d="M670 248 L670 286" class="wire async"/><polygon points="670,296 665,286 675,286" class="head async"/><text x="687" y="278" class="tiny">move membership</text><path d="M840 314 L790 314" class="wire"/><polygon points="780,314 790,309 790,319" class="head"/><path d="M780 336 L830 336" class="wire reply"/><polygon points="840,336 830,341 830,331" class="head reply"/>
+          <g class="is-new">
+            <rect x="370" y="275" width="195" height="20" rx="10" class="badge"/><text x="467.5" y="289" text-anchor="middle" class="badge-text">e12 / seq40 rejected</text><text x="395" y="254" class="tiny">drop at Ingest; reuse ACK</text>
+            <text x="112" y="329" class="tiny">Match rechecks the active session;</text><text x="112" y="350" class="tiny">capture age &lt;= 30 s, accuracy, online.</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">最后补乱序拒绝：seq40 不覆盖 seq41，也不能刷新 freshness。30 秒是业务候选窗口；键 TTL 只负责回收。</span><span class="lang-en">Reject seq40 without overwriting seq41 or refreshing freshness. Thirty seconds is a candidate window; key TTL only reclaims storage.</span></figcaption>
+      </div>
+    </figure><div class="bilingual"><div class="lang-zh"><p>epoch 由服务端单调分配并保留在点 TTL 之外；每次重连都换新 epoch、清旧点并重新采样。断线事件必须带 epoch 做条件更新，旧连接的延迟断线不能关闭新会话。序号只在当前会话内比较；客户端不能自选更大 epoch。业务在线、连接存活与 GPS 新鲜是三个字段。</p><p>下列伪代码描述单个骑手会话记录的存储事务/CAS。重复或迟到 seq 返回当前序号，<strong>不改 captured_at、received_at 或 TTL</strong>；较高 seq 的旧采样也要先拒绝。节流在此之前按骑手和区域执行，控制动作有独立配额。静止心跳维持 liveness，不能把旧 GPS 洗成新点。</p></div><div class="lang-en"><p>The server durably advances epoch beyond point TTL. Every reconnect gets a new epoch, clears the old point and requires a new sample. Disconnect updates match epoch, so an old delayed disconnect cannot close the new session. Sequence ordering applies within the current session; clients cannot select epochs. Business availability, connection liveness and GPS freshness are separate fields.</p><p>This pseudocode uses a per-courier storage transaction/CAS. Duplicate or older sequences return the current sequence <strong>without changing capture/receipt time or TTL</strong>. A higher sequence with stale capture also fails. Apply courier/zone throttling before this step and isolate control quotas. Stationary heartbeats maintain liveness without refreshing old GPS.</p></div></div>
+<pre data-language="Pseudocode · location session transaction" data-kind="pseudocode" data-source="location.pseudo"><code>startSession(authenticatedCourier, trustedClockBound):
+  begin location-store transaction
+    INSERT empty session if absent; on an identified unique race restart transaction
+    s = SELECT session FOR UPDATE
+    UPDATE session SET epoch = s.epoch + 1, connected = true,
+                       seq = -1, point = null, clockBounded = trustedClockBound
+  commit; return serverIssuedEpoch                       // retained beyond point TTL
+
+applyPoint(authenticatedCourier, inputEpoch, inputSeq, inputPoint):
+  begin location-store transaction
+    s = SELECT session FOR UPDATE
+    now = authoritativeTimeAfterLock()
+    require s.epoch == inputEpoch and s.connected else STALE_SESSION
+    require inputSeq &gt;= 0 and LocationGate.fresh(now, inputPoint, s.clockBounded) else INVALID
+    if inputSeq &lt;= s.seq: commit; return s.seq            // no timestamp/TTL refresh
+    UPDATE session SET seq = inputSeq, point = inputPoint, receivedAt = now, expiresAt = now + 60s
+    // Index delivery may be lossy; periodic reconciliation repairs omissions.
+  commit; return inputSeq
+
+disconnect(inputCourier, inputEpoch):
+  UPDATE session SET connected = false, point = null
+    WHERE courier_id = inputCourier AND epoch = inputEpoch
+  // An old disconnect cannot invalidate a newer session. Reconnect gets a new epoch.
+candidate(s, now):
+  return s.connected and now &lt; s.expiresAt
+         and LocationGate.fresh(now, s.point, s.clockBounded)
+  // Recheck current epoch, location cell, business eligibility and capacity too.</code></pre>
+<h3><span class="lang-zh">把 ±5 秒误差写进代码</span><span class="lang-en">Include the ±5 s clock uncertainty</span></h3>
+<div class="bilingual"><div class="lang-zh"><p>A6 假设采集时钟相对服务端误差可证明不超过 ±5 秒。保守年龄上界为 <code>now−captured+5s</code>，要求 ≤30 秒；同时拒绝 <code>captured&gt;now+5s</code> 的明显未来点，因此可接受区间是 <code>−5s≤now−captured≤25s</code>。误差界不可信就排除；这不是防伪造 GPS 的物理证明。</p><p>下面是完整可运行 Java 17 纯校验类，包含边界自检；不提供时钟同步或分布式 CAS。读候选时再次按当前时间计算，不能用 60 秒回收 TTL 当 30 秒业务新鲜度。</p></div><div class="lang-en"><p>A6 assumes a defensible relative clock-error bound of ±5 s. Conservative age is now−captured+5 s≤30 s, while captured&gt;now+5 s is rejected. Thus −5 s≤now−captured≤25 s. Exclude unbounded clocks; this is not physical proof against spoofed GPS.</p><p>This complete runnable Java 17 pure validator includes boundary checks, without clock synchronization or distributed CAS. Recompute freshness at candidate read time; the 60 s cleanup TTL does not replace the 30 s business age bound.</p></div></div>
+<pre data-language="Java 17 · runnable class" data-kind="runnable" data-source="LocationGate.java"><code>/** Java 17, dependency-free pure validation; no storage or clock synchronization. */
+public final class LocationGate {
+    public record Point(long capturedAtMs, double accuracyM, double lat, double lon) {}
+    public static boolean fresh(long nowMs, Point p, boolean boundedClock) {
+        if (!boundedClock || p == null || nowMs &lt; 0 || p.capturedAtMs() &lt; 0
+                || !Double.isFinite(p.accuracyM()) || p.accuracyM() &lt; 0 || p.accuracyM() &gt; 50
+                || !Double.isFinite(p.lat()) || Math.abs(p.lat()) &gt; 90
+                || !Double.isFinite(p.lon()) || Math.abs(p.lon()) &gt; 180) return false;
+        try {
+            long delta = Math.subtractExact(nowMs, p.capturedAtMs());
+            // Trusted relative clock error &lt;= 5 s. True capture-age upper bound &lt;= 30 s.
+            return delta &gt;= -5_000 &amp;&amp; delta &lt;= 25_000;
+        } catch (ArithmeticException invalidTime) {
+            return false;
+        }
+    }
+    public static void main(String[] args) {
+        if (!fresh(100_000, new Point(75_000, 50, 31, 121), true)
+                || fresh(100_000, new Point(74_999, 50, 31, 121), true)
+                || fresh(100_000, new Point(105_001, 5, 31, 121), true)
+                || fresh(100_000, new Point(100_000, Double.NaN, 31, 121), true)
+                || fresh(100_000, new Point(100_000, 5, 31, 121), false))
+            throw new AssertionError(&quot;freshness boundary failed&quot;);
+        System.out.println(&quot;LocationGate: normal/stale/future/NaN/unbounded checks passed&quot;);
+    }
+}</code></pre>
+<div class="bilingual"><div class="lang-zh"><p>Redis EXPIRE 是键级到期：详情键过期不会删除另一 GEO 键里的成员，给整个 GEO 键设 TTL 又会删掉所有成员。<a href="#ref4">[4]</a> 投影事件携 epoch/seq，处理前比当前详情，旧迁移/清理不能覆盖新成员；跨格先补新成员再条件删旧成员，短暂重复去重。漏事件由周期扫描当前有效详情修复；灾后不回放五分钟前旧点。索引只提供 IDs，最终仍核对详情、真实格子与权威容量。</p></div><div class="lang-en"><p>EXPIRE operates on a key: expiring details does not remove a member in another GEO key, while expiring the whole GEO key removes everyone. <a href="#ref4">[4]</a> Fence projection events/cleanup by epoch/sequence against current details. Add the new cell before conditionally deleting old membership and deduplicate temporary copies. Periodic reconciliation repairs dropped events from currently valid details rather than replaying old points. Index IDs still require detail/cell and authoritative capacity checks.</p></div></div>
+</section>
+
+<section>
+<h2><span class="lang-zh">轨迹与 ETA：位置可丢，履约状态可恢复</span><span class="lang-en">Tracking and ETA: lossy points, recoverable fulfillment</span></h2>
+<figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s1t d5s1d">
+          <title id="d5s1t">Authorize a tracking subscription</title>
+          <desc id="d5s1d">Client asks Tracking API to watch order o7. Tracking API queries Fulfillment DB, which returns current assignment and authorization facts.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <g class="is-new">
+            <rect x="96" y="18" width="848" height="364" rx="18" class="boundary"/><text x="112" y="38" class="tiny">TRACKING + ETA · permissioned snapshots, lossy point stream</text>
+            <circle cx="44" cy="102" r="12" class="box"/><path d="M24 148 Q44 116 64 148" class="wire"/><text x="44" y="170" text-anchor="middle" class="label">Client</text>
+            <rect x="190" y="90" width="150" height="76" rx="12" class="box"/><text x="265" y="125" text-anchor="middle" class="label">Tracking API</text><text x="265" y="144" text-anchor="middle" class="sub">check order owner</text>
+            <path d="M445 84 V178 A85 12 0 0 0 615 178 V84" class="store"/><ellipse cx="530" cy="84" rx="85" ry="12" class="store"/><text x="530" y="141" text-anchor="middle" class="label">Fulfillment DB</text><text x="530" y="159" text-anchor="middle" class="sub">order + assignment</text>
+            <path d="M70 117 L180 117" class="wire"/><polygon points="190,117 180,122 180,112" class="head"/><text x="135" y="109" text-anchor="middle" class="tiny">GET</text><path d="M340 117 L435 117" class="wire"/><polygon points="445,117 435,122 435,112" class="head"/><text x="393" y="108" text-anchor="middle" class="tiny">authorize</text>
+            <path d="M445 137 L350 137" class="wire reply"/><polygon points="340,137 350,132 350,142" class="head reply"/><text x="393" y="154" text-anchor="middle" class="tiny">current owner</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">先校验用户拥有 o7，再取得当前骑手与 attempt。一个订单号不能成为看全城位置的通行证。</span><span class="lang-en">Verify the caller owns o7 and obtain its current courier and attempt. An order ID cannot authorize citywide location access.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s2t d5s2d">
+          <title id="d5s2t">Read a validated current point</title>
+          <desc id="d5s2d">Tracking API reads Loc Store for the current courier. Loc Store returns sequence and capture age to Tracking API along the lower route.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="96" y="18" width="848" height="364" rx="18" class="boundary"/><text x="112" y="38" class="tiny">TRACKING + ETA · permissioned snapshots, lossy point stream</text>
+          <circle cx="44" cy="102" r="12" class="box"/><path d="M24 148 Q44 116 64 148" class="wire"/><text x="44" y="170" text-anchor="middle" class="label">Client</text>
+          <rect x="190" y="90" width="150" height="76" rx="12" class="box"/><text x="265" y="125" text-anchor="middle" class="label">Tracking API</text><text x="265" y="144" text-anchor="middle" class="sub">check order owner</text>
+          <path d="M445 84 V178 A85 12 0 0 0 615 178 V84" class="store"/><ellipse cx="530" cy="84" rx="85" ry="12" class="store"/><text x="530" y="141" text-anchor="middle" class="label">Fulfillment DB</text><text x="530" y="159" text-anchor="middle" class="sub">order + assignment</text>
+          <path d="M70 117 L180 117" class="wire"/><polygon points="190,117 180,122 180,112" class="head"/><text x="135" y="109" text-anchor="middle" class="tiny">GET</text><path d="M340 117 L435 117" class="wire"/><polygon points="445,117 435,122 435,112" class="head"/><text x="393" y="108" text-anchor="middle" class="tiny">authorize</text>
+          <path d="M445 137 L350 137" class="wire reply"/><polygon points="340,137 350,132 350,142" class="head reply"/><text x="393" y="154" text-anchor="middle" class="tiny">current owner</text>
+          <g class="is-new">
+            <rect x="697" y="277" width="175" height="72" rx="8" class="cache"/><rect x="690" y="270" width="175" height="72" rx="8" class="cache"/><text x="777.5" y="303" text-anchor="middle" class="label">Loc Store</text><text x="777.5" y="322" text-anchor="middle" class="sub">validated latest point</text>
+            <path d="M300 166 L300 220 Q300 228 308 228 L647 228 Q655 228 655 236 L655 285 Q655 293 663 293 L680 293" class="wire"/><polygon points="690,293 680,298 680,288" class="head"/><text x="489" y="242" text-anchor="middle" class="tiny">current courier only</text><path d="M690 317 L638 317 Q630 317 630 309 L630 258 Q630 250 622 250 L273 250 Q265 250 265 242 L265 176" class="wire reply"/><polygon points="265,166 270,176 260,176" class="head reply"/><text x="450" y="268" text-anchor="middle" class="tiny">seq + captured age</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">再读该骑手的新鲜位置，返回含 seq 与采集年龄。改派后订阅重绑新 attempt，迟到旧推送不能覆盖当前轨迹。</span><span class="lang-en">Read the current courier with sequence and capture age. Reassignment rebinds the subscription to its attempt, fencing delayed old points.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s3t d5s3d">
+          <title id="d5s3t">Bound the point stream</title>
+          <desc id="d5s3d">Tracking API returns an SSE snapshot to Client. Three thousand watchers receiving one point every five seconds require six hundred pushes per second.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="96" y="18" width="848" height="364" rx="18" class="boundary"/><text x="112" y="38" class="tiny">TRACKING + ETA · permissioned snapshots, lossy point stream</text>
+          <circle cx="44" cy="102" r="12" class="box"/><path d="M24 148 Q44 116 64 148" class="wire"/><text x="44" y="170" text-anchor="middle" class="label">Client</text>
+          <rect x="190" y="90" width="150" height="76" rx="12" class="box"/><text x="265" y="125" text-anchor="middle" class="label">Tracking API</text><text x="265" y="144" text-anchor="middle" class="sub">check order owner</text>
+          <path d="M445 84 V178 A85 12 0 0 0 615 178 V84" class="store"/><ellipse cx="530" cy="84" rx="85" ry="12" class="store"/><text x="530" y="141" text-anchor="middle" class="label">Fulfillment DB</text><text x="530" y="159" text-anchor="middle" class="sub">order + assignment</text>
+          <path d="M70 117 L180 117" class="wire"/><polygon points="190,117 180,122 180,112" class="head"/><text x="135" y="109" text-anchor="middle" class="tiny">GET</text><path d="M340 117 L435 117" class="wire"/><polygon points="445,117 435,122 435,112" class="head"/><text x="393" y="108" text-anchor="middle" class="tiny">authorize</text>
+          <path d="M445 137 L350 137" class="wire reply"/><polygon points="340,137 350,132 350,142" class="head reply"/><text x="393" y="154" text-anchor="middle" class="tiny">current owner</text>
+          <rect x="697" y="277" width="175" height="72" rx="8" class="cache"/><rect x="690" y="270" width="175" height="72" rx="8" class="cache"/><text x="777.5" y="303" text-anchor="middle" class="label">Loc Store</text><text x="777.5" y="322" text-anchor="middle" class="sub">validated latest point</text>
+          <path d="M300 166 L300 220 Q300 228 308 228 L647 228 Q655 228 655 236 L655 285 Q655 293 663 293 L680 293" class="wire"/><polygon points="690,293 680,298 680,288" class="head"/><text x="489" y="242" text-anchor="middle" class="tiny">current courier only</text><path d="M690 317 L638 317 Q630 317 630 309 L630 258 Q630 250 622 250 L273 250 Q265 250 265 242 L265 176" class="wire reply"/><polygon points="265,166 270,176 260,176" class="head reply"/><text x="450" y="268" text-anchor="middle" class="tiny">seq + captured age</text>
+          <g class="is-new">
+            <path d="M190 135 L80 135" class="wire reply"/><polygon points="70,135 80,130 80,140" class="head reply"/><text x="135" y="151" text-anchor="middle" class="tiny">SSE</text><text x="112" y="352" class="tiny">3,000 watchers / 5 s = 600 pushes/s; keep only the latest point per connection</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">位置沿 Loc Store→Tracking API→Client 返回。3,000 个观看连接÷5=600 推送/s；慢连接只保留最新点，不排一长串旧 GPS。</span><span class="lang-en">Return Loc Store→Tracking API→Client. 3,000 watchers/5=600 pushes/s; slow connections retain the latest point rather than a backlog.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s4t d5s4d">
+          <title id="d5s4t">Request route time separately</title>
+          <desc id="d5s4d">Tracking API sends an ETA request to Routing through the upper route; Routing returns duration and confidence through the middle route.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="96" y="18" width="848" height="364" rx="18" class="boundary"/><text x="112" y="38" class="tiny">TRACKING + ETA · permissioned snapshots, lossy point stream</text>
+          <circle cx="44" cy="102" r="12" class="box"/><path d="M24 148 Q44 116 64 148" class="wire"/><text x="44" y="170" text-anchor="middle" class="label">Client</text>
+          <rect x="190" y="90" width="150" height="76" rx="12" class="box"/><text x="265" y="125" text-anchor="middle" class="label">Tracking API</text><text x="265" y="144" text-anchor="middle" class="sub">check order owner</text>
+          <path d="M445 84 V178 A85 12 0 0 0 615 178 V84" class="store"/><ellipse cx="530" cy="84" rx="85" ry="12" class="store"/><text x="530" y="141" text-anchor="middle" class="label">Fulfillment DB</text><text x="530" y="159" text-anchor="middle" class="sub">order + assignment</text>
+          <path d="M70 117 L180 117" class="wire"/><polygon points="190,117 180,122 180,112" class="head"/><text x="135" y="109" text-anchor="middle" class="tiny">GET</text><path d="M340 117 L435 117" class="wire"/><polygon points="445,117 435,122 435,112" class="head"/><text x="393" y="108" text-anchor="middle" class="tiny">authorize</text>
+          <path d="M445 137 L350 137" class="wire reply"/><polygon points="340,137 350,132 350,142" class="head reply"/><text x="393" y="154" text-anchor="middle" class="tiny">current owner</text>
+          <rect x="697" y="277" width="175" height="72" rx="8" class="cache"/><rect x="690" y="270" width="175" height="72" rx="8" class="cache"/><text x="777.5" y="303" text-anchor="middle" class="label">Loc Store</text><text x="777.5" y="322" text-anchor="middle" class="sub">validated latest point</text>
+          <path d="M300 166 L300 220 Q300 228 308 228 L647 228 Q655 228 655 236 L655 285 Q655 293 663 293 L680 293" class="wire"/><polygon points="690,293 680,298 680,288" class="head"/><text x="489" y="242" text-anchor="middle" class="tiny">current courier only</text><path d="M690 317 L638 317 Q630 317 630 309 L630 258 Q630 250 622 250 L273 250 Q265 250 265 242 L265 176" class="wire reply"/><polygon points="265,166 270,176 260,176" class="head reply"/><text x="450" y="268" text-anchor="middle" class="tiny">seq + captured age</text>
+          <path d="M190 135 L80 135" class="wire reply"/><polygon points="70,135 80,130 80,140" class="head reply"/><text x="135" y="151" text-anchor="middle" class="tiny">SSE</text><text x="112" y="352" class="tiny">3,000 watchers / 5 s = 600 pushes/s; keep only the latest point per connection</text>
+          <g class="is-new">
+            <rect x="735" y="90" width="145" height="76" rx="12" class="box"/><text x="807.5" y="125" text-anchor="middle" class="label">Routing</text><text x="807.5" y="144" text-anchor="middle" class="sub">ETA / route matrix</text>
+            <path d="M340 94 L340 74 Q340 66 348 66 L801 66 Q808 66 808 73 L808 80" class="wire"/><polygon points="808,90 803,80 813,80" class="head"/><text x="600" y="58" text-anchor="middle" class="tiny">ETA request after consent</text><path d="M735 144 L663 144 Q655 144 655 152 L655 190 Q655 198 647 198 L328 198 Q320 198 320 190 L320 176" class="wire reply"/><polygon points="320,166 325,176 315,176" class="head reply"/><text x="805" y="199" text-anchor="middle" class="tiny">ETA + confidence</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">ETA 单独问 Routing，再由 Tracking API 返回用户。到店 4 分钟、出餐剩 6 分钟、送达路耗 8 分钟：max(4,6)+8=14 分钟。</span><span class="lang-en">Query Routing separately and return through Tracking API. Arrival in 4 minutes, food ready in 6, then 8 to dropoff gives max(4,6)+8=14 minutes.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s5t d5s5d">
+          <title id="d5s5t">Keep dependency failure at the API</title>
+          <desc id="d5s5d">The red loop is the Tracking API local timer: no Routing reply arrived before its wait budget. Tracking API returns uncertain or unavailable ETA over its existing reply. Stale location is unavailable rather than a fresh candidate.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="96" y="18" width="848" height="364" rx="18" class="boundary"/><text x="112" y="38" class="tiny">TRACKING + ETA · permissioned snapshots, lossy point stream</text>
+          <circle cx="44" cy="102" r="12" class="box"/><path d="M24 148 Q44 116 64 148" class="wire"/><text x="44" y="170" text-anchor="middle" class="label">Client</text>
+          <rect x="190" y="90" width="150" height="76" rx="12" class="box"/><text x="265" y="125" text-anchor="middle" class="label">Tracking API</text><text x="265" y="144" text-anchor="middle" class="sub">check order owner</text>
+          <path d="M445 84 V178 A85 12 0 0 0 615 178 V84" class="store"/><ellipse cx="530" cy="84" rx="85" ry="12" class="store"/><text x="530" y="141" text-anchor="middle" class="label">Fulfillment DB</text><text x="530" y="159" text-anchor="middle" class="sub">order + assignment</text>
+          <path d="M70 117 L180 117" class="wire"/><polygon points="190,117 180,122 180,112" class="head"/><text x="135" y="109" text-anchor="middle" class="tiny">GET</text><path d="M340 117 L435 117" class="wire"/><polygon points="445,117 435,122 435,112" class="head"/><text x="393" y="108" text-anchor="middle" class="tiny">authorize</text>
+          <path d="M445 137 L350 137" class="wire reply"/><polygon points="340,137 350,132 350,142" class="head reply"/><text x="393" y="154" text-anchor="middle" class="tiny">current owner</text>
+          <rect x="697" y="277" width="175" height="72" rx="8" class="cache"/><rect x="690" y="270" width="175" height="72" rx="8" class="cache"/><text x="777.5" y="303" text-anchor="middle" class="label">Loc Store</text><text x="777.5" y="322" text-anchor="middle" class="sub">validated latest point</text>
+          <path d="M300 166 L300 220 Q300 228 308 228 L647 228 Q655 228 655 236 L655 285 Q655 293 663 293 L680 293" class="wire"/><polygon points="690,293 680,298 680,288" class="head"/><text x="489" y="242" text-anchor="middle" class="tiny">current courier only</text><path d="M690 317 L638 317 Q630 317 630 309 L630 258 Q630 250 622 250 L273 250 Q265 250 265 242 L265 176" class="wire reply"/><polygon points="265,166 270,176 260,176" class="head reply"/><text x="450" y="268" text-anchor="middle" class="tiny">seq + captured age</text>
+          <path d="M190 135 L80 135" class="wire reply"/><polygon points="70,135 80,130 80,140" class="head reply"/><text x="135" y="151" text-anchor="middle" class="tiny">SSE</text><text x="112" y="352" class="tiny">3,000 watchers / 5 s = 600 pushes/s; keep only the latest point per connection</text>
+          <rect x="735" y="90" width="145" height="76" rx="12" class="box"/><text x="807.5" y="125" text-anchor="middle" class="label">Routing</text><text x="807.5" y="144" text-anchor="middle" class="sub">ETA / route matrix</text>
+          <path d="M340 94 L340 74 Q340 66 348 66 L801 66 Q808 66 808 73 L808 80" class="wire"/><polygon points="808,90 803,80 813,80" class="head"/><text x="600" y="58" text-anchor="middle" class="tiny">ETA request after consent</text><path d="M735 144 L663 144 Q655 144 655 152 L655 190 Q655 198 647 198 L328 198 Q320 198 320 190 L320 176" class="wire reply"/><polygon points="320,166 325,176 315,176" class="head reply"/><text x="805" y="199" text-anchor="middle" class="tiny">ETA + confidence</text>
+          <g class="is-new">
+            <path d="M205 166 L205 202 Q205 210 197 210 L170 210 Q162 210 162 202 L162 162 Q162 154 170 154 L180 154" class="wire fail"/><polygon points="190,154 180,159 180,149" class="head fail"/><text x="112" y="231" class="tiny">local timer</text><text x="425" y="215" class="tiny">No routing reply; ETA uncertain</text><text x="112" y="373" class="tiny">Stale location is shown as unavailable; it never becomes a fresh matching candidate.</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">红色回环是 API 本地等待超时，表示尚未收到 Routing 回复；用户看低可信区间或 ETA 暂不可用。若位置也过期，就显示最后更新时间，不用旧点伪装实时。</span><span class="lang-en">The red loop is the API local timer, with no Routing reply received; show uncertain or unavailable ETA. Stale points show their age and never masquerade as live location.</span></figcaption>
+      </div>
+    </figure><div class="bilingual"><div class="lang-zh"><p>订阅 o7 先验归属与当前 attempt，结束或改派时撤销/重绑授权；推送携 generation、attempt、epoch、seq。重连先拉授权后的当前快照，客户端拒绝旧代次。严格隐私要求还要在服务端发送门处核验权限/短期授权：已发进网络的数据不能因数据库换版本被收回。</p><p>骑手双向通道可用 WebSocket；用户单向观看可用 SSE，EventSource 支持重连与 Last-Event-ID，但不自动保存完整历史。<a href="#ref8">[8]</a><a href="#ref7">[7]</a> 每连接只有一个“最新位置”槽位，慢端覆盖旧点；delivered、cancelled、reassigned 走持久控制状态/事件，不能被位置覆盖，也不能由一条轨迹推断送达。</p></div><div class="lang-en"><p>Authorize order ownership/current attempt before subscribing; revoke/rebind after completion or reassignment. Pushes carry generation, attempt, epoch and sequence. Reconnect fetches an authorized current snapshot, and the client rejects old generations. Strict privacy also checks authorization at the server send gate or bounds grants; a DB version change cannot retract bytes already in flight.</p><p>WebSocket can carry courier bidirectional traffic; SSE suits one-way viewers. EventSource supports reconnection/Last-Event-ID without automatic complete history. <a href="#ref8">[8]</a><a href="#ref7">[7]</a> A slow viewer keeps only the latest point. Delivered/cancelled/reassigned use durable control state/events, never the overwriteable location slot or inferred movement.</p></div></div>
+<h3><span class="lang-zh">到店与出餐并行，降级不能制造新事实</span><span class="lang-en">Parallel preparation and travel; honest degradation</span></h3>
+<div class="bilingual"><div class="lang-zh"><p>未取餐：到店 4 分钟、出餐剩 6 分钟、到户 8 分钟，则 <code>ETA=max(4,6)+8=14 分钟</code>；相加为 18 重复算了并行等待。取餐后只算剩余送达路径，多单要包含已有停靠并保护先前承诺。</p><p>本地 Routing 等待预算耗尽不代表它回复失败。优先用仍有效且绑定当前 attempt、阶段、起终点和交通上下文的缓存，标低可信；单元素失败、缓存过期/错上下文则 ETA 暂不可用，不能把缺失路耗填零。直线距离÷假设速度只是粗参考。位置过期显示最后更新时间，并停止把它用于新派单。</p></div><div class="lang-en"><p>Before pickup, 4 min travel, 6 min remaining preparation and 8 min delivery give ETA=max(4,6)+8=14 min. Adding 18 double-counts concurrent waiting. After pickup use remaining travel; multiple orders include existing stops and protect prior promises.</p><p>Exhausting the local Routing wait budget is not a failure reply. Prefer valid cached durations bound to current attempt, phase, endpoints and traffic context, labelled low-confidence. Missing elements or expired/wrong-context cache mean unavailable ETA, never zero duration. Distance/speed is only a rough fallback. Display stale point age and exclude stale points from new matching.</p></div></div>
+</section>
+
+<section>
+<h2><span class="lang-zh">饭点运力：有界积压与持久恢复</span><span class="lang-en">Peak supply: bounded backlog and durable recovery</span></h2>
+<figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d6s1t d6s1d">
+          <title id="d6s1t">Quote zone capacity before payment</title>
+          <desc id="d6s1d">Client asks Admission for a zone A capacity quote before payment.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <g class="is-new">
+            <rect x="96" y="18" width="848" height="364" rx="18" class="boundary"/><text x="112" y="38" class="tiny">ZONE CAPACITY · reject before commitment, recover after commitment</text>
+            <circle cx="44" cy="102" r="12" class="box"/><path d="M24 148 Q44 116 64 148" class="wire"/><text x="44" y="170" text-anchor="middle" class="label">Client</text>
+            <rect x="180" y="90" width="145" height="76" rx="12" class="box"/><text x="252.5" y="125" text-anchor="middle" class="label">Admission</text><text x="252.5" y="144" text-anchor="middle" class="sub">zone A quote</text>
+            <path d="M70 117 L170 117" class="wire"/><polygon points="180,117 170,122 170,112" class="head"/><text x="132" y="107" text-anchor="middle" class="tiny">quote</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">把运力检查放到支付前。它是一份短期报价；并不凭空保证骑手可用，提交前还要重验。</span><span class="lang-en">Check capacity before payment with a short-lived quote. It does not guarantee a courier; submission revalidates capacity.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d6s2t d6s2d">
+          <title id="d6s2t">Persist accepted work in a bounded zone</title>
+          <desc id="d6s2d">Admission writes a paid fulfillment intent to Fulfillment DB. Commit returns through Admission to Client as 202 pending.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="96" y="18" width="848" height="364" rx="18" class="boundary"/><text x="112" y="38" class="tiny">ZONE CAPACITY · reject before commitment, recover after commitment</text>
+          <circle cx="44" cy="102" r="12" class="box"/><path d="M24 148 Q44 116 64 148" class="wire"/><text x="44" y="170" text-anchor="middle" class="label">Client</text>
+          <rect x="180" y="90" width="145" height="76" rx="12" class="box"/><text x="252.5" y="125" text-anchor="middle" class="label">Admission</text><text x="252.5" y="144" text-anchor="middle" class="sub">zone A quote</text>
+          <path d="M70 117 L170 117" class="wire"/><polygon points="180,117 170,122 170,112" class="head"/><text x="132" y="107" text-anchor="middle" class="tiny">quote</text>
+          <g class="is-new">
+            <path d="M405 84 V178 A95 12 0 0 0 595 178 V84" class="store"/><ellipse cx="500" cy="84" rx="95" ry="12" class="store"/><text x="500" y="141" text-anchor="middle" class="label">Fulfillment DB</text><text x="500" y="159" text-anchor="middle" class="sub">bounded pending A</text>
+            <path d="M325 117 L395 117" class="wire"/><polygon points="405,117 395,122 395,112" class="head"/><text x="365" y="106" text-anchor="middle" class="tiny">paid intent</text><path d="M405 139 L335 139" class="wire reply"/><polygon points="325,139 335,134 335,144" class="head reply"/><path d="M180 135 L80 135" class="wire reply"/><polygon points="70,135 80,130 80,140" class="head reply"/>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">已经承诺的单进入有界 pending。提交成功才 202；支付后若无法接受，保存明确补偿意图，不能仅丢一个 429。</span><span class="lang-en">Persist accepted work in bounded pending and return 202 after commit. If payment succeeded but admission fails, recover an explicit compensation intent.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d6s3t d6s3d">
+          <title id="d6s3t">Size supply rather than CPU</title>
+          <desc id="d6s3d">Fulfillment DB supplies pending zone A orders to Match; Match reserves in DB, and DB returns the commit to Match. Arrivals twenty per second versus twelve feasible assignments grow backlog by eight per second.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="96" y="18" width="848" height="364" rx="18" class="boundary"/><text x="112" y="38" class="tiny">ZONE CAPACITY · reject before commitment, recover after commitment</text>
+          <circle cx="44" cy="102" r="12" class="box"/><path d="M24 148 Q44 116 64 148" class="wire"/><text x="44" y="170" text-anchor="middle" class="label">Client</text>
+          <rect x="180" y="90" width="145" height="76" rx="12" class="box"/><text x="252.5" y="125" text-anchor="middle" class="label">Admission</text><text x="252.5" y="144" text-anchor="middle" class="sub">zone A quote</text>
+          <path d="M70 117 L170 117" class="wire"/><polygon points="180,117 170,122 170,112" class="head"/><text x="132" y="107" text-anchor="middle" class="tiny">quote</text>
+          <path d="M405 84 V178 A95 12 0 0 0 595 178 V84" class="store"/><ellipse cx="500" cy="84" rx="95" ry="12" class="store"/><text x="500" y="141" text-anchor="middle" class="label">Fulfillment DB</text><text x="500" y="159" text-anchor="middle" class="sub">bounded pending A</text>
+          <path d="M325 117 L395 117" class="wire"/><polygon points="405,117 395,122 395,112" class="head"/><text x="365" y="106" text-anchor="middle" class="tiny">paid intent</text><path d="M405 139 L335 139" class="wire reply"/><polygon points="325,139 335,134 335,144" class="head reply"/><path d="M180 135 L80 135" class="wire reply"/><polygon points="70,135 80,130 80,140" class="head reply"/>
+          <g class="is-new">
+            <rect x="700" y="90" width="165" height="76" rx="12" class="box"/><text x="782.5" y="125" text-anchor="middle" class="label">Match</text><text x="782.5" y="144" text-anchor="middle" class="sub">zone A worker</text>
+            <path d="M595 117 L690 117" class="wire async"/><polygon points="700,117 690,122 690,112" class="head async"/><text x="647" y="106" text-anchor="middle" class="tiny">recover pending</text><path d="M700 132 L605 132" class="wire"/><polygon points="595,132 605,127 605,137" class="head"/><path d="M595 150 L690 150" class="wire reply"/><polygon points="700,150 690,155 690,145" class="head reply"/><text x="647" y="185" text-anchor="middle" class="tiny">reserve / commit</text>
+            <text x="112" y="227" class="tiny">arrival 20/s; feasible assignment 12/s -&gt; backlog grows 8/s</text><text x="112" y="250" class="tiny">600 free slots / 8 per second = 75 s until full</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">加区内 Match，但不要把 worker 台数当成骑手数。20−12=8 单/s 净积压，空位 600÷8=75 秒用完。</span><span class="lang-en">Add local Match, keeping software workers distinct from courier supply. 20−12=8 orders/s backlog; 600/8=75 seconds to full.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d6s4t d6s4d">
+          <title id="d6s4t">Bound cross-zone borrowing</title>
+          <desc id="d6s4d">Match asks Neighbor quota for validated spare slots and receives a reply. At most two extra assignments per second raise service to fourteen, leaving six per second growth.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="96" y="18" width="848" height="364" rx="18" class="boundary"/><text x="112" y="38" class="tiny">ZONE CAPACITY · reject before commitment, recover after commitment</text>
+          <circle cx="44" cy="102" r="12" class="box"/><path d="M24 148 Q44 116 64 148" class="wire"/><text x="44" y="170" text-anchor="middle" class="label">Client</text>
+          <rect x="180" y="90" width="145" height="76" rx="12" class="box"/><text x="252.5" y="125" text-anchor="middle" class="label">Admission</text><text x="252.5" y="144" text-anchor="middle" class="sub">zone A quote</text>
+          <path d="M70 117 L170 117" class="wire"/><polygon points="180,117 170,122 170,112" class="head"/><text x="132" y="107" text-anchor="middle" class="tiny">quote</text>
+          <path d="M405 84 V178 A95 12 0 0 0 595 178 V84" class="store"/><ellipse cx="500" cy="84" rx="95" ry="12" class="store"/><text x="500" y="141" text-anchor="middle" class="label">Fulfillment DB</text><text x="500" y="159" text-anchor="middle" class="sub">bounded pending A</text>
+          <path d="M325 117 L395 117" class="wire"/><polygon points="405,117 395,122 395,112" class="head"/><text x="365" y="106" text-anchor="middle" class="tiny">paid intent</text><path d="M405 139 L335 139" class="wire reply"/><polygon points="325,139 335,134 335,144" class="head reply"/><path d="M180 135 L80 135" class="wire reply"/><polygon points="70,135 80,130 80,140" class="head reply"/>
+          <rect x="700" y="90" width="165" height="76" rx="12" class="box"/><text x="782.5" y="125" text-anchor="middle" class="label">Match</text><text x="782.5" y="144" text-anchor="middle" class="sub">zone A worker</text>
+          <path d="M595 117 L690 117" class="wire async"/><polygon points="700,117 690,122 690,112" class="head async"/><text x="647" y="106" text-anchor="middle" class="tiny">recover pending</text><path d="M700 132 L605 132" class="wire"/><polygon points="595,132 605,127 605,137" class="head"/><path d="M595 150 L690 150" class="wire reply"/><polygon points="700,150 690,155 690,145" class="head reply"/><text x="647" y="185" text-anchor="middle" class="tiny">reserve / commit</text>
+          <text x="112" y="227" class="tiny">arrival 20/s; feasible assignment 12/s -&gt; backlog grows 8/s</text><text x="112" y="250" class="tiny">600 free slots / 8 per second = 75 s until full</text>
+          <g class="is-new">
+            <rect x="700" y="290" width="165" height="64" rx="12" class="box"/><text x="782.5" y="319" text-anchor="middle" class="label">Neighbor quota</text><text x="782.5" y="338" text-anchor="middle" class="sub">borrow at most 2/s</text>
+            <path d="M785 166 L785 280" class="wire"/><polygon points="785,290 780,280 790,280" class="head"/><text x="800" y="230" class="tiny">validate slots</text><path d="M745 290 L745 176" class="wire reply"/><polygon points="745,166 750,176 740,176" class="head reply"/><text x="551" y="278" class="tiny">12 + 2 = 14/s; growth still 6/s</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">邻区借人最多 2/s，服务率 12+2=14/s，仍积压 6/s。借人要校验全局骑手名额，不能两区各认为自己有同一个人。</span><span class="lang-en">Borrow at most 2/s: service becomes 14/s and backlog still grows 6/s. Both zones validate the same authoritative courier slots.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d6s5t d6s5d">
+          <title id="d6s5t">Close admission without deleting accepted orders</title>
+          <desc id="d6s5d">Admission rejects new pre-payment quotes with 429. Already committed orders remain durable and require retries, explicit failure or compensation.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="96" y="18" width="848" height="364" rx="18" class="boundary"/><text x="112" y="38" class="tiny">ZONE CAPACITY · reject before commitment, recover after commitment</text>
+          <circle cx="44" cy="102" r="12" class="box"/><path d="M24 148 Q44 116 64 148" class="wire"/><text x="44" y="170" text-anchor="middle" class="label">Client</text>
+          <rect x="180" y="90" width="145" height="76" rx="12" class="box"/><text x="252.5" y="125" text-anchor="middle" class="label">Admission</text><text x="252.5" y="144" text-anchor="middle" class="sub">zone A quote</text>
+          <path d="M70 117 L170 117" class="wire"/><polygon points="180,117 170,122 170,112" class="head"/><text x="132" y="107" text-anchor="middle" class="tiny">quote</text>
+          <path d="M405 84 V178 A95 12 0 0 0 595 178 V84" class="store"/><ellipse cx="500" cy="84" rx="95" ry="12" class="store"/><text x="500" y="141" text-anchor="middle" class="label">Fulfillment DB</text><text x="500" y="159" text-anchor="middle" class="sub">bounded pending A</text>
+          <path d="M325 117 L395 117" class="wire"/><polygon points="405,117 395,122 395,112" class="head"/><text x="365" y="106" text-anchor="middle" class="tiny">paid intent</text><path d="M405 139 L335 139" class="wire reply"/><polygon points="325,139 335,134 335,144" class="head reply"/><path d="M180 135 L80 135" class="wire reply"/><polygon points="70,135 80,130 80,140" class="head reply"/>
+          <rect x="700" y="90" width="165" height="76" rx="12" class="box"/><text x="782.5" y="125" text-anchor="middle" class="label">Match</text><text x="782.5" y="144" text-anchor="middle" class="sub">zone A worker</text>
+          <path d="M595 117 L690 117" class="wire async"/><polygon points="700,117 690,122 690,112" class="head async"/><text x="647" y="106" text-anchor="middle" class="tiny">recover pending</text><path d="M700 132 L605 132" class="wire"/><polygon points="595,132 605,127 605,137" class="head"/><path d="M595 150 L690 150" class="wire reply"/><polygon points="700,150 690,155 690,145" class="head reply"/><text x="647" y="185" text-anchor="middle" class="tiny">reserve / commit</text>
+          <text x="112" y="227" class="tiny">arrival 20/s; feasible assignment 12/s -&gt; backlog grows 8/s</text><text x="112" y="250" class="tiny">600 free slots / 8 per second = 75 s until full</text>
+          <rect x="700" y="290" width="165" height="64" rx="12" class="box"/><text x="782.5" y="319" text-anchor="middle" class="label">Neighbor quota</text><text x="782.5" y="338" text-anchor="middle" class="sub">borrow at most 2/s</text>
+          <path d="M785 166 L785 280" class="wire"/><polygon points="785,290 780,280 790,280" class="head"/><text x="800" y="230" class="tiny">validate slots</text><path d="M745 290 L745 176" class="wire reply"/><polygon points="745,166 750,176 740,176" class="head reply"/><text x="551" y="278" class="tiny">12 + 2 = 14/s; growth still 6/s</text>
+          <g class="is-new">
+            <path d="M180 148 L74 148" class="wire fail"/><polygon points="64,148 74,143 74,153" class="head fail"/><text x="132" y="166" text-anchor="middle" class="tiny">429</text><rect x="343" y="292" width="240" height="20" rx="10" class="badge"/><text x="463" y="306" text-anchor="middle" class="badge-text">accepted work cannot disappear</text><text x="112" y="367" class="tiny">Reject fresh admission; committed orders keep retries, explicit failure, or refund intent.</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">最后把新准入拒绝画回 Client。边界是“尚未承诺”：存量单继续履约或明确失败补偿；扩区和加机器都不能代替这条决定。</span><span class="lang-en">Reject new uncommitted admission to Client. Existing orders continue or fail explicitly with compensation; extra zones or servers cannot replace that decision.</span></figcaption>
+      </div>
+    </figure><div class="bilingual"><div class="lang-zh"><p>在 A8 的<strong>恒定教学速率</strong>下，20/s 到达、12/s 可行派单，净增 8/s；初始 600 个队列空位约 75 秒耗尽。邻区从同一容量权威最多借 2/s 后，净增仍 6/s；若从相同初始空位重算，是 600÷6=100 秒，不是永久稳定。到达降到 ≤14/s 才不继续增长，清掉存量则需严格低于服务率。服务率指可行派单，不是 worker 消费速率。</p><p>队列只索引 DB 的 pending_match。按区域限制并发、优先老单/承诺期限；丢队列消息、worker 崩溃仍从权威行扫描，重复任务必须带 generation。下面将扫描候选与锁内重验分开，不能让旧扫描结果越过已接受/已取消状态。</p></div><div class="lang-en"><p>At A8’s <strong>constant teaching rates</strong>, 20/s arrivals and 12/s feasible assignments grow backlog by 8/s, filling 600 initial free slots in about 75 s. Borrowing 2/s through the same capacity authority still grows 6/s; the same initial 600 slots then last 100 s, without stability. Arrival≤14/s stops growth; draining requires less. Service means feasible assignments, not worker dequeue speed.</p><p>The queue indexes durable pending rows. Bound per-zone concurrency and prioritize age/promise deadlines. Recover lost queue deliveries or workers by scanning authoritative rows; duplicate work carries generation. Scan candidates and revalidate under locks so stale scans cannot override acceptance/cancellation.</p></div></div>
+<pre data-language="Pseudocode · bounded recovery scan" data-kind="pseudocode" data-source="recovery.pseudo"><code>recoverZone(inputZone, boundedBatch):
+  // Queue is an index. Scan durable rows even when no queue event survived.
+  for o in SELECT pending_match WHERE zone = inputZone ORDER BY matchDeadline, createdAt LIMIT boundedBatch:
+    if authoritativeNow() &gt;= o.matchDeadline or o.attemptCount &gt;= 3:
+      begin transaction
+        locked = SELECT order FOR UPDATE
+        now = SELECT clock_timestamp()
+        if stillPendingSameGeneration(locked, o) and exhausted(locked, now):
+          UPDATE order SET state = failed, generation = generation + 1
+          INSERT outbox(fixedFailureKey(locked), notificationAndCompensationIntent)
+      commit
+    else enqueue(orderId = o.id, generation = o.generation) // duplicates allowed
+  for a in SELECT offered WHERE deadline &lt;= authoritativeNow() LIMIT boundedBatch:
+    decideOffer(EXPIRE, a.orderId, a.id, a.generation, SERVER)
+  // Outbox relay retries fixed event keys. Courier fetches a current snapshot.
+  // Old matching workers still call reserve(expectedGeneration); their lease is not authority.
+  // Unknown creation: retry/query fixed upstream identity; compensate only after fencing dispatch.</code></pre>
+<div class="bilingual"><div class="lang-zh"><p>新单在支付前取短期运力报价；超限可显示运力不足，真正的请求速率限制可用 429 与可选 Retry-After。<a href="#ref9">[9]</a> 报价不是骑手槽位，提交仍会竞争。已承诺订单不能用 429 丢掉，三次/120 秒耗尽要写失败与通知/补偿意图。</p><p>支付已确认、履约创建响应未知时，按固定上游身份查询/重试。决定撤销则先由履约权威写“不可再创建或派单”的取消栅栏：尚未建单也留该身份 tombstone，再发固定补偿键；只查到暂时不存在不足以退款。若已接受/取餐，先转受控处置，不能用退款抢跑实物流程。</p><p>故障先降低非必要点流、限制 Routing 并发、收紧新准入；位置权威失效暂停新候选，履约权威失效停止新预占/accept。恢复重试带抖动与区域配额，已有实物仍由当前骑手保管。</p></div><div class="lang-en"><p>Quote short-lived supply before payment. Show supply failure when overloaded; actual request-rate limits may use 429 with optional Retry-After. <a href="#ref9">[9]</a> A quote is not a courier slot. Never discard committed work with 429; exhausted attempts/deadlines persist failure and notification/compensation intent.</p><p>After confirmed payment with unknown fulfillment creation, query/retry the fixed upstream identity. Before compensation, the fulfillment authority fences future creation/dispatch with a cancellation tombstone, including when no row exists, then emits a fixed compensation key. Temporary absence alone is insufficient. Accepted/picked custody requires controlled handling before funds race ahead.</p><p>Reduce optional point traffic, bound Routing concurrency and tighten new admission. Location authority failure pauses new candidates; fulfillment authority failure stops reservation/acceptance. Recover with jitter and zone quotas while current couriers retain custody.</p></div></div>
+<details><summary><span class="lang-zh">示例运行与验证范围</span><span class="lang-en">Running the examples and validation scope</span></summary><div class="bilingual"><div class="lang-zh"><p><code>node examples/ch27/sync.mjs --check</code> 校验页面七段代码同源；<code>PYTHONDONTWRITEBYTECODE=1 python3 examples/ch27/check.py</code> 真实执行 SQLite 双连接竞争/回滚、Java 17 校验和隔离 Redis 键 TTL 实验。SQLite 用 BEGIN IMMEDIATE 串行化写者，锁粒度比 PostgreSQL 粗；<a href="#ref12">[12]</a> 未验证生产行锁、复制切换、实际骑手/地图接口或压测，可信时钟与实物凭据仍是适配前提。</p></div><div class="lang-en"><p>Run node examples/ch27/sync.mjs --check for seven shared-source snippets, then PYTHONDONTWRITEBYTECODE=1 python3 examples/ch27/check.py for actual SQLite competitions/rollback, Java 17 validation and isolated Redis key TTL. SQLite BEGIN IMMEDIATE serializes writers more coarsely than PostgreSQL. <a href="#ref12">[12]</a> Production row locks, replication/failover, live couriers/routing and load are untested; clock/custody evidence remain adapter premises.</p></div></div>
+</details></section>
+
+<section>
+<h2><span class="lang-zh">复盘：讲清一笔超时竞争</span><span class="lang-en">Review: walk one expiry race</span></h2>
+<table><thead><tr><th><span class="lang-zh">翻车说法</span><span class="lang-en">Mistake</span></th><th><span class="lang-zh">实际失败窗口</span><span class="lang-en">Failure window</span></th><th><span class="lang-zh">白板修正</span><span class="lang-en">Fix</span></th></tr></thead><tbody>
+<tr><td><span class="lang-zh">通知 ACK 就 assigned</span><span class="lang-en">Transport ACK means assigned</span></td><td><span class="lang-zh">设备收包，业务未提交</span><span class="lang-en">Receipt precedes business commit</span></td><td><span class="lang-zh">accept 同 attempt/version 原子提交；重试查原结果</span><span class="lang-en">Atomic accept by attempt/version; replay the stored result</span></td></tr>
+<tr><td><span class="lang-zh">Redis 在线就有名额</span><span class="lang-en">Online implies capacity</span></td><td><span class="lang-zh">两个区同时读出空载 B</span><span class="lang-en">Two zones see the same free B</span></td><td><span class="lang-zh">所有占用和释放锁同一容量权威</span><span class="lang-en">Reserve/release through one capacity authority</span></td></tr>
+<tr><td><span class="lang-zh">骑手发送超时消息</span><span class="lang-en">Courier sends a timeout</span></td><td><span class="lang-zh">设备离线，永远没消息</span><span class="lang-en">Offline device never sends it</span></td><td><span class="lang-zh">服务端扫描 deadline，与 accept 竞争</span><span class="lang-en">Server scans deadline and races accept</span></td></tr>
+<tr><td><span class="lang-zh">未取餐就随时自动改派</span><span class="lang-en">Auto-reassign any unpicked order</span></td><td><span class="lang-zh">已接受且实际取餐，手机回报晚</span><span class="lang-en">Accepted courier may have custody before upload</span></td><td><span class="lang-zh">offered 才自动到期，之后受控撤销/交接</span><span class="lang-en">Only offered auto-expires; later use controlled handoff</span></td></tr>
+<tr><td><span class="lang-zh">ts 更新就永远新鲜</span><span class="lang-en">Higher timestamp means fresh</span></td><td><span class="lang-zh">手机回拨、补传、双设备</span><span class="lang-en">Clock changes, buffering, multiple devices</span></td><td><span class="lang-zh">epoch/seq 排序，采集年龄另检查</span><span class="lang-en">Order by epoch/seq; separately validate capture age</span></td></tr>
+<tr><td><span class="lang-zh">详情 TTL 会删 GEO 人</span><span class="lang-en">Detail TTL removes GEO members</span></td><td><span class="lang-zh">不同键生命周期不联动</span><span class="lang-en">Different key lifecycles</span></td><td><span class="lang-zh">读详情过滤，版本化迁移与清理</span><span class="lang-en">Filter details; version membership and cleanup</span></td></tr>
+<tr><td><span class="lang-zh">4+6+8=18 分钟 ETA</span><span class="lang-en">ETA is 4+6+8=18 min</span></td><td><span class="lang-zh">出餐与到店并行却重复相加</span><span class="lang-en">Arrival and prep overlap</span></td><td><span class="lang-zh">max(4,6)+8=14 分钟</span><span class="lang-en">max(4,6)+8=14 min</span></td></tr>
+<tr><td><span class="lang-zh">多开 worker 能清空缺人队列</span><span class="lang-en">More workers solve supply shortage</span></td><td><span class="lang-zh">20/s 到达对 12/s 可行派单</span><span class="lang-en">20/s arrivals vs 12/s feasible assignments</span></td><td><span class="lang-zh">600÷(20−12)=75 秒满；收紧新准入</span><span class="lang-en">600/(20−12)=75 s to full; tighten admission</span></td></tr>
+</tbody></table><div class="bilingual"><div class="lang-zh"><p>收尾沿 o7/a1/v7 口述：持久建单→新鲜召回→双方预占→accept 与到期锁内竞争→v8 拒绝旧动作→当前骑手取送。再复算 20−12=8/s、600÷8=75 秒，指出 CPU 扩容不能创造骑手供给。空间索引回 <a href="ch19.html">Ch19</a>，消息回 <a href="ch20.html">Ch20</a>，资金补偿回 <a href="ch24.html">Ch24</a>，工作租约回 <a href="ch25.html">Ch25</a>；配置版本见 <a href="ch28.html">Ch28</a>。</p></div><div class="lang-en"><p>Walk o7/a1/v7: durable create→fresh recall→bilateral reservation→locked accept/expiry race→v8 fences old actions→current courier pickup/delivery. Recalculate 20−12=8/s and 600/8=75 s, explaining why CPU cannot create courier supply. Revisit <a href="ch19.html">Ch19</a> spatial recall, <a href="ch20.html">Ch20</a> messaging, <a href="ch24.html">Ch24</a> compensation, <a href="ch25.html">Ch25</a> worker leases and <a href="ch28.html">Ch28</a> configuration versions.</p></div></div>
+</section>
+
+<section>
+<h2><span class="lang-zh">引用与适用边界</span><span class="lang-en">References and scope</span></h2>
+<ol class="references">
+<li id="ref1">[1] PostgreSQL Global Development Group, <a href="https://www.postgresql.org/docs/18/explicit-locking.html" target="_blank" rel="noopener noreferrer">Explicit Locking · PostgreSQL 18</a>. <span class="lang-zh">2025。行锁竞争与一致锁顺序；无配送吞吐数字。</span><span class="lang-en">2025. Row-lock conflicts and consistent lock order; no delivery throughput figure.</span></li>
+<li id="ref2">[2] PostgreSQL Global Development Group, <a href="https://www.postgresql.org/docs/18/ddl-constraints.html" target="_blank" rel="noopener noreferrer">Constraints · PostgreSQL 18</a>. <span class="lang-zh">2025。唯一、非空与行内 CHECK；容量的跨行检查仍由事务负责。</span><span class="lang-en">2025. Uniqueness, nullability and row-local checks; transactions enforce multirow capacity.</span></li>
+<li id="ref3">[3] Redis, <a href="https://redis.io/docs/latest/commands/geosearch/" target="_blank" rel="noopener noreferrer">GEOSEARCH command reference</a>. <span class="lang-zh">7.x/8.x 在线文档。半径/方框空间召回，不证明骑手可派。</span><span class="lang-en">online command reference. Radius/box recall without courier feasibility semantics.</span></li>
+<li id="ref4">[4] Redis, <a href="https://redis.io/docs/latest/commands/expire/" target="_blank" rel="noopener noreferrer">EXPIRE command reference</a>. <span class="lang-zh">在线文档。键级到期；本章 60 秒 TTL 是假设。</span><span class="lang-en">online documentation. Key expiry; 60 s TTL is a chapter assumption.</span></li>
+<li id="ref5">[5] AWS Prescriptive Guidance, <a href="https://docs.aws.amazon.com/prescriptive-guidance/latest/cloud-design-patterns/transactional-outbox.html" target="_blank" rel="noopener noreferrer">Transactional outbox pattern</a>. <span class="lang-zh">在线文档。状态与意图同事务、至少一次重复与消费者幂等。</span><span class="lang-en">online documentation. Atomic state/intent, delivery duplicates and consumer idempotency.</span></li>
+<li id="ref6">[6] Google Maps Platform, <a href="https://developers.google.com/maps/documentation/routes/compute_route_matrix" target="_blank" rel="noopener noreferrer">Get a route matrix · Routes API</a>. <span class="lang-zh">在线文档。多起终点时长与索引；8×1、14 分钟均为本章推导。</span><span class="lang-en">online documentation. Indexed multi-origin durations; 8×1 and 14 min are chapter calculations.</span></li>
+<li id="ref7">[7] WHATWG, <a href="https://html.spec.whatwg.org/multipage/server-sent-events.html" target="_blank" rel="noopener noreferrer">HTML Living Standard · Server-sent events</a>. <span class="lang-zh">Living Standard。EventSource 重连与 Last-Event-ID；不承诺业务恰好一次。</span><span class="lang-en">Living Standard. EventSource reconnect and Last-Event-ID without business exactly-once guarantees.</span></li>
+<li id="ref8">[8] I. Fette, A. Melnikov, <a href="https://www.rfc-editor.org/rfc/rfc6455.html" target="_blank" rel="noopener noreferrer">RFC 6455 · The WebSocket Protocol</a>. <span class="lang-zh">2011。双向通道；上报间隔与业务 accept 不是协议保证。</span><span class="lang-en">2011. Bidirectional transport without upload cadence or acceptance guarantees.</span></li>
+<li id="ref9">[9] M. Nottingham, R. Fielding, <a href="https://www.rfc-editor.org/rfc/rfc6585.html" target="_blank" rel="noopener noreferrer">RFC 6585 · Additional HTTP Status Codes</a>. <span class="lang-zh">2012。§4 的 429 与可选 Retry-After；运力阈值自己推导。</span><span class="lang-en">2012. Section 4: 429 and optional Retry-After; supply thresholds are our calculation.</span></li>
+<li id="ref10">[10] PostgreSQL Global Development Group, <a href="https://www.postgresql.org/docs/18/transaction-iso.html" target="_blank" rel="noopener noreferrer">Transaction Isolation · PostgreSQL 18</a>. <span class="lang-zh">2025。Read Committed 快照与条件更新竞争；不把普通读当锁。</span><span class="lang-en">2025. Read Committed snapshots and conditional updates; a plain read is not a lock.</span></li>
+<li id="ref11">[11] PostgreSQL, <a href="https://www.postgresql.org/docs/18/functions-datetime.html#FUNCTIONS-DATETIME-CURRENT" target="_blank" rel="noopener noreferrer">Date/Time functions · PostgreSQL 18</a>. <span class="lang-zh">now 是事务开始时刻；clock_timestamp 是调用时刻。</span><span class="lang-en">Transaction-start now versus actual clock_timestamp.</span></li>
+<li id="ref12">[12] SQLite, <a href="https://www.sqlite.org/isolation.html" target="_blank" rel="noopener noreferrer">Isolation in SQLite</a>; <a href="https://www.sqlite.org/lang_transaction.html" target="_blank" rel="noopener noreferrer">Transactions</a>. <span class="lang-zh">单写者与 BEGIN IMMEDIATE；不证明 PostgreSQL 行锁。</span><span class="lang-en">Single writer and BEGIN IMMEDIATE; not PostgreSQL row-lock proof.</span></li>
+</ol><div class="bilingual"><div class="lang-zh"><p>以上标准和官方文档支持协议、数据库与 API 机制。58/s、463 元素/s、14 分钟和 75/100 秒均由本章假设推导；没有当成厂商生产成绩。原文核对与运行限制见 <a href="../docs/reviews/ch27-sources.md">来源记录</a>。</p></div><div class="lang-en"><p>Official documentation supports protocol, database and API semantics. 58/s, 463 elements/s, 14 min and 75/100 s are chapter calculations rather than vendor production results. See the <a href="../docs/reviews/ch27-sources.md">source record</a> for checked claims and limits.</p></div></div>
+</section>
+
+<section>
+<h2><span class="lang-zh">闪卡：把失败窗口与算式说出来</span><span class="lang-en">Flashcards: state the race and arithmetic</span></h2>
+<p><span class="lang-zh">点击翻面，先说权威与原子边界，再说恢复。</span><span class="lang-en">Click to flip. Name authority and atomic scope, then recovery.</span></p><div class="cards-grid">
+<button class="flip" type="button"><span class="q"><span class="lang-zh">50 万单/天、10 倍峰值，下单峰值？</span><span class="lang-en">Peak for 500k/day at 10×?</span></span><span class="a"><span class="lang-zh">500,000÷86,400×10≈57.87/s；全城入口约 58/s，热点供需另算。</span><span class="lang-en">500,000/86,400×10≈57.87/s, about 58/s; hot-zone supply is separate.</span></span></button>
+<button class="flip" type="button"><span class="q"><span class="lang-zh">位置常态与 1Hz 突发怎么比？</span><span class="lang-en">Nominal versus 1 Hz location?</span></span><span class="a"><span class="lang-zh">10,000÷5=2,000/s；1Hz 为 10,000/s，五倍。200 B 负载为 0.4 与 2 MB/s。</span><span class="lang-en">2,000/s vs 10,000/s, 5×; 200 B gives 0.4 vs 2 MB/s.</span></span></button>
+<button class="flip" type="button"><span class="q"><span class="lang-zh">为什么要先过滤再 routing？</span><span class="lang-en">Why filter before routing?</span></span><span class="a"><span class="lang-zh">20 人过滤到 8 人，八起点到一取货点是 8 元素；无效人不花路耗预算。</span><span class="lang-en">20→8 feasible; 8 origins×1 pickup=8 elements, excluding infeasible candidates first.</span></span></button>
+<button class="flip" type="button"><span class="q"><span class="lang-zh">最近的 A 为什么输给 B？</span><span class="lang-en">Why does closer A lose?</span></span><span class="a"><span class="lang-zh">J_A=2+4×0.5+2×1=6；J_B=4+4×0.1+0=4.4，成本更小。</span><span class="lang-en">J_A=6; J_B=4.4. Lower cost wins after feasibility gates.</span></span></button>
+<button class="flip" type="button"><span class="q"><span class="lang-zh">收到推送 ACK 是否接单？</span><span class="lang-en">Does a transport ACK accept?</span></span><span class="a"><span class="lang-zh">否。只证明某跳收包；accept(a1,v7) 通过权威事务才 assigned。</span><span class="lang-en">No. Commit business accept(a1,v7) before assigned.</span></span></button>
+<button class="flip" type="button"><span class="q"><span class="lang-zh">accept 已成功但 HTTP 丢了怎么办？</span><span class="lang-en">Lost reply after successful accept?</span></span><span class="a"><span class="lang-zh">先验骑手与 attempt 绑定，再回原成功和当前快照；后来改派不能恢复旧执行权，也不再加容量。</span><span class="lang-en">Validate actor/binding; replay original success plus current snapshot. Reassignment never revives old rights or occupies twice.</span></span></button>
+<button class="flip" type="button"><span class="q"><span class="lang-zh">到期先赢后，旧 accept 怎么处理？</span><span class="lang-en">Expiry wins before old accept?</span></span><span class="a"><span class="lang-zh">a1 expired，订单回 pending，v7→v8；a1/v7 返回 409，容量只释放一次。</span><span class="lang-en">Expire a1, rematch at v8, reject a1/v7 with 409 and release once.</span></span></button>
+<button class="flip" type="button"><span class="q"><span class="lang-zh">GPS 过期能自动改派已取餐吗？</span><span class="lang-en">Can stale GPS reassign picked food?</span></span><span class="a"><span class="lang-zh">不能。offered 才自动到期；实物归属需要核实与受控交接。</span><span class="lang-en">No. Only offered auto-expires; custody requires controlled verification/handoff.</span></span></button>
+<button class="flip" type="button"><span class="q"><span class="lang-zh">seq42 一定比 seq41 更新鲜吗？</span><span class="lang-en">Is seq42 always fresher than seq41?</span></span><span class="a"><span class="lang-zh">不一定，可能是旧采样补传。排序验 epoch/seq；±5 秒误差下要求 −5≤now−captured≤25 秒，且在线/精度通过。</span><span class="lang-en">No: buffered capture can be old. Validate epoch/seq and −5≤now−captured≤25 s under ±5 s skew, plus online/accuracy gates.</span></span></button>
+<button class="flip" type="button"><span class="q"><span class="lang-zh">详情 TTL 会删 GEO 成员吗？</span><span class="lang-en">Does detail TTL remove a GEO member?</span></span><span class="a"><span class="lang-zh">不会联动其他键。索引版本化迁移与清理，候选仍复查详情。</span><span class="lang-en">No cross-key coupling. Version/clean membership and recheck details.</span></span></button>
+<button class="flip" type="button"><span class="q"><span class="lang-zh">到店 4、出餐 6、送 8 分钟，ETA？</span><span class="lang-en">Arrival 4, preparation 6, delivery 8?</span></span><span class="a"><span class="lang-zh">max(4,6)+8=14 分钟；到店与出餐并行，不能相加成 18。</span><span class="lang-en">max(4,6)+8=14 min; preparation and arrival overlap.</span></span></button>
+<button class="flip" type="button"><span class="q"><span class="lang-zh">热区 20/s 对 12/s，600 空位能撑多久？</span><span class="lang-en">20/s arrivals, 12/s service, 600 free slots?</span></span><span class="a"><span class="lang-zh">600÷(20−12)=75 秒；借 2/s 后仍净增 6/s，要收紧新准入。</span><span class="lang-en">600/(20−12)=75 s; borrowing 2/s still grows 6/s, requiring tighter admission.</span></span></button>
+<button class="flip" type="button"><span class="q"><span class="lang-zh">为什么不对 courier_id 直接加唯一约束？</span><span class="lang-en">Why not make courier_id unique?</span></span><span class="a"><span class="lang-zh">本章每人两槽位；(courier,slot) 与 order_id 分别唯一，双方占位同事务。</span><span class="lang-en">A courier has two slots. Unique (courier,slot) and order_id bind both sides in one transaction.</span></span></button>
+<button class="flip" type="button"><span class="q"><span class="lang-zh">旧断线消息会关闭新连接吗？</span><span class="lang-en">Can an old disconnect close a new session?</span></span><span class="a"><span class="lang-zh">重连换服务端 epoch；断线按 epoch 条件更新，旧消息不影响新会话。</span><span class="lang-en">Reconnect advances server epoch. Conditional disconnect cannot affect the newer session.</span></span></button>
+<button class="flip" type="button"><span class="q"><span class="lang-zh">借 2/s 后 600 空位能撑多久？</span><span class="lang-en">How long do 600 slots last after borrowing 2/s?</span></span><span class="a"><span class="lang-zh">同初始空位、恒定速率下 600÷(20−14)=100 秒；净增仍 6/s，不稳定。</span><span class="lang-en">At the same initial free capacity and constant rates: 600/(20−14)=100 s; growth remains 6/s.</span></span></button>
+</div></section>
+<button class="read-toggle" type="button" data-ch="ch27"><span class="when-off"><span class="lang-zh">我已学完本章</span><span class="lang-en">Mark chapter complete</span></span><span class="when-on"><span class="lang-zh">已学完本章</span><span class="lang-en">Completed</span></span></button><p class="cite"><span class="lang-zh">进度保存在这台浏览器里。</span><span class="lang-en">Progress is stored in this browser.</span></p></article></main>
+<script src="../assets/js/nav.js"></script><script src="../assets/js/lang.js"></script><script src="../assets/js/slides.js"></script><script src="../assets/js/progress.js"></script></body></html>

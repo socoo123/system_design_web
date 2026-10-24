@@ -1,0 +1,30 @@
+toolApiClose(authenticatedAdapter, immutableSnapshot):
+  require adapter identity and delegated caller match the snapshot
+  BEGIN IMMEDIATE on BusinessDB  // NOT the ExecutionDB transaction
+    receipt = SELECT receipt WHERE key=(tenant, intent_id)
+    if receipt exists:
+      require receipt.snapshot == immutableSnapshot
+      COMMIT; return retained outcome  // no second effect, even after expiry
+    require current user AND agent permission for resource tenant
+    changed = UPDATE ticket SET state=CLOSED, version=version+1
+      WHERE tenant=:tenant AND id=:ticket AND version=:expected
+        AND state=OPEN
+    outcome = SUCCEEDED if changed == 1 else FAILED_KNOWN(stale_precondition)
+    INSERT receipt(key, snapshot, outcome, result)  // unique key
+    // A failure inserting the receipt rolls back the ticket UPDATE too.
+  COMMIT; return outcome
+
+recordOutcome(key, epoch, authoritativeReceipt):
+  BEGIN IMMEDIATE on ExecutionDB
+    UPDATE intent SET state=receipt.outcome, result=receipt.result
+      WHERE key=:key AND epoch=:epoch AND state IN (DISPATCH_INTENT, UNKNOWN)
+    INSERT audit only if exactly one intent row changed
+  COMMIT before reporting completion
+
+recover(key):
+  query original backend receipt without invoking the effect
+  if matching receipt exists: recordOutcome(key, currentEpoch, receipt)
+  else: retain UNKNOWN  // absence cannot exclude a delayed old request
+  // Replay can execute a missing operation: allow only with live authority,
+  // unexpired approval and verified backend dedupe retention; same key/route.
+  // After retention compact bodies, keep key+binding+outcome tombstones.

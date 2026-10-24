@@ -1,0 +1,26 @@
+park(run, action, ownerEpoch, expectedVersion):
+  BEGIN RunStore transaction; lock run
+    require current ownerEpoch/version, RUNNING and live lease
+    require exact action still PREPARED; create stable pause_id
+    INSERT pause(pause_id, approval_id, action.binding)
+    UPDATE run SET status=WAIT_APPROVAL, owner=NULL, lease_until=0,
+      epoch=epoch+1, version=version+1
+    INSERT checkpoint + waiting event
+  COMMIT; only then release the active slot
+  reread Ch33 decision now; periodically scan waiting rows as a backstop
+
+resume(run, pause_id, expectedVersion, notification):
+  decision = Ch33.readAuthoritativeDecision(notification.approval_id)
+  BEGIN RunStore transaction; lock run and pause
+    if decision_id was accepted for this run/pause/binding: COMMIT; return saved result
+    require WAIT_APPROVAL, matching pause, version=expectedVersion, not cancelled
+    require run deadline is in the future
+    require decision is APPROVED and grant is still valid
+    require exact tenant/actor/Agent/intent/tool/route/args/resource/policy binding
+    INSERT accepted_decision with UNIQUE(tenant, decision_id)
+    UPDATE run SET status=READY, version=version+1
+      WHERE status=WAIT_APPROVAL AND pause_id=:pause AND version=:expectedVersion
+    require affected_rows = 1; INSERT READY outbox event
+  COMMIT; a later worker must claim, then Ch33 rechecks at dispatch
+  // Any failure rolls back this one database transaction.
+  // DENIED/expired means replan or review, never silently APPROVED.

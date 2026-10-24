@@ -1,0 +1,29 @@
+# Pseudocode: authenticated tenant/order, one authoritative local database.
+edit(auth, order_id, key, expected_version, sku, quantity):
+  authorize(auth, order_id)                       # also on a replay
+  hash = canonical_hash("edit-v1", auth.tenant, order_id,
+                        expected_version, sku, quantity)
+  BEGIN
+  inserted = INSERT command_result(tenant, order_id, key, hash, result=NULL)
+             ON CONFLICT (tenant, order_id, key) DO NOTHING
+  if not inserted:
+    saved = SELECT command_result WHERE (tenant, order_id, key) = scope
+    ROLLBACK
+    require saved.hash == hash                    # otherwise KEY_REUSE
+    return saved.result                          # immutable original receipt
+  before = SELECT root + lines WHERE tenant = auth.tenant AND id = order_id
+  require before.version == expected_version     # otherwise ROLLBACK / CONFLICT
+  next = before.editQuantity(sku, quantity)        # failure => ROLLBACK
+  changed = UPDATE orders SET total=next.total, version=next.version
+            WHERE tenant=:tenant AND id=:order_id
+              AND version=:expected_version AND state='draft'
+  require changed == 1                           # otherwise ROLLBACK / CONFLICT
+  UPDATE order_lines SET quantity=:quantity
+    WHERE tenant=:tenant AND order_id=:order_id AND sku=:sku
+  UPDATE command_result SET result=:receipt_for_next
+    WHERE tenant=:tenant AND order_id=:order_id AND key=:key
+  COMMIT                                         # never commit result=NULL
+  return receipt_for_next
+# SQL/domain failure before commit => ROLLBACK; bounded whole-TX retry only
+# for known aborted serialization/deadlock failures, using the same key/hash.
+# Lost COMMIT acknowledgement => UNKNOWN; query this key, never reapply blindly.

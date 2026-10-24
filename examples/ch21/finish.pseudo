@@ -1,0 +1,34 @@
+finish(hold_id, command):                              // internal authenticated command
+  require command.kind in {CONFIRM, EXPIRE}
+  scope = lookup_immutable_hold_scope(hold_id)          // never take scope from caller
+  BEGIN
+  fence = SELECT * FROM fences WHERE scope=:scope FOR SHARE
+  if not fence.active: ROLLBACK; return PENDING_MAINTENANCE
+  h = SELECT * FROM holds WHERE hold_id=:id FOR UPDATE
+  require h exists AND h.scope == fence.scope
+  require command.owner == h.owner AND command.order_id == h.order_id
+  if h.state != HELD: COMMIT; return h.state            // never revive a terminal hold
+  now = SELECT clock_timestamp()                      // AFTER waiting for hold lock
+  if command.kind == CONFIRM AND now >= h.deadline:
+    COMMIT; return EXPIRED_NOT_CONFIRMED                // Ch18 records refund/review duty
+  if command.kind == EXPIRE AND now < h.deadline:
+    COMMIT; return NOT_DUE
+  target = CONFIRMED if command.kind == CONFIRM else RELEASED
+  items = SELECT * FROM hold_items WHERE hold_id=:id ORDER BY resource
+  require items == h.expected_items AND all(items.scope == h.scope AND items.q > 0)
+  UPDATE holds SET state=:target, version=version+1 WHERE hold_id=:id AND state=HELD
+  require affected_rows == 1
+  for item in items:                                  // same transaction, fixed order
+    if target == CONFIRMED:
+      UPDATE stock SET reserved=reserved-:q, confirmed=confirmed+:q
+        WHERE scope=:scope AND resource=:resource AND reserved>=:q
+    else:
+      UPDATE stock SET reserved=reserved-:q, free=free+:q
+        WHERE scope=:scope AND resource=:resource AND reserved>=:q
+    require affected_rows == 1                        // mismatch aborts, never partial
+  INSERT outbox(HOLD_STATE, event_id=(id,h.version+1), state=target,
+                version=h.version+1, current_epoch=fence.epoch, token=h.token)
+  COMMIT; return target
+// Unexpected error rolls back state, ALL counters, and outbox together.
+// CONFIRM is supplied only after Ch18 validates funds and immutable order binding.
+// Timeout/EXPIRED/RELEASED is not payment failure: Ch18 retains the funds obligation.

@@ -31,32 +31,8 @@
     <p class="ch-meta-line"><span class="lang-zh">约 40 分钟 · 前置：Ch25、Ch32、Ch33 · 7 组 / 37 帧渐进白板图</span><span class="lang-en">~40 min · after Ch25, Ch32, Ch33 · 7 decks / 37 progressive frames</span></p>
   </header>
 
-<section class="goal"><h2><span class="lang-zh">这一章结束你能做什么</span> <span class="lang-en">What you can do after this chapter</span></h2>
-<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>画出持久接单、有界循环、模型与工具调用、checkpoint、暂停和恢复，说清状态由谁提交。</p>
-<p>区分模型与 workflow 控制，画出远端成功、本地未提交的恢复窗口。</p>
-<p>解释 handoff、批准竞争与补偿失败，再分别估算模型流量、活跃池和待批池。</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>Draw submission, durable admission, bounded loops, model/tool calls, checkpoints and pause/resume, locating each authoritative commit.</p>
-<p>Separate model from workflow control and draw recovery after remote success before local commit.</p>
-<p>Explain handoff, approval races and failed compensation; size model traffic, active runs and parked approvals separately.</p>
-</div></div></section>
-
-  <section>
-<h2><span class="lang-zh">30 秒开场：先确定谁有权推进下一步</span> <span class="lang-en">Opening: establish who may advance the run</span></h2>
-<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>我设计一个处理客服诊断和退款的 Agent Runtime。开放诊断用有界循环，模型提出下一工具；退款用固定 workflow，模型只在节点里抽字段，资格、批准和打款的边由代码决定。用户提交得到持久 run_id，worker 领取 owner 代次，每次模型调用前占预算，工具调用前固定业务 intent，结果确认后才写 observation。写需要人工批准时把 run 持久挂起并释放活跃槽；恢复先查未清动作，副作用需要撤销时按业务依赖补偿，不能重跑整段对话。</p>
-<p>先问六件事：路径是否已知、哪些工具会写、批准针对什么动作、run 是否跨进程或隔夜恢复、下游是否支持防重与回执查询、用户取消后必须停止什么。默认单角色足够；有真正的指令或权限分叉再 handoff。设单地域、有持久关系库、工具串行，客户端连接与执行解耦；多地域双写会增加 owner 与恢复问题，等这张图闭合之后再讨论。</p>
-<p><a class="chip" href="ch32.html">Ch32</a> 提供模型网关，<a class="chip" href="ch33.html">Ch33</a> 提供受审工具、审批和远端执行契约；本章负责跨这些调用保存“走到了哪里”。<a class="chip" href="ch25.html">Ch25</a> 的调度机制可复用，但 cron 不能替代模型步数、批准等待和副作用账本。选择依据是路径控制与恢复重放边界。[1]</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>Design a customer-support diagnostic/refund runtime. Open diagnostics use a bounded model-selected tool loop; refunds use code-defined eligibility/approval/payment edges with models inside nodes. Persist run_id, claim an owner generation, reserve model budgets, pin business intents before tools, and commit confirmed observations. Park approval waits outside active slots. Recovery first reconciles pending actions; business-dependent compensation never reruns the whole conversation.</p>
-<p>Clarify known paths, writes, action-bound review, cross-process/overnight recovery, backend deduplication/receipt support and cancellation semantics. Begin with one role; hand off only for meaningful instructions/authority differences. Assume one region, durable relational storage, serialized tools and detached client connections. Discuss cross-region ownership only after closing this design.</p>
-<p>Ch32 supplies LLM GW; Ch33 owns reviewed tools, approvals and execution contracts. This chapter persists orchestration progress. Ch25 scheduling mechanisms are reusable, but cron does not supply model budgets, approval waiting or an effect ledger. Framework names illustrate mechanisms; the deciding question is who controls progression and what replays [1].</p>
-</div></div></section>
-
-  <section>
-<h2><span class="lang-zh">教学数字均标 assumption</span> <span class="lang-en">Label every teaching number as an assumption</span></h2>
-<table><thead><tr><th><span class="lang-zh">编号与约束</span> <span class="lang-en">ID / constraint</span></th><th><span class="lang-zh">本章 assumption</span> <span class="lang-en">Assumption</span></th><th><span class="lang-zh">它改变的设计</span> <span class="lang-en">Design consequence</span></th></tr>
+<section class="goal"><h2><span class="lang-zh">本章核心：只从已提交状态推进</span><span class="lang-en">Core: advance only from committed state</span></h2><div class="bilingual"><div class="lang-zh"><p class="say">Runtime 负责保存并推进 run，模型只提出候选。三个决定：<strong>接单先持久化、外部输入与动作固定身份、每次推进都验 owner 与版本。</strong> 这样才能在 worker 重启、人工批准和工具超时后知道该继续哪一步。</p><ul><li>先读 Ch32 的模型预算与 Ch33 的工具、批准和副作用契约。</li><li>本章用客服诊断和退款贯穿：未知路径走有界 loop，退款业务边由 workflow 固定。</li><li>取消停止新工作；已发动作先核账，已确认效果才按业务规则补偿。</li></ul></div><div class="lang-en"><p class="say">Runtime persists and advances a run; the model proposes candidates. Three decisions: <strong>persist acceptance, pin external inputs/action identities, and check ownership/version at every transition.</strong> Recovery can then find the correct continuation after crashes, approval waits or tool timeouts.</p><ul><li>Ch32 owns model admission; Ch33 owns tools, approval and effect contracts.</li><li>Support diagnosis uses a bounded loop; refund policy uses fixed workflow edges.</li><li>Cancellation stops new work. Reconcile sent actions before compensating confirmed effects.</li></ul></div></div></section>
+<section><h2><span class="lang-zh">边界与规模：单地域、串行推进</span><span class="lang-en">Scope and load: one region, serial progression</span></h2><div class="bilingual"><div class="lang-zh"><p>用户以 <code>request_key</code> 提交任务，拿到持久 <code>run_id</code> 后轮询状态；连接不承载执行寿命。假设一个权威关系库、每 run 一个有效 owner、工具串行。先问路径是否固定、哪些工具会写、批准覆盖什么、是否需隔夜恢复、下游能否查回执，以及取消后必须停到哪里。</p><p>工作流与 Agent 的区别在于谁选路径；一次字段抽取不必上图引擎。<a href="#ref-1">[1]</a> 20 run/s、每 run 平均 5 次模型和 3 次工具是教学假设，得到 100 逻辑 model/s、60 tool/s；平均约 221 活跃和 1,800 待批，分池管理。</p></div><div class="lang-en"><p>A user submits a request_key and polls a durable run_id; connection lifetime is independent of execution. Assume one authoritative relational database, one valid owner per run and serial tools. Clarify path control, writing tools, approval scope, overnight recovery, receipt lookup and the required cancellation boundary.</p><p>Workflows and agents differ in who selects the path; extraction may need only one call. <a href="#ref-1">[1]</a> Teaching assumptions of 20 runs/s, five model calls and three tools/run give 100 logical model/s and 60 tool/s. About 221 active and 1,800 parked runs belong in separate pools.</p></div></div><details><summary><span class="lang-zh">展开 A1–A12：预算、租约、留存与等待假设</span><span class="lang-en">A1–A12: budgets, leases, retention and waiting assumptions</span></summary><table><thead><tr><th><span class="lang-zh">编号与约束</span> <span class="lang-en">ID / constraint</span></th><th><span class="lang-zh">本章 assumption</span> <span class="lang-en">Assumption</span></th><th><span class="lang-zh">它改变的设计</span> <span class="lang-en">Design consequence</span></th></tr>
 </thead><tbody><tr><td><span class="lang-zh">A1 · 到达与平均调用</span> <span class="lang-en">A1 · arrivals / calls</span></td><td><span class="lang-zh">稳态 20 run/s，每 run 平均 5 次逻辑模型调用、3 次工具</span> <span class="lang-en">Stable 20 runs/s; mean five logical model calls and three tools</span></td><td><span class="lang-zh">100 model/s、60 tool/s，物理重试另计</span> <span class="lang-en">100 model/s, 60 tool/s; physical retries extra</span></td></tr>
 <tr><td><span class="lang-zh">A2 · 全局步数</span> <span class="lang-en">A2 · global steps</span></td><td><span class="lang-zh">最多 12 次逻辑模型 step、8 次前向工具 invoke；串行工具</span> <span class="lang-en">≤12 model steps and eight forward tools; serial tools</span></td><td><span class="lang-zh">handoff、子任务、续跑都共用预算，拒绝无限循环</span> <span class="lang-en">Shared by handoff/subtasks/resume; no unbounded loop</span></td></tr>
 <tr><td><span class="lang-zh">A3 · 平均耗时</span> <span class="lang-en">A3 · mean times</span></td><td><span class="lang-zh">模型阶段 2 s、工具阶段 0.3 s，含前置持久准入；结果 checkpoint 20 ms</span> <span class="lang-en">2-s model and 0.3-s tool phases include durable admission; result checkpoints 20 ms</span></td><td><span class="lang-zh">八次 checkpoint：10+0.9+0.16=11.06 s</span> <span class="lang-en">Eight checkpoints: 10+0.9+0.16=11.06 s</span></td></tr>
@@ -67,17 +43,10 @@
 <tr><td><span class="lang-zh">A8 · 重复检测</span> <span class="lang-en">A8 · no progress</span></td><td><span class="lang-zh">同规范化动作及业务 revision 连续 3 次、没有进展</span> <span class="lang-en">Three repeated canonical actions/business revisions without progress</span></td><td><span class="lang-zh">只作停机启发式；有进展的轮询不误判为循环</span> <span class="lang-en">Stop heuristic; progressing polls are not necessarily stuck</span></td></tr>
 <tr><td><span class="lang-zh">A9 · owner 租约</span> <span class="lang-en">A9 · owner lease</span></td><td><span class="lang-zh">租约 15 s、每 5 s 续；回收时原子增加 epoch</span> <span class="lang-en">15-s lease, renew every 5 s; atomically increase epoch on reclaim</span></td><td><span class="lang-zh">过期 owner 拒绝提交；下游另需业务 key 防重</span> <span class="lang-en">Reject stale local commits; backend separately deduplicates keys</span></td></tr>
 <tr><td><span class="lang-zh">A10 · 历史与上下文</span> <span class="lang-en">A10 · history / context</span></td><td><span class="lang-zh">投影输入上限 12,000 token；逻辑增量留 7 天、两份</span> <span class="lang-en">Projected input ≤12,000 tokens; seven-day deltas, two copies</span></td><td><span class="lang-zh">保留审计证据，摘要不成为权限或批准凭据</span> <span class="lang-en">Preserve evidence; summaries confer no authority</span></td></tr>
-<tr><td><span class="lang-zh">A11 · 工具与批准契约</span> <span class="lang-en">A11 · tool / grant</span></td><td><span class="lang-zh">Ch33 原子防重与回执契约覆盖 24 h 重放；grant 5 分钟</span> <span class="lang-en">Ch33 atomic dedupe/receipts cover 24-h replay; grant lasts five minutes</span></td><td><span class="lang-zh">长等待不要求预先持有 grant；过期重审，UNKNOWN 不放行</span> <span class="lang-en">Issue grant at decision; expired grants re-review, UNKNOWN stays closed</span></td></tr>
+<tr><td><span class="lang-zh">A11 · 工具与批准契约</span> <span class="lang-en">A11 · tool / grant</span></td><td><span class="lang-zh">Ch33 防重/回执保留覆盖 24 h 恢复；UNKNOWN 身份不因到期删除；grant 5 分钟</span> <span class="lang-en">Ch33 dedupe/receipts cover 24-h recovery; retain UNKNOWN identities after expiry; grant lasts five minutes</span></td><td><span class="lang-zh">长等待不要求预先持有 grant；过期重审，UNKNOWN 不放行</span> <span class="lang-en">Issue grant at decision; expired grants re-review, UNKNOWN stays closed</span></td></tr>
 <tr><td><span class="lang-zh">A12 · 事件与失败接管</span> <span class="lang-en">A12 · events / escalation</span></td><td><span class="lang-zh">至少一次通知；持久 READY 每 5 s 扫描；每补偿动作≤2 已分类 attempt</span> <span class="lang-en">At-least-once hints; READY scan every 5 s; ≤2 classified attempts/compensation action</span></td><td><span class="lang-zh">漏提醒能恢复，未清补偿建持久人工工单</span> <span class="lang-en">Repair missed hints; unresolved undo gets a durable review case</span></td></tr>
-</tbody></table><div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>这些数字都是白板 assumption，不是某家公司吞吐或 SDK 默认。平均在途只能用同一边界、稳定区间的到达率乘平均驻留时间；本章把 run 的活跃时间、审批等待与物理 RPC 分开。所有全局预算都持久保留，暂停和换角色不清零前向预算。</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>These are whiteboard assumptions, not production throughput or SDK defaults. Mean concurrency needs a consistent boundary and stable interval. Separate run active time, approval wait and physical RPCs; persistent global budgets survive pauses and role changes.</p>
-</div></div></section>
-
-  <section>
-<h2><span class="lang-zh">持久接单：请求结束，run 才开始</span> <span class="lang-en">Durable admission: the request ends before the run does</span></h2>
-<figure class="deck">
+</tbody></table></details></section>
+<section><h2><span class="lang-zh">持久接单与领取：202 承诺什么</span><span class="lang-en">Durable admission and claim: what 202 promises</span></h2><figure class="deck">
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d1s1t d1s1d">
           <title id="d1s1t">Accept a run without holding a client connection</title>
@@ -104,7 +73,7 @@
           <path d="M70 216 L135 216" class="wire"/><polygon points="145,216 135,221 135,211" class="head"/><text x="103" y="208" text-anchor="middle" class="tiny">submit</text>
           <path d="M145 234 L80 234" class="wire reply"/><polygon points="70,234 80,229 80,239" class="head reply"/><text x="104" y="252" text-anchor="middle" class="tiny">202 / status</text>
           <g class="is-new">
-            <path d="M380 88 V143 A90 12 0 0 0 560 143 V88" class="store"/><ellipse cx="470" cy="88" rx="90" ry="12" class="store"/><text x="470" y="125.5" text-anchor="middle" class="label">Run Store</text><text x="470" y="143.5" text-anchor="middle" class="sub">run + events</text>
+            <path d="M380 88 V143 A90 12 0 0 0 560 143 V88" class="store"/><ellipse cx="470" cy="88" rx="90" ry="12" class="store"/><text x="470" y="119.5" text-anchor="middle" class="label">Run Store</text><text x="470" y="137.5" text-anchor="middle" class="sub">run + events</text>
             <path d="M190 190 L190 118 Q190 110 198 110 L370 110" class="wire"/><polygon points="380,110 370,115 370,105" class="head"/><text x="275" y="102" text-anchor="middle" class="tiny">create / read</text>
             <path d="M380 132 L248 132 Q240 132 240 140 L240 180" class="wire reply"/><polygon points="240,190 235,180 245,180" class="head reply"/><text x="270" y="152" class="tiny">durable</text>
           </g>
@@ -121,7 +90,7 @@
           <rect x="145" y="190" width="130" height="70" rx="12" class="box"/><text x="210" y="222" text-anchor="middle" class="label">Run API</text><text x="210" y="241" text-anchor="middle" class="sub">submit / status</text>
           <path d="M70 216 L135 216" class="wire"/><polygon points="145,216 135,221 135,211" class="head"/><text x="103" y="208" text-anchor="middle" class="tiny">submit</text>
           <path d="M145 234 L80 234" class="wire reply"/><polygon points="70,234 80,229 80,239" class="head reply"/><text x="104" y="252" text-anchor="middle" class="tiny">202 / status</text>
-          <path d="M380 88 V143 A90 12 0 0 0 560 143 V88" class="store"/><ellipse cx="470" cy="88" rx="90" ry="12" class="store"/><text x="470" y="125.5" text-anchor="middle" class="label">Run Store</text><text x="470" y="143.5" text-anchor="middle" class="sub">run + events</text>
+          <path d="M380 88 V143 A90 12 0 0 0 560 143 V88" class="store"/><ellipse cx="470" cy="88" rx="90" ry="12" class="store"/><text x="470" y="119.5" text-anchor="middle" class="label">Run Store</text><text x="470" y="137.5" text-anchor="middle" class="sub">run + events</text>
           <path d="M190 190 L190 118 Q190 110 198 110 L370 110" class="wire"/><polygon points="380,110 370,115 370,105" class="head"/><text x="275" y="102" text-anchor="middle" class="tiny">create / read</text>
           <path d="M380 132 L248 132 Q240 132 240 140 L240 180" class="wire reply"/><polygon points="240,190 235,180 245,180" class="head reply"/><text x="270" y="152" class="tiny">durable</text>
           <g class="is-new">
@@ -145,7 +114,7 @@
           <rect x="145" y="190" width="130" height="70" rx="12" class="box"/><text x="210" y="222" text-anchor="middle" class="label">Run API</text><text x="210" y="241" text-anchor="middle" class="sub">submit / status</text>
           <path d="M70 216 L135 216" class="wire"/><polygon points="145,216 135,221 135,211" class="head"/><text x="103" y="208" text-anchor="middle" class="tiny">submit</text>
           <path d="M145 234 L80 234" class="wire reply"/><polygon points="70,234 80,229 80,239" class="head reply"/><text x="104" y="252" text-anchor="middle" class="tiny">202 / status</text>
-          <path d="M380 88 V143 A90 12 0 0 0 560 143 V88" class="store"/><ellipse cx="470" cy="88" rx="90" ry="12" class="store"/><text x="470" y="125.5" text-anchor="middle" class="label">Run Store</text><text x="470" y="143.5" text-anchor="middle" class="sub">run + events</text>
+          <path d="M380 88 V143 A90 12 0 0 0 560 143 V88" class="store"/><ellipse cx="470" cy="88" rx="90" ry="12" class="store"/><text x="470" y="119.5" text-anchor="middle" class="label">Run Store</text><text x="470" y="137.5" text-anchor="middle" class="sub">run + events</text>
           <path d="M190 190 L190 118 Q190 110 198 110 L370 110" class="wire"/><polygon points="380,110 370,115 370,105" class="head"/><text x="275" y="102" text-anchor="middle" class="tiny">create / read</text>
           <path d="M380 132 L248 132 Q240 132 240 140 L240 180" class="wire reply"/><polygon points="240,190 235,180 245,180" class="head reply"/><text x="270" y="152" class="tiny">durable</text>
           <rect x="445" y="190" width="150" height="70" rx="12" class="box"/><text x="520" y="222" text-anchor="middle" class="label">Runtime</text><text x="520" y="241" text-anchor="middle" class="sub">lease + budget</text>
@@ -172,7 +141,7 @@
           <rect x="145" y="190" width="130" height="70" rx="12" class="box"/><text x="210" y="222" text-anchor="middle" class="label">Run API</text><text x="210" y="241" text-anchor="middle" class="sub">submit / status</text>
           <path d="M70 216 L135 216" class="wire"/><polygon points="145,216 135,221 135,211" class="head"/><text x="103" y="208" text-anchor="middle" class="tiny">submit</text>
           <path d="M145 234 L80 234" class="wire reply"/><polygon points="70,234 80,229 80,239" class="head reply"/><text x="104" y="252" text-anchor="middle" class="tiny">202 / status</text>
-          <path d="M380 88 V143 A90 12 0 0 0 560 143 V88" class="store"/><ellipse cx="470" cy="88" rx="90" ry="12" class="store"/><text x="470" y="125.5" text-anchor="middle" class="label">Run Store</text><text x="470" y="143.5" text-anchor="middle" class="sub">run + events</text>
+          <path d="M380 88 V143 A90 12 0 0 0 560 143 V88" class="store"/><ellipse cx="470" cy="88" rx="90" ry="12" class="store"/><text x="470" y="119.5" text-anchor="middle" class="label">Run Store</text><text x="470" y="137.5" text-anchor="middle" class="sub">run + events</text>
           <path d="M190 190 L190 118 Q190 110 198 110 L370 110" class="wire"/><polygon points="380,110 370,115 370,105" class="head"/><text x="275" y="102" text-anchor="middle" class="tiny">create / read</text>
           <path d="M380 132 L248 132 Q240 132 240 140 L240 180" class="wire reply"/><polygon points="240,190 235,180 245,180" class="head reply"/><text x="270" y="152" class="tiny">durable</text>
           <rect x="445" y="190" width="150" height="70" rx="12" class="box"/><text x="520" y="222" text-anchor="middle" class="label">Runtime</text><text x="520" y="241" text-anchor="middle" class="sub">lease + budget</text>
@@ -193,32 +162,22 @@
         </svg>
         <figcaption><span class="lang-zh">完整图加 Ch33 工具契约。observation 先落 run，再进入下一拍。20×5=100 次模型调用/秒，20×3=60 次工具调用/秒；工具结果不会直接绕回 Client。</span><span class="lang-en">Complete the graph with Ch33. Persist observations before the next step. 20×5=100 model calls/s; 20×3=60 tools/s. Results do not bypass Runtime.</span></figcaption>
       </div>
-    </figure><h3><span class="lang-zh">正常路径：接单与完成的承诺</span> <span class="lang-en">Normal path: admission and completion are different promises</span></h3>
-<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>客户端用业务 request_key 提交 <code>POST /runs</code>。Run API 从可信身份取 tenant、actor，把唯一映射 <code>(tenant, request_key) → run_id</code>、初始状态与 READY 事件写在同一事务里；同键参数摘要不同就冲突，不能悄悄复用另一任务。提交确认后返回 202 和状态地址，客户端断线也能查同一 run。只有接收进程内存里有任务、再异步写库，进程死一次就会出现已接单但永远没有结果的任务。[6][8]</p>
-<p>Runtime 收到提醒后条件领取 READY 行，读当前 checkpoint 与版本。先拿租约再调 LLM GW，返回 tool_call 时做结构、工具数及预算验证，把具体动作写成持久 intent 后交 Tool GW。observation 经 Runtime 写回 Run Store，再开始下一拍模型。用户的 GET /runs/{id} 经 Run API 读权威状态返回，模型结果不直接绕到客户端。每个外部调用都有本地前置记录，正常结果也有确定提交点。</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>POST /runs uses a business request_key. Run API derives tenant/actor and atomically writes the unique key-to-run mapping, parameter digest, initial state and READY event. Conflicting same-key input is rejected. A confirmed commit returns 202/status location; reconnects recover the same run. Memory-first admission followed by asynchronous persistence can lose accepted work [6][8].</p>
-<p>Runtime conditionally claims READY and loads checkpoint/version before LLM GW. Validate proposals, tool count/state/budgets and persist the exact intent before Tool GW. Commit observations before the next model step. GET /runs/{id} reads authority through Run API; model results do not bypass it. Every external call has a durable precondition and result commit.</p>
-</div></div><h3><span class="lang-zh">选择与代价：一个权威库先换来清楚的恢复边界</span> <span class="lang-en">Choice and cost: one authority gives a clear recovery boundary</span></h3>
-<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>约束是跨进程与隔夜恢复，所以不能把 messages 与当前 step 只留在 worker。关系库先承载 run 状态、step/action 记录、消息索引与 outbox，原始大文本可以存成不可变对象并用校验和引用；对象确认可读后再提交引用，失败留下的孤儿对象后续清理。不要每步重写整份历史：增量消息带唯一 event_id，checkpoint 固定所覆盖的末序号，读者用快照加连续增量重建，缺序号就停止恢复。</p>
-<p>代价是每步多一次持久化、需要留存与迁移。只有短只读任务、明确允许丢进度时，内存循环才是较轻的方案；持久 workflow 引擎也可以提供调度与 checkpoint，但接入后仍要理解它的重放边界。LangGraph 文档将线程 checkpoint 与跨线程 store 分开，并明确内存 saver 重启会丢失。[3] memory 不能自动提供恢复承诺。</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>Cross-process recovery and overnight approval require durable messages/progress. Start with one relational authority for runs, steps/actions, message indexes and outbox. Large immutable objects are referenced only after readable acknowledgment/checksum; clean orphaned objects later. Append unique event IDs instead of rewriting history, and rebuild from a snapshot plus contiguous deltas; gaps block recovery.</p>
-<p>Costs include persistence latency, retention and migrations. Memory loops fit explicitly disposable short read tasks; a workflow engine may supply checkpoint/scheduling while its replay boundary still matters. LangGraph distinguishes thread checkpoints from cross-thread stores and warns that in-memory savers lose state on restart [3]; generic memory is not the recovery guarantee.</p>
-</div></div><h3><span class="lang-zh">失败窗口：提醒可以丢，持久接单不能丢</span> <span class="lang-en">Failure window: hints may be lost, accepted work must remain</span></h3>
-<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>Run API 的 wake 只是降低排队延迟，扫描器仍按 A12 每 5 秒扫描可运行行。若事务已提交而提醒没发出，扫到 READY 就能启动；若提醒重复，条件领取只让一个 owner 成功。READY 扫描要分页、限速，监控最老可运行年龄，不能故障恢复后一口气拉满模型网关。图里未单独画扫描器，因为它只补同一 Runtime 的候选入口，权威仍是 Run Store。</p>
-<p>Run Store 写不可用时，新接单不能先回 202，已运行 worker 也不能继续发新的副作用；保留已发动作的可查询身份，等待恢复后核账。异步读副本可用于明确标陈旧的进度展示，但不能决定领取、批准恢复或 DONE。租约到期不是证明旧进程已停止，所以所有提交都要带 owner epoch 和预期 version，下一组恢复图会把这个窗口画实。</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>Wakeups only reduce queue latency; A12 scans runnable rows every five seconds. Missing/duplicate hints are repaired by scanning/conditional claim. Page and rate-limit scans and alert on oldest runnable age rather than saturate LLM GW after recovery. The scanner supplies the same Runtime candidate path; Run Store remains authority.</p>
-<p>If authoritative writes fail, do not acknowledge new acceptance or dispatch new effects. Preserve queryable identities for already-sent actions and reconcile after recovery. Explicitly stale progress may use read replicas; ownership, approval resume and DONE may not. Expiry does not prove old processes stopped, so commits require epoch/expected version.</p>
-</div></div></section>
-
-  <section>
-<h2><span class="lang-zh">有界循环：模型提议，Runtime 决定继续或停</span> <span class="lang-en">Bounded loop: models propose, Runtime decides continuation</span></h2>
-<figure class="deck">
+    </figure><div class="bilingual"><div class="lang-zh"><p><strong>图1的权威是 Run Store。</strong> Run API 在一个事务里写 <code>(tenant,request_key)→run_id</code>、可信 actor、请求摘要、READY 和 outbox；同键换主体或内容要冲突。提交确认后才回 202；回包丢失就查原 run。wake 只是提醒，READY 每 5 秒分页扫描补丢，条件领取消化重复提醒。<a href="#ref-6">[6]</a><a href="#ref-8">[8]</a></p><p>下面 SQL 在可执行 SQLite 适配中逐字运行：先拿写事务锁，再由数据库采样时间。只有拿到返回行并确认 COMMIT 才能出发；0 行表示未获权。<a href="#ref-12">[12]</a> 旧 owner 超时后接管仍保留动作/预算，过期或取消 run 只许核账，不许发新业务。</p></div><div class="lang-en"><p><strong>Run Store is the authority in deck 1.</strong> One transaction writes tenant/request-key mapping, trusted actor, request digest, READY and outbox; changed identity/content conflicts. A confirmed commit precedes 202; lost replies read the original run. Wakeups are hints; five-second paged scans repair loss and conditional claims absorb duplicates. <a href="#ref-6">[6]</a><a href="#ref-8">[8]</a></p><p>The executable SQLite adapter runs this SQL verbatim after acquiring its writer transaction; time comes from the database. Only a returned row plus confirmed COMMIT permits work. Zero rows means no ownership. <a href="#ref-12">[12]</a> Takeover preserves actions/budgets; expired or cancelled runs may reconcile but cannot start new business.</p></div></div><pre data-language="SQL · SQLite adapter" data-kind="teaching" data-source="claim.sql"><code>-- SQLite 3.38+ adapter: acquire BEGIN IMMEDIATE before this statement.
+-- READY starts forward work; expired active owners may only reconcile first.
+WITH clock(now) AS (SELECT unixepoch(&#x27;now&#x27;))
+UPDATE runs
+SET owner = :worker, epoch = epoch + 1, version = version + 1,
+    lease_until = (SELECT now FROM clock) + 15,
+    status = CASE WHEN status = &#x27;READY&#x27; THEN &#x27;RUNNING&#x27; ELSE status END
+WHERE run_id = :run_id AND version = :version
+  AND ((status = &#x27;READY&#x27; AND cancelled = 0
+        AND deadline &gt; (SELECT now FROM clock))
+    OR (status IN (&#x27;RUNNING&#x27;, &#x27;CANCEL_REQUESTED&#x27;, &#x27;COMPENSATING&#x27;)
+        AND lease_until &lt;= (SELECT now FROM clock)))
+RETURNING *;
+-- Zero rows: lost the race / not runnable. Do not invoke anything.
+-- COMMIT acknowledgment must be known before dispatch; otherwise read back.</code></pre><div class="bilingual"><div class="lang-zh"><p>这是一库条件更新，不能把 SELECT 后的无条件 UPDATE 当 CAS；生产行锁同样要检查影响行数。<a href="#ref-7">[7]</a> 后续每次结果提交复查 epoch、version、role_revision、租约与状态。Run Store 写不可用就停止新调用；异步副本只可显示标明陈旧的进度，不能批准、领取或决定 DONE。</p></div><div class="lang-en"><p>This is a single-database conditional update. A SELECT followed by an unconditional UPDATE is not CAS; inspect affected rows with production row locks too. <a href="#ref-7">[7]</a> Outcome commits recheck epoch, version, role revision, lease and status. Stop new calls if authority cannot be written. A stale replica may display labelled progress, never decide claim, approval or DONE.</p></div></div></section>
+<section><h2><span class="lang-zh">有界 step：固定输入，提交输出后才继续</span><span class="lang-en">Bounded steps: pin input, commit output, then continue</span></h2><figure class="deck">
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d2s1t d2s1d">
           <title id="d2s1t">Reserve budget before the model call</title>
@@ -325,32 +284,37 @@
         </svg>
         <figcaption><span class="lang-zh">最后加停止分支。同参数查询在版本推进时可能是合法轮询；只有规范化指纹重复且无进展才触发三次检测。STOPPED 留下原因和未清副作用，不等于回滚。</span><span class="lang-en">Add stopping. Repeated arguments with state progress may be valid polling; three unchanged canonical fingerprints without progress trigger the heuristic. STOPPED preserves effects.</span></figcaption>
       </div>
-    </figure><h3><span class="lang-zh">正常路径：先占预算，再调用，再提交</span> <span class="lang-en">Normal path: reserve, call, commit</span></h3>
-<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>step 是一次逻辑模型调用，先原子增加 step_count 并记录输入 revision，再发请求。相同 step 的供应商重试是物理 attempt，要另计费用与次数；模型输出未持久化前进程死了，可以为同一逻辑 step 再请求一次，但必须把额外费用记到账，并且只有第一个合法 CAS 输出能固定下一动作。工具尚未发出前允许模型输出变化，已经持久的业务 intent 则不能跟着新的模型答案变化。</p>
-<p>一拍模型可能给多个工具，也可能给终答。本章按稳定 action_id 串行执行，每个 invoke 另占工具计数；后端回执查询属于恢复工作，不让它占一个新的业务副作用身份，仍消耗操作与墙钟预算。已知结果组成完整 observation bundle，消息里保留 call/result 对应关系，提交成功后才回到预算门。终答通过输出 schema 与流程完成条件后保存，未到退款终态的“已处理好”必须拒绝，不把没 tool_call 当作业务已成功。</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>Define a step as one logical model call. Persist step_count/input revision before dispatch. Supplier retries are physical attempts with separate cost/count. A crash before output persistence may reissue the same logical step, accounting for costs; only the first valid CAS output pins progression. Undispatched model proposals may differ, but persisted business intent must remain stable.</p>
-<p>Serialize multiple tool proposals by stable action_id with separate invocation budgets. Recovery queries consume operation/time budgets without inventing a new effect identity. Persist complete matched call/result observations before continuation. Validate schema and workflow completion before persisting final output; tool-free prose does not prove a refund completed.</p>
-</div></div><h3><span class="lang-zh">为什么四种预算一起用</span> <span class="lang-en">Why four budgets are needed</span></h3>
-<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>12 次模型 step 只能限制模型轮次，不能限制单拍十个写工具；8 次 invoke 又挡不住一个请求卡住两分钟。因此同时设逻辑步数、工具动作数、活跃时间和 token/费用预算，每次发出前复查。输入 12,000 token 是投影上限，不是每次调用都会用满；实际预算预留已知输入加允许的最大输出，响应后按可信 usage 结算，usage 缺失保留未清费用，不凭“超时”退款。Ch32 已有物理重试与配额账，本章不在外层再套无界重试。</p>
-<p>ReAct 论文把推理与行动交织，通过环境观察更新后续行动；这不要求保存模型私有思考过程。[2] 本章只存允许保留的消息、工具调用、结果与可审计决策摘要。停止条件由代码执行：达到终态、预算用尽、用户取消或检测无进展。AI SDK 文档给出 stopWhen 与 prepareStep 等控制点，[5] 这里只引用有界控制的机制，教学 12 不冒充其通用默认或业务 SLA。</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>Twelve model steps do not bound ten tool writes in one output; eight tools do not bound a two-minute hang. Enforce steps, tools, active time and token/cost budgets before each dispatch. The 12,000-input-token cap is a maximum, not average consumption. Reserve input plus allowed output and settle trusted usage; missing usage keeps costs unresolved. Ch32 owns physical retries/quota accounting; do not add unbounded outer retries.</p>
-<p>ReAct interleaves reasoning/actions with observations [2] without requiring private model reasoning retention. Store permitted messages, calls, results and decision summaries. Code enforces completion, budget, cancellation and no-progress rules. AI SDK stopWhen/prepareStep illustrate control mechanisms [5]; twelve is our assumption, not an SDK default or SLA.</p>
-</div></div><h3><span class="lang-zh">边界：重复不一定卡死，停止也不一定没有副作用</span> <span class="lang-en">Boundary: repetition may progress, stopping may leave effects</span></h3>
-<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>stuck 指纹规范化工具名、参数和相关业务 revision（排除 step_count 等记账变化），结合观察进展连续检测三次。查长任务状态三次可能恰好从排队走到完成，不能只 hash(tool,args) 就认定卡死；反过来模型每次换一句话、同一业务状态完全没动，也不能逃过检查。它是减少浪费的启发式，硬上限仍由预算保证。停止时保存原因、剩余预算和待核动作，向用户给可恢复的状态地址。</p>
-<p>取消与工具 dispatch 也有竞态。取消事务先赢，后续条件 dispatch 必须失败；dispatch 先被持久确认，则取消是尽力终止，远端可能已经写完。Runtime 进入 CANCEL_REQUESTED 后先核账，再由业务策略决定补偿或人工。不能因为客户端关了页面就把后台 run 删除，更不能把 UNKNOWN observation 传成“未执行”，诱导下一角色再次写。</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>Canonicalize tool/arguments and relevant business revision excluding bookkeeping such as step_count and inspect three repetitions without progress. Polling a job may legitimately advance queued to done; text variations may hide an unchanged business state. This is a waste-control heuristic; budgets enforce hard limits. Persist stop reason, remaining budgets and pending obligations with a recoverable status URL.</p>
-<p>Cancellation races dispatch. A winning cancel blocks subsequent conditional dispatch; a previously committed dispatch may already have effects despite best-effort cancellation. CANCEL_REQUESTED first reconciles, then compensates/escalates by policy. Closing a client page must not delete the run or turn UNKNOWN into unexecuted.</p>
-</div></div></section>
-
-  <section>
-<h2><span class="lang-zh">已知流程：模型在节点里工作，代码固定业务边</span> <span class="lang-en">Known workflows: models inside nodes, code owns business edges</span></h2>
-<figure class="deck">
+    </figure><div class="bilingual"><div class="lang-zh"><p><strong>模型 step 是逻辑调用，attempt 是物理请求。</strong> 前置事务占一次 step 并固定模型/工具/workflow revision、授权后的消息投影、检索结果、记录的时间与随机值；再次恢复读取相同输入。已提交输出直接复用，不能为“回放”再问一次模型；尚未保存的输出可以重求且可能改变，但要另记费用，只让一个有效 CAS 结果固定动作。</p><p>代码对应图2预算门和 Commit。输出 schema、合法 workflow 边与 tool_call 数先验；稳定 business intent 来自可信业务交互，不由模型 call_id 或参数 hash 重新定义。外部请求在两个本库事务之间，不能套一个 transaction 把网络原子化。</p></div><div class="lang-en"><p><strong>A model step is logical; an attempt is physical.</strong> Admission reserves one step and pins model/tool/workflow revisions, authorized messages, retrieved evidence and recorded time/random values. Recovery reads the same input. Reuse committed output; missing output may be regenerated and differ, but charge the attempt and let only a valid CAS winner pin actions.</p><p>This contract covers deck 2’s budget gate and Commit. Validate output schema, legal workflow edges and call count. Trusted business interaction defines intent; model call IDs or argument hashes do not. External requests sit between two local transactions; no transaction makes the network atomic.</p></div></div><pre data-language="Pseudocode · step" data-kind="pseudocode" data-source="step.pseudo"><code>advance(run, owner, epoch, roleRevision, expectedVersion):
+  BEGIN RunStore transaction; lock run
+    require current owner/epoch/roleRevision, version=expectedVersion, live lease
+    require RUNNING, not cancelled, before deadline
+    if unresolved action exists: COMMIT; return RECONCILE_OR_WAIT
+    step = current logical step
+    if step exists: require matching revisions, or perform explicit migration
+    if step exists and step.output is stored: COMMIT; return stored output + actions
+    if step does not exist:
+      require step_count &lt; 12; increment step_count
+      INSERT step with workflow/model/tool revisions, messages,
+        retrieved evidence, recorded time/random values, input hash
+    require physical attempt and token reservation within remaining caps
+    INSERT attempt; reserve input + max_output tokens; bump run version
+    attemptVersion = updated run.version; retain exact owner/epoch/role token
+  COMMIT; on uncertain acknowledgment, read step/attempt before sending
+  output, usage = LLM_GW.call(step.immutableInput, attempt.id)  // outside TX
+  record trusted usage by attempt.id; missing usage keeps its reservation
+  proposals = validate(output, pinned schema and allowed workflow edge)
+  BEGIN RunStore transaction; lock run and step
+    require current owner/epoch/roleRevision, version=attemptVersion, live lease
+    require RUNNING, not cancelled, before deadline
+    if step exists and step.output is stored: COMMIT; return stored output + actions
+    UPDATE step SET output = proposals WHERE output IS NULL
+    INSERT exact actions with stable business intent, binding and PREPARED
+    INSERT checkpoint + next-state event; bump run version
+  COMMIT; only the committed winner may advance
+  // Tool dispatch separately checks state, budget, approval and Ch33 contract.
+  // Renewal/version changes require revalidation; never reuse the old entry version.
+  // No saved output: a new attempt may differ/cost more; never replace an intent.</code></pre><div class="bilingual"><div class="lang-zh"><p>12 次模型不能限制一拍多个工具；另设 8 个前向动作、120 秒活跃时间和 60,000 token/费用预算。每个物理 attempt 持久预留已知输入+最大输出，可信 usage 结算；缺 usage 保留占用，暂停/handoff 不清零。Ch32 负责供应商重试，Runtime 不再外套无界重试。ReAct 的行动/观察交织和 AI SDK 的 stopWhen/prepareStep 只是机制参考，不替代持久状态与硬预算，也不要求存私有思考。<a href="#ref-2">[2]</a><a href="#ref-5">[5]</a></p><p>同工具、规范参数及业务 revision 连续 3 次且无进展，只是 stuck 启发式；有版本进展的轮询应继续。STOPPED 留原因和未清义务。下面的已存输出复用是<strong>本设计契约</strong>：LangGraph 从旧 checkpoint 显式 replay 会重跑之后的 LLM/API/interrupt；sync/async/exit 的落盘时机也不同，不能把所有“checkpoint”视作本章同样保证。<a href="#ref-11">[11]</a></p></div><div class="lang-en"><p>Twelve model steps cannot cap a multi-tool response; separately bound eight forward actions, 120 active seconds and 60,000 tokens/cost. Persist reservations per physical attempt and settle trusted usage; missing usage retains the hold. Pause/handoff never resets budgets. Ch32 owns supplier retries. ReAct and AI SDK stopWhen/prepareStep illustrate control, not durability or hard admission, and do not require private reasoning storage. <a href="#ref-2">[2]</a><a href="#ref-5">[5]</a></p><p>Three repeated tool/argument/business-revision fingerprints without progress are only a stuck heuristic; versioned polling may progress. STOPPED retains reasons/obligations. Stored-output reuse is <strong>this design’s contract</strong>: explicit LangGraph replay from an older checkpoint re-executes later LLM/API/interrupt calls, and sync/async/exit persist at different times. <a href="#ref-11">[11]</a></p></div></div></section>
+<section><h2><span class="lang-zh">已知 workflow：代码决定业务边</span><span class="lang-en">Known workflows: code owns business edges</span></h2><figure class="deck">
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d3s1t d3s1d">
           <title id="d3s1t">A model works inside a fixed workflow node</title>
@@ -461,25 +425,8 @@
         </svg>
         <figcaption><span class="lang-zh">完整流程画拒绝与通知修复。资格不通过不发退款；退款已成功但邮件失败，只修复通知，不能机械地补偿整条链。失败行为由业务依赖决定。</span><span class="lang-en">Complete denial and notification repair. Ineligible means no refund; a valid refund with failed email needs notification repair, not automatic reversal of the whole chain.</span></figcaption>
       </div>
-    </figure><h3><span class="lang-zh">从资格到通知，谁允许下一条边</span> <span class="lang-en">From eligibility to notification: who authorizes each edge</span></h3>
-<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>退款先核原订单、已退款金额与资格，再审批具体 intent，执行退款，确认业务回执后通知。模型可以抽订单号、分类申诉或草拟回复，但资格规则是确定代码，不能由它生成新的 workflow 边。transition 同时验证当前节点、workflow_revision、输入证据和 owner，提交后才启动下一节点。节点内探索用有界 loop，共享总预算，结果仍由外层验证。</p>
-<p>图中 Eligibility 向 Model task 取字段并接回结果，接下来横向箭头都是持久控制状态转换，不是 HTTP 回程。批准边只表示拿到授权，不表示已经退款；Refund UNKNOWN 时留在回执核查，Notify 只有确认退款成功才启动。通知成功的回执使流程到 DONE，已知通知失败则进 REPAIR，仅补通知。用户要的退款已经成立，邮件故障不是撤销退款的业务理由。</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>Refund eligibility checks the order, prior refunded amount and policy before exact-intent approval, refund and receipt-gated notification. Models may extract IDs/classify/draft, but code defines legal edges. Transitions check current node, workflow revision, evidence and owner before committing the next node. Node-local exploration shares global budgets and its output is validated by the outer workflow.</p>
-<p>Eligibility’s model call has a return; horizontal arrows are persisted control transitions. Approval authorizes but does not complete a refund. UNKNOWN stays in refund reconciliation. Confirmed refund permits Notify; notification receipt yields DONE, known notification failure yields notification-only REPAIR. A failed email is no business reason to undo a valid refund.</p>
-</div></div><h3><span class="lang-zh">选择、替代与流程升级</span> <span class="lang-en">Choice, alternatives and workflow upgrades</span></h3>
-<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>约束是退款必须通过固定审查，所以选择 workflow，代价是需要维护状态与版本，新增政策不能只改 prompt。开放客服诊断则事先不知道先查账单还是网络，强行写死路径容易脆，应让模型选候选、Runtime 验执行门。两者不按“有没有 LLM”区分，而按谁决定路径。[1] 单次字段抽取可以就是一次调用，不必把每个请求都包装成复杂图引擎。</p>
-<p>升级流程时，新 run 固定新 revision，老 run 保留原规则或经过显式迁移。等待批准的动作参数与政策绑定在旧 revision，不能部署后自动按新代码越过检查。需要迁移就暂停、验证历史证据是否仍满足新要求、重建待批意图，再提交迁移记录。测试先覆盖合法与拒绝边，再注入每个外部调用前后崩溃、批准/取消竞争和重复回执，检查不变量，而不是仅看模型能否说出一句顺口回复。</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>Mandatory review favors workflows at the cost of maintaining states/revisions; prompt edits cannot silently change policy. Open diagnostics have unknown tool order and favor model proposals with runtime admission rather than brittle exhaustive graphs. The distinction is who selects the path [1], not whether an LLM exists. Simple extraction may remain one call.</p>
-<p>Pin revisions for new runs and retain old rules or migrate explicitly. Pending approvals bind old arguments/policy and cannot skip checks after deployment. Migration pauses, revalidates evidence, rebuilds pending intent and commits migration records. Test legal/rejected edges plus crashes, cancel/approve races and duplicate receipts against invariants.</p>
-</div></div></section>
-
-  <section>
-<h2><span class="lang-zh">崩溃恢复：checkpoint 不替远端保证恰好一次</span> <span class="lang-en">Crash recovery: checkpoints do not guarantee one remote effect</span></h2>
-<figure class="deck">
+    </figure><div class="bilingual"><div class="lang-zh"><p><strong>退款资格→具体动作审批→退款回执→通知，不能由模型跳边。</strong> 模型只在 Eligibility 内抽字段；代码验证证据、当前节点、workflow_revision 和 owner 后持久转换。Refund UNKNOWN 留在核账，不能发“退款成功”；退款已成功而邮件失败只进通知 REPAIR，不机械撤销退款。</p><p>新 run 固定新流程 revision，旧 run 保留旧版本或显式迁移。迁移先暂停、验证历史证据和批准是否仍适用，再提交新状态；只改 prompt 不能越过资格/审批。路径未定的诊断才交有界 loop，固定审查的路径用 workflow，代价是维护版本和合法边。<a href="#ref-1">[1]</a></p></div><div class="lang-en"><p><strong>Eligibility → exact-action approval → refund receipt → notification are code-owned edges.</strong> The model extracts fields within Eligibility. Code validates evidence, node, workflow revision and owner before persisting a transition. UNKNOWN refund stays in reconciliation; failed email after successful refund repairs notification only.</p><p>New runs pin new revisions; old runs retain their revision or migrate explicitly after parking and validating prior evidence/approval. Prompt edits cannot bypass policy. Open diagnosis suits a bounded loop; mandatory review suits workflow at the cost of revision/edge maintenance. <a href="#ref-1">[1]</a></p></div></div></section>
+<section><h2><span class="lang-zh">恢复：checkpoint 与远端效果是两份账</span><span class="lang-en">Recovery: checkpoint and remote effects are separate records</span></h2><figure class="deck">
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d4s1t d4s1d">
           <title id="d4s1t">Persist a stable action identity before dispatch</title>
@@ -488,7 +435,7 @@
           <g class="is-new">
             <rect x="18" y="24" width="924" height="360" rx="18" class="boundary"/><text x="34" y="46" class="tiny">CRASH RECOVERY · two databases, one stable business action</text>
             <rect x="25" y="100" width="140" height="70" rx="12" class="box"/><text x="95" y="132" text-anchor="middle" class="label">Runtime A</text><text x="95" y="151" text-anchor="middle" class="sub">owner epoch 7</text>
-            <path d="M340 100 V155 A95 12 0 0 0 530 155 V100" class="store"/><ellipse cx="435" cy="100" rx="95" ry="12" class="store"/><text x="435" y="137.5" text-anchor="middle" class="label">Run Store</text><text x="435" y="155.5" text-anchor="middle" class="sub">v + pending key</text>
+            <path d="M340 100 V155 A95 12 0 0 0 530 155 V100" class="store"/><ellipse cx="435" cy="100" rx="95" ry="12" class="store"/><text x="435" y="131.5" text-anchor="middle" class="label">Run Store</text><text x="435" y="149.5" text-anchor="middle" class="sub">v + pending key</text>
             <path d="M165 121 L330 121" class="wire"/><polygon points="340,121 330,126 330,116" class="head"/><text x="250" y="110" text-anchor="middle" class="tiny">claim / intent</text>
             <path d="M340 143 L175 143" class="wire reply"/><polygon points="165,143 175,138 175,148" class="head reply"/><text x="320" y="185" text-anchor="end" class="tiny">durable k9</text>
           </g>
@@ -502,18 +449,18 @@
           <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
           <rect x="18" y="24" width="924" height="360" rx="18" class="boundary"/><text x="34" y="46" class="tiny">CRASH RECOVERY · two databases, one stable business action</text>
           <rect x="25" y="100" width="140" height="70" rx="12" class="box"/><text x="95" y="132" text-anchor="middle" class="label">Runtime A</text><text x="95" y="151" text-anchor="middle" class="sub">owner epoch 7</text>
-          <path d="M340 100 V155 A95 12 0 0 0 530 155 V100" class="store"/><ellipse cx="435" cy="100" rx="95" ry="12" class="store"/><text x="435" y="137.5" text-anchor="middle" class="label">Run Store</text><text x="435" y="155.5" text-anchor="middle" class="sub">v + pending key</text>
+          <path d="M340 100 V155 A95 12 0 0 0 530 155 V100" class="store"/><ellipse cx="435" cy="100" rx="95" ry="12" class="store"/><text x="435" y="131.5" text-anchor="middle" class="label">Run Store</text><text x="435" y="149.5" text-anchor="middle" class="sub">v + pending key</text>
           <path d="M165 121 L330 121" class="wire"/><polygon points="340,121 330,126 330,116" class="head"/><text x="250" y="110" text-anchor="middle" class="tiny">claim / intent</text>
           <path d="M340 143 L175 143" class="wire reply"/><polygon points="165,143 175,138 175,148" class="head reply"/><text x="320" y="185" text-anchor="end" class="tiny">durable k9</text>
           <g class="is-new">
             <rect x="660" y="100" width="120" height="70" rx="12" class="box"/><text x="720" y="132" text-anchor="middle" class="label">Tool GW</text><text x="720" y="151" text-anchor="middle" class="sub">Ch33</text>
             <rect x="815" y="100" width="120" height="70" rx="12" class="box"/><text x="875" y="132" text-anchor="middle" class="label">Tool API</text><text x="875" y="151" text-anchor="middle" class="sub">atomic receipt</text>
-            <path d="M800 280 V335 A65 12 0 0 0 930 335 V280" class="store"/><ellipse cx="865" cy="280" rx="65" ry="12" class="store"/><text x="865" y="317.5" text-anchor="middle" class="label">Business DB</text><text x="865" y="335.5" text-anchor="middle" class="sub">key + effect</text>
+            <path d="M800 280 V335 A65 12 0 0 0 930 335 V280" class="store"/><ellipse cx="865" cy="280" rx="65" ry="12" class="store"/><text x="865" y="311.5" text-anchor="middle" class="label">Business DB</text><text x="865" y="329.5" text-anchor="middle" class="sub">key + effect</text>
             <path d="M95 100 L95 80 Q95 72 103 72 L692 72 Q700 72 700 80 L700 90" class="wire"/><polygon points="700,100 695,90 705,90" class="head"/><text x="420" y="64" text-anchor="middle" class="tiny">dispatch persisted intent k9</text>
             <path d="M780 121 L805 121" class="wire"/><polygon points="815,121 805,126 805,116" class="head"/>
             <path d="M815 145 L790 145" class="wire reply"/><polygon points="780,145 790,140 790,150" class="head reply"/>
             <path d="M660 138 L598 138 Q590 138 590 130 L590 90 Q590 82 582 82 L134 82 Q130 82 130 86 L130 90" class="wire reply"/><polygon points="130,100 125,90 135,90" class="head reply"/>
-            <path d="M840 170 L840 218 Q840 226 832 226 L808 226 Q800 226 800 234 L800 290" class="wire"/><polygon points="800,300 795,290 805,290" class="head"/><text x="806" y="212" class="tiny">commit k9</text>
+            <path d="M840 170 L840 218 Q840 226 832 226 L808 226 Q800 226 800 234 L800 290" class="wire"/><polygon points="800,300 795,290 805,290" class="head"/><text x="825" y="205" text-anchor="end" class="tiny">commit k9</text>
             <path d="M930 320 L935 320 Q940 320 940 315 L940 212 Q940 204 932 204 L903 204 Q895 204 895 196 L895 180" class="wire reply"/><polygon points="895,170 900,180 890,180" class="head reply"/><text x="935" y="247" text-anchor="end" class="tiny">stored</text>
             <text x="805" y="83" class="tiny">Adapter in Ch33</text>
           </g>
@@ -523,21 +470,21 @@
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d4s3t d4s3d">
           <title id="d4s3t">A missing reply leaves the persisted intent unresolved</title>
-          <desc id="d4s3d">Alternative failure lanes return Tool API to Tool GW to Runtime A after a backend commit but lost result. Run Store still has pending k9. The successful reply lane remains the alternative, not proof that this attempt was observed.</desc>
+          <desc id="d4s3d">The red lanes mark a lost result/local timeout after backend commit, not an authenticated failure response proving rollback. Run Store still has pending k9. The successful reply lane remains the alternative, not proof that this attempt was observed.</desc>
           <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
           <rect x="18" y="24" width="924" height="360" rx="18" class="boundary"/><text x="34" y="46" class="tiny">CRASH RECOVERY · two databases, one stable business action</text>
           <rect x="25" y="100" width="140" height="70" rx="12" class="box"/><text x="95" y="132" text-anchor="middle" class="label">Runtime A</text><text x="95" y="151" text-anchor="middle" class="sub">owner epoch 7</text>
-          <path d="M340 100 V155 A95 12 0 0 0 530 155 V100" class="store"/><ellipse cx="435" cy="100" rx="95" ry="12" class="store"/><text x="435" y="137.5" text-anchor="middle" class="label">Run Store</text><text x="435" y="155.5" text-anchor="middle" class="sub">v + pending key</text>
+          <path d="M340 100 V155 A95 12 0 0 0 530 155 V100" class="store"/><ellipse cx="435" cy="100" rx="95" ry="12" class="store"/><text x="435" y="131.5" text-anchor="middle" class="label">Run Store</text><text x="435" y="149.5" text-anchor="middle" class="sub">v + pending key</text>
           <path d="M165 121 L330 121" class="wire"/><polygon points="340,121 330,126 330,116" class="head"/><text x="250" y="110" text-anchor="middle" class="tiny">claim / intent</text>
           <path d="M340 143 L175 143" class="wire reply"/><polygon points="165,143 175,138 175,148" class="head reply"/><text x="320" y="185" text-anchor="end" class="tiny">durable k9</text>
           <rect x="660" y="100" width="120" height="70" rx="12" class="box"/><text x="720" y="132" text-anchor="middle" class="label">Tool GW</text><text x="720" y="151" text-anchor="middle" class="sub">Ch33</text>
           <rect x="815" y="100" width="120" height="70" rx="12" class="box"/><text x="875" y="132" text-anchor="middle" class="label">Tool API</text><text x="875" y="151" text-anchor="middle" class="sub">atomic receipt</text>
-          <path d="M800 280 V335 A65 12 0 0 0 930 335 V280" class="store"/><ellipse cx="865" cy="280" rx="65" ry="12" class="store"/><text x="865" y="317.5" text-anchor="middle" class="label">Business DB</text><text x="865" y="335.5" text-anchor="middle" class="sub">key + effect</text>
+          <path d="M800 280 V335 A65 12 0 0 0 930 335 V280" class="store"/><ellipse cx="865" cy="280" rx="65" ry="12" class="store"/><text x="865" y="311.5" text-anchor="middle" class="label">Business DB</text><text x="865" y="329.5" text-anchor="middle" class="sub">key + effect</text>
           <path d="M95 100 L95 80 Q95 72 103 72 L692 72 Q700 72 700 80 L700 90" class="wire"/><polygon points="700,100 695,90 705,90" class="head"/><text x="420" y="64" text-anchor="middle" class="tiny">dispatch persisted intent k9</text>
           <path d="M780 121 L805 121" class="wire"/><polygon points="815,121 805,126 805,116" class="head"/>
           <path d="M815 145 L790 145" class="wire reply"/><polygon points="780,145 790,140 790,150" class="head reply"/>
           <path d="M660 138 L598 138 Q590 138 590 130 L590 90 Q590 82 582 82 L134 82 Q130 82 130 86 L130 90" class="wire reply muted"/><polygon points="130,100 125,90 135,90" class="head reply muted"/>
-          <path d="M840 170 L840 218 Q840 226 832 226 L808 226 Q800 226 800 234 L800 290" class="wire"/><polygon points="800,300 795,290 805,290" class="head"/><text x="806" y="212" class="tiny">commit k9</text>
+          <path d="M840 170 L840 218 Q840 226 832 226 L808 226 Q800 226 800 234 L800 290" class="wire"/><polygon points="800,300 795,290 805,290" class="head"/><text x="825" y="205" text-anchor="end" class="tiny">commit k9</text>
           <path d="M930 320 L935 320 Q940 320 940 315 L940 212 Q940 204 932 204 L903 204 Q895 204 895 196 L895 180" class="wire reply"/><polygon points="895,170 900,180 890,180" class="head reply"/><text x="935" y="247" text-anchor="end" class="tiny">stored</text>
           <text x="805" y="83" class="tiny">Adapter in Ch33</text>
           <g class="is-new">
@@ -553,17 +500,17 @@
           <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
           <rect x="18" y="24" width="924" height="360" rx="18" class="boundary"/><text x="34" y="46" class="tiny">CRASH RECOVERY · two databases, one stable business action</text>
           <rect x="25" y="100" width="140" height="70" rx="12" class="box"/><text x="95" y="132" text-anchor="middle" class="label">Runtime A</text><text x="95" y="151" text-anchor="middle" class="sub">owner epoch 7</text>
-          <path d="M340 100 V155 A95 12 0 0 0 530 155 V100" class="store"/><ellipse cx="435" cy="100" rx="95" ry="12" class="store"/><text x="435" y="137.5" text-anchor="middle" class="label">Run Store</text><text x="435" y="155.5" text-anchor="middle" class="sub">v + pending key</text>
+          <path d="M340 100 V155 A95 12 0 0 0 530 155 V100" class="store"/><ellipse cx="435" cy="100" rx="95" ry="12" class="store"/><text x="435" y="131.5" text-anchor="middle" class="label">Run Store</text><text x="435" y="149.5" text-anchor="middle" class="sub">v + pending key</text>
           <path d="M165 121 L330 121" class="wire"/><polygon points="340,121 330,126 330,116" class="head"/><text x="250" y="110" text-anchor="middle" class="tiny">claim / intent</text>
           <path d="M340 143 L175 143" class="wire reply"/><polygon points="165,143 175,138 175,148" class="head reply"/><text x="320" y="185" text-anchor="end" class="tiny">durable k9</text>
           <rect x="660" y="100" width="120" height="70" rx="12" class="box"/><text x="720" y="132" text-anchor="middle" class="label">Tool GW</text><text x="720" y="151" text-anchor="middle" class="sub">Ch33</text>
           <rect x="815" y="100" width="120" height="70" rx="12" class="box"/><text x="875" y="132" text-anchor="middle" class="label">Tool API</text><text x="875" y="151" text-anchor="middle" class="sub">atomic receipt</text>
-          <path d="M800 280 V335 A65 12 0 0 0 930 335 V280" class="store"/><ellipse cx="865" cy="280" rx="65" ry="12" class="store"/><text x="865" y="317.5" text-anchor="middle" class="label">Business DB</text><text x="865" y="335.5" text-anchor="middle" class="sub">key + effect</text>
+          <path d="M800 280 V335 A65 12 0 0 0 930 335 V280" class="store"/><ellipse cx="865" cy="280" rx="65" ry="12" class="store"/><text x="865" y="311.5" text-anchor="middle" class="label">Business DB</text><text x="865" y="329.5" text-anchor="middle" class="sub">key + effect</text>
           <path d="M95 100 L95 80 Q95 72 103 72 L692 72 Q700 72 700 80 L700 90" class="wire"/><polygon points="700,100 695,90 705,90" class="head"/><text x="420" y="64" text-anchor="middle" class="tiny">dispatch persisted intent k9</text>
           <path d="M780 121 L805 121" class="wire"/><polygon points="815,121 805,126 805,116" class="head"/>
           <path d="M815 145 L790 145" class="wire reply"/><polygon points="780,145 790,140 790,150" class="head reply"/>
           <path d="M660 138 L598 138 Q590 138 590 130 L590 90 Q590 82 582 82 L134 82 Q130 82 130 86 L130 90" class="wire reply muted"/><polygon points="130,100 125,90 135,90" class="head reply muted"/>
-          <path d="M840 170 L840 218 Q840 226 832 226 L808 226 Q800 226 800 234 L800 290" class="wire"/><polygon points="800,300 795,290 805,290" class="head"/><text x="806" y="212" class="tiny">commit k9</text>
+          <path d="M840 170 L840 218 Q840 226 832 226 L808 226 Q800 226 800 234 L800 290" class="wire"/><polygon points="800,300 795,290 805,290" class="head"/><text x="825" y="205" text-anchor="end" class="tiny">commit k9</text>
           <path d="M930 320 L935 320 Q940 320 940 315 L940 212 Q940 204 932 204 L903 204 Q895 204 895 196 L895 180" class="wire reply"/><polygon points="895,170 900,180 890,180" class="head reply"/><text x="935" y="247" text-anchor="end" class="tiny">stored</text>
           <text x="805" y="83" class="tiny">Adapter in Ch33</text>
           <path d="M815 156 L790 156" class="wire fail"/><polygon points="780,156 790,151 790,161" class="head fail"/><path d="M660 138 L598 138 Q590 138 590 130 L590 90 Q590 82 582 82 L134 82 Q130 82 130 86 L130 90" class="wire fail"/><polygon points="130,100 125,90 135,90" class="head fail"/><text x="490" y="225" class="tiny">lost result → UNKNOWN</text>
@@ -582,17 +529,17 @@
           <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
           <rect x="18" y="24" width="924" height="360" rx="18" class="boundary"/><text x="34" y="46" class="tiny">CRASH RECOVERY · two databases, one stable business action</text>
           <rect x="25" y="100" width="140" height="70" rx="12" class="box"/><text x="95" y="132" text-anchor="middle" class="label">Runtime A</text><text x="95" y="151" text-anchor="middle" class="sub">owner epoch 7</text>
-          <path d="M340 100 V155 A95 12 0 0 0 530 155 V100" class="store"/><ellipse cx="435" cy="100" rx="95" ry="12" class="store"/><text x="435" y="137.5" text-anchor="middle" class="label">Run Store</text><text x="435" y="155.5" text-anchor="middle" class="sub">v + pending key</text>
+          <path d="M340 100 V155 A95 12 0 0 0 530 155 V100" class="store"/><ellipse cx="435" cy="100" rx="95" ry="12" class="store"/><text x="435" y="131.5" text-anchor="middle" class="label">Run Store</text><text x="435" y="149.5" text-anchor="middle" class="sub">v + pending key</text>
           <path d="M165 121 L330 121" class="wire"/><polygon points="340,121 330,126 330,116" class="head"/><text x="250" y="110" text-anchor="middle" class="tiny">claim / intent</text>
           <path d="M340 143 L175 143" class="wire reply"/><polygon points="165,143 175,138 175,148" class="head reply"/><text x="320" y="185" text-anchor="end" class="tiny">durable k9</text>
           <rect x="660" y="100" width="120" height="70" rx="12" class="box"/><text x="720" y="132" text-anchor="middle" class="label">Tool GW</text><text x="720" y="151" text-anchor="middle" class="sub">Ch33</text>
           <rect x="815" y="100" width="120" height="70" rx="12" class="box"/><text x="875" y="132" text-anchor="middle" class="label">Tool API</text><text x="875" y="151" text-anchor="middle" class="sub">atomic receipt</text>
-          <path d="M800 280 V335 A65 12 0 0 0 930 335 V280" class="store"/><ellipse cx="865" cy="280" rx="65" ry="12" class="store"/><text x="865" y="317.5" text-anchor="middle" class="label">Business DB</text><text x="865" y="335.5" text-anchor="middle" class="sub">key + effect</text>
+          <path d="M800 280 V335 A65 12 0 0 0 930 335 V280" class="store"/><ellipse cx="865" cy="280" rx="65" ry="12" class="store"/><text x="865" y="311.5" text-anchor="middle" class="label">Business DB</text><text x="865" y="329.5" text-anchor="middle" class="sub">key + effect</text>
           <path d="M95 100 L95 80 Q95 72 103 72 L692 72 Q700 72 700 80 L700 90" class="wire"/><polygon points="700,100 695,90 705,90" class="head"/><text x="420" y="64" text-anchor="middle" class="tiny">dispatch persisted intent k9</text>
           <path d="M780 121 L805 121" class="wire"/><polygon points="815,121 805,126 805,116" class="head"/>
           <path d="M815 145 L790 145" class="wire reply"/><polygon points="780,145 790,140 790,150" class="head reply"/>
           <path d="M660 138 L598 138 Q590 138 590 130 L590 90 Q590 82 582 82 L134 82 Q130 82 130 86 L130 90" class="wire reply muted"/><polygon points="130,100 125,90 135,90" class="head reply muted"/>
-          <path d="M840 170 L840 218 Q840 226 832 226 L808 226 Q800 226 800 234 L800 290" class="wire"/><polygon points="800,300 795,290 805,290" class="head"/><text x="806" y="212" class="tiny">commit k9</text>
+          <path d="M840 170 L840 218 Q840 226 832 226 L808 226 Q800 226 800 234 L800 290" class="wire"/><polygon points="800,300 795,290 805,290" class="head"/><text x="825" y="205" text-anchor="end" class="tiny">commit k9</text>
           <path d="M930 320 L935 320 Q940 320 940 315 L940 212 Q940 204 932 204 L903 204 Q895 204 895 196 L895 180" class="wire reply"/><polygon points="895,170 900,180 890,180" class="head reply"/><text x="935" y="247" text-anchor="end" class="tiny">stored</text>
           <text x="805" y="83" class="tiny">Adapter in Ch33</text>
           <path d="M815 156 L790 156" class="wire fail"/><polygon points="780,156 790,151 790,161" class="head fail"/><path d="M660 138 L598 138 Q590 138 590 130 L590 90 Q590 82 582 82 L134 82 Q130 82 130 86 L130 90" class="wire fail"/><polygon points="130,100 125,90 135,90" class="head fail"/><text x="490" y="225" class="tiny">lost result → UNKNOWN</text>
@@ -613,17 +560,17 @@
           <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
           <rect x="18" y="24" width="924" height="360" rx="18" class="boundary"/><text x="34" y="46" class="tiny">CRASH RECOVERY · two databases, one stable business action</text>
           <rect x="25" y="100" width="140" height="70" rx="12" class="box"/><text x="95" y="132" text-anchor="middle" class="label">Runtime A</text><text x="95" y="151" text-anchor="middle" class="sub">owner epoch 7</text>
-          <path d="M340 100 V155 A95 12 0 0 0 530 155 V100" class="store"/><ellipse cx="435" cy="100" rx="95" ry="12" class="store"/><text x="435" y="137.5" text-anchor="middle" class="label">Run Store</text><text x="435" y="155.5" text-anchor="middle" class="sub">v + pending key</text>
+          <path d="M340 100 V155 A95 12 0 0 0 530 155 V100" class="store"/><ellipse cx="435" cy="100" rx="95" ry="12" class="store"/><text x="435" y="131.5" text-anchor="middle" class="label">Run Store</text><text x="435" y="149.5" text-anchor="middle" class="sub">v + pending key</text>
           <path d="M165 121 L330 121" class="wire"/><polygon points="340,121 330,126 330,116" class="head"/><text x="250" y="110" text-anchor="middle" class="tiny">claim / intent</text>
           <path d="M340 143 L175 143" class="wire reply muted"/><polygon points="165,143 175,138 175,148" class="head reply muted"/><text x="320" y="185" text-anchor="end" class="tiny">durable k9</text>
           <rect x="660" y="100" width="120" height="70" rx="12" class="box"/><text x="720" y="132" text-anchor="middle" class="label">Tool GW</text><text x="720" y="151" text-anchor="middle" class="sub">Ch33</text>
           <rect x="815" y="100" width="120" height="70" rx="12" class="box"/><text x="875" y="132" text-anchor="middle" class="label">Tool API</text><text x="875" y="151" text-anchor="middle" class="sub">atomic receipt</text>
-          <path d="M800 280 V335 A65 12 0 0 0 930 335 V280" class="store"/><ellipse cx="865" cy="280" rx="65" ry="12" class="store"/><text x="865" y="317.5" text-anchor="middle" class="label">Business DB</text><text x="865" y="335.5" text-anchor="middle" class="sub">key + effect</text>
+          <path d="M800 280 V335 A65 12 0 0 0 930 335 V280" class="store"/><ellipse cx="865" cy="280" rx="65" ry="12" class="store"/><text x="865" y="311.5" text-anchor="middle" class="label">Business DB</text><text x="865" y="329.5" text-anchor="middle" class="sub">key + effect</text>
           <path d="M95 100 L95 80 Q95 72 103 72 L692 72 Q700 72 700 80 L700 90" class="wire"/><polygon points="700,100 695,90 705,90" class="head"/><text x="420" y="64" text-anchor="middle" class="tiny">dispatch persisted intent k9</text>
           <path d="M780 121 L805 121" class="wire"/><polygon points="815,121 805,126 805,116" class="head"/>
           <path d="M815 145 L790 145" class="wire reply"/><polygon points="780,145 790,140 790,150" class="head reply"/>
           <path d="M660 138 L598 138 Q590 138 590 130 L590 90 Q590 82 582 82 L134 82 Q130 82 130 86 L130 90" class="wire reply muted"/><polygon points="130,100 125,90 135,90" class="head reply muted"/>
-          <path d="M840 170 L840 218 Q840 226 832 226 L808 226 Q800 226 800 234 L800 290" class="wire"/><polygon points="800,300 795,290 805,290" class="head"/><text x="806" y="212" class="tiny">commit k9</text>
+          <path d="M840 170 L840 218 Q840 226 832 226 L808 226 Q800 226 800 234 L800 290" class="wire"/><polygon points="800,300 795,290 805,290" class="head"/><text x="825" y="205" text-anchor="end" class="tiny">commit k9</text>
           <path d="M930 320 L935 320 Q940 320 940 315 L940 212 Q940 204 932 204 L903 204 Q895 204 895 196 L895 180" class="wire reply"/><polygon points="895,170 900,180 890,180" class="head reply"/><text x="935" y="247" text-anchor="end" class="tiny">stored</text>
           <text x="805" y="83" class="tiny">Adapter in Ch33</text>
           <path d="M815 156 L790 156" class="wire fail"/><polygon points="780,156 790,151 790,161" class="head fail"/><path d="M660 138 L598 138 Q590 138 590 130 L590 90 Q590 82 582 82 L134 82 Q130 82 130 86 L130 90" class="wire fail"/><polygon points="130,100 125,90 135,90" class="head fail"/><text x="490" y="225" class="tiny">lost result → UNKNOWN</text>
@@ -640,32 +587,37 @@
         </svg>
         <figcaption><span class="lang-zh">完整图加旧 owner 拒绝。Run Store 验 epoch、version、status，远端靠 k9 原子防重；只在本库写 fencing 字段，拦不住 A 早已发出的网络请求。</span><span class="lang-en">Complete the graph with stale-owner rejection. Run Store checks epoch/version/status; backend k9 deduplicates effects. A local fencing field cannot stop an already-sent remote call.</span></figcaption>
       </div>
-    </figure><h3><span class="lang-zh">持久状态必须包含下一动作，而不只是聊天记录</span> <span class="lang-en">Durable state must include the next action, not just chat</span></h3>
-<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>Run 表至少有 tenant、actor、status、workflow_revision、current_agent、role_revision、step_count、工具及费用预算、owner_epoch、lease_until、version、deadline。Step/Action 表固定 logical_step、action_id、工具 revision、参数摘要及完整参数引用、业务 intent、DISPATCHING/UNKNOWN/已知结果、补偿依赖和回执；消息与批准通过 ID 关联。唯一约束 <code>(run_id, action_id)</code> 防止本地重复 observation，同 key 不同参数要硬冲突。[6]</p>
-<p>正常发工具前，事务里记录 intent 并推进到可发送状态，确认后调用。外部成功回包只是一份证据，Runtime 再同事务写结果、消息索引、下一状态和后续事件；确认完成才交下一拍模型。若本地提交 ACK 丢失，先按 action_id 查询提交结果。不能在重启时扫描到 running 就重跑上一个函数，因为那个函数可能已在第三方收费，而 run 里没有记录成功。</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>Run fields include tenant/actor/status, workflow and role revisions, current_agent, global budgets, epoch/lease/version and deadline. Step/Action records pin logical step/action identity, tool revision, digest/full argument reference, intent, dispatch/unknown/known results, compensation dependencies and receipt. Unique (run_id, action_id) prevents duplicate observations; same-key/different-args conflicts [6].</p>
-<p>Persist intent/dispatchable state before invocation. A successful external reply is evidence; atomically commit outcome, message index, next state and event before continuing. If local acknowledgment is lost, query the action record. Replaying a running function may repeat a third-party charge whose result was never observed.</p>
-</div></div><h3><span class="lang-zh">两库窗口：先查回执，再决定能否同键重放</span> <span class="lang-en">Two-database gap: query evidence before replay</span></h3>
-<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>图中 Business DB 已写业务效果与 k9 回执，Run Store 仍只有 pending k9，这两个库没有共同事务。B 接管必须先走 Ch33 查询原动作；确认成功就补写 observation，确认未执行且契约允许才发原 key，已知不可重试错误进入业务失败分支。若只有非幂等 POST，没有权威状态查询，保留 UNKNOWN 并人工核查；不能换 key，也不能把业务参数重新交模型让它“再试一下”。</p>
-<p>只读模型调用与写工具有不同代价。重跑模型可能输出不同、费用增加，但固定 step 的 CAS 可以避免两个结果都推进；重跑业务写需要业务端将 key、条件写与回执原子保存，TTL 过期前后也要匹配 24 小时恢复窗口。尚未发出的历史 intent 到期后可以拒绝，UNKNOWN 即使超过期限仍要保留未清义务，不能删 key 当成允许重新写。框架保存 checkpoint 无法替外部 SaaS 补上这个契约。</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>Business DB may have effect/receipt k9 while Run Store still has pending k9; these databases do not share a transaction. B queries the original action via Ch33, commits confirmed success, safely replays the original key only under contract, or records known nonretryable failure. A non-idempotent POST without authoritative lookup requires UNKNOWN/manual reconciliation, not a new key or regenerated proposal.</p>
-<p>Model replay may vary output/cost while step CAS prevents dual progression. Business replay requires backend atomic key/conditional effect/receipt and retention covering the 24-h recovery window. Undispatched expired intents may be rejected; expired UNKNOWN retains obligations and never grants a new write. Framework checkpoints cannot invent this SaaS contract.</p>
-</div></div><h3><span class="lang-zh">租约管接管，fencing 管旧结果</span> <span class="lang-en">Lease controls takeover, fencing controls stale commits</span></h3>
-<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>A 的 15 秒租约过期后，B 通过一个条件事务增加 epoch。领取、续租和结果提交都验证数据库时间、status 与预期 version；并发更新时必须检查影响行数，不能把先 SELECT 后无条件 UPDATE 当成 CAS。[7] B 不把 step_count 归零，也不把 k9 改成自己新造的 key。A 从长暂停中醒来，带 epoch 7 的提交会被拒，租约的作用是让活跃 owner 能接管，代次的作用是让旧 owner 不能推进权威状态。</p>
-<p>但 Run Store 的拒绝挡不住已经发给远端的包。Kleppmann 的原文强调 fencing 要由受保护资源验证。[10] 本章实际下游保护来自 Ch33 与业务库的同 key 防重；如果业务支持 epoch fence，就在原子业务写里验它，不能只把字段附在 HTTP header。恢复完成前每个 run 仍串行，租约与幂等解决不同竞态，不能互相替代。</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>After A’s 15-s lease expires, B conditionally increments epoch. Claims, renewals and result commits check DB time/status/expected version and affected-row count; SELECT followed by unconditional UPDATE is not CAS [7]. B retains step_count/k9. Epoch 7 commits are rejected after takeover; leases enable liveness while generations prevent stale authoritative progression.</p>
-<p>Local rejection cannot stop already-sent remote packets. Kleppmann requires the protected resource to enforce fencing [10]. Here Ch33/backend same-key atomic deduplication protects effects; a supported epoch fence must be checked inside the business write, not merely placed in a header. Leases and idempotency protect different races.</p>
-</div></div></section>
-
-  <section>
-<h2><span class="lang-zh">handoff：转负责人，还是调用一个专科工具</span> <span class="lang-en">Handoff: transfer ownership or invoke a specialist</span></h2>
-<figure class="deck">
+    </figure><div class="bilingual"><div class="lang-zh"><p><strong>图4最关键的窗口：Business DB 已提交 k9，Run Store 仍 pending。</strong> 接管者先读原动作的 key、完整 binding 和参数，再向 Ch33 查权威回执；确认成功才补一次 observation。查不到回执也可能是旧请求仍在途，不能据此认定没执行。只有防重契约仍有效时，才允许有界同 key 重放；否则 UNKNOWN→NEEDS_REVIEW，不能换 key、route 或让模型重造动作。</p><p>Run 保存状态、节点/角色版本、owner/epoch/lease/version 和全局预算；Step 保存固定输入与输出；Action 保存 intent、工具/目的端、参数/资源/policy revision、状态及回执。结果、消息索引、checkpoint 末序号和后续事件同库事务；唯一 observation 防本地重复推进。大文本用已确认可读的不可变对象引用，恢复以快照+连续增量重建，缺序号就停。checkpoint 与跨线程 store 是不同存储职责。<a href="#ref-3">[3]</a></p></div><div class="lang-en"><p><strong>Deck 4’s critical gap: Business DB committed k9 while Run Store remains pending.</strong> A new owner reads the original key, full binding and arguments, then queries Ch33 receipts. Confirm success before inserting one observation. Absence may mean an old request is still in flight. Bounded same-key replay requires a still-valid dedupe contract; otherwise retain UNKNOWN/NEEDS_REVIEW, never change key/route or regenerate the action.</p><p>Run holds state, node/role revisions, ownership and budgets; Step pins input/output; Action holds intent, tool/route/arguments/resource/policy revisions, status and receipt. Commit outcome, message index, checkpoint sequence and next event in one database transaction. Unique observations prevent duplicate progression. Large content uses acknowledged immutable objects; snapshot-plus-deltas recovery stops at gaps. Thread checkpoints and cross-thread stores have different roles. <a href="#ref-3">[3]</a></p></div></div><pre data-language="Pseudocode · recovery" data-kind="pseudocode" data-source="recover.pseudo"><code>recover(run, action, newOwnerEpoch):
+  // Claim first; retain original action key, binding, budgets and revisions.
+  receipt = Ch33.query(action.key, action.exactBinding)  // outside RunStore TX
+  if receipt is absent or inconclusive:
+    if not cancelled and contract permits bounded same-key replay now:
+      BEGIN RunStore transaction; lock run and action
+        require recovery owner/epoch/version, live lease, not cancelled, before deadline
+        INSERT bounded replay attempt referencing original key and binding
+      COMMIT; confirm acknowledgment before sending
+      retry original action through Ch33; never change key/route/arguments
+    else:
+      persist UNKNOWN + NEEDS_REVIEW + escalation outbox; return
+  else:
+    BEGIN RunStore transaction; lock run and action
+      require current recovery owner/epoch/version and live lease
+      INSERT observation UNIQUE(run_id, action_id), or read matching prior one
+      UPDATE action with authenticated known outcome and receipt
+      if success: INSERT confirmed effect ledger entry
+      if cancelled: preserve cancel flag; never schedule a new model step
+      INSERT checkpoint + next legal recovery event; bump run version
+    COMMIT
+  if cancelled and confirmed effects require undo:
+    choose next action from persisted business dependencies
+    persist stable compensation key linked to original effect
+    dispatch through Ch33 with its own approval and bounded recovery budget
+    // UNKNOWN compensation blocks dependents; query the same compensation key.
+  if undo cannot safely finish:
+    persist NEEDS_REVIEW + stable case_key + outbox
+    relay to case system; checkpoint relay cursor only after durable case receipt
+  // COMPENSATED is a recovered business failure, never successful DONE.</code></pre><div class="bilingual"><div class="lang-zh"><p>图中 epoch 7 的 A 不能在 epoch 8 后推进本库，B 仍使用 k9，步数不重置。<strong>本库 fence 挡不住已发的远端包。</strong> 远端必须原子检查原 key/完整 binding、业务条件并保存效果+回执；若采用 epoch fence，也要在受保护资源内验证。<a href="#ref-10">[10]</a> 尚未发出的 intent 可到期拒绝；UNKNOWN 到期仍保留身份和核查义务，禁止因 TTL 删除而重新写。</p></div><div class="lang-en"><p>Epoch 7 cannot advance local state after epoch 8; B keeps k9 and budgets. <strong>Local fencing cannot stop an already-sent packet.</strong> The backend must atomically check key/binding and business conditions and store effect plus receipt; any epoch fence must be enforced by the protected resource. <a href="#ref-10">[10]</a> Expired undispatched intents may be denied. Expired UNKNOWN retains identity and reconciliation obligations; TTL deletion never authorizes a new write.</p></div></div></section>
+<section><h2><span class="lang-zh">Handoff：更换角色，保留 run 与义务</span><span class="lang-en">Handoff: change role, retain run and obligations</span></h2><figure class="deck">
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s1t d5s1d">
           <title id="d5s1t">Start with one role and one durable owner</title>
@@ -677,7 +629,7 @@
             <rect x="25" y="180" width="145" height="75" rx="12" class="box"/><text x="97.5" y="214.5" text-anchor="middle" class="label">Agent A</text><text x="97.5" y="233.5" text-anchor="middle" class="sub">support role</text>
             <path d="M330 205 L180 205" class="wire"/><polygon points="170,205 180,200 180,210" class="head"/><text x="250" y="197" text-anchor="middle" class="tiny">active role</text>
             <path d="M170 231 L320 231" class="wire reply"/><polygon points="330,231 320,236 320,226" class="head reply"/>
-            <path d="M325 78 V130 A90 12 0 0 0 505 130 V78" class="store"/><ellipse cx="415" cy="78" rx="90" ry="12" class="store"/><text x="415" y="114" text-anchor="middle" class="label">Run Store</text><text x="415" y="132" text-anchor="middle" class="sub">owner + budgets</text>
+            <path d="M325 78 V130 A90 12 0 0 0 505 130 V78" class="store"/><ellipse cx="415" cy="78" rx="90" ry="12" class="store"/><text x="415" y="108.0" text-anchor="middle" class="label">Run Store</text><text x="415" y="126.0" text-anchor="middle" class="sub">owner + budgets</text>
             <path d="M370 180 L370 154 Q370 146 362 146 L333 146 Q325 146 325 138 L325 118" class="wire"/><polygon points="325,108 330,118 320,118" class="head"/><text x="290" y="148" text-anchor="end" class="tiny">CAS</text>
             <path d="M415 142 L415 152 Q415 160 423 160 L460 160 Q465 160 465 165 L465 170" class="wire reply"/><polygon points="465,180 460,170 470,170" class="head reply"/>
           </g>
@@ -694,7 +646,7 @@
           <rect x="25" y="180" width="145" height="75" rx="12" class="box"/><text x="97.5" y="214.5" text-anchor="middle" class="label">Agent A</text><text x="97.5" y="233.5" text-anchor="middle" class="sub">support role</text>
           <path d="M330 205 L180 205" class="wire muted"/><polygon points="170,205 180,200 180,210" class="head muted"/><text x="250" y="197" text-anchor="middle" class="tiny">active role</text>
           <path d="M170 231 L320 231" class="wire muted reply"/><polygon points="330,231 320,236 320,226" class="head muted reply"/>
-          <path d="M325 78 V130 A90 12 0 0 0 505 130 V78" class="store"/><ellipse cx="415" cy="78" rx="90" ry="12" class="store"/><text x="415" y="114" text-anchor="middle" class="label">Run Store</text><text x="415" y="132" text-anchor="middle" class="sub">owner + budgets</text>
+          <path d="M325 78 V130 A90 12 0 0 0 505 130 V78" class="store"/><ellipse cx="415" cy="78" rx="90" ry="12" class="store"/><text x="415" y="108.0" text-anchor="middle" class="label">Run Store</text><text x="415" y="126.0" text-anchor="middle" class="sub">owner + budgets</text>
           <path d="M370 180 L370 154 Q370 146 362 146 L333 146 Q325 146 325 138 L325 118" class="wire"/><polygon points="325,108 330,118 320,118" class="head"/><text x="290" y="148" text-anchor="end" class="tiny">CAS</text>
           <path d="M415 142 L415 152 Q415 160 423 160 L460 160 Q465 160 465 165 L465 170" class="wire reply"/><polygon points="465,180 460,170 470,170" class="head reply"/>
           <g class="is-new">
@@ -703,7 +655,7 @@
             <text x="540" y="126" class="tiny">Resolve or explicitly inherit each pending action</text>
           </g>
         </svg>
-        <figcaption><span class="lang-zh">先提交 handoff 决定，不先启动 B。角色 r4→r5 与下一状态原子更新，未清动作要解决或显式继承；12 步预算和批准记录不重新生成。</span><span class="lang-en">Commit handoff before activating B. Atomically change role revision/next state; resolve or explicitly inherit pending effects. The twelve-step budget and approvals are retained.</span></figcaption>
+        <figcaption><span class="lang-zh">先提交 handoff 决定，不先启动 B。角色 r4→r5 与下一状态原子更新，未清动作要解决或显式继承；12 步预算不重置；批准历史保留作审计，A 的 grant 不自动授权 B。</span><span class="lang-en">Commit handoff before activating B. Atomically change role revision/next state; resolve or explicitly inherit pending effects. The global budget and approval history persist; A's grant does not authorize B.</span></figcaption>
       </div>
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s3t d5s3d">
@@ -715,7 +667,7 @@
           <rect x="25" y="180" width="145" height="75" rx="12" class="box"/><text x="97.5" y="214.5" text-anchor="middle" class="label">Agent A</text><text x="97.5" y="233.5" text-anchor="middle" class="sub">support role</text>
           <path d="M330 205 L180 205" class="wire muted"/><polygon points="170,205 180,200 180,210" class="head muted"/><text x="250" y="197" text-anchor="middle" class="tiny">active role</text>
           <path d="M170 231 L320 231" class="wire muted reply"/><polygon points="330,231 320,236 320,226" class="head muted reply"/>
-          <path d="M325 78 V130 A90 12 0 0 0 505 130 V78" class="store"/><ellipse cx="415" cy="78" rx="90" ry="12" class="store"/><text x="415" y="114" text-anchor="middle" class="label">Run Store</text><text x="415" y="132" text-anchor="middle" class="sub">owner + budgets</text>
+          <path d="M325 78 V130 A90 12 0 0 0 505 130 V78" class="store"/><ellipse cx="415" cy="78" rx="90" ry="12" class="store"/><text x="415" y="108.0" text-anchor="middle" class="label">Run Store</text><text x="415" y="126.0" text-anchor="middle" class="sub">owner + budgets</text>
           <path d="M370 180 L370 154 Q370 146 362 146 L333 146 Q325 146 325 138 L325 118" class="wire"/><polygon points="325,108 330,118 320,118" class="head"/><text x="290" y="148" text-anchor="end" class="tiny">CAS</text>
           <path d="M415 142 L415 152 Q415 160 423 160 L460 160 Q465 160 465 165 L465 170" class="wire reply"/><polygon points="465,180 460,170 470,170" class="head reply"/>
           <text x="540" y="76" class="tiny">CAS: current_agent A → B, role r4 → r5</text>
@@ -742,7 +694,7 @@
           <rect x="25" y="180" width="145" height="75" rx="12" class="box"/><text x="97.5" y="214.5" text-anchor="middle" class="label">Agent A</text><text x="97.5" y="233.5" text-anchor="middle" class="sub">support role</text>
           <path d="M330 205 L180 205" class="wire muted"/><polygon points="170,205 180,200 180,210" class="head muted"/><text x="250" y="197" text-anchor="middle" class="tiny">active role</text>
           <path d="M170 231 L320 231" class="wire muted reply"/><polygon points="330,231 320,236 320,226" class="head muted reply"/>
-          <path d="M325 78 V130 A90 12 0 0 0 505 130 V78" class="store"/><ellipse cx="415" cy="78" rx="90" ry="12" class="store"/><text x="415" y="114" text-anchor="middle" class="label">Run Store</text><text x="415" y="132" text-anchor="middle" class="sub">owner + budgets</text>
+          <path d="M325 78 V130 A90 12 0 0 0 505 130 V78" class="store"/><ellipse cx="415" cy="78" rx="90" ry="12" class="store"/><text x="415" y="108.0" text-anchor="middle" class="label">Run Store</text><text x="415" y="126.0" text-anchor="middle" class="sub">owner + budgets</text>
           <path d="M370 180 L370 154 Q370 146 362 146 L333 146 Q325 146 325 138 L325 118" class="wire"/><polygon points="325,108 330,118 320,118" class="head"/><text x="290" y="148" text-anchor="end" class="tiny">CAS</text>
           <path d="M415 142 L415 152 Q415 160 423 160 L460 160 Q465 160 465 165 L465 170" class="wire reply"/><polygon points="465,180 460,170 470,170" class="head reply"/>
           <text x="540" y="76" class="tiny">CAS: current_agent A → B, role r4 → r5</text>
@@ -772,7 +724,7 @@
           <rect x="25" y="180" width="145" height="75" rx="12" class="box"/><text x="97.5" y="214.5" text-anchor="middle" class="label">Agent A</text><text x="97.5" y="233.5" text-anchor="middle" class="sub">support role</text>
           <path d="M330 205 L180 205" class="wire muted"/><polygon points="170,205 180,200 180,210" class="head muted"/><text x="250" y="197" text-anchor="middle" class="tiny">active role</text>
           <path d="M170 231 L320 231" class="wire muted reply"/><polygon points="330,231 320,236 320,226" class="head muted reply"/>
-          <path d="M325 78 V130 A90 12 0 0 0 505 130 V78" class="store"/><ellipse cx="415" cy="78" rx="90" ry="12" class="store"/><text x="415" y="114" text-anchor="middle" class="label">Run Store</text><text x="415" y="132" text-anchor="middle" class="sub">owner + budgets</text>
+          <path d="M325 78 V130 A90 12 0 0 0 505 130 V78" class="store"/><ellipse cx="415" cy="78" rx="90" ry="12" class="store"/><text x="415" y="108.0" text-anchor="middle" class="label">Run Store</text><text x="415" y="126.0" text-anchor="middle" class="sub">owner + budgets</text>
           <path d="M370 180 L370 154 Q370 146 362 146 L333 146 Q325 146 325 138 L325 118" class="wire"/><polygon points="325,108 330,118 320,118" class="head"/><text x="290" y="148" text-anchor="end" class="tiny">CAS</text>
           <path d="M415 142 L415 152 Q415 160 423 160 L460 160 Q465 160 465 165 L465 170" class="wire reply"/><polygon points="465,180 460,170 470,170" class="head reply"/>
           <text x="540" y="76" class="tiny">CAS: current_agent A → B, role r4 → r5</text>
@@ -797,25 +749,8 @@
         </svg>
         <figcaption><span class="lang-zh">最后加另一种契约：专科作为有界工具返回给当前负责人。它有独立 subtask_id 和截止时间，但不能抢用户对话、扩大 scope 或重置全局预算。</span><span class="lang-en">Add the alternate contract: a bounded specialist returns to the current owner. It has subtask_id/deadline but cannot take user ownership, broaden scope or reset global budgets.</span></figcaption>
       </div>
-    </figure><h3><span class="lang-zh">先落控制权，再过滤上下文</span> <span class="lang-en">Persist control first, then project context</span></h3>
-<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>先单 agent，不会真的分叉的任务拆成多个专家，只会多一批 prompt、trace 和权限投影。确实需要 billing 接管时，Runtime 先确认当前没有不能继承的未清动作，按允许角色转换同事务写 current_agent=B、role_revision=r5、下一节点与 handoff 事件。run_id、总预算、批准绑定与副作用账本全部保留。B 激活失败继续从这条已提交转换恢复，不能回退成 A/B 都有权对用户推进。</p>
-<p>交给 B 的是授权投影：先按角色和对象权限过滤历史，再做摘要，敏感工具结果与凭据不靠摘要“模糊一下”就算隔离。模型消息中的 tool_call 与 tool_result 要匹配，删除一半会让下一拍输入不合法。摘要固定所覆盖的末消息序号与角色 revision，保留不可变原文引用；摘要是方便模型理解的派生数据，绝不是 grant 或已成功回执。12,000 token 放不下时先压缩旧的允许内容，不删未清动作身份。</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>Start with one role unless instructions/authority truly diverge. For billing handoff, resolve or explicitly inherit pending effects and atomically persist current_agent B, role revision r5, next node and event through an allowed transition. Retain run_id, budgets, approval bindings and effect ledger. Failed B activation resumes that committed transition instead of granting both A/B progression.</p>
-<p>Project authorized history before summarizing. Sensitive results/credentials need real filtering; call/result pairs remain matched. Pin summary message sequence/role revision with immutable evidence references. A summary is derived context, never a grant or success receipt. Under the 12,000-input-token limit, compress permitted history without dropping pending action identities.</p>
-</div></div><h3><span class="lang-zh">专科作为工具，控制权不会移交</span> <span class="lang-en">Agent-as-tool keeps control with the caller</span></h3>
-<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>agent-as-tool 适合让专科查证或提取信息，调用者仍负责最终回复。专科得到 subtask_id、收窄 scope、deadline 与预算分配，返回结果经 Runtime 汇入父 run；实际模型 token 消耗仍记全局账。专科是否能写由显式策略决定，本章默认只读。子任务重投按稳定 subtask_id 查原结果，不能每次恢复又开一个专家。handoff 则改变活跃角色，因此两者不能只用一条“Agent A → Agent B”箭头混写。</p>
-<p>Agent A/B 表示角色投影，run 仍统一存储。旧 A 的迟到结果要同时通过 owner epoch 和 role_revision 检查，r4 已失效就只留日志，不可提交新动作。若要真并行多个专科，先定义互不冲突的子任务、父节点的 join、结果排序、取消传播和共享预算，写动作有冲突时仍串行。恢复后必须有唯一下一状态。</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>Agent-as-tool fits bounded evidence/extraction tasks while the caller owns the final reply. Give a specialist subtask_id, narrowed scope, deadline and allocated budgets; account model costs globally. This design defaults to read-only subtasks. Stable subtask identities recover original results rather than launch another expert after every crash. Handoff changes the active role; the contracts cannot be merged into one unexplained A-to-B arrow.</p>
-<p>A/B are instruction/tool projections, not independent run databases. Late A results check epoch and role revision; obsolete r4 may be logged but cannot dispatch. Real parallelism requires independent tasks, durable join/order, cancel propagation and shared budgets, with conflicting writes serialized. Recovery must retain one definite next state.</p>
-</div></div></section>
-
-  <section>
-<h2><span class="lang-zh">人工批准：停得住、唤得醒、迟到事件不能复活</span> <span class="lang-en">Human review: durable parking and reliable, race-safe wakeups</span></h2>
-<figure class="deck">
+    </figure><div class="bilingual"><div class="lang-zh"><p><strong>先提交控制权，再启动 B。</strong> 在 owner 事务里检查允许的角色转换，解决或显式继承未清动作，同事务更新 current_agent、role_revision 和下一节点。run_id、总预算与副作用账本保留；旧 A 的迟到输出因 epoch/role_revision 不符而拒绝。批准记录可保留作审计，但绑定 A 的 grant 不自动授权 B；写动作换 Agent 必须经 Ch33 重新校验或重新审批。</p><p>B 获得先按权限过滤、再摘要的历史投影；tool_call/result 成对保留。摘要带覆盖序号与来源，不能当权限或成功回执。专科作为工具只返回有界只读结果，当前负责人仍答用户；稳定 subtask_id、deadline 与费用归父 run。只有真实指令/权限分叉才多角色，避免增加无意义调用。</p></div><div class="lang-en"><p><strong>Commit control transfer before starting B.</strong> Under the owner transaction, validate the role edge, resolve or explicitly inherit pending actions, and update current_agent, role revision and next node together. Retain run ID, budgets and effect ledger; reject late A outputs by epoch/role revision. Keep approval records for audit, but an A-bound grant does not authorize B; Ch33 must revalidate or obtain new approval.</p><p>Filter history by authorization before summarizing; keep tool call/result pairs. A summary has covered sequence/source references, never authority or receipt status. A specialist-as-tool returns bounded read-only results while the current role answers; subtask identity/deadline/cost remain with the parent run. Add roles only for real instruction or permission differences.</p></div></div></section>
+<section><h2><span class="lang-zh">暂停与批准：决定可早到，恢复只赢一次</span><span class="lang-en">Pause and approval: decisions may arrive early, resume wins once</span></h2><figure class="deck">
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d6s1t d6s1d">
           <title id="d6s1t">Pending approval is not tool success</title>
@@ -842,7 +777,7 @@
           <path d="M165 211 L202 211 Q210 211 210 203 L210 112 Q210 104 218 104 L250 104" class="wire"/><polygon points="260,104 250,109 250,99" class="head"/><text x="184" y="174" text-anchor="middle" class="tiny">intent</text>
           <path d="M260 128 L243 128 Q235 128 235 136 L235 231 Q235 239 227 239 L175 239" class="wire reply"/><polygon points="165,239 175,234 175,244" class="head reply"/><text x="245" y="169" class="tiny">pending</text>
           <g class="is-new">
-            <path d="M270 280 V335 A85 12 0 0 0 440 335 V280" class="store"/><ellipse cx="355" cy="280" rx="85" ry="12" class="store"/><text x="355" y="317.5" text-anchor="middle" class="label">Run Store</text><text x="355" y="335.5" text-anchor="middle" class="sub">pause + ready</text>
+            <path d="M270 280 V335 A85 12 0 0 0 440 335 V280" class="store"/><ellipse cx="355" cy="280" rx="85" ry="12" class="store"/><text x="355" y="311.5" text-anchor="middle" class="label">Run Store</text><text x="355" y="329.5" text-anchor="middle" class="sub">pause + ready</text>
             <path d="M125 265 L125 292 Q125 300 133 300 L260 300" class="wire"/><polygon points="270,300 260,305 260,295" class="head"/><text x="250" y="282" text-anchor="end" class="tiny">save / claim</text>
             <path d="M270 324 L73 324 Q65 324 65 316 L65 275" class="wire reply"/><polygon points="65,265 70,275 60,275" class="head reply"/><text x="183" y="343" text-anchor="middle" class="tiny">durable / ready</text>
             <text x="30" y="90" class="tiny">Persist pause,</text>
@@ -854,14 +789,14 @@
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d6s3t d6s3d">
           <title id="d6s3t">The reviewer approves an exact versioned action</title>
-          <desc id="d6s3d">Approval UI reads and approves the exact intent through Tool GW, which durably stores the decision and returns it to Approval UI. Editing arguments creates a new revision and review rather than inheriting the previous approval.</desc>
+          <desc id="d6s3d">Approval UI reads the complete tenant/actor/Agent/intent/tool/route/arguments/resource/policy binding through Tool GW, which durably stores the decision and returns it to Approval UI. Editing arguments creates a new revision and review rather than inheriting the previous approval.</desc>
           <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
           <rect x="18" y="24" width="924" height="360" rx="18" class="boundary"/><text x="34" y="46" class="tiny">HITL · durable pause, durable decision, idempotent resume</text>
           <rect x="25" y="190" width="140" height="75" rx="12" class="box"/><text x="95" y="224.5" text-anchor="middle" class="label">Runtime</text><text x="95" y="243.5" text-anchor="middle" class="sub">pause / claim</text>
           <rect x="260" y="80" width="150" height="65" rx="12" class="box"/><text x="335" y="109.5" text-anchor="middle" class="label">Tool GW</text><text x="335" y="128.5" text-anchor="middle" class="sub">durable approval</text>
           <path d="M165 211 L202 211 Q210 211 210 203 L210 112 Q210 104 218 104 L250 104" class="wire"/><polygon points="260,104 250,109 250,99" class="head"/><text x="184" y="174" text-anchor="middle" class="tiny">intent</text>
           <path d="M260 128 L243 128 Q235 128 235 136 L235 231 Q235 239 227 239 L175 239" class="wire reply"/><polygon points="165,239 175,234 175,244" class="head reply"/><text x="245" y="169" class="tiny">pending</text>
-          <path d="M270 280 V335 A85 12 0 0 0 440 335 V280" class="store"/><ellipse cx="355" cy="280" rx="85" ry="12" class="store"/><text x="355" y="317.5" text-anchor="middle" class="label">Run Store</text><text x="355" y="335.5" text-anchor="middle" class="sub">pause + ready</text>
+          <path d="M270 280 V335 A85 12 0 0 0 440 335 V280" class="store"/><ellipse cx="355" cy="280" rx="85" ry="12" class="store"/><text x="355" y="311.5" text-anchor="middle" class="label">Run Store</text><text x="355" y="329.5" text-anchor="middle" class="sub">pause + ready</text>
           <path d="M125 265 L125 292 Q125 300 133 300 L260 300" class="wire"/><polygon points="270,300 260,305 260,295" class="head"/><text x="250" y="282" text-anchor="end" class="tiny">save / claim</text>
           <path d="M270 324 L73 324 Q65 324 65 316 L65 275" class="wire reply"/><polygon points="65,265 70,275 60,275" class="head reply"/><text x="183" y="343" text-anchor="middle" class="tiny">durable / ready</text>
           <text x="30" y="90" class="tiny">Persist pause,</text>
@@ -872,7 +807,7 @@
             <path d="M410 128 L710 128" class="wire reply"/><polygon points="720,128 710,133 710,123" class="head reply"/><text x="557" y="148" text-anchor="middle" class="tiny">durable decision</text>
           </g>
         </svg>
-        <figcaption><span class="lang-zh">加人工审批闭环。批准绑定 tenant、actor、intent、参数摘要与资源/策略版本；编辑金额产生新 revision 重新审查，不能沿用旧 grant。</span><span class="lang-en">Add human review. Bind approval to tenant/actor/intent, argument digest and resource/policy revisions; editing the amount requires a new revision and review.</span></figcaption>
+        <figcaption><span class="lang-zh">加人工审批闭环。批准绑定 tenant、actor、Agent、intent、工具/route、参数与资源/策略版本；编辑金额产生新 revision 重新审查，不能沿用旧 grant。</span><span class="lang-en">Add human review. Bind tenant/actor/Agent/intent, tool/route, arguments and resource/policy revisions; editing the amount requires a new revision and review.</span></figcaption>
       </div>
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d6s4t d6s4d">
@@ -884,7 +819,7 @@
           <rect x="260" y="80" width="150" height="65" rx="12" class="box"/><text x="335" y="109.5" text-anchor="middle" class="label">Tool GW</text><text x="335" y="128.5" text-anchor="middle" class="sub">durable approval</text>
           <path d="M165 211 L202 211 Q210 211 210 203 L210 112 Q210 104 218 104 L250 104" class="wire"/><polygon points="260,104 250,109 250,99" class="head"/><text x="184" y="174" text-anchor="middle" class="tiny">intent</text>
           <path d="M260 128 L243 128 Q235 128 235 136 L235 231 Q235 239 227 239 L175 239" class="wire reply"/><polygon points="165,239 175,234 175,244" class="head reply"/><text x="245" y="169" class="tiny">pending</text>
-          <path d="M270 280 V335 A85 12 0 0 0 440 335 V280" class="store"/><ellipse cx="355" cy="280" rx="85" ry="12" class="store"/><text x="355" y="317.5" text-anchor="middle" class="label">Run Store</text><text x="355" y="335.5" text-anchor="middle" class="sub">pause + ready</text>
+          <path d="M270 280 V335 A85 12 0 0 0 440 335 V280" class="store"/><ellipse cx="355" cy="280" rx="85" ry="12" class="store"/><text x="355" y="311.5" text-anchor="middle" class="label">Run Store</text><text x="355" y="329.5" text-anchor="middle" class="sub">pause + ready</text>
           <path d="M125 265 L125 292 Q125 300 133 300 L260 300" class="wire"/><polygon points="270,300 260,305 260,295" class="head"/><text x="250" y="282" text-anchor="end" class="tiny">save / claim</text>
           <path d="M270 324 L73 324 Q65 324 65 316 L65 275" class="wire reply"/><polygon points="65,265 70,275 60,275" class="head reply"/><text x="183" y="343" text-anchor="middle" class="tiny">durable / ready</text>
           <text x="30" y="90" class="tiny">Persist pause,</text>
@@ -911,7 +846,7 @@
           <rect x="260" y="80" width="150" height="65" rx="12" class="box"/><text x="335" y="109.5" text-anchor="middle" class="label">Tool GW</text><text x="335" y="128.5" text-anchor="middle" class="sub">durable approval</text>
           <path d="M165 211 L202 211 Q210 211 210 203 L210 112 Q210 104 218 104 L250 104" class="wire"/><polygon points="260,104 250,109 250,99" class="head"/><text x="184" y="174" text-anchor="middle" class="tiny">intent</text>
           <path d="M260 128 L243 128 Q235 128 235 136 L235 231 Q235 239 227 239 L175 239" class="wire reply"/><polygon points="165,239 175,234 175,244" class="head reply"/><text x="245" y="169" class="tiny">pending</text>
-          <path d="M270 280 V335 A85 12 0 0 0 440 335 V280" class="store"/><ellipse cx="355" cy="280" rx="85" ry="12" class="store"/><text x="355" y="317.5" text-anchor="middle" class="label">Run Store</text><text x="355" y="335.5" text-anchor="middle" class="sub">pause + ready</text>
+          <path d="M270 280 V335 A85 12 0 0 0 440 335 V280" class="store"/><ellipse cx="355" cy="280" rx="85" ry="12" class="store"/><text x="355" y="311.5" text-anchor="middle" class="label">Run Store</text><text x="355" y="329.5" text-anchor="middle" class="sub">pause + ready</text>
           <path d="M125 265 L125 292 Q125 300 133 300 L260 300" class="wire"/><polygon points="270,300 260,305 260,295" class="head"/><text x="250" y="282" text-anchor="end" class="tiny">save / claim</text>
           <path d="M270 324 L73 324 Q65 324 65 316 L65 275" class="wire reply"/><polygon points="65,265 70,275 60,275" class="head reply"/><text x="183" y="343" text-anchor="middle" class="tiny">durable / ready</text>
           <text x="30" y="90" class="tiny">Persist pause,</text>
@@ -941,7 +876,7 @@
           <rect x="260" y="80" width="150" height="65" rx="12" class="box"/><text x="335" y="109.5" text-anchor="middle" class="label">Tool GW</text><text x="335" y="128.5" text-anchor="middle" class="sub">durable approval</text>
           <path d="M165 211 L202 211 Q210 211 210 203 L210 112 Q210 104 218 104 L250 104" class="wire"/><polygon points="260,104 250,109 250,99" class="head"/><text x="184" y="174" text-anchor="middle" class="tiny">intent</text>
           <path d="M260 128 L243 128 Q235 128 235 136 L235 231 Q235 239 227 239 L175 239" class="wire reply"/><polygon points="165,239 175,234 175,244" class="head reply"/><text x="245" y="169" class="tiny">pending</text>
-          <path d="M270 280 V335 A85 12 0 0 0 440 335 V280" class="store"/><ellipse cx="355" cy="280" rx="85" ry="12" class="store"/><text x="355" y="317.5" text-anchor="middle" class="label">Run Store</text><text x="355" y="335.5" text-anchor="middle" class="sub">pause + ready</text>
+          <path d="M270 280 V335 A85 12 0 0 0 440 335 V280" class="store"/><ellipse cx="355" cy="280" rx="85" ry="12" class="store"/><text x="355" y="311.5" text-anchor="middle" class="label">Run Store</text><text x="355" y="329.5" text-anchor="middle" class="sub">pause + ready</text>
           <path d="M125 265 L125 292 Q125 300 133 300 L260 300" class="wire"/><polygon points="270,300 260,305 260,295" class="head"/><text x="250" y="282" text-anchor="end" class="tiny">save / claim</text>
           <path d="M270 324 L73 324 Q65 324 65 316 L65 275" class="wire reply"/><polygon points="65,265 70,275 60,275" class="head reply"/><text x="183" y="343" text-anchor="middle" class="tiny">durable / ready</text>
           <text x="30" y="90" class="tiny">Persist pause,</text>
@@ -957,35 +892,38 @@
           <path d="M440 326 L710 326" class="wire reply"/><polygon points="720,326 710,331 710,321" class="head reply"/><text x="570" y="347" text-anchor="middle" class="tiny">one accepted resume</text>
           <text x="30" y="368" class="tiny">assumption: 6 approvals/s × 300 s mean wait = 1,800 parked runs</text>
           <g class="is-new">
-            <path d="M440 314 L710 314" class="wire fail"/><polygon points="720,314 710,319 710,309" class="head fail"/><text x="570" y="368" text-anchor="middle" class="tiny">reject stale pause / revision</text>
+            <path d="M440 314 L710 314" class="wire fail"/><polygon points="720,314 710,319 710,309" class="head fail"/><text x="570" y="274" text-anchor="middle" class="tiny">reject stale pause / revision</text>
           </g>
         </svg>
         <figcaption><span class="lang-zh">完整图画出旧事件拒绝。取消与恢复争同一 version/status，取消先赢就不能被迟到批准复活；拒绝记录为已知策略结果，重规划也不能自动重复相同被拒写动作。</span><span class="lang-en">Complete with stale-event rejection. Cancel/resume race on one version/status; a winning cancel prevents revival. Denial is known policy outcome; replanning cannot automatically repeat the denied action.</span></figcaption>
       </div>
-    </figure><h3><span class="lang-zh">正常路径：批准权和继续执行的权利分开</span> <span class="lang-en">Normal path: approval authority differs from continuation ownership</span></h3>
-<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>Tool GW 返回 PENDING 与稳定 approval_id，Runtime 把 pause_id、等待的 intent/revision、checkpoint、WAIT_APPROVAL 和 owner 释放一起提交。提交确认后释放活跃槽，平均等五分钟的 run 不应占一条正在工作的 RPC。批准在 Ch33 持久记录，Resume API 从网关取权威结果后，验证 tenant、run、pause、参数/资源/政策版本，用唯一 decision_id 加状态 CAS 同事务写已接受决定、READY 与 outbox；重复通知查回同一恢复结果。</p>
-<p>worker 重新领取 READY，再取可用 grant 并通过 Ch33 做执行前复查。五分钟 grant 从批准决定时发行，而非在五分钟前开始等待时就要存在；批准后排队太久过期就重审。人工编辑金额或资源产生新动作 revision，原批准不能自动继承。DENIED 是已知策略结果，给模型一个受限重规划机会或终止；不能把它当 5xx、再次发相同写工具反复请求批准。</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>PENDING supplies stable approval_id. Atomically persist pause_id, exact intent/revision, checkpoint, WAIT_APPROVAL and released ownership; release the active slot after acknowledgment. Ch33 durably owns approval decisions. Resume API retrieves authoritative evidence, checks tenant/run/pause and argument/resource/policy revisions, and uses unique decision_id/status CAS to atomically commit accepted decision, READY and outbox. Duplicate notifications retrieve the same result.</p>
-<p>A worker claims READY, retrieves a valid grant and rechecks through Ch33 before execution. The five-minute grant is issued at approval, not when waiting starts; post-approval expiry requires review. Edits create a new revision. DENIED permits limited policy-compliant replanning or termination, never 5xx-style repeat execution.</p>
-</div></div><h3><span class="lang-zh">三个竞态不能靠 webhook 运气解决</span> <span class="lang-en">Three races cannot depend on webhook timing</span></h3>
-<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>第一，批准可能先于本地暂停提交：网关已经存 APPROVED，worker 随后才写 WAIT_APPROVAL。如果只在收到一次 webhook 时唤醒，事件到达时没等待行就丢了。本章在写暂停后立即查批准状态，后台也扫 WAIT_APPROVAL 查到期与决定；事件只是加速，最终根据已持久状态收敛。第二，批准通知重复或恢复者并发：唯一决定与 WAIT_APPROVAL→READY 的条件更新只能成功一次，不能放出两个有效 owner。</p>
-<p>第三，取消或到期与批准恢复竞争：检查同一个 run version、pause_id 和 status。取消先提交，迟到批准只能留审计；恢复先提交而尚未 dispatch，取消仍能赢下一次执行门。写已经持久 dispatch 后，取消不保证远端无副作用，按前面恢复规则核账。LangGraph 的 interrupt 文档明确恢复时节点会从头开始，interrupt 前的代码可能再执行。[4] 因此“停在那行继续”只描述逻辑等待位置，不承诺之前任何写永不重放。</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>Approval can precede local parking. If a one-shot webhook finds no waiting row, the continuation is lost. Re-read decision after parking and scan WAIT_APPROVAL for decisions/expiry; events accelerate durable convergence. Duplicate notifications/concurrent resumers use unique decisions and one conditional WAIT_APPROVAL-to-READY transition, never two owners.</p>
-<p>Cancel/expiry races resume on run version/pause/status. A winning cancel makes late approval audit-only; a resumed-but-undispatched run can still be canceled at the next gate. Already-dispatched writes require reconciliation. LangGraph documents node restart on resume, including code before interrupt [4]; logical pause position does not guarantee pre-interrupt writes never replay.</p>
-</div></div><h3><span class="lang-zh">为什么等待池要独立</span> <span class="lang-en">Why parked runs need a separate pool</span></h3>
-<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>A5 给 20×0.3=6 次暂停/秒，平均等待 300 秒，稳定时平均 6×300=1,800 个待批 run。把它们和约 221 个活跃 run 塞到 320 槽里会直接阻塞新任务，所以 WAIT_APPROVAL 只占持久记录、通知和查询能力。审批者跟不上时，1,800 不再成立，监控最老待批年龄、到达减处理的增长率、批准后到真正执行的延迟；限制每 tenant 待批量，避免无限积压消耗存储和人的注意力。</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>A5 gives 20×0.3=6 pauses/s and 6×300=1,800 mean parked runs in steady state. Combining them with roughly 221 active runs in 320 slots blocks arrivals. Parked runs consume storage/notification/query capacity. If reviewers fall behind, the steady mean fails: monitor oldest age, arrival-minus-completion growth and approval-to-execution delay and bound per-tenant backlog.</p>
-</div></div></section>
+    </figure><div class="bilingual"><div class="lang-zh"><p><strong>PENDING 不是成功，批准也不是已执行。</strong> 先提交 pause_id、approval_id、精确 action binding、checkpoint、WAIT_APPROVAL 与 owner 释放，确认后才归还活跃槽。批准可能先于暂停，所以提交暂停后立即重读 Ch33 决定，并扫描等待行；webhook 只加速，不能是唯一唤醒证据。通知重复由唯一 decision_id 和同一状态/version 的 CAS 消化。</p><p>审批绑定 tenant、actor、Agent、intent、工具/revision、route、规范参数、资源 ID/version、policy 与期限；UI 显示可读动作。金额/资源/主体变化必须新 revision。Resume API 读取权威决定，拒绝客户端自报 approved=true；READY 后 worker 仍需领取，Ch33 执行门复查当前权限、资源和 grant。grant 从批准时起 5 分钟，排队过期就重审。</p></div><div class="lang-en"><p><strong>PENDING is not success; approval is not execution.</strong> Commit pause/approval IDs, exact binding, checkpoint, WAIT_APPROVAL and released ownership before returning the active slot. Approval can beat parking: reread Ch33 after parking and scan waiting rows. Webhooks accelerate recovery. Unique decision IDs and state/version CAS absorb duplicate notifications.</p><p>Bind tenant, actor, agent, intent, tool/revision, route, canonical arguments, resource ID/version, policy and expiry; show readable actions. Changes require a new revision. Resume API reads authoritative decisions rather than caller-supplied approved=true. READY still requires claim and Ch33’s execution-time recheck. Five-minute grants begin at approval; expiry while queued requires review.</p></div></div><pre data-language="Pseudocode · resume" data-kind="pseudocode" data-source="resume.pseudo"><code>park(run, action, ownerEpoch, expectedVersion):
+  BEGIN RunStore transaction; lock run
+    require current ownerEpoch/version, RUNNING and live lease
+    require exact action still PREPARED; create stable pause_id
+    INSERT pause(pause_id, approval_id, action.binding)
+    UPDATE run SET status=WAIT_APPROVAL, owner=NULL, lease_until=0,
+      epoch=epoch+1, version=version+1
+    INSERT checkpoint + waiting event
+  COMMIT; only then release the active slot
+  reread Ch33 decision now; periodically scan waiting rows as a backstop
 
-  <section>
-<h2><span class="lang-zh">失败补偿：恢复义务比一个 failed 标记更具体</span> <span class="lang-en">Compensation: persist recovery obligations beyond a failed flag</span></h2>
-<figure class="deck">
+resume(run, pause_id, expectedVersion, notification):
+  decision = Ch33.readAuthoritativeDecision(notification.approval_id)
+  BEGIN RunStore transaction; lock run and pause
+    if decision_id was accepted for this run/pause/binding: COMMIT; return saved result
+    require WAIT_APPROVAL, matching pause, version=expectedVersion, not cancelled
+    require run deadline is in the future
+    require decision is APPROVED and grant is still valid
+    require exact tenant/actor/Agent/intent/tool/route/args/resource/policy binding
+    INSERT accepted_decision with UNIQUE(tenant, decision_id)
+    UPDATE run SET status=READY, version=version+1
+      WHERE status=WAIT_APPROVAL AND pause_id=:pause AND version=:expectedVersion
+    require affected_rows = 1; INSERT READY outbox event
+  COMMIT; a later worker must claim, then Ch33 rechecks at dispatch
+  // Any failure rolls back this one database transaction.
+  // DENIED/expired means replan or review, never silently APPROVED.</code></pre><div class="bilingual"><div class="lang-zh"><p>取消和恢复争同一状态/version：取消先赢，迟到批准只留审计；恢复先赢但尚未 dispatch，取消仍能挡下一道门。已持久 dispatch 后取消是尽力终止，不能宣称远端无效果。LangGraph interrupt 的节点恢复会从头执行，interrupt 之前的代码可能重跑，因此暂停不是进程栈停在某行的保证。<a href="#ref-4">[4]</a></p><p>6 次暂停/s×300 秒=1,800 个平均待批 run，占持久记录和查询能力，不占 320 活跃槽。审批跟不上时平均值失效，应限制租户待批数并观察最老年龄与到达减处理率。</p></div><div class="lang-en"><p>Cancel/resume contend on the same state/version. A winning cancel makes late approval audit-only; cancellation after resume but before dispatch can still win the next gate. After durable dispatch, termination is best effort and remote effects remain possible. LangGraph resumes interrupt nodes from the beginning, so earlier code may rerun; a pause is not a suspended process stack. <a href="#ref-4">[4]</a></p><p>Six pauses/s × 300 seconds gives 1,800 mean parked runs using storage/query capacity rather than 320 active slots. If review falls behind, bound tenant backlog and monitor oldest age and arrival-minus-completion rate.</p></div></div></section>
+<section><h2><span class="lang-zh">取消与补偿：先查发生了什么，再决定怎么修</span><span class="lang-en">Cancel and compensate: establish effects before repairing</span></h2><figure class="deck">
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d7s1t d7s1d">
           <title id="d7s1t">Compensation starts from confirmed business effects</title>
@@ -994,7 +932,7 @@
           <g class="is-new">
             <rect x="18" y="24" width="924" height="360" rx="18" class="boundary"/><text x="34" y="46" class="tiny">FAILURE COMPENSATION · confirmed effects and durable recovery obligations</text>
             <rect x="25" y="170" width="130" height="75" rx="12" class="box"/><text x="90" y="204.5" text-anchor="middle" class="label">Runtime</text><text x="90" y="223.5" text-anchor="middle" class="sub">compensating</text>
-            <path d="M310 290 V345 A90 12 0 0 0 490 345 V290" class="store"/><ellipse cx="400" cy="290" rx="90" ry="12" class="store"/><text x="400" y="327.5" text-anchor="middle" class="label">Run Store</text><text x="400" y="345.5" text-anchor="middle" class="sub">effect ledger</text>
+            <path d="M310 290 V345 A90 12 0 0 0 490 345 V290" class="store"/><ellipse cx="400" cy="290" rx="90" ry="12" class="store"/><text x="400" y="321.5" text-anchor="middle" class="label">Run Store</text><text x="400" y="339.5" text-anchor="middle" class="sub">effect ledger</text>
             <path d="M125 245 L125 305 Q125 313 133 313 L300 313" class="wire"/><polygon points="310,313 300,318 300,308" class="head"/><text x="285" y="303" text-anchor="end" class="tiny">record undo intent</text>
             <path d="M310 337 L73 337 Q65 337 65 329 L65 255" class="wire reply"/><polygon points="65,245 70,255 60,255" class="head reply"/>
             <text x="30" y="78" class="tiny">Confirmed: e1 reserve → e2 charge</text>
@@ -1011,7 +949,7 @@
           <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
           <rect x="18" y="24" width="924" height="360" rx="18" class="boundary"/><text x="34" y="46" class="tiny">FAILURE COMPENSATION · confirmed effects and durable recovery obligations</text>
           <rect x="25" y="170" width="130" height="75" rx="12" class="box"/><text x="90" y="204.5" text-anchor="middle" class="label">Runtime</text><text x="90" y="223.5" text-anchor="middle" class="sub">compensating</text>
-          <path d="M310 290 V345 A90 12 0 0 0 490 345 V290" class="store"/><ellipse cx="400" cy="290" rx="90" ry="12" class="store"/><text x="400" y="327.5" text-anchor="middle" class="label">Run Store</text><text x="400" y="345.5" text-anchor="middle" class="sub">effect ledger</text>
+          <path d="M310 290 V345 A90 12 0 0 0 490 345 V290" class="store"/><ellipse cx="400" cy="290" rx="90" ry="12" class="store"/><text x="400" y="321.5" text-anchor="middle" class="label">Run Store</text><text x="400" y="339.5" text-anchor="middle" class="sub">effect ledger</text>
           <path d="M125 245 L125 305 Q125 313 133 313 L300 313" class="wire"/><polygon points="310,313 300,318 300,308" class="head"/><text x="285" y="303" text-anchor="end" class="tiny">record undo intent</text>
           <path d="M310 337 L73 337 Q65 337 65 329 L65 255" class="wire reply"/><polygon points="65,245 70,255 60,255" class="head reply"/>
           <text x="30" y="78" class="tiny">Confirmed: e1 reserve → e2 charge</text>
@@ -1032,7 +970,7 @@
           <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
           <rect x="18" y="24" width="924" height="360" rx="18" class="boundary"/><text x="34" y="46" class="tiny">FAILURE COMPENSATION · confirmed effects and durable recovery obligations</text>
           <rect x="25" y="170" width="130" height="75" rx="12" class="box"/><text x="90" y="204.5" text-anchor="middle" class="label">Runtime</text><text x="90" y="223.5" text-anchor="middle" class="sub">compensating</text>
-          <path d="M310 290 V345 A90 12 0 0 0 490 345 V290" class="store"/><ellipse cx="400" cy="290" rx="90" ry="12" class="store"/><text x="400" y="327.5" text-anchor="middle" class="label">Run Store</text><text x="400" y="345.5" text-anchor="middle" class="sub">effect ledger</text>
+          <path d="M310 290 V345 A90 12 0 0 0 490 345 V290" class="store"/><ellipse cx="400" cy="290" rx="90" ry="12" class="store"/><text x="400" y="321.5" text-anchor="middle" class="label">Run Store</text><text x="400" y="339.5" text-anchor="middle" class="sub">effect ledger</text>
           <path d="M125 245 L125 305 Q125 313 133 313 L300 313" class="wire"/><polygon points="310,313 300,318 300,308" class="head"/><text x="285" y="303" text-anchor="end" class="tiny">record undo intent</text>
           <path d="M310 337 L73 337 Q65 337 65 329 L65 255" class="wire reply"/><polygon points="65,245 70,255 60,255" class="head reply"/>
           <text x="30" y="78" class="tiny">Confirmed: e1 reserve → e2 charge</text>
@@ -1043,7 +981,7 @@
           <path d="M315 220 L165 220" class="wire reply"/><polygon points="155,220 165,215 165,225" class="head reply"/>
           <g class="is-new">
             <rect x="635" y="170" width="145" height="75" rx="12" class="box"/><text x="707.5" y="204.5" text-anchor="middle" class="label">Tool API</text><text x="707.5" y="223.5" text-anchor="middle" class="sub">undo condition</text>
-            <path d="M800 176 V231 A65 12 0 0 0 930 231 V176" class="store"/><ellipse cx="865" cy="176" rx="65" ry="12" class="store"/><text x="865" y="213.5" text-anchor="middle" class="label">Business DB</text><text x="865" y="231.5" text-anchor="middle" class="sub">undo + receipt</text>
+            <path d="M800 176 V231 A65 12 0 0 0 930 231 V176" class="store"/><ellipse cx="865" cy="176" rx="65" ry="12" class="store"/><text x="865" y="207.5" text-anchor="middle" class="label">Business DB</text><text x="865" y="225.5" text-anchor="middle" class="sub">undo + receipt</text>
             <path d="M465 194 L625 194" class="wire"/><polygon points="635,194 625,199 625,189" class="head"/><text x="550" y="184" text-anchor="middle" class="tiny">compensate</text>
             <path d="M635 220 L475 220" class="wire reply"/><polygon points="465,220 475,215 475,225" class="head reply"/>
             <path d="M780 194 L790 194" class="wire"/><polygon points="800,194 790,199 790,189" class="head"/>
@@ -1057,11 +995,11 @@
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d7s4t d7s4d">
           <title id="d7s4t">A compensation timeout stays unresolved</title>
-          <desc id="d7s4d">Alternative failure lanes return a lost compensation result Tool API to Tool GW to Runtime. Runtime keeps compensation c2 unresolved in Run Store and queries its original receipt. It must not begin c1 as though refund failed or never happened.</desc>
+          <desc id="d7s4d">Red lanes mark a lost compensation result and local timeout, not proof that Tool API rolled back. Green replies are the alternative successful observation path. Runtime keeps compensation c2 unresolved in Run Store and queries its original receipt. It must not begin c1 as though refund failed or never happened.</desc>
           <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
           <rect x="18" y="24" width="924" height="360" rx="18" class="boundary"/><text x="34" y="46" class="tiny">FAILURE COMPENSATION · confirmed effects and durable recovery obligations</text>
           <rect x="25" y="170" width="130" height="75" rx="12" class="box"/><text x="90" y="204.5" text-anchor="middle" class="label">Runtime</text><text x="90" y="223.5" text-anchor="middle" class="sub">compensating</text>
-          <path d="M310 290 V345 A90 12 0 0 0 490 345 V290" class="store"/><ellipse cx="400" cy="290" rx="90" ry="12" class="store"/><text x="400" y="327.5" text-anchor="middle" class="label">Run Store</text><text x="400" y="345.5" text-anchor="middle" class="sub">effect ledger</text>
+          <path d="M310 290 V345 A90 12 0 0 0 490 345 V290" class="store"/><ellipse cx="400" cy="290" rx="90" ry="12" class="store"/><text x="400" y="321.5" text-anchor="middle" class="label">Run Store</text><text x="400" y="339.5" text-anchor="middle" class="sub">effect ledger</text>
           <path d="M125 245 L125 305 Q125 313 133 313 L300 313" class="wire"/><polygon points="310,313 300,318 300,308" class="head"/><text x="285" y="303" text-anchor="end" class="tiny">record undo intent</text>
           <path d="M310 337 L73 337 Q65 337 65 329 L65 255" class="wire reply"/><polygon points="65,245 70,255 60,255" class="head reply"/>
           <text x="30" y="78" class="tiny">Confirmed: e1 reserve → e2 charge</text>
@@ -1071,7 +1009,7 @@
           <path d="M155 194 L305 194" class="wire"/><polygon points="315,194 305,199 305,189" class="head"/><text x="235" y="184" text-anchor="middle" class="tiny">undo key c2</text>
           <path d="M315 220 L165 220" class="wire reply"/><polygon points="155,220 165,215 165,225" class="head reply"/>
           <rect x="635" y="170" width="145" height="75" rx="12" class="box"/><text x="707.5" y="204.5" text-anchor="middle" class="label">Tool API</text><text x="707.5" y="223.5" text-anchor="middle" class="sub">undo condition</text>
-          <path d="M800 176 V231 A65 12 0 0 0 930 231 V176" class="store"/><ellipse cx="865" cy="176" rx="65" ry="12" class="store"/><text x="865" y="213.5" text-anchor="middle" class="label">Business DB</text><text x="865" y="231.5" text-anchor="middle" class="sub">undo + receipt</text>
+          <path d="M800 176 V231 A65 12 0 0 0 930 231 V176" class="store"/><ellipse cx="865" cy="176" rx="65" ry="12" class="store"/><text x="865" y="207.5" text-anchor="middle" class="label">Business DB</text><text x="865" y="225.5" text-anchor="middle" class="sub">undo + receipt</text>
           <path d="M465 194 L625 194" class="wire"/><polygon points="635,194 625,199 625,189" class="head"/><text x="550" y="184" text-anchor="middle" class="tiny">compensate</text>
           <path d="M635 220 L475 220" class="wire reply"/><polygon points="465,220 475,215 475,225" class="head reply"/>
           <path d="M780 194 L790 194" class="wire"/><polygon points="800,194 790,199 790,189" class="head"/>
@@ -1092,7 +1030,7 @@
           <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
           <rect x="18" y="24" width="924" height="360" rx="18" class="boundary"/><text x="34" y="46" class="tiny">FAILURE COMPENSATION · confirmed effects and durable recovery obligations</text>
           <rect x="25" y="170" width="130" height="75" rx="12" class="box"/><text x="90" y="204.5" text-anchor="middle" class="label">Runtime</text><text x="90" y="223.5" text-anchor="middle" class="sub">compensating</text>
-          <path d="M310 290 V345 A90 12 0 0 0 490 345 V290" class="store"/><ellipse cx="400" cy="290" rx="90" ry="12" class="store"/><text x="400" y="327.5" text-anchor="middle" class="label">Run Store</text><text x="400" y="345.5" text-anchor="middle" class="sub">effect ledger</text>
+          <path d="M310 290 V345 A90 12 0 0 0 490 345 V290" class="store"/><ellipse cx="400" cy="290" rx="90" ry="12" class="store"/><text x="400" y="321.5" text-anchor="middle" class="label">Run Store</text><text x="400" y="339.5" text-anchor="middle" class="sub">effect ledger</text>
           <path d="M125 245 L125 305 Q125 313 133 313 L300 313" class="wire"/><polygon points="310,313 300,318 300,308" class="head"/><text x="285" y="303" text-anchor="end" class="tiny">record undo intent</text>
           <path d="M310 337 L73 337 Q65 337 65 329 L65 255" class="wire reply"/><polygon points="65,245 70,255 60,255" class="head reply"/>
           <text x="30" y="78" class="tiny">Confirmed: e1 reserve → e2 charge</text>
@@ -1102,7 +1040,7 @@
           <path d="M155 194 L305 194" class="wire"/><polygon points="315,194 305,199 305,189" class="head"/><text x="235" y="184" text-anchor="middle" class="tiny">undo key c2</text>
           <path d="M315 220 L165 220" class="wire reply"/><polygon points="155,220 165,215 165,225" class="head reply"/>
           <rect x="635" y="170" width="145" height="75" rx="12" class="box"/><text x="707.5" y="204.5" text-anchor="middle" class="label">Tool API</text><text x="707.5" y="223.5" text-anchor="middle" class="sub">undo condition</text>
-          <path d="M800 176 V231 A65 12 0 0 0 930 231 V176" class="store"/><ellipse cx="865" cy="176" rx="65" ry="12" class="store"/><text x="865" y="213.5" text-anchor="middle" class="label">Business DB</text><text x="865" y="231.5" text-anchor="middle" class="sub">undo + receipt</text>
+          <path d="M800 176 V231 A65 12 0 0 0 930 231 V176" class="store"/><ellipse cx="865" cy="176" rx="65" ry="12" class="store"/><text x="865" y="207.5" text-anchor="middle" class="label">Business DB</text><text x="865" y="225.5" text-anchor="middle" class="sub">undo + receipt</text>
           <path d="M465 194 L625 194" class="wire"/><polygon points="635,194 625,199 625,189" class="head"/><text x="550" y="184" text-anchor="middle" class="tiny">compensate</text>
           <path d="M635 220 L475 220" class="wire reply"/><polygon points="465,220 475,215 475,225" class="head reply"/>
           <path d="M780 194 L790 194" class="wire"/><polygon points="800,194 790,199 790,189" class="head"/>
@@ -1121,97 +1059,42 @@
         </svg>
         <figcaption><span class="lang-zh">最后加人工 relay：工单确认后才推进游标。补偿成功是 COMPENSATED，原业务仍未成功；不可逆邮件只能事前审批或事后修复。工单确认前不能删除义务或把 run 安静地写成 FAILED。</span><span class="lang-en">Add review relay; case acknowledgment precedes the cursor checkpoint. COMPENSATED is not business success. Irreversible email needs pre-action review or forward repair; do not erase obligations or silently end FAILED before case acknowledgment.</span></figcaption>
       </div>
-    </figure><h3><span class="lang-zh">先确认发生过什么，再决定要撤销什么</span> <span class="lang-en">Establish what happened before deciding what to undo</span></h3>
+    </figure><div class="bilingual"><div class="lang-zh"><p><strong>取消只禁止新的前向动作，迟到成功仍须入账。</strong> 未发出的拒绝可结束；已经发出的未知动作先查原回执。不能猜测“可能扣款”就退款，也不能猜测“可能没扣”就再扣。确认效果进入 ledger，保存原交易、undo 工具、当前条件、依赖和进度。图7例子的依赖是 refund c2→release c1；邮件失败只修通知，顺序取决于业务，不是通用逆序栈。<a href="#ref-9">[9]</a></p><p>补偿是新的业务动作：不同于 forward key，但稳定关联原效果，经同样 Ch33 权限/审批/回执契约。每个补偿最多 2 次已分类安全 attempt；UNKNOWN c2 阻塞 c1，只查原 key。预算耗尽或 run 到期不删除义务，转独立恢复任务；8 项已确认效果各最多 2 次是最多 16 次总调用的教学界限，不能当每秒速率上限。</p><p>撤销要按当前状态和可退额度做条件动作，不能用旧快照覆盖他人的修改。补偿也会失败；不安全重放或无法确认就持久 NEEDS_REVIEW、case_key 与 outbox。人工系统按原 case_key 防重，拿到持久回执才推进 relay 游标，期间义务仍在。全部撤销为 COMPENSATED，原用户目标仍未成功，不能记 DONE。</p></div><div class="lang-en"><p><strong>Cancellation blocks new forward work; record late success.</strong> Undispatched denial may finish, but sent uncertain actions first query original receipts. Never refund speculation or charge again on guessed failure. Confirmed effects enter a ledger with original transaction, undo tool, conditions, dependencies and progress. Deck 7 requires refund c2 before release c1; failed email repairs notification. Order is business-specific. <a href="#ref-9">[9]</a></p><p>Compensation is a new business action with a distinct stable key linked to the original effect, subject to Ch33 authorization/approval/receipts. Each has at most two classified safe attempts; UNKNOWN c2 blocks c1. Exhausted forward budgets or expiry transfer obligations to durable recovery. Eight effects times two attempts bounds sixteen total calls, not calls/second.</p><p>Use current state/refundable balance; never overwrite concurrent changes from an old snapshot. Unsafe replay or unknown results retain NEEDS_REVIEW, stable case key and outbox. Deduplicated case receipt precedes relay cursor acknowledgment. Fully undone work is COMPENSATED, not successful DONE.</p></div></div></section>
+<section><h2><span class="lang-zh">容量与实现验证</span><span class="lang-en">Capacity and implementation validation</span></h2><div class="bilingual"><div class="lang-zh"><p><strong>正常热路径 11.06 秒，平均活跃 221.2；模型多一次 attempt 的成本要另算。</strong> 同一稳定边界用到达率×平均驻留时间；320 槽是保护上限，不能用均值证明 p99。</p></div><div class="lang-en"><p><strong>Normal service time is 11.06 seconds and mean active concurrency 221.2; extra model attempts add work.</strong> Use arrival rate × mean residence time at the same stable boundary. A 320-slot protection limit is not a p99 proof.</p></div></div><details><summary><span class="lang-zh">展开流量、并发与增量存储复算</span><span class="lang-en">Traffic, concurrency and incremental-storage calculations</span></summary>
 <div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>按业务结果分类失败：明确没发出的动作可以重新准入；瞬时且已声明安全的操作按剩余预算重试；schema、权限、拒绝是已知结果；已 dispatch 但不知道效果是 UNKNOWN。UNKNOWN 先查原回执，不能因为“可能扣了钱”就先退款，也不能因为“也可能没扣”就再扣一次。确认成功的副作用进入 effect ledger，保存原业务 ID、可补偿条件、undo 工具、依赖与当前进度，模型文本不记账。</p>
-<p>例子先 reserve、再 charge，失败后业务依赖要求 refund 再 release。每项补偿先存稳定 comp_action_id 与 key=c2，调用仍经 Tool GW→Tool API→Business DB，回执逐跳回来并写入 Run Store 后才推进。补偿 key 与原 forward key 不同，但明确关联原交易，超时后查同一 c2，不能生成第二笔退款。A12 的两次 attempt 只用于已分类可重试的补偿；下游未知就核账，不用两次上限为盲写找理由。</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>Classify business outcomes: undispatched actions may be re-admitted; explicitly safe transient operations retry within budget; schema/access/denial are known outcomes; dispatched uncertain effects are UNKNOWN. Query receipts before charging again or refunding speculation. Confirmed effects enter a ledger with business ID, undo conditions/tool, dependencies and progress; model prose is not evidence.</p>
-<p>For reserve then charge, this example requires refund then release. Persist stable compensation identity/key c2 and invoke Tool GW → Tool API → Business DB. Commit returned receipts before advancing. Compensation keys differ from forward keys but link the original transaction; lost refund results query c2 rather than create another refund. Two attempts apply only to classified retry-safe compensation.</p>
-</div></div><h3><span class="lang-zh">为什么补偿不是把数据库倒回昨天</span> <span class="lang-en">Why compensation is not restoring yesterday’s database</span></h3>
-<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>补偿要读取当前业务状态，以原 transaction_id、可退款额度和当前资源版本为条件做原子动作，不能直接把旧快照覆盖回去，否则别人已经修改的数据会被你抹掉。补偿通常不是全局原子回滚，可能比原动作更慢，也可能需人工。Microsoft 的原文指出顺序未必和原执行完全相反，有些能并行；[9] 本章“退款后释放”是这项业务的依赖，不能推广成所有系统通用的副作用栈逆序。</p>
-<p>退款成功但通知失败，只需修复通知；发送出去的邮件不能 unsend，外部不可逆动作应在 dispatch 前审批，事后只能用业务允许的正向修复。若补偿也需要批准，进入带 comp_action_id 的等待状态，恢复时沿用补偿预算和原动作关联，不重新启动原业务。补偿全完成是 COMPENSATED，原任务仍没达成用户目标，不能把它写成 DONE；没有未清义务的已知失败才可结束为 FAILED。前向工具八次或活跃期限耗尽，也不能阻止已持久的清理义务：转到独立的恢复任务，每项补偿最多两次安全 attempt，八项原动作合计最多十六次；超过防重有效期只核查或人工，不继续重放。</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>Undo checks current state using original transaction ID, refundable balance and resource version; never overwrite a historical snapshot and erase concurrent work. Compensation is not globally atomic and may be slow/manual. Microsoft notes undo order need not exactly reverse execution and some actions may run in parallel [9]; refund-before-release is this business dependency, not a universal stack rule.</p>
-<p>A valid refund with failed email needs notification repair. Sent email cannot be unsent; irreversible dispatch needs prior review or forward repair. Compensation approval retains compensation identity/budget/original linkage instead of restarting the business. Fully undone work is COMPENSATED, not successful DONE; known failure without unresolved effects may end FAILED. Exhausted forward budgets do not erase cleanup: a separate durable recovery task permits at most two safe attempts per compensation, sixteen across eight effects. Beyond dedupe retention, query/escalate rather than replay.</p>
-</div></div><h3><span class="lang-zh">失败出口：人工也必须可靠接到义务</span> <span class="lang-en">Failure exit: reliably hand unresolved obligations to a person</span></h3>
-<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>自动补偿耗尽安全重试或无法确认结果时进入 NEEDS_REVIEW，同事务保存未清动作、证据链接、下一合法核查动作与人工接管事件。relay 至少一次交给工单系统，按稳定 case_key 防重，工单返回持久回执后才记录已接管；事件发出前进程死了仍能重发。不能只投一个内存 DLQ，再把 run 标成终态 failed。用户看到明确“需人工核查”的进度，后台保留可续的义务与审计。</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>Exhausted safe retries or unresolved undo enters NEEDS_REVIEW. Atomically store unresolved identities, evidence, next legal checks and escalation event. Deliver at least once using stable case_key and record takeover only after durable case acknowledgment. An in-memory DLQ plus terminal failed loses obligations. Show review-needed progress while keeping recoverable evidence and authority checks.</p>
-</div></div></section>
-
-  <section>
-<h2><span class="lang-zh">容量：把五次模型调用的内环算进去</span> <span class="lang-en">Capacity: account for the five-call inner loop</span></h2>
-<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>A1 给逻辑模型流量 20×5=100/s，即 6,000/min；平均工具 20×3=60/s。A6 假设 10% 模型 step 各多一次物理 attempt，则 100×1.1=110/s，110×60×4,000=26,400,000 token/min，也就是 26.4M TPM；未加重试时是 24M。4,000 是每次物理请求的平均输入加输出，与输入上限 12,000 和全 run 上限 60,000 不同。必须按供应商实际计费/限额口径验收；不要拿 Ch32 单轮聊天的流量预算直接复用。[5]</p>
-<p>不含重试和审批的正常热路径按 A3 是 5×2 + 3×0.3 + 8×0.02 = 11.06 秒，平均活跃 run 20×11.06=221.2，口播约 221。旧文只算 10 秒与 200 个，漏了工具和 checkpoint；若 10% 物理模型补调用也平均花 2 秒，每 run 多 0.5×2=1 秒，活跃均值约 20×12.06=241.2。320 槽是保护上限，不能凭均值证明 p99 可用；需要在给定配额下压测排队、尾延迟与租户公平性。若每个 run 都走满 12 次模型和 8 次工具，仍按 A3 均值、不含重试和审批，20 次结果 checkpoint 给 12×2+8×0.3+20×0.02=26.8 秒，20×26.8=536 所需平均在途，已超 320。观测步数放大时要收紧准入，不能按平均五步的容量承诺最坏情况。</p>
+<p>A1 给逻辑模型流量 20×5=100/s，即 6,000/min；平均工具 20×3=60/s。A6 假设 10% 模型 step 各多一次物理 attempt，则 100×1.1=110/s，110×60×4,000=26,400,000 token/min，也就是 26.4M TPM；未加重试时是 24M。4,000 是每次物理请求的平均输入加输出，与输入上限 12,000 和全 run 上限 60,000 不同。必须按供应商实际计费/限额口径验收；不要拿 Ch32 单轮聊天的流量预算直接复用。</p>
+<p>不含重试和审批的正常热路径按 A3 是 5×2 + 3×0.3 + 8×0.02 = 11.06 秒，平均活跃 run 20×11.06=221.2，口播约 221。若 10% 物理模型补调用也平均花 2 秒，每 run 多 0.5×2=1 秒，活跃均值约 20×12.06=241.2。320 槽是保护上限，不能凭均值证明 p99 可用；需要在给定配额下压测排队、尾延迟与租户公平性。若每个 run 都走满 12 次模型和 8 次工具，仍按 A3 均值、不含重试和审批，20 次结果 checkpoint 给 12×2+8×0.3+20×0.02=26.8 秒，20×26.8=536 所需平均在途，已超 320。观测步数放大时要收紧准入，不能按平均五步的容量承诺最坏情况。</p>
 <p>A3 的阶段均值已含调用前持久准入；这里只另加结果 checkpoint。结果增量是 20×8=160 次写/s，160×2,000=320,000 B/s=0.32 MB/s。峰值持续全天给 0.32×86,400=27,648 MB=27.648 GB/天，七天两份为 27.648×7×2=387.072 GB。完整消息、接单、调用前预算/intent 写、owner 续租、审批/补偿与索引/WAL 另计。若每步把全文写回，消息越长每次越贵，2 KB 假设就失效；增量与对象引用是这笔容量迫出的设计。暂停池 1,800 另存，不能简单和活跃池相加当 CPU 台数。</p>
 </div><div class="lang-en"><p class="col-kicker">English</p>
-<p>A1 gives 20×5=100 logical model calls/s or 6,000/min and 60 tools/s. Ten-percent extra model attempts gives 110 physical calls/s and 110×60×4,000=26.4M TPM, versus 24M without retries. The 4,000 mean total input/output tokens differs from the 12,000-input and 60,000-run maxima. Validate actual supplier accounting; do not reuse single-chat traffic budgets [5].</p>
-<p>Normal active time excluding retries/approvals is 5×2+3×0.3+8×0.02=11.06 s, implying 221.2 mean active runs. The old ten-second/200-run estimate omitted tools/checkpoints. If added attempts average two seconds, 0.5 extra attempts/run adds one second: 12.06 s and 241.2 active. A 320-slot cap protects resources but does not prove p99; benchmark queues/tails/fairness under token/RPM constraints. If every run reaches twelve model calls/eight tools using A3 means, excluding retries/review, twenty result checkpoints give 12×2+8×0.3+20×0.02=26.8 s and 20×26.8=536 required mean active, exceeding 320. Tighten admission when steps increase; five-step capacity does not cover this worst-case workload.</p>
+<p>A1 gives 20×5=100 logical model calls/s or 6,000/min and 60 tools/s. Ten-percent extra model attempts gives 110 physical calls/s and 110×60×4,000=26.4M TPM, versus 24M without retries. The 4,000 mean total input/output tokens differs from the 12,000-input and 60,000-run maxima. Validate actual supplier accounting; do not reuse single-chat traffic budgets.</p>
+<p>Normal active time excluding retries/approvals is 5×2+3×0.3+8×0.02=11.06 s, implying 221.2 mean active runs. If added attempts average two seconds, 0.5 extra attempts/run adds one second: 12.06 s and 241.2 active. A 320-slot cap protects resources but does not prove p99; benchmark queues/tails/fairness under token/RPM constraints. If every run reaches twelve model calls/eight tools using A3 means, excluding retries/review, twenty result checkpoints give 12×2+8×0.3+20×0.02=26.8 s and 20×26.8=536 required mean active, exceeding 320. Tighten admission when steps increase; five-step capacity does not cover this worst-case workload.</p>
 <p>A3 phase means include durable pre-call admission; only result checkpoints are added separately. Result deltas are 20×8=160 writes/s and 160×2,000=0.32 MB/s. All-day peak yields 27.648 GB/day; seven days/two copies is 387.072 GB. Full messages, admission, pre-call budget/intent writes, lease renewals, review/undo, indexes/WAL are extra. Full-history rewrites invalidate 2-KB deltas; append/object references follow from this budget. The separate 1,800 parked runs are not CPU instance demand.</p>
-</div></div></section>
-
-  <section>
-<h2><span class="lang-zh">翻车点：用状态与证据回答追问</span> <span class="lang-en">Failure traps: answer with states and evidence</span></h2>
-<table><thead><tr><th><span class="lang-zh">常见说法</span> <span class="lang-en">Common claim</span></th><th><span class="lang-zh">为什么会错</span> <span class="lang-en">Why it fails</span></th><th><span class="lang-zh">本章修正</span> <span class="lang-en">Correction</span></th></tr>
-</thead><tbody><tr><td><span class="lang-zh">有 checkpoint 就恰好一次</span> <span class="lang-en">Checkpoint means exactly once</span></td><td><span class="lang-zh">远端成功、本地 observation 未提交</span> <span class="lang-en">Remote success before local observation</span></td><td><span class="lang-zh">固定 intent，查回执；UNKNOWN 不生成新写</span> <span class="lang-en">Pin intent, query receipts, no new write for UNKNOWN</span></td></tr>
-<tr><td><span class="lang-zh">12 步最多 12 个工具</span> <span class="lang-en">Twelve steps means twelve tools</span></td><td><span class="lang-zh">一拍可能多个 tool_call</span> <span class="lang-en">One output can contain multiple tool calls</span></td><td><span class="lang-zh">工具计数独立，串行准入，共享总预算</span> <span class="lang-en">Separate tool budget, serial admission, shared global caps</span></td></tr>
-<tr><td><span class="lang-zh">handoff 换个 agent_id 就行</span> <span class="lang-en">Handoff only changes agent_id</span></td><td><span class="lang-zh">旧输出能迟到，未清动作和批准会遗失</span> <span class="lang-en">Late outputs, lost effects/approval binding</span></td><td><span class="lang-zh">角色 CAS、授权投影、继承账本、不重置预算</span> <span class="lang-en">Role CAS, authorized projection, inherited ledger/budgets</span></td></tr>
-<tr><td><span class="lang-zh">收到批准事件就直接续跑</span> <span class="lang-en">An approval event is enough</span></td><td><span class="lang-zh">批准早于暂停、事件可重复或丢失</span> <span class="lang-en">Early approval, duplicates/loss</span></td><td><span class="lang-zh">查持久决定，唯一 decision，READY 扫描兜底</span> <span class="lang-en">Read durable decision, unique ID, READY scan</span></td></tr>
-<tr><td><span class="lang-zh">取消了就肯定没扣款</span> <span class="lang-en">Cancel proves no charge</span></td><td><span class="lang-zh">取消与 dispatch、远端提交竞态</span> <span class="lang-en">Cancel races dispatch/remote commit</span></td><td><span class="lang-zh">取消后先核账，有效果再决定补偿</span> <span class="lang-en">Reconcile, then decide compensation</span></td></tr>
-<tr><td><span class="lang-zh">失败把栈倒着撤就行</span> <span class="lang-en">Always reverse the effect stack</span></td><td><span class="lang-zh">依赖各异，退款不因邮件失败撤销</span> <span class="lang-en">Dependencies vary; email failure does not undo refund</span></td><td><span class="lang-zh">已确认账本、业务依赖、条件补偿</span> <span class="lang-en">Confirmed ledger, business dependencies, conditional undo</span></td></tr>
-<tr><td><span class="lang-zh">补偿失败记 failed 即可</span> <span class="lang-en">Failed undo can simply end failed</span></td><td><span class="lang-zh">义务消失，没人知道还需核查</span> <span class="lang-en">Obligations disappear</span></td><td><span class="lang-zh">NEEDS_REVIEW，工单持久确认后才交接</span> <span class="lang-en">NEEDS_REVIEW, durable case acknowledgment</span></td></tr>
-<tr><td><span class="lang-zh">20 run/s 只需 200 并发</span> <span class="lang-en">20 runs/s needs only 200 slots</span></td><td><span class="lang-zh">只算模型，漏工具、checkpoint 与补调用</span> <span class="lang-en">Omits tools/checkpoints/retries</span></td><td><span class="lang-zh">正常 221.2；额外模型 attempt 下 241.2，审批另池</span> <span class="lang-en">221.2 normal, 241.2 with extra attempts; separate approvals</span></td></tr>
-</tbody></table></section>
-
-  <section>
-<h2><span class="lang-zh">一分钟收尾：走正常链，再指定一个崩溃点</span> <span class="lang-en">One-minute wrap-up: normal path plus one crash point</span></h2>
-<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>从 Client 到 Run API 持久接单，worker 领取 owner，预算门放行模型，工具 intent 先落库，回执回来提交 observation，下一拍再检查预算。开放问题走 loop，退款固定 workflow；handoff 改角色但不改 run 与总预算。审批先持久暂停后释放槽，用权威决定与状态 CAS 唤醒；未知副作用先核账，需要撤销的按业务依赖补偿，未清义务持久交人工。</p>
-<p>追问扣款后崩溃，指恢复图的 Business DB 与 Run Store：B 拿 epoch 8、读 pending k9、查回执、提交一次 observation；A 的 epoch 7 不能推进，本地 fence 也不能撤销已发网络请求。最后报 100 逻辑模型/s、60 工具/s、约 221 正常活跃、1,800 平均待批，并说明额外模型重试给 110/s 与约 241 活跃。用这一个窗口解释预算、权限与状态。</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>Walk Client → Run API durable admission → owner claim → model budget → persisted tool intent → receipt → observation commit → next budget check. Open paths loop; refunds follow fixed workflow. Handoff preserves run/budgets. Persist approval parking, resume from authoritative decisions/CAS, reconcile unknown effects, compensate by dependencies and durably escalate obligations.</p>
-<p>For a crash after charge, point to Business DB versus Run Store: B claims epoch 8, reads pending k9, queries receipt and commits one observation; epoch 7 cannot advance, and local fences cannot undo sent packets. Quote 100 logical model/s, 60 tools/s, about 221 normal active and 1,800 parked; added attempts give 110/s and about 241 active. Tie one concrete window to budgets, authority and state.</p>
-</div></div></section>
-
-  <section>
-<h2><span class="lang-zh">引用与延伸</span> <span class="lang-en">References and follow-ups</span></h2>
-<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>原文仅支持机制事实，A1–A12 均为教学假设。文档按本次日期核验，未做真实供应商调用、审批部署或负载压测。</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>Sources support mechanisms; A1–A12 are teaching assumptions. Documentation was verified on the stated date. No live supplier calls, approval deployment or load benchmark were performed.</p>
-</div></div><ol class="references"><li id="ref-1">[1] Anthropic, <a href="https://www.anthropic.com/engineering/building-effective-agents"><em>Building effective agents</em></a>, 2024. <span class="lang-zh">工作流与 Agent 的路径控制差别；本章不引用该文作为吞吐数据。</span> <span class="lang-en">Path control in workflows versus agents; no throughput data used.</span></li>
+</div></div></details><div class="bilingual"><div class="lang-zh"><p>本页 4 段代码从 <a href="../examples/ch34/README.md">examples/ch34</a> 逐字同步；伪代码不是 Java。可执行适配用 Python 标准库和两个 SQLite 文件，实际运行多连接领取、旧 epoch 拒绝、输入固定/输出复用、审批早到与取消竞争、两库失包、补偿未知和事务回滚。它检验教学契约，不证明分布式复制、真实供应商或生产负载可靠。</p></div><div class="lang-en"><p>The four snippets match <a href="../examples/ch34/README.md">examples/ch34</a> exactly; pseudocode is not Java. A Python-standard-library adapter uses two SQLite databases to exercise concurrent claims, stale owners, pinned input/output reuse, early approval/cancellation races, lost outcomes, unknown compensation and rollback. These are contract checks, not proof of distributed replication, live suppliers or production reliability.</p></div></div></section>
+<section><h2><span class="lang-zh">面试复盘：沿一条链，指出一个崩溃点</span><span class="lang-en">Interview recap: one path and one crash point</span></h2><div class="bilingual"><div class="lang-zh"><p>“先持久接单，领取 owner，预算门放行固定输入的模型 step，输出与精确动作提交后再调工具；回执写 observation 和 checkpoint。等待批准释放槽，按权威决定与 CAS 恢复。扣款后丢回包则保留 k9，接管者查回执而不是重跑对话；旧 owner 不推进，取消后照样核账，补偿或人工义务不丢。”</p></div><div class="lang-en"><p>“Persist admission, claim ownership and reserve a pinned-input model step. Commit output/exact actions before tools, then receipt/observation/checkpoint. Park approval without a slot and resume via authoritative decision plus CAS. If a charge reply is lost, keep k9 and query receipts instead of replaying conversation. Reject stale progression, reconcile after cancellation and preserve recovery obligations.”</p></div></div></section>
+<section><h2><span class="lang-zh">一手来源与延伸</span><span class="lang-en">Primary sources and follow-ups</span></h2><div class="bilingual"><div class="lang-zh"><p>按 2026-10-24 重新访问官方文档/论文；A1–A12 均为教学假设。LangGraph/AI SDK 仅引用机制，不把当前默认值当通用 SLA。未做真实云服务调用、故障注入或负载压测。</p></div><div class="lang-en"><p>Official documents/papers were rechecked on 2026-10-24. A1–A12 are teaching assumptions; LangGraph/AI SDK illustrate mechanisms, not universal defaults or SLAs. No live cloud calls, infrastructure fault injection or load benchmark.</p></div></div><ol class="references"><li id="ref-1">[1] Anthropic, <a href="https://www.anthropic.com/research/building-effective-agents"><em>Building effective agents</em></a>, 2024. <span class="lang-zh">工作流与 Agent 的路径控制差别；本章不引用该文作为吞吐数据。</span> <span class="lang-en">Path control in workflows versus agents; no throughput data used.</span></li>
 <li id="ref-2">[2] Yao et al., <a href="https://arxiv.org/abs/2210.03629"><em>ReAct: Synergizing Reasoning and Acting in Language Models</em></a>, 2022 / ICLR 2023. <span class="lang-zh">推理、行动与观察交织的模式；12 步是本章假设。</span> <span class="lang-en">Interleaved reasoning/actions/observations; twelve steps are our assumption.</span></li>
-<li id="ref-3">[3] LangChain, <a href="https://docs.langchain.com/oss/python/langgraph/persistence"><em>LangGraph — Persistence</em></a>, 2026 · accessed 2026-10-07. <span class="lang-zh">checkpoint 与跨线程 store 的边界，内存 saver 重启丢失；不借它承诺远端副作用一次。</span> <span class="lang-en">Checkpoint/store distinction and volatile savers; no remote exactly-once claim.</span></li>
-<li id="ref-4">[4] LangChain, <a href="https://docs.langchain.com/oss/python/langgraph/interrupts"><em>LangGraph — Interrupts</em></a>, 2026 · accessed 2026-10-07. <span class="lang-zh">持久暂停、同 thread 恢复、节点重启使 interrupt 前代码可能重跑。</span> <span class="lang-en">Durable pauses, same-thread resume and pre-interrupt replay on node restart.</span></li>
-<li id="ref-5">[5] Vercel, <a href="https://ai-sdk.dev/docs/agents/loop-control"><em>AI SDK — Loop Control</em></a>, 2026 · accessed 2026-10-07. <span class="lang-zh">停止条件与每步准备机制；不采用未经版本固定的 SDK 默认数字。</span> <span class="lang-en">Stop/step preparation mechanisms, no unpinned default limit.</span></li>
+<li id="ref-3">[3] LangChain, <a href="https://docs.langchain.com/oss/python/langgraph/persistence"><em>LangGraph — Persistence</em></a>, 2026 · accessed 2026-10-24. <span class="lang-zh">线程 checkpoint 与跨线程 store 的边界；不借它承诺远端副作用一次。</span> <span class="lang-en">Thread checkpoint/store distinction; no remote exactly-once claim.</span></li>
+<li id="ref-4">[4] LangChain, <a href="https://docs.langchain.com/oss/python/langgraph/interrupts"><em>LangGraph — Interrupts</em></a>, 2026 · accessed 2026-10-24. <span class="lang-zh">持久暂停、同 thread 恢复、节点重启使 interrupt 前代码可能重跑。</span> <span class="lang-en">Durable pauses, same-thread resume and pre-interrupt replay on node restart.</span></li>
+<li id="ref-5">[5] Vercel, <a href="https://ai-sdk.dev/docs/agents/loop-control"><em>AI SDK — Loop Control</em></a>, 2026 · accessed 2026-10-24. <span class="lang-zh">停止条件与每步准备机制；不采用未经版本固定的 SDK 默认数字。</span> <span class="lang-en">Stop/step preparation mechanisms, no unpinned default limit.</span></li>
 <li id="ref-6">[6] PostgreSQL, <a href="https://www.postgresql.org/docs/18/ddl-constraints.html"><em>PostgreSQL 18 — Constraints</em></a>, 2025. <span class="lang-zh">唯一约束与非空身份用于接单和 observation 防重。</span> <span class="lang-en">Uniqueness/non-null identities for run and observation deduplication.</span></li>
 <li id="ref-7">[7] PostgreSQL, <a href="https://www.postgresql.org/docs/18/transaction-iso.html"><em>PostgreSQL 18 — Transaction Isolation</em></a>, 2025. <span class="lang-zh">并发更新的条件复查，提交需要检查影响行数。</span> <span class="lang-en">Conditional update rechecks under concurrency; inspect affected rows.</span></li>
-<li id="ref-8">[8] AWS, <a href="https://docs.aws.amazon.com/prescriptive-guidance/latest/cloud-design-patterns/transactional-outbox.html"><em>Transactional outbox pattern</em></a>, accessed 2026-10-07. <span class="lang-zh">状态和后续事件同事务；重复投递需要幂等消费者。</span> <span class="lang-en">State/events in one transaction and idempotent duplicate consumers.</span></li>
-<li id="ref-9">[9] Microsoft, <a href="https://learn.microsoft.com/en-us/azure/architecture/patterns/compensating-transaction"><em>Compensating Transaction pattern</em></a>, accessed 2026-10-07. <span class="lang-zh">补偿需可恢复与幂等，顺序未必完全逆序，也可能人工介入。</span> <span class="lang-en">Recoverable/idempotent compensation, nonuniversal reverse order and manual intervention.</span></li>
+<li id="ref-8">[8] AWS, <a href="https://docs.aws.amazon.com/prescriptive-guidance/latest/cloud-design-patterns/transactional-outbox.html"><em>Transactional outbox pattern</em></a>, accessed 2026-10-24. <span class="lang-zh">状态和后续事件同事务；重复投递需要幂等消费者。</span> <span class="lang-en">State/events in one transaction and idempotent duplicate consumers.</span></li>
+<li id="ref-9">[9] Microsoft, <a href="https://learn.microsoft.com/en-us/azure/architecture/patterns/compensating-transaction"><em>Compensating Transaction pattern</em></a>, accessed 2026-10-24. <span class="lang-zh">补偿需可恢复与幂等，顺序未必完全逆序，也可能人工介入。</span> <span class="lang-en">Recoverable/idempotent compensation, nonuniversal reverse order and manual intervention.</span></li>
 <li id="ref-10">[10] Martin Kleppmann, <a href="https://martin.kleppmann.com/2016/02/08/how-to-do-distributed-locking.html"><em>How to do distributed locking</em></a>, 2016. <span class="lang-zh">长暂停后的旧租约风险，fencing 必须由受保护资源检查。</span> <span class="lang-en">Stale lease risks and resource-enforced fencing.</span></li>
-</ol><p class="cite"><span class="lang-zh">站内延伸：</span> <span class="lang-en">Course follow-ups:</span> <a class="chip" href="ch18.html">Ch18</a> <a class="chip" href="ch25.html">Ch25</a> <a class="chip" href="ch32.html">Ch32</a> <a class="chip" href="ch33.html">Ch33</a> <a class="chip" href="ch35.html"><span class="lang-zh">Ch35</span><span class="lang-en">Ch35</span></a> <a class="chip" href="ch41.html"><span class="lang-zh">Ch41</span><span class="lang-en">Ch41</span></a> <a class="chip" href="ch42.html"><span class="lang-zh">Ch42</span><span class="lang-en">Ch42</span></a></p>
-</section>
-
-  <section>
-<h2><span class="lang-zh">闪卡</span> <span class="lang-en">Flashcards</span></h2>
-<p class="cite"><span class="lang-zh">点一下翻面；先回答权威在哪，再回答崩溃后查哪份证据。</span> <span class="lang-en">Click to flip; identify authority, then the evidence recovery reads.</span></p>
-<div class="cards-grid"><button type="button" class="flip"><span class="q"><span class="lang-zh">为什么返回 202 前必须持久化？</span> <span class="lang-en">Why persist before 202?</span></span><span class="a"><span class="lang-zh">run、防重映射与 READY 同事务；回包丢失仍查回原 run，不丢接单。</span> <span class="lang-en">Commit run, dedupe mapping and READY; recover the original run after lost replies.</span></span></button>
+<li id="ref-11">[11] LangChain, <a href="https://docs.langchain.com/oss/python/langgraph/checkpointers"><em>LangGraph — Checkpointers: Replay / Durability modes</em></a>, accessed 2026-10-24. <span class="lang-zh">旧 checkpoint 后节点重跑；sync/async/exit 落盘差异。</span><span class="lang-en">Replay after a prior checkpoint and sync/async/exit persistence boundaries.</span></li><li id="ref-12">[12] SQLite, <a href="https://www.sqlite.org/lang_transaction.html">Transactions</a>, <a href="https://www.sqlite.org/lang_returning.html">RETURNING</a>, <a href="https://www.sqlite.org/releaselog/3_38_0.html">3.38.0 release</a>, accessed 2026-10-24. <span class="lang-zh">单写事务、返回行不等于提交；示例最低3.38。</span><span class="lang-en">Single writer, returned rows versus commit; adapter needs 3.38+.</span></li></ol><p class="cite"><a href="ch25.html">Ch25</a> · <a href="ch32.html">Ch32</a> · <a href="ch33.html">Ch33</a> · <a href="ch35.html">Ch35</a></p></section>
+<section><h2><span class="lang-zh">闪卡</span><span class="lang-en">Flashcards</span></h2><div class="cards-grid"><button type="button" class="flip"><span class="q"><span class="lang-zh">为什么返回 202 前必须持久化？</span> <span class="lang-en">Why persist before 202?</span></span><span class="a"><span class="lang-zh">run、防重映射与 READY 同事务；回包丢失仍查回原 run，不丢接单。</span> <span class="lang-en">Commit run, dedupe mapping and READY; recover the original run after lost replies.</span></span></button>
 <button type="button" class="flip"><span class="q"><span class="lang-zh">12 步为什么还要工具预算？</span> <span class="lang-en">Why a separate tool budget beside twelve steps?</span></span><span class="a"><span class="lang-zh">一拍可能多个调用；模型 12、工具 8、时间和 token 都要独立限制。</span> <span class="lang-en">One output may include many tools; independently cap model, tool, time and token budgets.</span></span></button>
 <button type="button" class="flip"><span class="q"><span class="lang-zh">什么时候 loop，什么时候 workflow？</span> <span class="lang-en">When loop versus workflow?</span></span><span class="a"><span class="lang-zh">路径未知用有界候选循环；退款等固定业务边用 workflow，模型不能改边。</span> <span class="lang-en">Unknown paths use bounded proposals; fixed business edges use workflows the model cannot alter.</span></span></button>
 <button type="button" class="flip"><span class="q"><span class="lang-zh">下游成功、本地没 observation 怎么恢复？</span> <span class="lang-en">Remote success before observation: recovery?</span></span><span class="a"><span class="lang-zh">读取原 pending intent，查同 key 回执，已确认后补一次 observation。</span> <span class="lang-en">Read pending intent, query its original receipt and commit one confirmed observation.</span></span></button>
 <button type="button" class="flip"><span class="q"><span class="lang-zh">epoch 能阻止已发远端写吗？</span> <span class="lang-en">Can epoch stop already-sent remote writes?</span></span><span class="a"><span class="lang-zh">本库拒旧提交；远端须原子 key 防重，或在受保护资源内验证 fence。</span> <span class="lang-en">Local epochs reject stale commits; remote atomic dedupe/resource-enforced fencing protects effects.</span></span></button>
-<button type="button" class="flip"><span class="q"><span class="lang-zh">handoff 会清零步数吗？</span> <span class="lang-en">Does handoff reset steps?</span></span><span class="a"><span class="lang-zh">不清；同 run、同预算、同账本，角色 revision 原子推进并过滤历史。</span> <span class="lang-en">No; retain run/budgets/ledger, atomically change role revision and project context.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">handoff 会清零步数吗？</span> <span class="lang-en">Does handoff reset steps?</span></span><span class="a"><span class="lang-zh">不清；同run/预算/账本，角色revision防旧输出；A的grant不自动给B。</span> <span class="lang-en">No; retain run/budgets/ledger and fence old roles. An A-bound grant does not authorize B.</span></span></button>
 <button type="button" class="flip"><span class="q"><span class="lang-zh">专科作为工具谁答用户？</span> <span class="lang-en">Who answers with a specialist-as-tool?</span></span><span class="a"><span class="lang-zh">当前负责人；专科返回有界结果，subtask 与费用归父 run。</span> <span class="lang-en">The current owner; bounded subtask results/costs remain traceable to the parent run.</span></span></button>
 <button type="button" class="flip"><span class="q"><span class="lang-zh">批准比暂停先到会丢恢复吗？</span> <span class="lang-en">Approval beats parking: lost wakeup?</span></span><span class="a"><span class="lang-zh">暂停后复查持久决定，后台扫描；通知只是提醒，decision_id 和 CAS 去重。</span> <span class="lang-en">Re-read durable decision after parking, scan, dedupe decisions/CAS; events are hints.</span></span></button>
 <button type="button" class="flip"><span class="q"><span class="lang-zh">取消和拒绝意味着没副作用吗？</span> <span class="lang-en">Do cancel and denial prove no effect?</span></span><span class="a"><span class="lang-zh">拒绝的未 dispatch 动作不执行；取消可能晚于写，先核账再补偿。</span> <span class="lang-en">Denied undispatched action does not execute; late cancellation requires reconciliation.</span></span></button>
 <button type="button" class="flip"><span class="q"><span class="lang-zh">补偿一定逆序吗？</span> <span class="lang-en">Is compensation always reverse order?</span></span><span class="a"><span class="lang-zh">依业务依赖；例子退款后释放，邮件失败只补通知，UNKNOWN 先查回执。</span> <span class="lang-en">Business dependencies decide; refund before release here, email-only repair, reconcile UNKNOWN.</span></span></button>
 <button type="button" class="flip"><span class="q"><span class="lang-zh">活跃 run 和待批 run 怎么算？</span> <span class="lang-en">Active versus parked runs?</span></span><span class="a"><span class="lang-zh">20×11.06=221.2 正常活跃；20×0.3×300=1,800 待批；额外模型重试给 241.2 活跃。</span> <span class="lang-en">221.2 normal active; 1,800 parked; extra model attempts raise active mean to 241.2.</span></span></button>
 <button type="button" class="flip"><span class="q"><span class="lang-zh">补偿失败能直接终态 FAILED 吗？</span> <span class="lang-en">May unresolved compensation simply end FAILED?</span></span><span class="a"><span class="lang-zh">NEEDS_REVIEW + 持久未清义务，工单确认后交接；COMPENSATED 也不是 DONE。</span> <span class="lang-en">NEEDS_REVIEW retains obligations until durable case acknowledgment; COMPENSATED is not DONE.</span></span></button>
-</div></section>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">恢复要重新调用所有模型吗？</span><span class="lang-en">Does recovery rerun every model call?</span></span><span class="a"><span class="lang-zh">本设计复用已提交输出；未保存输出可有界重求，固定输入并另计费用，不能替换已存动作。</span><span class="lang-en">Reuse committed output here. Missing output may retry with pinned input and extra cost, never replace stored actions.</span></span></button></div></section>
 
   <p><button type="button" class="read-toggle"><span class="when-off"><span class="lang-zh">我已学完本章</span><span class="lang-en">Mark this chapter done</span></span><span class="when-on"><span class="lang-zh">已学完本章</span><span class="lang-en">Completed</span></span></button></p>
   <p class="cite"><span class="lang-zh">进度存在这台浏览器里。</span><span class="lang-en">Saved in this browser only.</span></p>

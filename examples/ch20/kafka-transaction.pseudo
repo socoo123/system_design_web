@@ -1,0 +1,27 @@
+# Kafka 4.1.2 API-shaped pseudocode; pure transform, no DB/HTTP side effects.
+# Stable transactional.id per logical task; auto.commit=false; input/output read_committed.
+producer.initTransactions()             # resolve the previous producer incarnation first
+batch = consumer.poll(bounded_duration)
+try:
+  producer.beginTransaction()
+  for record in batch:
+    producer.send(transformToKafkaRecord(record))
+  producer.sendOffsetsToTransaction(batch.nextOffsets(), consumer.groupMetadata())
+except fatal_producer_error:            # fencing, authorization, invalid epoch, etc.
+  close producer and consumer; stop
+except abortable_precommit_error:
+  try: producer.abortTransaction()
+  except timeout_or_other_error: close producer and consumer; restart
+  close producer and consumer; restart  # recover committed offsets, not current position
+
+while bounded_commit_retry_budget_remains:
+  try:
+    producer.commitTransaction()
+    return COMMITTED                   # output and next offsets share this outcome
+  except TimeoutException:
+    continue                           # retry SAME commit; DO NOT switch to abort
+  except other_error:
+    close producer and consumer; restart
+close producer and consumer; restart   # outcome UNKNOWN; initTransactions resolves it
+# Never start the next batch after an unresolved commit/abort.
+# Restart is an application recovery loop; it does not assert that UNKNOWN was aborted.

@@ -1,0 +1,22 @@
+consume(tenant, consumer, event_id, account_id, delta):
+  require nonempty canonical identity; authorize tenant/account/event source
+  digest = SHA256(canonical(account_id, delta))
+  BEGIN
+  won = SQL INSERT INTO inbox(tenant, consumer, event_id, digest, result)
+        VALUES (:tenant, :consumer, :event_id, :digest, :delta)
+        ON CONFLICT (tenant, consumer, event_id) DO NOTHING RETURNING result
+  if won is empty:
+    old = SQL SELECT digest, result FROM inbox
+              WHERE tenant=:tenant AND consumer=:consumer AND event_id=:event_id
+    if old is empty: ROLLBACK; RETRY_LATER_SAME_EVENT
+    if old.digest != digest: ROLLBACK; QUARANTINE_CONFLICT_WITHOUT_ACK
+    ROLLBACK
+    ACK; return old.result
+  affected = SQL UPDATE accounts SET points=points+:delta
+                 WHERE tenant=:tenant AND account_id=:account_id
+  if affected != 1: ROLLBACK; RETRY_OR_QUARANTINE_WITHOUT_ACK
+  COMMIT
+  ACK; return delta
+# On DB/commit error: discard connection; do not ACK, replay same event_id.
+# Inbox is retained; its insert and local effect share this one DB transaction.
+# External email/payment is not inside this transaction.

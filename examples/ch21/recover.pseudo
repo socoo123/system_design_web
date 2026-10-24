@@ -1,0 +1,24 @@
+recover(scope):                                     // one gated SKU; all writers use fence
+  close_ingress(scope)
+  BEGIN
+  f = SELECT * FROM fences WHERE scope=:scope FOR UPDATE // waits for shared writer locks
+  UPDATE fences SET active=false, epoch=epoch+1, recovery_id=:fresh_id WHERE ...
+  COMMIT                                             // old entered transitions have drained
+  snapshot = read_while_paused(scope, f.epoch+1)
+  // Cross-check each stock row against ALL HELD + CONFIRMED hold_items.
+  // Expired-but-HELD remains occupied. Any mismatch: stay closed and investigate.
+  // Include live ownership AND retained request/tombstone terminal identities.
+  key = "gate:{scope}:" + snapshot.epoch                // never reuse an epoch key
+  EVAL install.lua key snapshot                       // validate; ready=0; chunks; ready=1
+  // Existing key + same snapshot is a read-only replay; never reset a live counter.
+  // Same closed partial baseline: retry; corrupt/different snapshot: stay closed, NEW epoch.
+  require Redis metadata == (snapshot.epoch, snapshot.snapshot, ready=1)
+  BEGIN
+  f = SELECT * FROM fences WHERE scope=:scope FOR UPDATE
+  require not f.active AND f.epoch == snapshot.epoch AND f.recovery_id == fresh_id
+  UPDATE fences SET active=true WHERE ...
+  COMMIT; publish_current_epoch_and_open_ingress(snapshot.epoch)
+// Old-e7 writes fail the DB fence. Effects for e7 never modify the current e8 key.
+// An e7 hold still HELD is imported; its later transition emits a CURRENT-e8 receipt.
+// Install/ACK unknown: retry the same immutable snapshot; never DEL/reinstall live state.
+// Failure after resume: close ingress and repeat with a NEW epoch, not this baseline.

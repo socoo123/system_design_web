@@ -1,0 +1,28 @@
+release_buffered_sentences(principal, bundle, pack, draft):
+  for sentence in bounded_sentence_buffer(draft):
+    parsed = parse_structured_claims_and_citation_ids(sentence)
+    if parse fails OR any ID not in pack.actual_ids: block_whole_sentence()
+    for claim in parsed.claims:
+      if claim.requires_evidence AND claim.citation_ids is empty: block_sentence()
+      cited = pack.exact_spans(claim.citation_ids)
+      if a structured_domain_fact(claim):
+        require source_entity == claim.entity AND source_unit == claim.unit
+        require source_value == claim.value AND source_conditions == claim.conditions
+      else:
+        verdict = support_judge(claim, cited, pinned_judge_version, deadline)
+        require verdict == SUPPORTED           # UNKNOWN/timeout => block
+        # A fallible statistical judgment; calibrate false acceptance with humans.
+    # Recheck AFTER potentially slow judge work, before every network release.
+    BEGIN authoritative_read                 # shared locks, canonical doc order
+    lock current membership AND every pack doc/current/ACL dependency
+    require principal tenant matches every pack tenant AND membership still valid
+    for span in pack.ALL_spans:              # not just this sentence's citations
+      require NOT tombstone AND published[bundle.pool].rev == span.rev
+      require manifest.text[span.id].hash == span.hash
+      require live document ACL AND every covered span ACL allow principal
+      require policy epochs == pack.recorded_policy_epochs
+    COMMIT                                   # failure => cancel and DISCARD draft
+    send_via_RAG_Gateway(sentence)            # check/send gap is explicit
+  # Invalid/unsupported: at most one bounded rewrite using the same checked pack.
+  # A changed/revoked pack invalidates ALL draft text; never just remove its cite.
+  # Already sent bytes cannot be retracted. Citation clicks authorize exact rev.

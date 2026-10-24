@@ -1,0 +1,969 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="parchment" data-locale="zh">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ch35 · 大模型基础架构</title>
+  <link rel="icon" href="../favicon.ico" sizes="48x48">
+  <link rel="stylesheet" href="../assets/css/style.css">
+  <script src="../assets/js/boot.js"></script>
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="../index.html"><span class="brand-logo">SD</span><span class="lang-zh">系统设计面试</span><span class="lang-en">System Design Interview</span></a>
+  <span class="spacer"></span>
+  <a class="map-link" href="../index.html"><span class="lang-zh">课程地图</span><span class="lang-en">Map</span></a>
+  <div class="seg" role="group" aria-label="language">
+    <button type="button" data-locale-set="zh">中文</button>
+    <button type="button" data-locale-set="both"><span class="lang-zh">对照</span><span class="lang-en">Both</span></button>
+    <button type="button" data-locale-set="en">EN</button>
+  </div>
+  <div class="seg" role="group" aria-label="theme">
+    <button type="button" data-theme-set="parchment"><span class="lang-zh">护眼</span><span class="lang-en">Paper</span></button>
+    <button type="button" data-theme-set="dracula"><span class="lang-zh">深色</span><span class="lang-en">Dark</span></button>
+  </div>
+</header>
+<main class="wrap">
+<article class="chapter" id="ch35" data-ch="ch35">
+  <header>
+    <div class="ch-kicker"><span class="lang-zh">CHAPTER 35 · LLM / Agent</span><span class="lang-en">CHAPTER 35 · LLM / Agent</span></div>
+    <h1><span class="lang-zh">大模型基础架构</span><span class="lang-en">LLM infrastructure</span></h1>
+    <p class="ch-meta-line"><span class="lang-zh">主线约 35 分钟 · 前置：Ch29 / Ch32 · 6 组 / 33 帧自动播放演进图</span><span class="lang-en">~35 min core · after Ch29 / Ch32 · 6 evolution decks / 33 frames</span></p>
+  </header>
+
+<section><h2><span class="lang-zh">本章核心：版本、资源、上线三个决定</span><span class="lang-en">Core: versions, resources and rollout</span></h2><div class="bilingual"><div class="lang-zh"><p><strong>平台必须证明：这组设备加载了什么，能否承接这条请求，出错后如何退回。</strong>主线是固定不可变bundle → 放置/预热完整副本 → 多维准入 → 灰度与旧流退休。Registry、Fleet Controller不经过每个token的热路径。</p><ul><li><strong>版本：</strong>权重、tokenizer、prompt、镜像和运行配置一次固定。</li><li><strong>资源：</strong>先过滤设备/隔离条件，再原子占租户与副本信用；均值、吞吐、故障余量各算一次。</li><li><strong>上线：</strong>先准备新容量，再发布更高revision；在途请求保持原bundle，旧热容量决定能否快退。</li></ul></div><div class="lang-en"><p><strong>Prove what a device group loaded, whether it can accept this request, and how to recover.</strong>Pin an immutable bundle → place/warm complete replicas → admit resource demand → roll out and retire old streams. Registry and Fleet Controller do not carry each token.</p><ul><li><strong>Versions:</strong> pin weights, tokenizer, prompt, image and runtime configuration together.</li><li><strong>Resources:</strong> filter device/isolation constraints, then atomically reserve tenant/replica credit. Size means, throughput and failure headroom separately.</li><li><strong>Rollout:</strong> prepare capacity before publishing a higher revision. In-flight work keeps its bundle; retained warm capacity enables fast rollback.</li></ul></div></div></section>
+<section><h2><span class="lang-zh">边界与容量假设</span><span class="lang-en">Scope and capacity assumptions</span></h2><div class="bilingual"><div class="lang-zh"><p>设计单地域内部多租户在线托管平台。<a class="chip" href="ch29.html">Ch29</a>管引擎批调度/KV页，<a class="chip" href="ch32.html">Ch32</a>管API契约/token账，本章管部署、设备组和发布。训练会更新权重，另有梯度、优化器、激活与checkpoint成本；本章只接收训练产物，不用在线KV预算估训练。离线批任务单独排队，借在线卡须能及时撤回，撤回/加载期间不算在线热容量。</p><p><strong>所有数字都是教学假设，未做GPU压测。</strong>C=4表示固定权重/精度、长度分布和SLO下最高接纳速率的假设；测试须包含超时/取消/失败并同时验延迟与错误率。goodput只数达标完成，不能代替总接纳速率。Little定律要求稳定且相同的准入到物理释放边界，160不证明尾部。</p></div><div class="lang-en"><p>Design a single-region internal multi-tenant online hosting platform. <a class="chip" href="ch29.html">Ch29</a>owns engine iterations/KV pages; <a class="chip" href="ch32.html">Ch32</a>owns APIs/token accounts. Here we own deployment, device groups and rollout. Training updates weights and budgets gradients, optimizer state, activations and checkpoints separately. We receive its artifacts; online KV sizing does not size training. Batch has a separate queue; borrowed online devices count as warm only after reclaim/load completes.</p><p><strong>All numbers are teaching assumptions; no GPU load test was run.</strong>C=4 assumes a maximum admission rate meeting fixed workload/profile SLOs. Include timeout/cancel/failure outcomes and validate errors plus latency. Goodput counts compliant completions, not all admissions. Little’s law uses a stable, identical admission-to-physical-release boundary; 160 does not establish tail behavior.</p></div></div><details><summary><span class="lang-zh">展开A1–A12：每个数字改变哪个决定</span><span class="lang-en">Expand A1–A12 and their design consequences</span></summary><table><thead><tr><th><span class="lang-zh">编号与约束</span> <span class="lang-en">ID / constraint</span></th><th><span class="lang-zh">教学取值</span> <span class="lang-en">Teaching value</span></th><th><span class="lang-zh">设计影响</span> <span class="lang-en">Consequence</span></th></tr></thead><tbody><tr><td><span class="lang-zh">A1 · 主模型</span> <span class="lang-en">A1 · workload</span></td><td><span class="lang-zh">稳态峰值20 req/s；平均GPU准入到物理释放8 s；固定长度分布</span> <span class="lang-en">Stable peak 20 req/s; mean GPU admission-to-release 8 s; fixed length mix</span></td><td><span class="lang-zh">L=20×8=160，只是平均在途</span> <span class="lang-en">L=160 mean occupancy only</span></td></tr><tr><td><span class="lang-zh">A2 · 接纳容量</span> <span class="lang-en">A2 · admission capacity</span></td><td><span class="lang-zh">每副本32序列；C=4 req/s是在约定SLO下的最高接纳率假设，未实测</span> <span class="lang-en">32 sequences/replica; assumed C=4 req/s maximum admission rate meeting the chosen SLO, not measured</span></td><td><span class="lang-zh">goodput仅计达标完成，不直接作C</span> <span class="lang-en">Goodput counts compliant completions; it is not C</span></td></tr><tr><td><span class="lang-zh">A3 · 余量</span> <span class="lang-en">A3 · headroom</span></td><td><span class="lang-zh">正常按C×80%=3.2 req/s规划；故障全峰值另验</span> <span class="lang-en">Plan at C×80%=3.2 req/s; validate full-peak failure behavior separately</span></td><td><span class="lang-zh">正常至少7副本</span> <span class="lang-en">At least seven normally</span></td></tr><tr><td><span class="lang-zh">A4 · 故障域</span> <span class="lang-en">A4 · domains</span></td><td><span class="lang-zh">每副本1 GPU；9个prod副本按3/3/3跨三机器；允许单机故障降级</span> <span class="lang-en">One GPU/replica; nine prod replicas spread 3/3/3; node-loss degradation allowed</span></td><td><span class="lang-zh">剩6：原始24/s；同80%预算19.2/s</span> <span class="lang-en">Six remain: raw 24/s, planned 19.2/s</span></td></tr><tr><td><span class="lang-zh">A5 · 发布重叠</span> <span class="lang-en">A5 · overlap</span></td><td><span class="lang-zh">另有1 canary、2小模型副本；小模型不挪作主模型容量</span> <span class="lang-en">One extra canary and two small-model replicas; small models do not count as main capacity</span></td><td><span class="lang-zh">起步12卡；全量双跑20卡</span> <span class="lang-en">Twelve initial GPUs; twenty at full overlap</span></td></tr><tr><td><span class="lang-zh">A6 · 冷加载</span> <span class="lang-en">A6 · cold load</span></td><td><span class="lang-zh">artifact 40 GB；独享有效下载2 GB/s；校验/加载/预热另100 s；GB=10⁹ B</span> <span class="lang-en">40 GB artifact; 2 GB/s effective dedicated download; 100 s verification/load/warmup; decimal GB</span></td><td><span class="lang-zh">单份120 s；9份冷拉360 GB</span> <span class="lang-en">120 s singly; 360 GB for nine copies</span></td></tr><tr><td><span class="lang-zh">A7 · 等待</span> <span class="lang-en">A7 · waiting</span></td><td><span class="lang-zh">平均等待目标200 ms；队列硬限40；每条准入200 ms，执行最长60 s</span> <span class="lang-en">Mean wait target 200 ms; hard queue cap 40; admission 200 ms; execution lifetime 60 s</span></td><td><span class="lang-zh">平均队列4；超时触发退休而非直接退信用</span> <span class="lang-en">Mean queue four; timeout starts retirement, not refund</span></td></tr><tr><td><span class="lang-zh">A8 · 租户</span> <span class="lang-en">A8 · tenant</span></td><td><span class="lang-zh">示例16个活跃permit，另限KV信用与长度/输出预算</span> <span class="lang-en">Example sixteen active permits plus KV credit and context/output bounds</span></td><td><span class="lang-zh">16×4,000与16×32,000总token工作量不同</span> <span class="lang-en">64,000 versus 512,000 total-token work</span></td></tr><tr><td><span class="lang-zh">A9 · 路由新鲜度</span> <span class="lang-en">A9 · freshness</span></td><td><span class="lang-zh">签名快照寿命≤5 s；相对签发权威的时钟差≤100 ms，提前失效</span> <span class="lang-en">Signed snapshots live ≤5 s; clock offset from the issuer ≤100 ms; expire conservatively</span></td><td><span class="lang-zh">Ledger仍逐次检查当前revision；不可达停止新准入</span> <span class="lang-en">Ledger also checks current revision; unavailable means no new hold</span></td></tr><tr><td><span class="lang-zh">A10 · 灰度</span> <span class="lang-en">A10 · canary</span></td><td><span class="lang-zh">v2接10%请求；至少5分钟且600条同类样本</span> <span class="lang-en">v2 gets 10% of requests; ≥5 minutes and ≥600 comparable samples</span></td><td><span class="lang-zh">20×10%×300=600；不是统计置信保证</span> <span class="lang-en">600 expected samples, not a confidence guarantee</span></td></tr><tr><td><span class="lang-zh">A11 · 示例门槛</span> <span class="lang-en">A11 · example gates</span></td><td><span class="lang-zh">错误率≤1%、p95 TTFT≤1 s，另验输出速度/质量；坏canary错误率5%</span> <span class="lang-en">Errors ≤1%, p95 TTFT≤1 s plus output speed/quality; failed canary has 5% errors</span></td><td><span class="lang-zh">按版本看；全局仅0.5%会掩盖问题</span> <span class="lang-en">Per-version metrics; 0.5% aggregate can hide it</span></td></tr><tr><td><span class="lang-zh">A12 · 保留</span> <span class="lang-en">A12 · retention</span></td><td><span class="lang-zh">desired扫描5 s；热回滚30分钟；artifact/审计7天</span> <span class="lang-en">Desired scan 5 s; warm rollback 30 minutes; artifact/audit 7 days</span></td><td><span class="lang-zh">文件保留与热GPU是两笔预算</span> <span class="lang-en">Stored bytes and warm GPUs are separate budgets</span></td></tr></tbody></table></details></section>
+<section><h2><span class="lang-zh">总图：请求面与控制面在READY集合相交</span><span class="lang-en">Overview: request and control planes meet at READY endpoints</span></h2><div class="bilingual"><div class="lang-zh"><p><strong>用第5帧作总图。</strong>Client → Gateway → Inference Router → Model Worker；token逐跳原路返回。Router解析一次完整bundle/revision，并携带可信tenant、请求摘要、期限。KV留在worker；控制面不下载每次请求的权重，也不搬token。</p></div><div class="lang-en"><p><strong>Use frame 5 as the overview.</strong>Client → Gateway → Inference Router → Model Worker, with token replies reversing the hops. Router pins one coherent bundle/revision and carries trusted tenant, request digest and deadlines. KV remains on the worker; control does not download weights per request or move tokens.</p></div></div><figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d1s1t d1s1d">
+          <title id="d1s1t">The business gateway calls a hosted platform</title>
+          <desc id="d1s1d">Client calls Gateway and receives responses through Gateway. A model alias is the public contract, not a replica address.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <g class="is-new">
+            <rect x="130" y="24" width="812" height="360" rx="18" class="boundary"/><text x="146" y="46" class="tiny">LLM PLATFORM · data plane carries tokens; control plane reconciles replicas</text>
+            <circle cx="44" cy="201" r="12" class="box"/><path d="M24 247 Q44 215 64 247" class="wire"/><text x="44" y="269" text-anchor="middle" class="label">Client</text>
+            <rect x="145" y="190" width="135" height="70" rx="12" class="box"/><text x="212.5" y="222" text-anchor="middle" class="label">Gateway</text><text x="212.5" y="241" text-anchor="middle" class="sub">Ch32</text>
+            <path d="M70 216 L135 216" class="wire"/><polygon points="145,216 135,221 135,211" class="head"/><text x="104" y="205" text-anchor="middle" class="tiny">chat</text>
+            <path d="M145 234 L80 234" class="wire reply"/><polygon points="70,234 80,229 80,239" class="head reply"/>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">先画业务入口。Ch32 处理 API 身份与 token 账，本平台接住自托管模型；业务只提交 model 别名，不绑定某张卡的地址。</span><span class="lang-en">Start at the business entry. Ch32 owns API identity/token accounting; this platform hosts the model. Callers submit an alias, not a GPU address.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d1s2t d1s2d">
+          <title id="d1s2t">Pin a serving tuple before endpoint selection</title>
+          <desc id="d1s2d">Gateway calls Inference Router and receives the stream back. Inference Router reads Platform Store and receives a coherent routing revision and serving tuple. Snapshots can be cached within a bounded freshness contract.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="130" y="24" width="812" height="360" rx="18" class="boundary"/><text x="146" y="46" class="tiny">LLM PLATFORM · data plane carries tokens; control plane reconciles replicas</text>
+          <circle cx="44" cy="201" r="12" class="box"/><path d="M24 247 Q44 215 64 247" class="wire"/><text x="44" y="269" text-anchor="middle" class="label">Client</text>
+          <rect x="145" y="190" width="135" height="70" rx="12" class="box"/><text x="212.5" y="222" text-anchor="middle" class="label">Gateway</text><text x="212.5" y="241" text-anchor="middle" class="sub">Ch32</text>
+          <path d="M70 216 L135 216" class="wire"/><polygon points="145,216 135,221 135,211" class="head"/><text x="104" y="205" text-anchor="middle" class="tiny">chat</text>
+          <path d="M145 234 L80 234" class="wire reply"/><polygon points="70,234 80,229 80,239" class="head reply"/>
+          <g class="is-new">
+            <rect x="420" y="190" width="165" height="70" rx="12" class="box"/><text x="502.5" y="222" text-anchor="middle" class="label">Inference Router</text><text x="502.5" y="241" text-anchor="middle" class="sub">pin + admit</text>
+            <path d="M280 216 L410 216" class="wire"/><polygon points="420,216 410,221 410,211" class="head"/><text x="350" y="207" text-anchor="middle" class="tiny">model alias</text>
+            <path d="M420 234 L290 234" class="wire reply"/><polygon points="280,234 290,229 290,239" class="head reply"/><text x="350" y="253" text-anchor="middle" class="tiny">stream</text>
+            <path d="M385 72 V126 A85 12 0 0 0 555 126 V72" class="store"/><ellipse cx="470" cy="72" rx="85" ry="12" class="store"/><text x="470" y="109" text-anchor="middle" class="label">Platform Store</text><text x="470" y="127" text-anchor="middle" class="sub">registry + desired</text>
+            <path d="M470 190 L470 148" class="wire"/><polygon points="470,138 475,148 465,148" class="head"/><text x="489" y="166" class="tiny">snapshot</text>
+            <path d="M555 126 L602 126 Q610 126 610 134 L610 163 Q610 171 602 171 L549.5 171 Q545 171 545 175.5 L545 180" class="wire reply"/><polygon points="545,190 540,180 550,180" class="head reply"/><text x="622" y="152" class="tiny">revision</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">加 Inference Router 与权威快照。一条请求固定 revision、权重与 prompt 等完整组合；快照可缓存，但不能分别读几个可变别名拼成未知组合。</span><span class="lang-en">Add Inference Router and authority. Pin one revision and full weight/prompt bundle per request. Cache bounded snapshots; never combine independently moving aliases.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d1s3t d1s3d">
+          <title id="d1s3t">Tokens return through every proxy</title>
+          <desc id="d1s3d">Inference Router calls Model Worker with the exact serving tuple. Model Worker returns tokens to Inference Router, then Gateway, then Client. Worker owns local KV state.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="130" y="24" width="812" height="360" rx="18" class="boundary"/><text x="146" y="46" class="tiny">LLM PLATFORM · data plane carries tokens; control plane reconciles replicas</text>
+          <circle cx="44" cy="201" r="12" class="box"/><path d="M24 247 Q44 215 64 247" class="wire"/><text x="44" y="269" text-anchor="middle" class="label">Client</text>
+          <rect x="145" y="190" width="135" height="70" rx="12" class="box"/><text x="212.5" y="222" text-anchor="middle" class="label">Gateway</text><text x="212.5" y="241" text-anchor="middle" class="sub">Ch32</text>
+          <path d="M70 216 L135 216" class="wire"/><polygon points="145,216 135,221 135,211" class="head"/><text x="104" y="205" text-anchor="middle" class="tiny">chat</text>
+          <path d="M145 234 L80 234" class="wire reply"/><polygon points="70,234 80,229 80,239" class="head reply"/>
+          <rect x="420" y="190" width="165" height="70" rx="12" class="box"/><text x="502.5" y="222" text-anchor="middle" class="label">Inference Router</text><text x="502.5" y="241" text-anchor="middle" class="sub">pin + admit</text>
+          <path d="M280 216 L410 216" class="wire"/><polygon points="420,216 410,221 410,211" class="head"/><text x="350" y="207" text-anchor="middle" class="tiny">model alias</text>
+          <path d="M420 234 L290 234" class="wire reply"/><polygon points="280,234 290,229 290,239" class="head reply"/><text x="350" y="253" text-anchor="middle" class="tiny">stream</text>
+          <path d="M385 72 V126 A85 12 0 0 0 555 126 V72" class="store"/><ellipse cx="470" cy="72" rx="85" ry="12" class="store"/><text x="470" y="109" text-anchor="middle" class="label">Platform Store</text><text x="470" y="127" text-anchor="middle" class="sub">registry + desired</text>
+          <path d="M470 190 L470 148" class="wire"/><polygon points="470,138 475,148 465,148" class="head"/><text x="489" y="166" class="tiny">snapshot</text>
+          <path d="M555 126 L602 126 Q610 126 610 134 L610 163 Q610 171 602 171 L549.5 171 Q545 171 545 175.5 L545 180" class="wire reply"/><polygon points="545,190 540,180 550,180" class="head reply"/><text x="622" y="152" class="tiny">revision</text>
+          <g class="is-new">
+            <rect x="750" y="190" width="175" height="70" rx="12" class="box"/><text x="837.5" y="222" text-anchor="middle" class="label">Model Worker</text><text x="837.5" y="241" text-anchor="middle" class="sub">Ch29 · KV state</text>
+            <path d="M585 216 L740 216" class="wire"/><polygon points="750,216 740,221 740,211" class="head"/><text x="670" y="206" text-anchor="middle" class="tiny">exact tuple</text>
+            <path d="M750 234 L595 234" class="wire reply"/><polygon points="585,234 595,229 595,239" class="head reply"/><text x="670" y="253" text-anchor="middle" class="tiny">tokens</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">加有状态 Model Worker。token 按 Worker→Router→Gateway→Client 返回；卡上 KV 留在 worker，控制面不搬运每个 token。</span><span class="lang-en">Add stateful Model Worker. Tokens return Worker→Router→Gateway→Client; KV stays on the worker and control does not carry tokens.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d1s4t d1s4d">
+          <title id="d1s4t">Desired replicas are durable, not a one-shot command</title>
+          <desc id="d1s4d">Fleet Controller reads and conditionally updates desired deployments in Platform Store. Platform Store acknowledges. Fleet Controller asynchronously sends create, load or drain commands to Model Worker.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="130" y="24" width="812" height="360" rx="18" class="boundary"/><text x="146" y="46" class="tiny">LLM PLATFORM · data plane carries tokens; control plane reconciles replicas</text>
+          <circle cx="44" cy="201" r="12" class="box"/><path d="M24 247 Q44 215 64 247" class="wire"/><text x="44" y="269" text-anchor="middle" class="label">Client</text>
+          <rect x="145" y="190" width="135" height="70" rx="12" class="box"/><text x="212.5" y="222" text-anchor="middle" class="label">Gateway</text><text x="212.5" y="241" text-anchor="middle" class="sub">Ch32</text>
+          <path d="M70 216 L135 216" class="wire"/><polygon points="145,216 135,221 135,211" class="head"/><text x="104" y="205" text-anchor="middle" class="tiny">chat</text>
+          <path d="M145 234 L80 234" class="wire reply"/><polygon points="70,234 80,229 80,239" class="head reply"/>
+          <rect x="420" y="190" width="165" height="70" rx="12" class="box"/><text x="502.5" y="222" text-anchor="middle" class="label">Inference Router</text><text x="502.5" y="241" text-anchor="middle" class="sub">pin + admit</text>
+          <path d="M280 216 L410 216" class="wire"/><polygon points="420,216 410,221 410,211" class="head"/><text x="350" y="207" text-anchor="middle" class="tiny">model alias</text>
+          <path d="M420 234 L290 234" class="wire reply"/><polygon points="280,234 290,229 290,239" class="head reply"/><text x="350" y="253" text-anchor="middle" class="tiny">stream</text>
+          <path d="M385 72 V126 A85 12 0 0 0 555 126 V72" class="store"/><ellipse cx="470" cy="72" rx="85" ry="12" class="store"/><text x="470" y="109" text-anchor="middle" class="label">Platform Store</text><text x="470" y="127" text-anchor="middle" class="sub">registry + desired</text>
+          <path d="M470 190 L470 148" class="wire"/><polygon points="470,138 475,148 465,148" class="head"/><text x="489" y="166" class="tiny">snapshot</text>
+          <path d="M555 126 L602 126 Q610 126 610 134 L610 163 Q610 171 602 171 L549.5 171 Q545 171 545 175.5 L545 180" class="wire reply"/><polygon points="545,190 540,180 550,180" class="head reply"/><text x="622" y="152" class="tiny">revision</text>
+          <rect x="750" y="190" width="175" height="70" rx="12" class="box"/><text x="837.5" y="222" text-anchor="middle" class="label">Model Worker</text><text x="837.5" y="241" text-anchor="middle" class="sub">Ch29 · KV state</text>
+          <path d="M585 216 L740 216" class="wire"/><polygon points="750,216 740,221 740,211" class="head"/><text x="670" y="206" text-anchor="middle" class="tiny">exact tuple</text>
+          <path d="M750 234 L595 234" class="wire reply"/><polygon points="585,234 595,229 595,239" class="head reply"/><text x="670" y="253" text-anchor="middle" class="tiny">tokens</text>
+          <g class="is-new">
+            <rect x="750" y="65" width="175" height="70" rx="12" class="box"/><text x="837.5" y="97" text-anchor="middle" class="label">Fleet Controller</text><text x="837.5" y="116" text-anchor="middle" class="sub">reconcile</text>
+            <path d="M750 90 L565 90" class="wire"/><polygon points="555,90 565,85 565,95" class="head"/><text x="650" y="80" text-anchor="middle" class="tiny">read / CAS</text>
+            <path d="M555 114 L740 114" class="wire reply"/><polygon points="750,114 740,119 740,109" class="head reply"/>
+            <path d="M790 135 L790 180" class="wire async"/><polygon points="790,190 785,180 795,180" class="head async"/><text x="774" y="169" text-anchor="end" class="tiny">load</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">控制面另加 Fleet Controller。扩容先持久记录 desired，再协调设备；命令超时查同一 replica_id，不能多创建一组卡。</span><span class="lang-en">Add Fleet Controller separately. Persist desired state before allocating devices; uncertain commands query the same replica_id instead of creating another replica.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d1s5t d1s5d">
+          <title id="d1s5t">Observed readiness closes the control loop</title>
+          <desc id="d1s5d">Model Worker asynchronously reports observed generation and readiness to Fleet Controller. Controller reconciles in Platform Store; Inference Router uses only ready, matching, fresh endpoints. The request path stays Client to Gateway to Inference Router to Model Worker and reverses hop by hop.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="130" y="24" width="812" height="360" rx="18" class="boundary"/><text x="146" y="46" class="tiny">LLM PLATFORM · data plane carries tokens; control plane reconciles replicas</text>
+          <circle cx="44" cy="201" r="12" class="box"/><path d="M24 247 Q44 215 64 247" class="wire"/><text x="44" y="269" text-anchor="middle" class="label">Client</text>
+          <rect x="145" y="190" width="135" height="70" rx="12" class="box"/><text x="212.5" y="222" text-anchor="middle" class="label">Gateway</text><text x="212.5" y="241" text-anchor="middle" class="sub">Ch32</text>
+          <path d="M70 216 L135 216" class="wire"/><polygon points="145,216 135,221 135,211" class="head"/><text x="104" y="205" text-anchor="middle" class="tiny">chat</text>
+          <path d="M145 234 L80 234" class="wire reply"/><polygon points="70,234 80,229 80,239" class="head reply"/>
+          <rect x="420" y="190" width="165" height="70" rx="12" class="box"/><text x="502.5" y="222" text-anchor="middle" class="label">Inference Router</text><text x="502.5" y="241" text-anchor="middle" class="sub">pin + admit</text>
+          <path d="M280 216 L410 216" class="wire"/><polygon points="420,216 410,221 410,211" class="head"/><text x="350" y="207" text-anchor="middle" class="tiny">model alias</text>
+          <path d="M420 234 L290 234" class="wire reply"/><polygon points="280,234 290,229 290,239" class="head reply"/><text x="350" y="253" text-anchor="middle" class="tiny">stream</text>
+          <path d="M385 72 V126 A85 12 0 0 0 555 126 V72" class="store"/><ellipse cx="470" cy="72" rx="85" ry="12" class="store"/><text x="470" y="109" text-anchor="middle" class="label">Platform Store</text><text x="470" y="127" text-anchor="middle" class="sub">registry + desired</text>
+          <path d="M470 190 L470 148" class="wire"/><polygon points="470,138 475,148 465,148" class="head"/><text x="489" y="166" class="tiny">snapshot</text>
+          <path d="M555 126 L602 126 Q610 126 610 134 L610 163 Q610 171 602 171 L549.5 171 Q545 171 545 175.5 L545 180" class="wire reply"/><polygon points="545,190 540,180 550,180" class="head reply"/><text x="622" y="152" class="tiny">revision</text>
+          <rect x="750" y="190" width="175" height="70" rx="12" class="box"/><text x="837.5" y="222" text-anchor="middle" class="label">Model Worker</text><text x="837.5" y="241" text-anchor="middle" class="sub">Ch29 · KV state</text>
+          <path d="M585 216 L740 216" class="wire"/><polygon points="750,216 740,221 740,211" class="head"/><text x="670" y="206" text-anchor="middle" class="tiny">exact tuple</text>
+          <path d="M750 234 L595 234" class="wire reply"/><polygon points="585,234 595,229 595,239" class="head reply"/><text x="670" y="253" text-anchor="middle" class="tiny">tokens</text>
+          <rect x="750" y="65" width="175" height="70" rx="12" class="box"/><text x="837.5" y="97" text-anchor="middle" class="label">Fleet Controller</text><text x="837.5" y="116" text-anchor="middle" class="sub">reconcile</text>
+          <path d="M750 90 L565 90" class="wire"/><polygon points="555,90 565,85 565,95" class="head"/><text x="650" y="80" text-anchor="middle" class="tiny">read / CAS</text>
+          <path d="M555 114 L740 114" class="wire reply"/><polygon points="750,114 740,119 740,109" class="head reply"/>
+          <path d="M790 135 L790 180" class="wire async"/><polygon points="790,190 785,180 795,180" class="head async"/><text x="774" y="169" text-anchor="end" class="tiny">load</text>
+          <g class="is-new">
+            <path d="M870 190 L870 145" class="wire async"/><polygon points="870,135 875,145 865,145" class="head async"/><text x="887" y="169" class="tiny">ready</text>
+            <text x="390" y="293" class="tiny">Registry ≠ request hop; READY ≠ process started</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">完整图补 observed 回路。只有版本校验、预热和设备状态通过才发布 endpoint；控制面失联时，已有受限新鲜快照继续服务，未知部署和发版冻结。</span><span class="lang-en">Complete the observed-state loop. Publish endpoints only after version verification, warmup and device checks. Bounded fresh snapshots may serve during control loss; unknown deployments/rollouts freeze.</span></figcaption>
+      </div>
+    </figure><div class="bilingual"><div class="lang-zh"><p>Fleet Controller先把deployment、稳定replica_id、bundle、设备集合和generation写成desired，再协调加载；创建回包未知就查同一身份。设备唯一预占、owner条件写与节点agent的旧代次拒绝，分别防双分配和旧命令生效。READY必须验证完整内容、镜像、设备组、当前generation和代表性warmup；端口可连不够。控制器只把完整observed证明发布为endpoint。Kubernetes控制回路支持这层desired/actual心智，具体epoch/准入是本章协议。<a href="#ref-10">[10]</a></p><p><strong>失去控制器不等于失去权威库。</strong>Fleet/Registry API故障而Ledger仍可用时，已有热副本可在有效路由内继续获准；Ledger不可达则无法原子扣信用，立即停止新准入。已有流按原契约退休。把控制面完全移出可用性链会与本章中央账本矛盾。选择与转发可拆开；Gateway API Inference Extension的EPP给代理选端点，不承担全部token代理。<a href="#ref-5">[5]</a></p></div><div class="lang-en"><p>Fleet Controller persists deployment, stable replica IDs, bundle/device set and generation before reconciliation; uncertain create calls query that identity. Unique device reservations, conditional ownership and node-agent generation checks address different races. READY proves exact content/image/device group/current generation plus representative warmup, not an open port. Only complete observed proof publishes endpoints. Kubernetes documents desired/actual control loops; epochs/admission here are our protocol. <a href="#ref-10">[10]</a></p><p><strong>Controller loss differs from authority-store loss.</strong>With Fleet/Registry APIs down but Ledger available, warm workers may receive permits under valid routes. An unavailable Ledger immediately stops new holds because credit cannot be serialized; accepted streams retire normally. A central authority remains an availability dependency. Selection and forwarding may be separate: the Gateway API Inference Extension EPP selects endpoints for a proxy rather than carrying all tokens. <a href="#ref-5">[5]</a></p></div></div></section>
+<section><h2><span class="lang-zh">模型版本：封存内容，再证明能服务</span><span class="lang-en">Model versions: seal content, then prove serving readiness</span></h2><div class="bilingual"><div class="lang-zh"><p><strong>bundle是完整、不可变的上线组合。</strong>权重分片、tokenizer、prompt、engine image digest、量化/运行配置、adapter与兼容base都固定；逐文件hash进manifest。下载固定同一不可变revision，不能中途追随main。HF支持commit revision；MLflow alias可重指向不同版本，两者都不自动提供本章的跨记录原子发布。<a href="#ref-1">[1]</a><a href="#ref-2">[2]</a></p></div><div class="lang-en"><p><strong>A bundle is a complete immutable serving combination.</strong>Pin weight shards, tokenizer, prompt, engine image digest, quantization/runtime configuration, adapters and compatible base, with per-file hashes in a manifest. Download one immutable revision, never a moving main branch. HF supports commit revisions; MLflow aliases can be reassigned. Neither alone provides our multi-record atomic publication. <a href="#ref-1">[1]</a><a href="#ref-2">[2]</a></p></div></div><figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d2s1t d2s1d">
+          <title id="d2s1t">Seal bytes before registering a version</title>
+          <desc id="d2s1d">Publisher calls Registry API. Registry API seals an immutable manifest in Artifact Store and receives its acknowledgment; upload/status replies return Registry API to Publisher.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <g class="is-new">
+            <rect x="120" y="24" width="822" height="360" rx="18" class="boundary"/><text x="136" y="46" class="tiny">MODEL RELEASE · immutable content first, routable readiness last</text>
+            <circle cx="44" cy="126" r="12" class="box"/><path d="M24 172 Q44 140 64 172" class="wire"/><text x="44" y="194" text-anchor="middle" class="label">Publisher</text>
+            <rect x="145" y="115" width="135" height="70" rx="12" class="box"/><text x="212.5" y="147" text-anchor="middle" class="label">Registry API</text><text x="212.5" y="166" text-anchor="middle" class="sub">authorize + seal</text>
+            <path d="M380 100 V155 A90 12 0 0 0 560 155 V100" class="store"/><ellipse cx="470" cy="100" rx="90" ry="12" class="store"/><text x="470" y="137.5" text-anchor="middle" class="label">Artifact Store</text><text x="470" y="155.5" text-anchor="middle" class="sub">hash + manifest</text>
+            <path d="M70 141 L135 141" class="wire"/><polygon points="145,141 135,146 135,136" class="head"/>
+            <path d="M145 159 L80 159" class="wire reply"/><polygon points="70,159 80,154 80,164" class="head reply"/>
+            <path d="M280 141 L370 141" class="wire"/><polygon points="380,141 370,146 370,136" class="head"/><text x="330" y="129" text-anchor="middle" class="tiny">seal</text>
+            <path d="M380 153 L290 153" class="wire reply"/><polygon points="280,153 290,148 290,158" class="head reply"/>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">先让内容有确定身份。权重分片、tokenizer 与配置写完并封存 manifest，校验每个分片摘要；上传完成不等于已经可以接流量。</span><span class="lang-en">Give content a fixed identity. Seal shards, tokenizer/config and per-file digests in a manifest. Completed upload is not serving readiness.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d2s2t d2s2d">
+          <title id="d2s2t">Register the full serving bundle atomically</title>
+          <desc id="d2s2d">Registry API registers the immutable serving bundle and desired deployment in Platform Store and receives a durable acknowledgment. The bundle pins weights, tokenizer, prompt, engine image and optional adapter/base compatibility.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="24" width="822" height="360" rx="18" class="boundary"/><text x="136" y="46" class="tiny">MODEL RELEASE · immutable content first, routable readiness last</text>
+          <circle cx="44" cy="126" r="12" class="box"/><path d="M24 172 Q44 140 64 172" class="wire"/><text x="44" y="194" text-anchor="middle" class="label">Publisher</text>
+          <rect x="145" y="115" width="135" height="70" rx="12" class="box"/><text x="212.5" y="147" text-anchor="middle" class="label">Registry API</text><text x="212.5" y="166" text-anchor="middle" class="sub">authorize + seal</text>
+          <path d="M380 100 V155 A90 12 0 0 0 560 155 V100" class="store"/><ellipse cx="470" cy="100" rx="90" ry="12" class="store"/><text x="470" y="137.5" text-anchor="middle" class="label">Artifact Store</text><text x="470" y="155.5" text-anchor="middle" class="sub">hash + manifest</text>
+          <path d="M70 141 L135 141" class="wire"/><polygon points="145,141 135,146 135,136" class="head"/>
+          <path d="M145 159 L80 159" class="wire reply"/><polygon points="70,159 80,154 80,164" class="head reply"/>
+          <path d="M280 141 L370 141" class="wire"/><polygon points="380,141 370,146 370,136" class="head"/><text x="330" y="129" text-anchor="middle" class="tiny">seal</text>
+          <path d="M380 153 L290 153" class="wire reply"/><polygon points="280,153 290,148 290,158" class="head reply"/>
+          <g class="is-new">
+            <path d="M380 285 V340 A90 12 0 0 0 560 340 V285" class="store"/><ellipse cx="470" cy="285" rx="90" ry="12" class="store"/><text x="470" y="322.5" text-anchor="middle" class="label">Platform Store</text><text x="470" y="340.5" text-anchor="middle" class="sub">bundle + desired</text>
+            <path d="M205 185 L205 300 Q205 308 213 308 L370 308" class="wire"/><polygon points="380,308 370,313 370,303" class="head"/><text x="230" y="273" class="tiny">register bundle</text>
+            <path d="M380 330 L178 330 Q170 330 170 322 L170 195" class="wire reply"/><polygon points="170,185 175,195 165,195" class="head reply"/><text x="220" y="350" class="tiny">commit before publish</text>
+            <text x="310" y="227" class="tiny">Bundle = weights + tokenizer + prompt + image + adapter</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">再登记不可变 bundle；prompt 可独立开发，但上线组合必须一次固定。对象已封存、库未提交只留下待清孤儿，不能公开半个版本。</span><span class="lang-en">Register an immutable bundle. Prompt development may be independent, but publish one coherent serving combination. Sealed objects without registry commit remain orphan candidates.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d2s3t d2s3d">
+          <title id="d2s3t">Loading follows durable desired state</title>
+          <desc id="d2s3d">Fleet Controller reads desired state from Platform Store and receives its generation. It sends a load command to Model Worker. Worker fetches the exact manifest from Artifact Store and receives bytes there.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="24" width="822" height="360" rx="18" class="boundary"/><text x="136" y="46" class="tiny">MODEL RELEASE · immutable content first, routable readiness last</text>
+          <circle cx="44" cy="126" r="12" class="box"/><path d="M24 172 Q44 140 64 172" class="wire"/><text x="44" y="194" text-anchor="middle" class="label">Publisher</text>
+          <rect x="145" y="115" width="135" height="70" rx="12" class="box"/><text x="212.5" y="147" text-anchor="middle" class="label">Registry API</text><text x="212.5" y="166" text-anchor="middle" class="sub">authorize + seal</text>
+          <path d="M380 100 V155 A90 12 0 0 0 560 155 V100" class="store"/><ellipse cx="470" cy="100" rx="90" ry="12" class="store"/><text x="470" y="137.5" text-anchor="middle" class="label">Artifact Store</text><text x="470" y="155.5" text-anchor="middle" class="sub">hash + manifest</text>
+          <path d="M70 141 L135 141" class="wire"/><polygon points="145,141 135,146 135,136" class="head"/>
+          <path d="M145 159 L80 159" class="wire reply"/><polygon points="70,159 80,154 80,164" class="head reply"/>
+          <path d="M280 141 L370 141" class="wire"/><polygon points="380,141 370,146 370,136" class="head"/><text x="330" y="129" text-anchor="middle" class="tiny">seal</text>
+          <path d="M380 153 L290 153" class="wire reply"/><polygon points="280,153 290,148 290,158" class="head reply"/>
+          <path d="M380 285 V340 A90 12 0 0 0 560 340 V285" class="store"/><ellipse cx="470" cy="285" rx="90" ry="12" class="store"/><text x="470" y="322.5" text-anchor="middle" class="label">Platform Store</text><text x="470" y="340.5" text-anchor="middle" class="sub">bundle + desired</text>
+          <path d="M205 185 L205 300 Q205 308 213 308 L370 308" class="wire"/><polygon points="380,308 370,313 370,303" class="head"/><text x="230" y="273" class="tiny">register bundle</text>
+          <path d="M380 330 L178 330 Q170 330 170 322 L170 195" class="wire reply"/><polygon points="170,185 175,195 165,195" class="head reply"/><text x="220" y="350" class="tiny">commit before publish</text>
+          <text x="310" y="227" class="tiny">Bundle = weights + tokenizer + prompt + image + adapter</text>
+          <g class="is-new">
+            <rect x="700" y="280" width="170" height="70" rx="12" class="box"/><text x="785" y="312" text-anchor="middle" class="label">Fleet Controller</text><text x="785" y="331" text-anchor="middle" class="sub">replica generation</text>
+            <rect x="730" y="90" width="180" height="70" rx="12" class="box"/><text x="820" y="122" text-anchor="middle" class="label">Model Worker</text><text x="820" y="141" text-anchor="middle" class="sub">verify + warm</text>
+            <path d="M700 307 L570 307" class="wire"/><polygon points="560,307 570,302 570,312" class="head"/><text x="625" y="297" text-anchor="middle" class="tiny">read desired</text>
+            <path d="M560 331 L690 331" class="wire reply"/><polygon points="700,331 690,336 690,326" class="head reply"/>
+            <path d="M795 280 L795 170" class="wire async"/><polygon points="795,160 800,170 790,170" class="head async"/><text x="810" y="244" class="tiny">load tuple</text>
+            <path d="M730 113 L570 113" class="wire"/><polygon points="560,113 570,108 570,118" class="head"/><text x="645" y="101" text-anchor="middle" class="tiny">fetch manifest</text>
+            <path d="M560 137 L720 137" class="wire reply"/><polygon points="730,137 720,142 720,132" class="head reply"/><text x="645" y="156" text-anchor="middle" class="tiny">exact bytes</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">加持久 desired→加载。replica_id 与 generation 固定，worker 拉确切 hash；重试复用身份，控制器重启仍能知道哪些已分配、哪些在加载。</span><span class="lang-en">Add desired→load. Pin replica_id/generation and fetch the exact hash. Retries reuse identity; controller restarts recover allocated and loading replicas.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d2s4t d2s4d">
+          <title id="d2s4t">A real warmup precedes endpoint publication</title>
+          <desc id="d2s4d">After hash verification, engine load and representative warmup, Model Worker reports READY with generation 7 to Fleet Controller. Controller accepts only current generation and publishes a matching endpoint in Platform Store.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="24" width="822" height="360" rx="18" class="boundary"/><text x="136" y="46" class="tiny">MODEL RELEASE · immutable content first, routable readiness last</text>
+          <circle cx="44" cy="126" r="12" class="box"/><path d="M24 172 Q44 140 64 172" class="wire"/><text x="44" y="194" text-anchor="middle" class="label">Publisher</text>
+          <rect x="145" y="115" width="135" height="70" rx="12" class="box"/><text x="212.5" y="147" text-anchor="middle" class="label">Registry API</text><text x="212.5" y="166" text-anchor="middle" class="sub">authorize + seal</text>
+          <path d="M380 100 V155 A90 12 0 0 0 560 155 V100" class="store"/><ellipse cx="470" cy="100" rx="90" ry="12" class="store"/><text x="470" y="137.5" text-anchor="middle" class="label">Artifact Store</text><text x="470" y="155.5" text-anchor="middle" class="sub">hash + manifest</text>
+          <path d="M70 141 L135 141" class="wire"/><polygon points="145,141 135,146 135,136" class="head"/>
+          <path d="M145 159 L80 159" class="wire reply"/><polygon points="70,159 80,154 80,164" class="head reply"/>
+          <path d="M280 141 L370 141" class="wire"/><polygon points="380,141 370,146 370,136" class="head"/><text x="330" y="129" text-anchor="middle" class="tiny">seal</text>
+          <path d="M380 153 L290 153" class="wire reply"/><polygon points="280,153 290,148 290,158" class="head reply"/>
+          <path d="M380 285 V340 A90 12 0 0 0 560 340 V285" class="store"/><ellipse cx="470" cy="285" rx="90" ry="12" class="store"/><text x="470" y="322.5" text-anchor="middle" class="label">Platform Store</text><text x="470" y="340.5" text-anchor="middle" class="sub">bundle + desired</text>
+          <path d="M205 185 L205 300 Q205 308 213 308 L370 308" class="wire"/><polygon points="380,308 370,313 370,303" class="head"/><text x="230" y="273" class="tiny">register bundle</text>
+          <path d="M380 330 L178 330 Q170 330 170 322 L170 195" class="wire reply"/><polygon points="170,185 175,195 165,195" class="head reply"/><text x="220" y="350" class="tiny">commit before publish</text>
+          <text x="310" y="227" class="tiny">Bundle = weights + tokenizer + prompt + image + adapter</text>
+          <rect x="700" y="280" width="170" height="70" rx="12" class="box"/><text x="785" y="312" text-anchor="middle" class="label">Fleet Controller</text><text x="785" y="331" text-anchor="middle" class="sub">replica generation</text>
+          <rect x="730" y="90" width="180" height="70" rx="12" class="box"/><text x="820" y="122" text-anchor="middle" class="label">Model Worker</text><text x="820" y="141" text-anchor="middle" class="sub">verify + warm</text>
+          <path d="M700 307 L570 307" class="wire"/><polygon points="560,307 570,302 570,312" class="head"/><text x="625" y="297" text-anchor="middle" class="tiny">read desired</text>
+          <path d="M560 331 L690 331" class="wire reply"/><polygon points="700,331 690,336 690,326" class="head reply"/>
+          <path d="M795 280 L795 170" class="wire async"/><polygon points="795,160 800,170 790,170" class="head async"/><text x="810" y="244" class="tiny">load tuple</text>
+          <path d="M730 113 L570 113" class="wire"/><polygon points="560,113 570,108 570,118" class="head"/><text x="645" y="101" text-anchor="middle" class="tiny">fetch manifest</text>
+          <path d="M560 137 L720 137" class="wire reply"/><polygon points="730,137 720,142 720,132" class="head reply"/><text x="645" y="156" text-anchor="middle" class="tiny">exact bytes</text>
+          <g class="is-new">
+            <path d="M855 160 L855 270" class="wire async"/><polygon points="855,280 850,270 860,270" class="head async"/><text x="870" y="207" class="tiny">READY g7</text>
+            <text x="310" y="252" class="tiny">Ready proof: manifest hash, image digest, device set, g7</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">补 READY 证明：权重摘要、镜像、设备组与当前 g7 都一致，再用代表性请求预热。端口能连上仅证明进程活着，不能替代可推理。</span><span class="lang-en">Add READY proof: manifest/image/device set/current g7 match, then representative warmup passes. A reachable port alone does not prove inference readiness.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d2s5t d2s5d">
+          <title id="d2s5t">Bad content never reaches the serving endpoint set</title>
+          <desc id="d2s5d">On hash or warmup failure, Model Worker reports rejection to Fleet Controller on the alternative failure path. The controller records failed observed state without publishing an endpoint; the sealed manifest is not overwritten to repair the release.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="24" width="822" height="360" rx="18" class="boundary"/><text x="136" y="46" class="tiny">MODEL RELEASE · immutable content first, routable readiness last</text>
+          <circle cx="44" cy="126" r="12" class="box"/><path d="M24 172 Q44 140 64 172" class="wire"/><text x="44" y="194" text-anchor="middle" class="label">Publisher</text>
+          <rect x="145" y="115" width="135" height="70" rx="12" class="box"/><text x="212.5" y="147" text-anchor="middle" class="label">Registry API</text><text x="212.5" y="166" text-anchor="middle" class="sub">authorize + seal</text>
+          <path d="M380 100 V155 A90 12 0 0 0 560 155 V100" class="store"/><ellipse cx="470" cy="100" rx="90" ry="12" class="store"/><text x="470" y="137.5" text-anchor="middle" class="label">Artifact Store</text><text x="470" y="155.5" text-anchor="middle" class="sub">hash + manifest</text>
+          <path d="M70 141 L135 141" class="wire"/><polygon points="145,141 135,146 135,136" class="head"/>
+          <path d="M145 159 L80 159" class="wire reply"/><polygon points="70,159 80,154 80,164" class="head reply"/>
+          <path d="M280 141 L370 141" class="wire"/><polygon points="380,141 370,146 370,136" class="head"/><text x="330" y="129" text-anchor="middle" class="tiny">seal</text>
+          <path d="M380 153 L290 153" class="wire reply"/><polygon points="280,153 290,148 290,158" class="head reply"/>
+          <path d="M380 285 V340 A90 12 0 0 0 560 340 V285" class="store"/><ellipse cx="470" cy="285" rx="90" ry="12" class="store"/><text x="470" y="322.5" text-anchor="middle" class="label">Platform Store</text><text x="470" y="340.5" text-anchor="middle" class="sub">bundle + desired</text>
+          <path d="M205 185 L205 300 Q205 308 213 308 L370 308" class="wire"/><polygon points="380,308 370,313 370,303" class="head"/><text x="230" y="273" class="tiny">register bundle</text>
+          <path d="M380 330 L178 330 Q170 330 170 322 L170 195" class="wire reply"/><polygon points="170,185 175,195 165,195" class="head reply"/><text x="220" y="350" class="tiny">commit before publish</text>
+          <text x="310" y="227" class="tiny">Bundle = weights + tokenizer + prompt + image + adapter</text>
+          <rect x="700" y="280" width="170" height="70" rx="12" class="box"/><text x="785" y="312" text-anchor="middle" class="label">Fleet Controller</text><text x="785" y="331" text-anchor="middle" class="sub">replica generation</text>
+          <rect x="730" y="90" width="180" height="70" rx="12" class="box"/><text x="820" y="122" text-anchor="middle" class="label">Model Worker</text><text x="820" y="141" text-anchor="middle" class="sub">verify + warm</text>
+          <path d="M700 307 L570 307" class="wire"/><polygon points="560,307 570,302 570,312" class="head"/><text x="625" y="297" text-anchor="middle" class="tiny">read desired</text>
+          <path d="M560 331 L690 331" class="wire reply"/><polygon points="700,331 690,336 690,326" class="head reply"/>
+          <path d="M795 280 L795 170" class="wire async"/><polygon points="795,160 800,170 790,170" class="head async"/><text x="810" y="244" class="tiny">load tuple</text>
+          <path d="M730 113 L570 113" class="wire"/><polygon points="560,113 570,108 570,118" class="head"/><text x="645" y="101" text-anchor="middle" class="tiny">fetch manifest</text>
+          <path d="M560 137 L720 137" class="wire reply"/><polygon points="730,137 720,142 720,132" class="head reply"/><text x="645" y="156" text-anchor="middle" class="tiny">exact bytes</text>
+          <path d="M855 160 L855 270" class="wire async"/><polygon points="855,280 850,270 860,270" class="head async"/><text x="870" y="207" class="tiny">READY g7</text>
+          <text x="310" y="252" class="tiny">Ready proof: manifest hash, image digest, device set, g7</text>
+          <g class="is-new">
+            <path d="M910 137 L922 137 Q930 137 930 145 L930 311 Q930 319 922 319 L880 319" class="wire fail"/><polygon points="870,319 880,314 880,324" class="head fail"/><text x="895" y="263" text-anchor="middle" class="tiny">reject hash</text>
+            <text x="136" y="368" class="tiny">Assumption: 40 GB ÷ 2 GB/s + 100 s warmup = 120 s; shared link adds contention</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">最后画失败拒绝。坏内容不能靠原地补文件变好版本。40 GB÷2 GB/s+100 s=120 s 只是本章加载假设；并发加载共享链路，扩容不能按瞬时容量计。</span><span class="lang-en">Draw rejection. In-place patches cannot repair an immutable release. 40 GB÷2 GB/s+100 s=120 s is a teaching assumption; concurrent downloads contend and are not instant capacity.</span></figcaption>
+      </div>
+    </figure><div class="bilingual"><div class="lang-zh"><p>先完成并校验对象，再登记bundle，最后加载/warmup到READY。对象已写、登记失败只留下待按引用/留存清理的孤儿；登记后再异步补片会暴露半版本。摘要失败或旧generation迟到READY只能记失败/忽略，不原地修manifest。日志关联request_id、bundle_hash、route_revision、replica/epoch，不能只写model=prod。</p><p>A6：40 GB÷2 GB/s+100 s=120 s；9份冷拉共360 GB。若2 GB/s是共享总出口，纯下载下界是180 s，不能把9个加载者都当独享链路。缓存仍需完整性校验、磁盘/CPU/并发预算。Prompt或LoRA较小不代表零GPU成本：更长prompt/输出增加prefill、KV与驻留；adapter必须绑定兼容base。</p></div><div class="lang-en"><p>Complete and verify objects, register the bundle, then load/warm to READY. Objects without a registry commit are orphan cleanup candidates; publishing before async upload exposes incomplete content. Hash failures and late old-generation READY reports cannot patch a sealed manifest or revive stale endpoints. Correlate request/bundle/revision/replica/epoch rather than only model=prod.</p><p>A6: 40 GB/2 GB/s+100 s=120 s; nine cold copies total 360 GB. With 2 GB/s aggregate egress, download work alone needs at least 180 s. Caches still require integrity, disk/CPU and concurrency budgets. Smaller prompts/adapters are not zero-cost: longer prompts/output increase prefill/KV/residence; adapters pin compatible bases.</p></div></div></section>
+<section><h2><span class="lang-zh">设备与故障域：槽位、吞吐、幸存预算分别算</span><span class="lang-en">Devices and failure domains: occupancy, throughput and survivors</span></h2><div class="bilingual"><div class="lang-zh"><p><strong>先问单副本能放在哪，再问丢哪些设备会失去多少完整副本。</strong>内存、互联、镜像和租户隔离是硬过滤；跨机器spread之后才在合格位置binpack。Kubernetes的MostAllocated是资源评分，硬spread需DoNotSchedule等相应设置；两者都不证明GPU隔离或幸存容量。<a href="#ref-3">[3]</a><a href="#ref-4">[4]</a></p></div><div class="lang-en"><p><strong>First find eligible devices, then count complete replicas lost with each failure.</strong>Memory, interconnect, image and isolation are hard constraints. Spread across machines before packing eligible placements. Kubernetes MostAllocated is a scoring policy; hard spread needs the appropriate DoNotSchedule policy. Neither proves GPU isolation or surviving capacity. <a href="#ref-3">[3]</a><a href="#ref-4">[4]</a></p></div></div><figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d3s1t d3s1d">
+          <title id="d3s1t">Placement begins with hard eligibility</title>
+          <desc id="d3s1d">Fleet Controller applies device memory, topology, model image and tenant eligibility constraints before scoring. Nodes A, B and C are distinct machine failure domains; no worker is placed yet.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <g class="is-new">
+            <rect x="18" y="24" width="924" height="360" rx="18" class="boundary"/><text x="34" y="46" class="tiny">GPU PLACEMENT · one replica uses one GPU in this teaching case</text>
+            <rect x="30" y="175" width="145" height="70" rx="12" class="box"/><text x="102.5" y="207" text-anchor="middle" class="label">Fleet Controller</text><text x="102.5" y="226" text-anchor="middle" class="sub">fit, then score</text>
+            <rect x="255" y="90" width="190" height="235" rx="18" class="boundary"/><rect x="490" y="90" width="190" height="235" rx="18" class="boundary"/><rect x="725" y="90" width="190" height="235" rx="18" class="boundary"/><text x="271" y="112" class="tiny">Node A</text><text x="506" y="112" class="tiny">Node B</text><text x="741" y="112" class="tiny">Node C</text>
+            <text x="34" y="143" class="tiny">Fit memory / devices</text>
+            <text x="34" y="162" class="tiny">then spread + pack</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">先画三台独立故障域，再做硬过滤。本文每 replica 一张卡是假设；多卡 tensor parallel 要整体放置设备组，不能把副本数直接叫 GPU 数。</span><span class="lang-en">Start with three machine failure domains and hard eligibility. One GPU/replica is an assumption; tensor-parallel replicas need whole device groups.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d3s2t d3s2d">
+          <title id="d3s2t">Occupancy and benchmark throughput are independent checks</title>
+          <desc id="d3s2d">Fleet Controller places replicas r1 to r3 as Model Worker on Node A and receives observed state. Teaching arrival 20 per second times mean eight seconds gives 160 mean active sequences; 32 slots alone gives a five-replica occupancy lower bound, not throughput.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="18" y="24" width="924" height="360" rx="18" class="boundary"/><text x="34" y="46" class="tiny">GPU PLACEMENT · one replica uses one GPU in this teaching case</text>
+          <rect x="30" y="175" width="145" height="70" rx="12" class="box"/><text x="102.5" y="207" text-anchor="middle" class="label">Fleet Controller</text><text x="102.5" y="226" text-anchor="middle" class="sub">fit, then score</text>
+          <rect x="255" y="90" width="190" height="235" rx="18" class="boundary"/><rect x="490" y="90" width="190" height="235" rx="18" class="boundary"/><rect x="725" y="90" width="190" height="235" rx="18" class="boundary"/><text x="271" y="112" class="tiny">Node A</text><text x="506" y="112" class="tiny">Node B</text><text x="741" y="112" class="tiny">Node C</text>
+          <text x="34" y="143" class="tiny">Fit memory / devices</text>
+          <text x="34" y="162" class="tiny">then spread + pack</text>
+          <g class="is-new">
+            <rect x="275" y="180" width="150" height="70" rx="12" class="box"/><text x="350" y="212" text-anchor="middle" class="label">Model Worker</text><text x="350" y="231" text-anchor="middle" class="sub">v1 · r1–r3</text>
+            <path d="M175 195 L217 195 Q225 195 225 187 L225 158 Q225 150 233 150 L342 150 Q350 150 350 158 L350 170" class="wire async"/><polygon points="350,180 345,170 355,170" class="head async"/>
+            <path d="M425 215 L430 215 Q435 215 435 220 L435 329 Q435 337 427 337 L123 337 Q115 337 115 329 L115 255" class="wire async"/><polygon points="115,245 120,255 110,255" class="head async"/>
+            <text x="34" y="72" class="tiny">160 mean; ≥5 by slots</text><text x="34" y="91" class="tiny">ceil(20/3.2) = 7 normal</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">加第一组副本。20×8=160 是平均驻留；160÷32=5 只是槽位下界。接纳容量假设 C=4 req/s/replica，目标使用率 80%，正常需要 ceil(20/3.2)=7。</span><span class="lang-en">Add replicas. 20×8=160 is mean occupancy; 160/32=5 is only a slot lower bound. An assumed admission capacity C=4 req/s at 80% target utilization needs ceil(20/3.2)=7.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d3s3t d3s3d">
+          <title id="d3s3t">Spread changes which replicas fail together</title>
+          <desc id="d3s3d">Fleet Controller independently places replicas r4 to r6 on Node B and receives observed state. This is fan-out placement, not a chain from Node A to Node B.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="18" y="24" width="924" height="360" rx="18" class="boundary"/><text x="34" y="46" class="tiny">GPU PLACEMENT · one replica uses one GPU in this teaching case</text>
+          <rect x="30" y="175" width="145" height="70" rx="12" class="box"/><text x="102.5" y="207" text-anchor="middle" class="label">Fleet Controller</text><text x="102.5" y="226" text-anchor="middle" class="sub">fit, then score</text>
+          <rect x="255" y="90" width="190" height="235" rx="18" class="boundary"/><rect x="490" y="90" width="190" height="235" rx="18" class="boundary"/><rect x="725" y="90" width="190" height="235" rx="18" class="boundary"/><text x="271" y="112" class="tiny">Node A</text><text x="506" y="112" class="tiny">Node B</text><text x="741" y="112" class="tiny">Node C</text>
+          <text x="34" y="143" class="tiny">Fit memory / devices</text>
+          <text x="34" y="162" class="tiny">then spread + pack</text>
+          <rect x="275" y="180" width="150" height="70" rx="12" class="box"/><text x="350" y="212" text-anchor="middle" class="label">Model Worker</text><text x="350" y="231" text-anchor="middle" class="sub">v1 · r1–r3</text>
+          <path d="M175 195 L217 195 Q225 195 225 187 L225 158 Q225 150 233 150 L342 150 Q350 150 350 158 L350 170" class="wire async"/><polygon points="350,180 345,170 355,170" class="head async"/>
+          <path d="M425 215 L430 215 Q435 215 435 220 L435 329 Q435 337 427 337 L123 337 Q115 337 115 329 L115 255" class="wire async"/><polygon points="115,245 120,255 110,255" class="head async"/>
+          <text x="34" y="72" class="tiny">160 mean; ≥5 by slots</text><text x="34" y="91" class="tiny">ceil(20/3.2) = 7 normal</text>
+          <g class="is-new">
+            <rect x="510" y="180" width="150" height="70" rx="12" class="box"/><text x="585" y="212" text-anchor="middle" class="label">Model Worker</text><text x="585" y="231" text-anchor="middle" class="sub">v1 · r4–r6</text>
+            <path d="M175 195 L217 195 Q225 195 225 187 L225 78 Q225 70 233 70 L577 70 Q585 70 585 78 L585 170" class="wire async"/><polygon points="585,180 580,170 590,170" class="head async"/>
+            <path d="M660 215 L665 215 Q670 215 670 220 L670 343 Q670 351 662 351 L93 351 Q85 351 85 343 L85 255" class="wire async"/><polygon points="85,245 90,255 80,255" class="head async"/>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">第二笔跨机器放副本，避免同机故障同时丢尽。spread 是硬边界内的选择，binpack 再填同类资源；两者不能替代幸存吞吐验算。</span><span class="lang-en">Place on another machine to reduce correlated loss. Spread sets the failure boundary; pack eligible resources within it. Neither proves surviving throughput.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d3s4t d3s4d">
+          <title id="d3s4t">Three domains with three replicas each provide bounded headroom</title>
+          <desc id="d3s4d">Fleet Controller independently places replicas r7 to r9 on Node C and receives observed state. Each node has 96 active slots and 12 req/s benchmark capacity. Nine replicas provide 288 slots and 36 req/s.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="18" y="24" width="924" height="360" rx="18" class="boundary"/><text x="34" y="46" class="tiny">GPU PLACEMENT · one replica uses one GPU in this teaching case</text>
+          <rect x="30" y="175" width="145" height="70" rx="12" class="box"/><text x="102.5" y="207" text-anchor="middle" class="label">Fleet Controller</text><text x="102.5" y="226" text-anchor="middle" class="sub">fit, then score</text>
+          <rect x="255" y="90" width="190" height="235" rx="18" class="boundary"/><rect x="490" y="90" width="190" height="235" rx="18" class="boundary"/><rect x="725" y="90" width="190" height="235" rx="18" class="boundary"/><text x="271" y="112" class="tiny">Node A</text><text x="506" y="112" class="tiny">Node B</text><text x="741" y="112" class="tiny">Node C</text>
+          <text x="34" y="143" class="tiny">Fit memory / devices</text>
+          <text x="34" y="162" class="tiny">then spread + pack</text>
+          <rect x="275" y="180" width="150" height="70" rx="12" class="box"/><text x="350" y="212" text-anchor="middle" class="label">Model Worker</text><text x="350" y="231" text-anchor="middle" class="sub">v1 · r1–r3</text>
+          <path d="M175 195 L217 195 Q225 195 225 187 L225 158 Q225 150 233 150 L342 150 Q350 150 350 158 L350 170" class="wire async"/><polygon points="350,180 345,170 355,170" class="head async"/>
+          <path d="M425 215 L430 215 Q435 215 435 220 L435 329 Q435 337 427 337 L123 337 Q115 337 115 329 L115 255" class="wire async"/><polygon points="115,245 120,255 110,255" class="head async"/>
+          <text x="34" y="72" class="tiny">160 mean; ≥5 by slots</text><text x="34" y="91" class="tiny">ceil(20/3.2) = 7 normal</text>
+          <rect x="510" y="180" width="150" height="70" rx="12" class="box"/><text x="585" y="212" text-anchor="middle" class="label">Model Worker</text><text x="585" y="231" text-anchor="middle" class="sub">v1 · r4–r6</text>
+          <path d="M175 195 L217 195 Q225 195 225 187 L225 78 Q225 70 233 70 L577 70 Q585 70 585 78 L585 170" class="wire async"/><polygon points="585,180 580,170 590,170" class="head async"/>
+          <path d="M660 215 L665 215 Q670 215 670 220 L670 343 Q670 351 662 351 L93 351 Q85 351 85 343 L85 255" class="wire async"/><polygon points="85,245 90,255 80,255" class="head async"/>
+          <g class="is-new">
+            <rect x="745" y="180" width="150" height="70" rx="12" class="box"/><text x="820" y="212" text-anchor="middle" class="label">Model Worker</text><text x="820" y="231" text-anchor="middle" class="sub">v1 · r7–r9</text>
+            <path d="M175 195 L217 195 Q225 195 225 187 L225 66 Q225 58 233 58 L812 58 Q820 58 820 66 L820 170" class="wire async"/><polygon points="820,180 815,170 825,170" class="head async"/>
+            <path d="M895 215 L900 215 Q905 215 905 220 L905 357 Q905 365 897 365 L63 365 Q55 365 55 357 L55 255" class="wire async"/><polygon points="55,245 60,255 50,255" class="head async"/>
+            <text x="285" y="277" class="tiny">3 × 32 = 96 slots</text><text x="285" y="300" class="tiny">3 × 4 = 12 req/s</text><text x="520" y="277" class="tiny">3 × 32 = 96 slots</text><text x="520" y="300" class="tiny">3 × 4 = 12 req/s</text><text x="755" y="277" class="tiny">3 × 32 = 96 slots</text><text x="755" y="300" class="tiny">3 × 4 = 12 req/s</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">第三笔得到 3×3=9 个热副本：288 槽、36 req/s。正常 20÷36≈55.6%；数字取决于待测的请求分布与 SLO 条件，不是显存除法。</span><span class="lang-en">Add the third domain: nine warm replicas, 288 slots and 36 req/s. Normal load is 20/36≈55.6%; capacity depends on assumed request mix/SLO, not memory arithmetic.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d3s5t d3s5d">
+          <title id="d3s5t">A node failure removes endpoints before replacement loads</title>
+          <desc id="d3s5d">Alternative failure notification from Node A returns to Fleet Controller. Removing its three endpoints leaves Nodes B and C with six replicas and 24 req/s. Replacement loading remains asynchronous and does not add immediate capacity.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="18" y="24" width="924" height="360" rx="18" class="boundary"/><text x="34" y="46" class="tiny">GPU PLACEMENT · one replica uses one GPU in this teaching case</text>
+          <rect x="30" y="175" width="145" height="70" rx="12" class="box"/><text x="102.5" y="207" text-anchor="middle" class="label">Fleet Controller</text><text x="102.5" y="226" text-anchor="middle" class="sub">fit, then score</text>
+          <rect x="255" y="90" width="190" height="235" rx="18" class="boundary"/><rect x="490" y="90" width="190" height="235" rx="18" class="boundary"/><rect x="725" y="90" width="190" height="235" rx="18" class="boundary"/><text x="271" y="112" class="tiny">Node A</text><text x="506" y="112" class="tiny">Node B</text><text x="741" y="112" class="tiny">Node C</text>
+          <text x="34" y="143" class="tiny">Fit memory / devices</text>
+          <text x="34" y="162" class="tiny">then spread + pack</text>
+          <rect x="275" y="180" width="150" height="70" rx="12" class="box bad"/><text x="350" y="212" text-anchor="middle" class="label">Model Worker</text><text x="350" y="231" text-anchor="middle" class="sub">r1–r3 unavailable</text>
+          <path d="M175 195 L217 195 Q225 195 225 187 L225 158 Q225 150 233 150 L342 150 Q350 150 350 158 L350 170" class="wire async"/><polygon points="350,180 345,170 355,170" class="head async"/>
+          <path d="M425 215 L430 215 Q435 215 435 220 L435 329 Q435 337 427 337 L123 337 Q115 337 115 329 L115 255" class="wire async muted"/><polygon points="115,245 120,255 110,255" class="head async muted"/>
+          <text x="34" y="72" class="tiny">160 mean; ≥5 by slots</text><text x="34" y="91" class="tiny">ceil(20/3.2) = 7 normal</text>
+          <rect x="510" y="180" width="150" height="70" rx="12" class="box"/><text x="585" y="212" text-anchor="middle" class="label">Model Worker</text><text x="585" y="231" text-anchor="middle" class="sub">v1 · r4–r6</text>
+          <path d="M175 195 L217 195 Q225 195 225 187 L225 78 Q225 70 233 70 L577 70 Q585 70 585 78 L585 170" class="wire async"/><polygon points="585,180 580,170 590,170" class="head async"/>
+          <path d="M660 215 L665 215 Q670 215 670 220 L670 343 Q670 351 662 351 L93 351 Q85 351 85 343 L85 255" class="wire async"/><polygon points="85,245 90,255 80,255" class="head async"/>
+          <rect x="745" y="180" width="150" height="70" rx="12" class="box"/><text x="820" y="212" text-anchor="middle" class="label">Model Worker</text><text x="820" y="231" text-anchor="middle" class="sub">v1 · r7–r9</text>
+          <path d="M175 195 L217 195 Q225 195 225 187 L225 66 Q225 58 233 58 L812 58 Q820 58 820 66 L820 170" class="wire async"/><polygon points="820,180 815,170 825,170" class="head async"/>
+          <path d="M895 215 L900 215 Q905 215 905 220 L905 357 Q905 365 897 365 L63 365 Q55 365 55 357 L55 255" class="wire async"/><polygon points="55,245 60,255 50,255" class="head async"/>
+          <text x="285" y="277" class="tiny">0 live slots</text><text x="285" y="300" class="tiny">0 live req/s</text><text x="520" y="277" class="tiny">3 × 32 = 96 slots</text><text x="520" y="300" class="tiny">3 × 4 = 12 req/s</text><text x="755" y="277" class="tiny">3 × 32 = 96 slots</text><text x="755" y="300" class="tiny">3 × 4 = 12 req/s</text>
+          <g class="is-new">
+            <path d="M425 215 L430 215 Q435 215 435 220 L435 329 Q435 337 427 337 L123 337 Q115 337 115 329 L115 255" class="wire fail"/><polygon points="115,245 120,255 110,255" class="head fail"/><text x="34" y="116" class="tiny">A lost: C=24/s</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">画单机故障：去掉 Node A 的三个 endpoint 后剩 24 req/s，20÷24≈83.3%。原始容量覆盖峰值，但 80% 预算仅 19.2/s；全峰值故障 SLO 须另测，替补加载期间仍限流。</span><span class="lang-en">Lose Node A: six survivors provide 24 req/s, so 20/24≈83.3%. The raw capacity covers arrivals but the 80% budget is only 19.2/s; validate failure SLO separately and cap admission while replacements load.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d3s6t d3s6d">
+          <title id="d3s6t">Canary and other models are additional capacity</title>
+          <desc id="d3s6d">The final placement diagram preserves all nine production replicas across three domains and the failure lane. Canary and another model require separate additional device reservations, not the displayed production slots.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="18" y="24" width="924" height="360" rx="18" class="boundary"/><text x="34" y="46" class="tiny">GPU PLACEMENT · one replica uses one GPU in this teaching case</text>
+          <rect x="30" y="175" width="145" height="70" rx="12" class="box"/><text x="102.5" y="207" text-anchor="middle" class="label">Fleet Controller</text><text x="102.5" y="226" text-anchor="middle" class="sub">fit, then score</text>
+          <rect x="255" y="90" width="190" height="235" rx="18" class="boundary"/><rect x="490" y="90" width="190" height="235" rx="18" class="boundary"/><rect x="725" y="90" width="190" height="235" rx="18" class="boundary"/><text x="271" y="112" class="tiny">Node A</text><text x="506" y="112" class="tiny">Node B</text><text x="741" y="112" class="tiny">Node C</text>
+          <text x="34" y="143" class="tiny">Fit memory / devices</text>
+          <text x="34" y="162" class="tiny">then spread + pack</text>
+          <rect x="275" y="180" width="150" height="70" rx="12" class="box bad"/><text x="350" y="212" text-anchor="middle" class="label">Model Worker</text><text x="350" y="231" text-anchor="middle" class="sub">r1–r3 unavailable</text>
+          <path d="M175 195 L217 195 Q225 195 225 187 L225 158 Q225 150 233 150 L342 150 Q350 150 350 158 L350 170" class="wire async"/><polygon points="350,180 345,170 355,170" class="head async"/>
+          <path d="M425 215 L430 215 Q435 215 435 220 L435 329 Q435 337 427 337 L123 337 Q115 337 115 329 L115 255" class="wire async muted"/><polygon points="115,245 120,255 110,255" class="head async muted"/>
+          <text x="34" y="72" class="tiny">160 mean; ≥5 by slots</text><text x="34" y="91" class="tiny">ceil(20/3.2) = 7 normal</text>
+          <rect x="510" y="180" width="150" height="70" rx="12" class="box"/><text x="585" y="212" text-anchor="middle" class="label">Model Worker</text><text x="585" y="231" text-anchor="middle" class="sub">v1 · r4–r6</text>
+          <path d="M175 195 L217 195 Q225 195 225 187 L225 78 Q225 70 233 70 L577 70 Q585 70 585 78 L585 170" class="wire async"/><polygon points="585,180 580,170 590,170" class="head async"/>
+          <path d="M660 215 L665 215 Q670 215 670 220 L670 343 Q670 351 662 351 L93 351 Q85 351 85 343 L85 255" class="wire async"/><polygon points="85,245 90,255 80,255" class="head async"/>
+          <rect x="745" y="180" width="150" height="70" rx="12" class="box"/><text x="820" y="212" text-anchor="middle" class="label">Model Worker</text><text x="820" y="231" text-anchor="middle" class="sub">v1 · r7–r9</text>
+          <path d="M175 195 L217 195 Q225 195 225 187 L225 66 Q225 58 233 58 L812 58 Q820 58 820 66 L820 170" class="wire async"/><polygon points="820,180 815,170 825,170" class="head async"/>
+          <path d="M895 215 L900 215 Q905 215 905 220 L905 357 Q905 365 897 365 L63 365 Q55 365 55 357 L55 255" class="wire async"/><polygon points="55,245 60,255 50,255" class="head async"/>
+          <text x="285" y="277" class="tiny">0 live slots</text><text x="285" y="300" class="tiny">0 live req/s</text><text x="520" y="277" class="tiny">3 × 32 = 96 slots</text><text x="520" y="300" class="tiny">3 × 4 = 12 req/s</text><text x="755" y="277" class="tiny">3 × 32 = 96 slots</text><text x="755" y="300" class="tiny">3 × 4 = 12 req/s</text>
+          <path d="M425 215 L430 215 Q435 215 435 220 L435 329 Q435 337 427 337 L123 337 Q115 337 115 329 L115 255" class="wire fail"/><polygon points="115,245 120,255 110,255" class="head fail"/><text x="34" y="116" class="tiny">A lost: C=24/s</text>
+          <g class="is-new">
+            <text x="130" y="278" class="tiny">12 initial GPUs</text><text x="130" y="301" class="tiny">20 at full overlap</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">完整图注明账外资源。9 prod+1 canary+2 小模型=12 卡；全量热回滚窗口是 9 旧+9 新+2 小=20 卡。不能把 12 卡的起步预算当作全量双跑预算。</span><span class="lang-en">Name additional devices: 9 prod+1 canary+2 small-model=12 GPUs. Full hot rollback needs 9 old+9 new+2 small=20, not the starting twelve.</span></figcaption>
+      </div>
+    </figure><div class="bilingual"><div class="lang-zh"><p><strong>占用下界：</strong>20×8=160，ceil(160/32)=5。<strong>正常吞吐预算：</strong>ceil(20/(4×0.8))=7。7个按3/2/2放，失去最大机器只剩4个：原始16/s，80%预算12.8/s。选9个3/3/3后，正常288槽、36/s；坏一台剩192槽、原始24/s，负载83.3%。同80%预算只剩19.2/s，须至少拒绝0.8/s即4%，或另验降级SLO。不能把“原始覆盖”写成p99保证。</p><p><strong>若故障后仍守相同80%预算：</strong>跨三机均衡的最小总数是11（4/4/3），最大损失4后剩7×3.2=22.4/s；10（4/3/3）仍只剩19.2/s。下面Java17按最大故障域计算，不用N−1偷换成只少一张卡。原9副本配置是允许故障降级的选择，后续12/20卡都沿用它。</p></div><div class="lang-en"><p><strong>Occupancy lower bound:</strong>20×8=160; ceil(160/32)=5. <strong>Normal rate budget:</strong>ceil(20/(4×0.8))=7. Seven spread 3/2/2 leave four after the largest loss: raw 16/s, planned 12.8/s. Nine spread 3/3/3 give 288 slots/36/s; six survivors give 192 slots/raw 24/s at 83.3% load. The same 80% budget is only 19.2/s: reject at least 0.8/s (4%) or validate a degraded SLO. Raw coverage does not prove p99.</p><p><strong>Preserving the same 80% budget after failure</strong>needs at least eleven across three balanced nodes (4/4/3): lose four, retain 7×3.2=22.4/s. Ten (4/3/3) still leave only 19.2/s. The Java17 calculation uses the largest domain loss, not one missing device. Nine remains our degradation-allowed choice; the twelve/twenty-GPU rollout figures retain it.</p></div></div><pre data-language="Java 17 · capacity" data-kind="runnable" data-source="Capacity.java"><code>import java.util.Arrays;
+
+// Java 17. All rates are teaching assumptions for one fixed workload/profile.
+public final class Capacity {
+    static double surviving(int[] perNode, double admittedPerReplica) {
+        int total = Arrays.stream(perNode).sum();
+        int largestLoss = Arrays.stream(perNode).max().orElseThrow();
+        return (total - largestLoss) * admittedPerReplica;
+    }
+    static int sameBudgetReplicas(int domains, double peak, double planned) {
+        for (int n = 1; ; n++) {
+            int largestLoss = (n + domains - 1) / domains;
+            if ((n - largestLoss) * planned &gt;= peak) return n;
+        }
+    }
+    public static void main(String[] args) {
+        double peak = 20, residence = 8, cap = 4, headroom = 0.8;
+        int slots = 32;
+        System.out.printf(&quot;meanActive=%.0f slotLowerBound=%.0f normal=%.0f%n&quot;,
+            peak * residence, Math.ceil(peak * residence / slots),
+            Math.ceil(peak / (cap * headroom)));
+        System.out.printf(&quot;nine: rawSurvivor=%.1f plannedSurvivor=%.1f%n&quot;,
+            surviving(new int[]{3, 3, 3}, cap),
+            surviving(new int[]{3, 3, 3}, cap * headroom));
+        System.out.printf(&quot;same-budget N-1 across 3 nodes: %d%n&quot;,
+            sameBudgetReplicas(3, peak, cap * headroom));
+        if (sameBudgetReplicas(3, peak, 3.2) != 11) throw new AssertionError();
+        if (surviving(new int[]{4, 4, 3}, 3.2) &lt; peak) throw new AssertionError();
+        if (surviving(new int[]{4, 3, 3}, 3.2) &gt;= peak) throw new AssertionError();
+    }
+}</code></pre><div class="bilingual"><div class="lang-zh"><p><strong>显存不是一只可随便加总的桶。</strong>每张卡分别满足：权重分片 + 引擎临时空间峰值 + KV信用 + 安全余量 ≤ 可用显存。教学例80 GiB−40 GiB权重−8 GiB临时峰值−8 GiB余量=24 GiB KV预算；这与40 GB磁盘artifact不是同一假设。KV随活上下文与模型几何变化；32序列并不能限定它。vLLM v0.15.1也分别讨论sequence/batch-token限制、KV不足与并行度，未给本章的容量数字。<a href="#ref-6">[6]</a></p><p>异构GPU按profile分别标定容量/精度/上下文和临时峰值，不能把两张不相容卡的空闲字节相加。TP副本须整体唯一预留并整组READY；一rank不可用，本章按整个replica group不可服务。跨机器组的故障损失是所有触及坏机器的group，不只本机rank数。空卡/加载中副本都不计幸存热容量。</p></div><div class="lang-en"><p><strong>Device memory is not one freely pooled bucket.</strong>Each device must fit its weight shard + peak engine workspace + KV credit + safety reserve. A teaching 80 GiB−40 GiB weights−8 GiB workspace−8 GiB reserve leaves 24 GiB KV; this is independent of the 40-decimal-GB disk artifact. KV depends on live context/model geometry; 32 sequences alone do not bound it. vLLM v0.15.1 separately discusses sequence/batch-token limits, KV pressure and parallelism, not our capacity numbers. <a href="#ref-6">[6]</a></p><p>Benchmark heterogeneous profiles separately for precision/context/capacity/workspace; free bytes on incompatible devices cannot be added. Reserve TP devices as a whole and require whole-group READY; one unavailable rank makes that replica group unavailable in this contract. Node loss removes every group touching that node, not just local ranks. Empty devices/loaders are not surviving warm capacity.</p></div></div></section>
+<section><h2><span class="lang-zh">多维准入：持久预占、唯一派发、物理退休</span><span class="lang-en">Admission: durable multidimensional holds, unique dispatch, physical retirement</span></h2><div class="bilingual"><div class="lang-zh"><p><strong>监控指标只用来选候选，数据库决定能否占额度。</strong>平台同时限制sequence数与KV信用，按可信tokenization/输出上限、模型几何和profile向上取整为MiB；信用是保守预留，不是当前活页。权重/临时峰值已从profile容量扣除；batch-token/计算预算仍由Ch29每轮执行。拿到permit不能迫使引擎超显存或调度预算。</p></div><div class="lang-en"><p><strong>Metrics choose candidates; authority decides credit.</strong>Bound both sequences and KV credit, rounded up to MiB from trusted tokenization/output bounds, geometry and device profile. Credit is conservative reservation, not allocated live pages. Profile capacity already subtracts weights/workspace; Ch29 still enforces per-iteration batch-token/compute limits. A platform permit cannot override engine memory/scheduling limits.</p></div></div><figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d4s1t d4s1d">
+          <title id="d4s1t">Reserve a permit before dispatching physical work</title>
+          <desc id="d4s1d">WAITING transitions to HELD after an atomic reservation of tenant and replica capacity. The stable request permit k9 and worker epoch identify the reservation. Arrows are admission state transitions, not network replies.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <g class="is-new">
+            <rect x="18" y="24" width="924" height="360" rx="18" class="boundary"/><text x="34" y="46" class="tiny">GPU ADMISSION · a permit is not a rate-limit counter; arrows are state transitions</text>
+            <rect x="30" y="130" width="145" height="70" rx="12" class="box"/><text x="102.5" y="162" text-anchor="middle" class="label">WAITING</text><text x="102.5" y="181" text-anchor="middle" class="sub">bounded queue</text>
+            <rect x="250" y="130" width="145" height="70" rx="12" class="box"/><text x="322.5" y="162" text-anchor="middle" class="label">HELD</text><text x="322.5" y="181" text-anchor="middle" class="sub">k9 + epoch + KV</text>
+            <path d="M175 156 L240 156" class="wire"/><polygon points="250,156 240,161 240,151" class="head"/><text x="212" y="145" text-anchor="middle" class="tiny">reserve</text>
+            <text x="34" y="82" class="tiny">Atomic hold: request key + tenant + replica + sequence/KV credit + worker epoch</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">先画 WAITING→HELD。按 request_key、tenant 与 worker epoch 原子预占租户额度和 replica 额度；仅看异步 queue_length 再发两条请求会超卖。</span><span class="lang-en">Start with WAITING→HELD. Atomically reserve tenant/replica capacity by request key and worker epoch; stale queue metrics cannot serialize admissions.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d4s2t d4s2d">
+          <title id="d4s2t">Workers consume the exact permit once</title>
+          <desc id="d4s2d">HELD transitions to RUNNING when Model Worker validates serving tuple, epoch and current permit, then records acceptance once. Duplicate dispatches retrieve acceptance for k9 instead of enqueueing another physical generation.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="18" y="24" width="924" height="360" rx="18" class="boundary"/><text x="34" y="46" class="tiny">GPU ADMISSION · a permit is not a rate-limit counter; arrows are state transitions</text>
+          <rect x="30" y="130" width="145" height="70" rx="12" class="box"/><text x="102.5" y="162" text-anchor="middle" class="label">WAITING</text><text x="102.5" y="181" text-anchor="middle" class="sub">bounded queue</text>
+          <rect x="250" y="130" width="145" height="70" rx="12" class="box"/><text x="322.5" y="162" text-anchor="middle" class="label">HELD</text><text x="322.5" y="181" text-anchor="middle" class="sub">k9 + epoch + KV</text>
+          <path d="M175 156 L240 156" class="wire"/><polygon points="250,156 240,161 240,151" class="head"/><text x="212" y="145" text-anchor="middle" class="tiny">reserve</text>
+          <text x="34" y="82" class="tiny">Atomic hold: request key + tenant + replica + sequence/KV credit + worker epoch</text>
+          <g class="is-new">
+            <rect x="490" y="130" width="155" height="70" rx="12" class="box"/><text x="567.5" y="162" text-anchor="middle" class="label">RUNNING</text><text x="567.5" y="181" text-anchor="middle" class="sub">worker accepted</text>
+            <path d="M395 156 L480 156" class="wire"/><polygon points="490,156 480,161 480,151" class="head"/><text x="442" y="145" text-anchor="middle" class="tiny">consume k9</text>
+            <text x="34" y="107" class="tiny">HELD → DISPATCHING → RUNNING; duplicate RPC never reauthorizes launch</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">加消费门；这条边细分为持久 DISPATCHING，再由 worker 消费为 RUNNING。只有首次 CAS 赢家可发/启动；丢 ACK 只查原 k9，不把查询到 RUNNING 当作再次启动许可。</span><span class="lang-en">This edge contains durable DISPATCHING, then worker consumption to RUNNING. Only the first CAS winners may send/launch. A lost ACK queries k9; observing RUNNING never authorizes another launch.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d4s3t d4s3d">
+          <title id="d4s3t">Bounded queues fail before exceeding the waiting budget</title>
+          <desc id="d4s3d">WAITING transitions to REJECTED on quota or deadline. With teaching arrival twenty per second and a 0.2-second mean queue budget, Little law gives mean queue occupancy four, not a maximum queue guarantee; the design also caps queued requests at forty with per-request deadlines.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="18" y="24" width="924" height="360" rx="18" class="boundary"/><text x="34" y="46" class="tiny">GPU ADMISSION · a permit is not a rate-limit counter; arrows are state transitions</text>
+          <rect x="30" y="130" width="145" height="70" rx="12" class="box"/><text x="102.5" y="162" text-anchor="middle" class="label">WAITING</text><text x="102.5" y="181" text-anchor="middle" class="sub">bounded queue</text>
+          <rect x="250" y="130" width="145" height="70" rx="12" class="box"/><text x="322.5" y="162" text-anchor="middle" class="label">HELD</text><text x="322.5" y="181" text-anchor="middle" class="sub">k9 + epoch + KV</text>
+          <path d="M175 156 L240 156" class="wire"/><polygon points="250,156 240,161 240,151" class="head"/><text x="212" y="145" text-anchor="middle" class="tiny">reserve</text>
+          <text x="34" y="82" class="tiny">Atomic hold: request key + tenant + replica + sequence/KV credit + worker epoch</text>
+          <rect x="490" y="130" width="155" height="70" rx="12" class="box"/><text x="567.5" y="162" text-anchor="middle" class="label">RUNNING</text><text x="567.5" y="181" text-anchor="middle" class="sub">worker accepted</text>
+          <path d="M395 156 L480 156" class="wire"/><polygon points="490,156 480,161 480,151" class="head"/><text x="442" y="145" text-anchor="middle" class="tiny">consume k9</text>
+          <text x="34" y="107" class="tiny">HELD → DISPATCHING → RUNNING; duplicate RPC never reauthorizes launch</text>
+          <g class="is-new">
+            <rect x="250" y="295" width="145" height="60" rx="12" class="box bad"/><text x="322.5" y="322" text-anchor="middle" class="label">REJECTED</text><text x="322.5" y="341" text-anchor="middle" class="sub">deadline / quota</text>
+            <path d="M105 200 L105 317 Q105 325 113 325 L240 325" class="wire fail"/><polygon points="250,325 240,330 240,320" class="head fail"/><text x="120" y="267" class="tiny">closed</text>
+            <text x="34" y="368" class="tiny">assumption: 20/s × 0.2 s = 4 mean queued; hard cap 40 + actual deadlines</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">画队列出口。20×0.2=4 是稳态平均，不是最多排四条；另定 40 条硬上限与每条 200 ms 准入期限，按实际等待超时拒绝。</span><span class="lang-en">Add bounded rejection. 20×0.2=4 is a stable mean, not a hard cap. Use a separate forty-request cap and actual 200-ms admission deadlines.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d4s4t d4s4d">
+          <title id="d4s4t">Canceling the client begins retirement, not slot reuse</title>
+          <desc id="d4s4d">RUNNING transitions to RETIRING after completion or cancellation. The cancellation failure lane enters the same retirement state; a closed client connection does not imply physical GPU work has ended.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="18" y="24" width="924" height="360" rx="18" class="boundary"/><text x="34" y="46" class="tiny">GPU ADMISSION · a permit is not a rate-limit counter; arrows are state transitions</text>
+          <rect x="30" y="130" width="145" height="70" rx="12" class="box"/><text x="102.5" y="162" text-anchor="middle" class="label">WAITING</text><text x="102.5" y="181" text-anchor="middle" class="sub">bounded queue</text>
+          <rect x="250" y="130" width="145" height="70" rx="12" class="box"/><text x="322.5" y="162" text-anchor="middle" class="label">HELD</text><text x="322.5" y="181" text-anchor="middle" class="sub">k9 + epoch + KV</text>
+          <path d="M175 156 L240 156" class="wire"/><polygon points="250,156 240,161 240,151" class="head"/><text x="212" y="145" text-anchor="middle" class="tiny">reserve</text>
+          <text x="34" y="82" class="tiny">Atomic hold: request key + tenant + replica + sequence/KV credit + worker epoch</text>
+          <rect x="490" y="130" width="155" height="70" rx="12" class="box"/><text x="567.5" y="162" text-anchor="middle" class="label">RUNNING</text><text x="567.5" y="181" text-anchor="middle" class="sub">worker accepted</text>
+          <path d="M395 156 L480 156" class="wire"/><polygon points="490,156 480,161 480,151" class="head"/><text x="442" y="145" text-anchor="middle" class="tiny">consume k9</text>
+          <text x="34" y="107" class="tiny">HELD → DISPATCHING → RUNNING; duplicate RPC never reauthorizes launch</text>
+          <rect x="250" y="295" width="145" height="60" rx="12" class="box bad"/><text x="322.5" y="322" text-anchor="middle" class="label">REJECTED</text><text x="322.5" y="341" text-anchor="middle" class="sub">deadline / quota</text>
+          <path d="M105 200 L105 317 Q105 325 113 325 L240 325" class="wire fail"/><polygon points="250,325 240,330 240,320" class="head fail"/><text x="120" y="267" class="tiny">closed</text>
+          <text x="34" y="368" class="tiny">assumption: 20/s × 0.2 s = 4 mean queued; hard cap 40 + actual deadlines</text>
+          <g class="is-new">
+            <rect x="735" y="130" width="185" height="70" rx="12" class="box"/><text x="827.5" y="162" text-anchor="middle" class="label">RETIRING</text><text x="827.5" y="181" text-anchor="middle" class="sub">cancel / complete</text>
+            <path d="M645 156 L725 156" class="wire async"/><polygon points="735,156 725,161 725,151" class="head async"/><text x="690" y="145" text-anchor="middle" class="tiny">finish</text>
+            <path d="M645 181 L725 181" class="wire fail"/><polygon points="735,181 725,186 725,176" class="head fail"/><text x="690" y="221" text-anchor="middle" class="tiny">cancel</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">补 RETIRING。SSE 断开或取消只发起退休；异步 kernel 或下游流仍在跑时，租户与设备占用保留。release 早于物理结束会让新请求撞上旧工作。</span><span class="lang-en">Add RETIRING. SSE disconnect/cancel initiates retirement; retain capacity while asynchronous kernels/streams remain. Early release admits overlapping physical work.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d4s5t d4s5d">
+          <title id="d4s5t">Release follows a trustworthy physical completion</title>
+          <desc id="d4s5d">RETIRING transitions to RELEASED after Model Worker confirms physical completion and GPU fence. If a node is unreachable, quarantine its capacity until the device/process is fenced or reset; lease expiry alone cannot prove it stopped.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="18" y="24" width="924" height="360" rx="18" class="boundary"/><text x="34" y="46" class="tiny">GPU ADMISSION · a permit is not a rate-limit counter; arrows are state transitions</text>
+          <rect x="30" y="130" width="145" height="70" rx="12" class="box"/><text x="102.5" y="162" text-anchor="middle" class="label">WAITING</text><text x="102.5" y="181" text-anchor="middle" class="sub">bounded queue</text>
+          <rect x="250" y="130" width="145" height="70" rx="12" class="box"/><text x="322.5" y="162" text-anchor="middle" class="label">HELD</text><text x="322.5" y="181" text-anchor="middle" class="sub">k9 + epoch + KV</text>
+          <path d="M175 156 L240 156" class="wire"/><polygon points="250,156 240,161 240,151" class="head"/><text x="212" y="145" text-anchor="middle" class="tiny">reserve</text>
+          <text x="34" y="82" class="tiny">Atomic hold: request key + tenant + replica + sequence/KV credit + worker epoch</text>
+          <rect x="490" y="130" width="155" height="70" rx="12" class="box"/><text x="567.5" y="162" text-anchor="middle" class="label">RUNNING</text><text x="567.5" y="181" text-anchor="middle" class="sub">worker accepted</text>
+          <path d="M395 156 L480 156" class="wire"/><polygon points="490,156 480,161 480,151" class="head"/><text x="442" y="145" text-anchor="middle" class="tiny">consume k9</text>
+          <text x="34" y="107" class="tiny">HELD → DISPATCHING → RUNNING; duplicate RPC never reauthorizes launch</text>
+          <rect x="250" y="295" width="145" height="60" rx="12" class="box bad"/><text x="322.5" y="322" text-anchor="middle" class="label">REJECTED</text><text x="322.5" y="341" text-anchor="middle" class="sub">deadline / quota</text>
+          <path d="M105 200 L105 317 Q105 325 113 325 L240 325" class="wire fail"/><polygon points="250,325 240,330 240,320" class="head fail"/><text x="120" y="267" class="tiny">closed</text>
+          <text x="34" y="368" class="tiny">assumption: 20/s × 0.2 s = 4 mean queued; hard cap 40 + actual deadlines</text>
+          <rect x="735" y="130" width="185" height="70" rx="12" class="box"/><text x="827.5" y="162" text-anchor="middle" class="label">RETIRING</text><text x="827.5" y="181" text-anchor="middle" class="sub">cancel / complete</text>
+          <path d="M645 156 L725 156" class="wire async"/><polygon points="735,156 725,161 725,151" class="head async"/><text x="690" y="145" text-anchor="middle" class="tiny">finish</text>
+          <path d="M645 181 L725 181" class="wire fail"/><polygon points="735,181 725,186 725,176" class="head fail"/><text x="690" y="221" text-anchor="middle" class="tiny">cancel</text>
+          <g class="is-new">
+            <rect x="735" y="295" width="185" height="60" rx="12" class="box ok"/><text x="827.5" y="322" text-anchor="middle" class="label">RELEASED</text><text x="827.5" y="341" text-anchor="middle" class="sub">physical work ended</text>
+            <path d="M825 200 L825 285" class="wire reply"/><polygon points="825,295 820,285 830,285" class="head reply"/><text x="842" y="254" class="tiny">GPU fence</text>
+            <text x="450" y="218" class="tiny">Lost device → quarantine</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">加物理完成确认，再唯一 release。机器失联时冻结它的设备信用，直到进程/设备隔离或重置；租约到期只撤销提交权，不证明旧 GPU 已停止。</span><span class="lang-en">Add completion then unique release. Quarantine unreachable devices until process/device fencing or reset; lease expiry revokes authority, not physical execution.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d4s6t d4s6d">
+          <title id="d4s6t">Only undispatched holds may expire without a GPU acknowledgment</title>
+          <desc id="d4s6d">HELD transitions to EXPIRED only while its dispatch state remains undispatched, competing atomically with dispatch. The full graph separates queue rejection, unconsumed holds, accepted work, retirement and physical release.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="18" y="24" width="924" height="360" rx="18" class="boundary"/><text x="34" y="46" class="tiny">GPU ADMISSION · a permit is not a rate-limit counter; arrows are state transitions</text>
+          <rect x="30" y="130" width="145" height="70" rx="12" class="box"/><text x="102.5" y="162" text-anchor="middle" class="label">WAITING</text><text x="102.5" y="181" text-anchor="middle" class="sub">bounded queue</text>
+          <rect x="250" y="130" width="145" height="70" rx="12" class="box"/><text x="322.5" y="162" text-anchor="middle" class="label">HELD</text><text x="322.5" y="181" text-anchor="middle" class="sub">k9 + epoch + KV</text>
+          <path d="M175 156 L240 156" class="wire"/><polygon points="250,156 240,161 240,151" class="head"/><text x="212" y="145" text-anchor="middle" class="tiny">reserve</text>
+          <text x="34" y="82" class="tiny">Atomic hold: request key + tenant + replica + sequence/KV credit + worker epoch</text>
+          <rect x="490" y="130" width="155" height="70" rx="12" class="box"/><text x="567.5" y="162" text-anchor="middle" class="label">RUNNING</text><text x="567.5" y="181" text-anchor="middle" class="sub">worker accepted</text>
+          <path d="M395 156 L480 156" class="wire"/><polygon points="490,156 480,161 480,151" class="head"/><text x="442" y="145" text-anchor="middle" class="tiny">consume k9</text>
+          <text x="34" y="107" class="tiny">HELD → DISPATCHING → RUNNING; duplicate RPC never reauthorizes launch</text>
+          <rect x="250" y="295" width="145" height="60" rx="12" class="box bad"/><text x="322.5" y="322" text-anchor="middle" class="label">REJECTED</text><text x="322.5" y="341" text-anchor="middle" class="sub">deadline / quota</text>
+          <path d="M105 200 L105 317 Q105 325 113 325 L240 325" class="wire fail"/><polygon points="250,325 240,330 240,320" class="head fail"/><text x="120" y="267" class="tiny">closed</text>
+          <text x="34" y="368" class="tiny">assumption: 20/s × 0.2 s = 4 mean queued; hard cap 40 + actual deadlines</text>
+          <rect x="735" y="130" width="185" height="70" rx="12" class="box"/><text x="827.5" y="162" text-anchor="middle" class="label">RETIRING</text><text x="827.5" y="181" text-anchor="middle" class="sub">cancel / complete</text>
+          <path d="M645 156 L725 156" class="wire async"/><polygon points="735,156 725,161 725,151" class="head async"/><text x="690" y="145" text-anchor="middle" class="tiny">finish</text>
+          <path d="M645 181 L725 181" class="wire fail"/><polygon points="735,181 725,186 725,176" class="head fail"/><text x="690" y="221" text-anchor="middle" class="tiny">cancel</text>
+          <rect x="735" y="295" width="185" height="60" rx="12" class="box ok"/><text x="827.5" y="322" text-anchor="middle" class="label">RELEASED</text><text x="827.5" y="341" text-anchor="middle" class="sub">physical work ended</text>
+          <path d="M825 200 L825 285" class="wire reply"/><polygon points="825,295 820,285 830,285" class="head reply"/><text x="842" y="254" class="tiny">GPU fence</text>
+          <text x="450" y="218" class="tiny">Lost device → quarantine</text>
+          <g class="is-new">
+            <rect x="490" y="295" width="155" height="60" rx="12" class="box bad"/><text x="567.5" y="322" text-anchor="middle" class="label">EXPIRED</text><text x="567.5" y="341" text-anchor="middle" class="sub">never dispatched</text>
+            <path d="M325 200 L325 241 Q325 249 333 249 L557 249 Q565 249 565 257 L565 285" class="wire fail"/><polygon points="565,295 560,285 570,285" class="head fail"/><text x="445" y="241" text-anchor="middle" class="tiny">expire only pre-dispatch</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">最后加未派发 hold 的过期边，与 dispatch CAS 竞争。一旦 dispatch 先赢或处于未知，TTL 不能走这条边；完整图把速率限流、排队与物理占用分开。</span><span class="lang-en">Add undispatched expiry racing dispatch atomically. A winning or unknown dispatch cannot use TTL release. The graph separates rate limits, queues and physical occupancy.</span></figcaption>
+      </div>
+    </figure><h3><span class="lang-zh">预占：两类额度与唯一请求同事务</span><span class="lang-en">Reserve both budgets with one request identity</span></h3><div class="bilingual"><div class="lang-zh"><p>以下摘自可运行Python/SQLite文件库，<code>write_tx</code>执行BEGIN IMMEDIATE与COMMIT/ROLLBACK，由数据库串行化不同连接/进程的写入。租户与replica的sequence/KV条件更新、唯一(tenant,rid)在同一事务；第二步失败会回滚第一步。相同key更改正文/bundle/profile/信用报冲突，终态重放不重新执行。<a href="#ref-11">[11]</a></p></div><div class="lang-en"><p>This runnable Python/SQLite file-database excerpt uses BEGIN IMMEDIATE and COMMIT/ROLLBACK. SQLite serializes writers across connections/processes. Tenant/replica sequence and KV conditional updates plus unique (tenant,rid) share a transaction; second-step failure rolls back the first. Changed body/bundle/profile/credit conflicts, and a terminal replay never reopens work. <a href="#ref-11">[11]</a></p></div></div><pre data-language="Python · SQLite" data-kind="runnable" data-source="ledger.py#reserve"><code>def take(db, table, identity, kv):
+    # table is an internal constant: tenant or replica, never client SQL.
+    sql = f&#x27;&#x27;&#x27;UPDATE {table} SET used_slots=used_slots+1, used_kv=used_kv+?
+              WHERE id=? AND used_slots+1&lt;=slots AND used_kv+?&lt;=kv&#x27;&#x27;&#x27;
+    if db.execute(sql, (kv, identity, kv)).rowcount != 1:
+        raise Refused(table + &#x27; capacity&#x27;)
+
+
+def reserve(db, q, clock, fail_after_tenant=False):
+    fp = encoded([q[&#x27;body&#x27;], q[&#x27;bundle&#x27;], q[&#x27;profile&#x27;], q[&#x27;kv&#x27;]])
+    with write_tx(db):
+        now = clock()
+        old = db.execute(&#x27;SELECT * FROM permit WHERE tenant=? AND rid=?&#x27;,
+                         (q[&#x27;tenant&#x27;], q[&#x27;rid&#x27;])).fetchone()
+        if old:
+            if old[&#x27;fingerprint&#x27;] != fp:
+                raise Refused(&#x27;same key, different request&#x27;)
+            return dict(old) | {&#x27;created&#x27;: False}
+        r = one(db, &#x27;SELECT * FROM replica WHERE id=?&#x27;, (q[&#x27;replica&#x27;],))
+        t = one(db, &#x27;SELECT * FROM tenant WHERE id=?&#x27;, (q[&#x27;tenant&#x27;],))
+        s = one(db, &#x27;SELECT * FROM snapshot WHERE rev=?&#x27;, (q[&#x27;rev&#x27;],))
+        rev = one(db, &#x27;SELECT rev FROM control WHERE id=1&#x27;)[&#x27;rev&#x27;]
+        endpoints = json.loads(s[&#x27;payload&#x27;])[&#x27;endpoints&#x27;]
+        exact = [r[&#x27;id&#x27;], r[&#x27;epoch&#x27;], r[&#x27;bundle&#x27;], r[&#x27;profile&#x27;]]
+        if (q[&#x27;kv&#x27;] &lt;= 0 or q[&#x27;rev&#x27;] != rev or now &gt;= s[&#x27;expires&#x27;]
+            or exact not in endpoints or not r[&#x27;ready&#x27;] or r[&#x27;draining&#x27;]
+            or (r[&#x27;bundle&#x27;], r[&#x27;epoch&#x27;], r[&#x27;profile&#x27;], r[&#x27;tier&#x27;]) !=
+               (q[&#x27;bundle&#x27;], q[&#x27;epoch&#x27;], q[&#x27;profile&#x27;], t[&#x27;tier&#x27;])):
+            raise Refused(&#x27;ineligible or stale&#x27;)
+        deadline = min(q[&#x27;deadline&#x27;], s[&#x27;expires&#x27;])
+        if now &gt;= deadline:
+            raise Refused(&#x27;deadline&#x27;)
+        take(db, &#x27;tenant&#x27;, q[&#x27;tenant&#x27;], q[&#x27;kv&#x27;])
+        if fail_after_tenant:
+            raise RuntimeError(&#x27;injected before replica charge&#x27;)
+        take(db, &#x27;replica&#x27;, q[&#x27;replica&#x27;], q[&#x27;kv&#x27;])
+        values = (q[&#x27;tenant&#x27;], q[&#x27;rid&#x27;], fp, q[&#x27;bundle&#x27;], q[&#x27;replica&#x27;],
+                  q[&#x27;epoch&#x27;], q[&#x27;profile&#x27;], q[&#x27;kv&#x27;], q[&#x27;rev&#x27;], deadline)
+        db.execute(&quot;INSERT INTO permit VALUES(?,?,?,?,?,?,?,?,?,?,&#x27;HELD&#x27;)&quot;, values)
+        return dict(permit(db, q[&#x27;tenant&#x27;], q[&#x27;rid&#x27;])) | {&#x27;created&#x27;: True}</code></pre><h3><span class="lang-zh">派发：查到状态不等于重新获得执行权</span><span class="lang-en">Dispatch: observing state does not regrant execution</span></h3><pre data-language="Python · SQLite" data-kind="runnable" data-source="ledger.py#launch"><code>def begin_dispatch(db, tenant, rid, clock):
+    with write_tx(db):
+        now = clock()
+        p = permit(db, tenant, rid)
+        if p[&#x27;state&#x27;] != &#x27;HELD&#x27;:
+            return False
+        r = one(db, &#x27;SELECT * FROM replica WHERE id=?&#x27;, (p[&#x27;replica&#x27;],))
+        rev = one(db, &#x27;SELECT rev FROM control WHERE id=1&#x27;)[&#x27;rev&#x27;]
+        if (now &gt;= p[&#x27;deadline&#x27;] or p[&#x27;rev&#x27;] != rev or not r[&#x27;ready&#x27;]
+            or r[&#x27;draining&#x27;] or r[&#x27;epoch&#x27;] != p[&#x27;epoch&#x27;]):
+            close_credit(db, p, &#x27;EXPIRED&#x27;)
+            return False
+        db.execute(&quot;UPDATE permit SET state=&#x27;DISPATCHING&#x27; WHERE tenant=? AND rid=?&quot;,
+                   (tenant, rid))
+        return True  # Only this successful caller may send once.
+
+
+def consume(db, tenant, rid, worker, epoch, bundle, clock):
+    with write_tx(db):
+        now = clock()
+        p = permit(db, tenant, rid)
+        r = one(db, &#x27;SELECT * FROM replica WHERE id=?&#x27;, (worker,))
+        if (p[&#x27;state&#x27;] != &#x27;DISPATCHING&#x27; or now &gt;= p[&#x27;deadline&#x27;]
+            or (worker, epoch, bundle) != (p[&#x27;replica&#x27;], p[&#x27;epoch&#x27;], p[&#x27;bundle&#x27;])
+            or r[&#x27;epoch&#x27;] != epoch or r[&#x27;bundle&#x27;] != bundle or not r[&#x27;ready&#x27;]):
+            return False
+        db.execute(&quot;UPDATE permit SET state=&#x27;RUNNING&#x27; WHERE tenant=? AND rid=?&quot;,
+                   (tenant, rid))
+        return True  # Only this successful caller may enqueue GPU work once.</code></pre><div class="bilingual"><div class="lang-zh"><p><code>clock()</code>在获得写锁后取权威时间；锁等待跨过deadline也会拒绝。只有<code>begin_dispatch=True</code>的原调用者能发一次；只有<code>consume=True</code>的原调用者能入GPU队列一次。提交后丢ACK、或提交后进程崩溃，不可由查询到DISPATCHING/RUNNING的新调用者补发/补启动。本例保守丢进度，留信用并核查/隔离，不承诺恰好一次完成。重启先隔离旧进程/设备，再给新epoch；仅有进程内Set不足以恢复。</p><p>RUNNING/派发UNKNOWN取消后进RETIRING。只有可信适配器证明全部相关kernel、copy与stream依赖已结束，或旧设备/进程已隔离重置，才把终态和两笔信用释放同事务提交；重复/旧epoch回执不重复释放。CUDA event只确认它捕获的工作，不是任意event完成就全卡安全。<a href="#ref-12">[12]</a>本例测试注入可信完成通知，没运行CUDA。HELD才可与dispatch原子竞争过期；TTL不释放DISPATCHING/UNKNOWN。60 s触发终止流程，也不提前退信用。</p><p>队列另外有40条硬限与200 ms准入期限；20×0.2=4只是稳态平均排队，四不是上限。公平排队按预计工作量，tenant16并发也不能覆盖任意长上下文。Ledger拒绝/不可达时不发送；与Ch32独立token预留的拒绝/结算，须通过持久幂等终态/outbox恢复，不能把两个库称为一笔事务。</p></div><div class="lang-en"><p>Sample the authority clock after acquiring the writer lock, so a lock wait crossing deadline rejects. Only the original begin_dispatch=True caller may send once; only the original consume=True caller may enqueue once. A lost commit ACK or post-commit crash cannot authorize a later observer to resend/relaunch. This model sacrifices progress, retaining credit for reconciliation/fencing; it does not promise exactly-once completion. Fence old processes/devices before a new epoch; an in-memory Set is insufficient recovery.</p><p>Canceling RUNNING/unknown dispatch enters RETIRING. A trusted adapter must prove all relevant kernels/copies/stream dependencies ended, or fence/reset the old device/process, before terminal state and both refunds commit together. Repeated/old-epoch notices cannot refund twice. CUDA events prove captured work, not all-device safety from an arbitrary event. <a href="#ref-12">[12]</a>The tests inject completion notices and do not run CUDA. Only HELD may expire against dispatch atomically; TTL never refunds DISPATCHING/UNKNOWN. Sixty seconds starts termination, not early reuse.</p><p>The queue separately caps forty with 200-ms admission deadlines. 20×0.2=4 is mean queue occupancy, not a maximum. Fair scheduling estimates work; sixteen concurrent requests do not cover arbitrary contexts. Never send after refusal/unavailable Ledger. Releasing independent Ch32 token holds needs durable idempotent terminal/outbox recovery; two databases are not one transaction.</p></div></div></section>
+<section><h2><span class="lang-zh">租户与KV亲和：隔离条件先于命中</span><span class="lang-en">Tenants and KV affinity: isolation before hits</span></h2><div class="bilingual"><div class="lang-zh"><p><strong>权限、bundle、隔离等级、profile与期限先过滤；命中只给合格候选加分。</strong>私有池满了拒绝或用同等级私有备用，不能静默落共享。热点worker满了，可在同bundle的合格worker重算prefill；一条已输出的流仍固定原worker/attempt。</p></div><div class="lang-en"><p><strong>Filter authority, bundle, isolation tier, profile and deadline before scoring cache hits.</strong>A full private tier rejects or uses equivalent private backup. A full preferred worker can yield to an eligible same-bundle worker and recompute prefill; an active stream remains pinned to its worker/attempt.</p></div></div><figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s1t d5s1d">
+          <title id="d5s1t">Tenant identity comes from a trusted boundary</title>
+          <desc id="d5s1d">Tenant A calls Inference Router and receives a response. Tenant identity is derived from authenticated context passed by Gateway, not caller-supplied cache keys. Router filters model, tenant, isolation class and readiness before scoring.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <g class="is-new">
+            <rect x="240" y="24" width="702" height="360" rx="18" class="boundary"/><text x="256" y="46" class="tiny">TENANT ISOLATION · fairness, cache namespaces and device isolation differ</text>
+            <rect x="30" y="80" width="130" height="60" rx="12" class="box"/><text x="95" y="107" text-anchor="middle" class="label">Tenant A</text><text x="95" y="126" text-anchor="middle" class="sub">shared tier</text>
+            <rect x="280" y="170" width="150" height="90" rx="12" class="box"/><text x="355" y="212" text-anchor="middle" class="label">Inference Router</text><text x="355" y="231" text-anchor="middle" class="sub">filter → score</text>
+            <path d="M160 103 L212 103 Q220 103 220 111 L220 185 Q220 193 228 193 L270 193" class="wire"/><polygon points="280,193 270,198 270,188" class="head"/>
+            <path d="M280 215 L203 215 Q195 215 195 207 L195 135 Q195 127 187 127 L170 127" class="wire reply"/><polygon points="160,127 170,122 170,132" class="head reply"/>
+            <text x="30" y="68" class="tiny">Trusted tenant</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">先固定可信租户身份。模型、版本、隔离等级、地域与健康都先过滤；prefix 命中只能给合格候选加分，不能把越权 endpoint 拉回来。</span><span class="lang-en">Pin trusted identity. Filter model/revision/isolation/region/health first; prefix hits score eligible candidates and never restore forbidden endpoints.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s2t d5s2d">
+          <title id="d5s2t">Affinity is a preference under a real capacity limit</title>
+          <desc id="d5s2d">Inference Router selects the shared Model Worker for Tenant A and receives its stream back. Selection prefers reusable prefixes only among capacity-admissible endpoints; stale metrics remain hints and workers enforce exact permit limits.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="240" y="24" width="702" height="360" rx="18" class="boundary"/><text x="256" y="46" class="tiny">TENANT ISOLATION · fairness, cache namespaces and device isolation differ</text>
+          <rect x="30" y="80" width="130" height="60" rx="12" class="box"/><text x="95" y="107" text-anchor="middle" class="label">Tenant A</text><text x="95" y="126" text-anchor="middle" class="sub">shared tier</text>
+          <rect x="280" y="170" width="150" height="90" rx="12" class="box"/><text x="355" y="212" text-anchor="middle" class="label">Inference Router</text><text x="355" y="231" text-anchor="middle" class="sub">filter → score</text>
+          <path d="M160 103 L212 103 Q220 103 220 111 L220 185 Q220 193 228 193 L270 193" class="wire"/><polygon points="280,193 270,198 270,188" class="head"/>
+          <path d="M280 215 L203 215 Q195 215 195 207 L195 135 Q195 127 187 127 L170 127" class="wire reply"/><polygon points="160,127 170,122 170,132" class="head reply"/>
+          <text x="30" y="68" class="tiny">Trusted tenant</text>
+          <g class="is-new">
+            <rect x="650" y="85" width="225" height="70" rx="12" class="box"/><text x="762.5" y="117" text-anchor="middle" class="label">Model Worker</text><text x="762.5" y="136" text-anchor="middle" class="sub">shared · tenant salt</text>
+            <path d="M430 193 L492 193 Q500 193 500 185 L500 119 Q500 111 508 111 L640 111" class="wire"/><polygon points="650,111 640,116 640,106" class="head"/><text x="568" y="99" text-anchor="middle" class="tiny">A: eligible</text>
+            <path d="M650 135 L548 135 Q540 135 540 143 L540 207 Q540 215 532 215 L440 215" class="wire reply"/><polygon points="430,215 440,210 440,220" class="head reply"/>
+            <text x="450" y="68" class="tiny">Prefix affinity loses to full capacity or wrong version</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">加共享 worker。先满足准入与排队预算，再考虑 KV 亲和；热点命中机满了就换同版本合格机，重算 prefill，不能为了命中无限排队。</span><span class="lang-en">Add a shared worker. Admission/wait budgets precede KV affinity; a full preferred endpoint yields to another eligible same-version endpoint and recomputes prefill.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s3t d5s3d">
+          <title id="d5s3t">KV reuse is scoped to tenant and exact serving content</title>
+          <desc id="d5s3d">Model Worker looks up Prefix Cache and receives cached KV. Cache identity includes trusted tenant namespace, weights, tokenizer, adapter and exact token prefix; a new serving tuple cannot reuse incompatible blocks. This is worker-local KV, not semantic answer caching.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="240" y="24" width="702" height="360" rx="18" class="boundary"/><text x="256" y="46" class="tiny">TENANT ISOLATION · fairness, cache namespaces and device isolation differ</text>
+          <rect x="30" y="80" width="130" height="60" rx="12" class="box"/><text x="95" y="107" text-anchor="middle" class="label">Tenant A</text><text x="95" y="126" text-anchor="middle" class="sub">shared tier</text>
+          <rect x="280" y="170" width="150" height="90" rx="12" class="box"/><text x="355" y="212" text-anchor="middle" class="label">Inference Router</text><text x="355" y="231" text-anchor="middle" class="sub">filter → score</text>
+          <path d="M160 103 L212 103 Q220 103 220 111 L220 185 Q220 193 228 193 L270 193" class="wire"/><polygon points="280,193 270,198 270,188" class="head"/>
+          <path d="M280 215 L203 215 Q195 215 195 207 L195 135 Q195 127 187 127 L170 127" class="wire reply"/><polygon points="160,127 170,122 170,132" class="head reply"/>
+          <text x="30" y="68" class="tiny">Trusted tenant</text>
+          <rect x="650" y="85" width="225" height="70" rx="12" class="box"/><text x="762.5" y="117" text-anchor="middle" class="label">Model Worker</text><text x="762.5" y="136" text-anchor="middle" class="sub">shared · tenant salt</text>
+          <path d="M430 193 L492 193 Q500 193 500 185 L500 119 Q500 111 508 111 L640 111" class="wire"/><polygon points="650,111 640,116 640,106" class="head"/><text x="568" y="99" text-anchor="middle" class="tiny">A: eligible</text>
+          <path d="M650 135 L548 135 Q540 135 540 143 L540 207 Q540 215 532 215 L440 215" class="wire reply"/><polygon points="430,215 440,210 440,220" class="head reply"/>
+          <text x="450" y="68" class="tiny">Prefix affinity loses to full capacity or wrong version</text>
+          <g class="is-new">
+            <rect x="657" y="192" width="225" height="50" rx="8" class="cache"/><rect x="650" y="185" width="225" height="50" rx="8" class="cache"/><text x="762.5" y="207" text-anchor="middle" class="label">Prefix Cache</text><text x="762.5" y="226" text-anchor="middle" class="sub">tenant + exact tuple</text>
+            <path d="M700 155 L700 175" class="wire"/><polygon points="700,185 695,175 705,175" class="head"/><text x="677" y="176" text-anchor="end" class="tiny">KV</text>
+            <path d="M825 185 L825 165" class="wire reply"/><polygon points="825,155 830,165 820,165" class="head reply"/>
+            <text x="455" y="261" class="tiny">Trusted salt + exact KV namespace</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">补 worker 内 KV 查回程。namespace 含可信 tenant 与确切内容；换权重/adapter/tokenizer 不能沿用不兼容块。salt 由平台注入，不能让用户猜别人的 salt 来跨边界复用。</span><span class="lang-en">Add worker-local KV lookup/return. Namespace by trusted tenant/exact content; weight/adapter/tokenizer changes cannot reuse incompatible blocks. Infrastructure injects salt.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s4t d5s4d">
+          <title id="d5s4t">Sensitive tenants receive an explicit private resource boundary</title>
+          <desc id="d5s4d">Tenant B calls Inference Router, which routes to a private Model Worker and receives its stream, then returns to Tenant B. Private tier uses separately allocated device/process resources and never the shared Prefix Cache shown above.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="240" y="24" width="702" height="360" rx="18" class="boundary"/><text x="256" y="46" class="tiny">TENANT ISOLATION · fairness, cache namespaces and device isolation differ</text>
+          <rect x="30" y="80" width="130" height="60" rx="12" class="box"/><text x="95" y="107" text-anchor="middle" class="label">Tenant A</text><text x="95" y="126" text-anchor="middle" class="sub">shared tier</text>
+          <rect x="280" y="170" width="150" height="90" rx="12" class="box"/><text x="355" y="212" text-anchor="middle" class="label">Inference Router</text><text x="355" y="231" text-anchor="middle" class="sub">filter → score</text>
+          <path d="M160 103 L212 103 Q220 103 220 111 L220 185 Q220 193 228 193 L270 193" class="wire"/><polygon points="280,193 270,198 270,188" class="head"/>
+          <path d="M280 215 L203 215 Q195 215 195 207 L195 135 Q195 127 187 127 L170 127" class="wire reply"/><polygon points="160,127 170,122 170,132" class="head reply"/>
+          <text x="30" y="68" class="tiny">Trusted tenant</text>
+          <rect x="650" y="85" width="225" height="70" rx="12" class="box"/><text x="762.5" y="117" text-anchor="middle" class="label">Model Worker</text><text x="762.5" y="136" text-anchor="middle" class="sub">shared · tenant salt</text>
+          <path d="M430 193 L492 193 Q500 193 500 185 L500 119 Q500 111 508 111 L640 111" class="wire"/><polygon points="650,111 640,116 640,106" class="head"/><text x="568" y="99" text-anchor="middle" class="tiny">A: eligible</text>
+          <path d="M650 135 L548 135 Q540 135 540 143 L540 207 Q540 215 532 215 L440 215" class="wire reply"/><polygon points="430,215 440,210 440,220" class="head reply"/>
+          <text x="450" y="68" class="tiny">Prefix affinity loses to full capacity or wrong version</text>
+          <rect x="657" y="192" width="225" height="50" rx="8" class="cache"/><rect x="650" y="185" width="225" height="50" rx="8" class="cache"/><text x="762.5" y="207" text-anchor="middle" class="label">Prefix Cache</text><text x="762.5" y="226" text-anchor="middle" class="sub">tenant + exact tuple</text>
+          <path d="M700 155 L700 175" class="wire"/><polygon points="700,185 695,175 705,175" class="head"/><text x="677" y="176" text-anchor="end" class="tiny">KV</text>
+          <path d="M825 185 L825 165" class="wire reply"/><polygon points="825,155 830,165 820,165" class="head reply"/>
+          <text x="455" y="261" class="tiny">Trusted salt + exact KV namespace</text>
+          <g class="is-new">
+            <rect x="30" y="280" width="130" height="60" rx="12" class="box"/><text x="95" y="307" text-anchor="middle" class="label">Tenant B</text><text x="95" y="326" text-anchor="middle" class="sub">private tier</text>
+            <path d="M160 302 L232 302 Q240 302 240 294 L240 238 Q240 230 248 230 L270 230" class="wire"/><polygon points="280,230 270,235 270,225" class="head"/>
+            <path d="M280 239 L233 239 Q225 239 225 247 L225 318 Q225 326 217 326 L170 326" class="wire reply"/><polygon points="160,326 170,321 170,331" class="head reply"/>
+            <rect x="650" y="280" width="225" height="70" rx="12" class="box"/><text x="762.5" y="312" text-anchor="middle" class="label">Model Worker</text><text x="762.5" y="331" text-anchor="middle" class="sub">Tenant B only</text>
+            <path d="M380 260 L380 297 Q380 305 388 305 L640 305" class="wire"/><polygon points="650,305 640,310 640,300" class="head"/><text x="520" y="294" text-anchor="middle" class="tiny">B: private</text>
+            <path d="M650 333 L333 333 Q325 333 325 325 L325 270" class="wire reply"/><polygon points="325,260 330,270 320,270" class="head reply"/>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">加敏感租户私有池，分配独立进程与明确设备边界。独立 replica 若仍 time-slice 同一张卡，不自动有显存/故障隔离；MIG 的保证也不延伸到宿主机全部共享资源。</span><span class="lang-en">Add a private tier with distinct processes and explicit devices. Separate replicas time-slicing one GPU do not gain memory/fault isolation; MIG does not isolate every host resource.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s5t d5s5d">
+          <title id="d5s5t">Isolation is retained under overload</title>
+          <desc id="d5s5d">The alternative failure lane returns Inference Router to Tenant B when its private tier is full. Shared resources cannot become a silent fallback. Tenant A stays within its own capacity/namespace; token quotas and slot fairness are separate contracts.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="240" y="24" width="702" height="360" rx="18" class="boundary"/><text x="256" y="46" class="tiny">TENANT ISOLATION · fairness, cache namespaces and device isolation differ</text>
+          <rect x="30" y="80" width="130" height="60" rx="12" class="box"/><text x="95" y="107" text-anchor="middle" class="label">Tenant A</text><text x="95" y="126" text-anchor="middle" class="sub">shared tier</text>
+          <rect x="280" y="170" width="150" height="90" rx="12" class="box"/><text x="355" y="212" text-anchor="middle" class="label">Inference Router</text><text x="355" y="231" text-anchor="middle" class="sub">filter → score</text>
+          <path d="M160 103 L212 103 Q220 103 220 111 L220 185 Q220 193 228 193 L270 193" class="wire"/><polygon points="280,193 270,198 270,188" class="head"/>
+          <path d="M280 215 L203 215 Q195 215 195 207 L195 135 Q195 127 187 127 L170 127" class="wire reply"/><polygon points="160,127 170,122 170,132" class="head reply"/>
+          <text x="30" y="68" class="tiny">Trusted tenant</text>
+          <rect x="650" y="85" width="225" height="70" rx="12" class="box"/><text x="762.5" y="117" text-anchor="middle" class="label">Model Worker</text><text x="762.5" y="136" text-anchor="middle" class="sub">shared · tenant salt</text>
+          <path d="M430 193 L492 193 Q500 193 500 185 L500 119 Q500 111 508 111 L640 111" class="wire"/><polygon points="650,111 640,116 640,106" class="head"/><text x="568" y="99" text-anchor="middle" class="tiny">A: eligible</text>
+          <path d="M650 135 L548 135 Q540 135 540 143 L540 207 Q540 215 532 215 L440 215" class="wire reply"/><polygon points="430,215 440,210 440,220" class="head reply"/>
+          <text x="450" y="68" class="tiny">Prefix affinity loses to full capacity or wrong version</text>
+          <rect x="657" y="192" width="225" height="50" rx="8" class="cache"/><rect x="650" y="185" width="225" height="50" rx="8" class="cache"/><text x="762.5" y="207" text-anchor="middle" class="label">Prefix Cache</text><text x="762.5" y="226" text-anchor="middle" class="sub">tenant + exact tuple</text>
+          <path d="M700 155 L700 175" class="wire"/><polygon points="700,185 695,175 705,175" class="head"/><text x="677" y="176" text-anchor="end" class="tiny">KV</text>
+          <path d="M825 185 L825 165" class="wire reply"/><polygon points="825,155 830,165 820,165" class="head reply"/>
+          <text x="455" y="261" class="tiny">Trusted salt + exact KV namespace</text>
+          <rect x="30" y="280" width="130" height="60" rx="12" class="box"/><text x="95" y="307" text-anchor="middle" class="label">Tenant B</text><text x="95" y="326" text-anchor="middle" class="sub">private tier</text>
+          <path d="M160 302 L232 302 Q240 302 240 294 L240 238 Q240 230 248 230 L270 230" class="wire"/><polygon points="280,230 270,235 270,225" class="head"/>
+          <path d="M280 239 L233 239 Q225 239 225 247 L225 318 Q225 326 217 326 L170 326" class="wire reply muted"/><polygon points="160,326 170,321 170,331" class="head reply muted"/>
+          <rect x="650" y="280" width="225" height="70" rx="12" class="box"/><text x="762.5" y="312" text-anchor="middle" class="label">Model Worker</text><text x="762.5" y="331" text-anchor="middle" class="sub">Tenant B only</text>
+          <path d="M380 260 L380 297 Q380 305 388 305 L640 305" class="wire"/><polygon points="650,305 640,310 640,300" class="head"/><text x="520" y="294" text-anchor="middle" class="tiny">B: private</text>
+          <path d="M650 333 L333 333 Q325 333 325 325 L325 270" class="wire reply"/><polygon points="325,260 330,270 320,270" class="head reply"/>
+          <g class="is-new">
+            <path d="M280 239 L233 239 Q225 239 225 247 L225 318 Q225 326 217 326 L170 326" class="wire fail"/><polygon points="160,326 170,321 170,331" class="head fail"/><text x="455" y="365" class="tiny">Private full → reject; no shared fallback</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">完整图加过载拒绝。私有池满了按契约拒绝 B，不能悄悄落共享。token 配额、并发上限与公平排队分别保护花费、占用和等待；salt 只隔复用边界，不能替它们。</span><span class="lang-en">Complete with overload rejection. A full private tier rejects B rather than silently downgrading. Token quota, concurrency and fair queuing protect cost, occupancy and wait separately.</span></figcaption>
+      </div>
+    </figure><div class="bilingual"><div class="lang-zh"><p>Worker本地KV复用以可信tenant、精确计算内容/token前缀分namespace；新权重、tokenizer、adapter/位置配置不能误用旧块。旧namespace随在途drain，不全局强删仍在引用的页。它不是Ch32的整份答案缓存。vLLM安全页将共享前缀TTFT差异视为timing风险，cache_salt仅允许同salt复用；由平台注入不可猜秘密，不能信用户自报salt。共享同进程不构成租户隔离。<a href="#ref-8">[8]</a></p><p>NVIDIA GPU Operator 24.9.1说明time-slicing共享卡不提供其“replica”之间的显存/故障隔离；MIG有硬件层相应隔离，但不隔离宿主机、网络等所有共享资源。<a href="#ref-7">[7]</a>本章敏感租户默认独立进程和明确设备边界。命名空间、硬件边界、公平队列分别保护隐私、资源故障与等待。16×4,000=64,000和16×32,000=512,000是总token工作量示意，不是KV字节数，也不保证耗时线性八倍。</p></div><div class="lang-en"><p>Worker-local KV namespaces include trusted tenant and exact computational identity/token prefix. Weight/tokenizer/adapter/position changes cannot reuse incompatible blocks. Drain referenced old namespaces rather than deleting live pages. This differs from Ch32 answer caching. vLLM documents prefix TTFT timing risk and same-salt reuse; inject an unpredictable secret rather than trusting caller salt. A shared server process is not tenant isolation. <a href="#ref-8">[8]</a></p><p>NVIDIA GPU Operator 24.9.1 documents no memory/fault isolation between time-sliced GPU “replicas”; MIG provides corresponding hardware isolation but not all shared host/network isolation. <a href="#ref-7">[7]</a>Sensitive tenants here use dedicated processes and explicit devices. Namespaces, hardware boundaries and fair queues protect different things. 64,000 versus 512,000 total tokens illustrates work, not KV bytes or a guaranteed eightfold runtime.</p></div></div></section>
+<section><h2><span class="lang-zh">发布与回滚：切新单，保留旧契约与热容量</span><span class="lang-en">Rollout and rollback: new traffic, pinned contracts and warm capacity</span></h2><div class="bilingual"><div class="lang-zh"><p><strong>先补READY容量，再提高权重。</strong>20×10%=2 req/s；1个C=4/s的canary只是起步。全量v2、旧v1保留完整热回退，加2个小模型：9+9+2=20卡；起步9+1+2=12卡。v2至少5分钟且600个可比样本才考虑ramp，缺数据冻结；这不是统计置信证明。10%是请求比例，长度/输出不同须重新测资源分布。</p></div><div class="lang-en"><p><strong>Prepare READY capacity before raising traffic weight.</strong>20×10%=2 req/s; one assumed C=4/s canary is only a start. Full v2 plus full warm v1 rollback and two small-model replicas need 9+9+2=20 GPUs, versus 9+1+2=12 initially. Consider ramp after ≥5 min and ≥600 comparable samples; missing evidence freezes it. This is not a confidence proof. Request share is not equal work share under changed lengths/output.</p></div></div><figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d6s1t d6s1d">
+          <title id="d6s1t">Loading and ready are distinct rollout states</title>
+          <desc id="d6s1d">LOADING transitions to READY only after exact bundle verification and representative warmup. Teaching cold load takes 120 seconds. Arrows are durable rollout state transitions rather than client request paths.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <g class="is-new">
+            <rect x="18" y="24" width="924" height="360" rx="18" class="boundary"/><text x="34" y="46" class="tiny">MODEL ROLLOUT · monotonic routing revision; immutable content may roll back</text>
+            <rect x="30" y="130" width="145" height="70" rx="12" class="box"/><text x="102.5" y="162" text-anchor="middle" class="label">LOADING</text><text x="102.5" y="181" text-anchor="middle" class="sub">desired g7</text>
+            <rect x="250" y="130" width="145" height="70" rx="12" class="box"/><text x="322.5" y="162" text-anchor="middle" class="label">READY</text><text x="322.5" y="181" text-anchor="middle" class="sub">warm exact tuple</text>
+            <path d="M175 156 L240 156" class="wire"/><polygon points="250,156 240,161 240,151" class="head"/><text x="212" y="144" text-anchor="middle" class="tiny">verify</text>
+            <text x="34" y="82" class="tiny">Full serving tuple + readiness + capacity must all match</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">先画 LOADING→READY。校验和预热是状态转换条件；本章 120 s 冷加载假设提醒我们先建容量，不能先改流量再等模型起来。</span><span class="lang-en">Start LOADING→READY. Verification/warmup gate the state. The 120-s cold-load assumption requires capacity before traffic publication.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d6s2t d6s2d">
+          <title id="d6s2t">Publish a coherent weighted snapshot</title>
+          <desc id="d6s2d">READY transitions to CANARY by atomically publishing a new routing revision containing both serving bundles and their weights. Twenty req/s times ten percent is two req/s to v2; one teaching canary replica supports four req/s at the specified workload.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="18" y="24" width="924" height="360" rx="18" class="boundary"/><text x="34" y="46" class="tiny">MODEL ROLLOUT · monotonic routing revision; immutable content may roll back</text>
+          <rect x="30" y="130" width="145" height="70" rx="12" class="box"/><text x="102.5" y="162" text-anchor="middle" class="label">LOADING</text><text x="102.5" y="181" text-anchor="middle" class="sub">desired g7</text>
+          <rect x="250" y="130" width="145" height="70" rx="12" class="box"/><text x="322.5" y="162" text-anchor="middle" class="label">READY</text><text x="322.5" y="181" text-anchor="middle" class="sub">warm exact tuple</text>
+          <path d="M175 156 L240 156" class="wire"/><polygon points="250,156 240,161 240,151" class="head"/><text x="212" y="144" text-anchor="middle" class="tiny">verify</text>
+          <text x="34" y="82" class="tiny">Full serving tuple + readiness + capacity must all match</text>
+          <g class="is-new">
+            <rect x="490" y="130" width="155" height="70" rx="12" class="box"/><text x="567.5" y="162" text-anchor="middle" class="label">CANARY</text><text x="567.5" y="181" text-anchor="middle" class="sub">v2 · 10%</text>
+            <path d="M395 156 L480 156" class="wire"/><polygon points="490,156 480,161 480,151" class="head"/><text x="442" y="144" text-anchor="middle" class="tiny">publish</text>
+            <text x="34" y="107" class="tiny">20/s × 10% = 2/s to v2; 1 warm replica: assumed C=4/s</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">加 10% 灰度，单事务发布 revision 与完整目标。20×10%=2 req/s；一台 v2 的 C=4 req/s 假设有余量，但 10% 是请求比例，长输出不同仍要重估 GPU 工作量。</span><span class="lang-en">Add 10% canary in one coherent revision. 20×10%=2 req/s; one assumed C=4 req/s replica has room. Request share is not GPU work share when output lengths change.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d6s3t d6s3d">
+          <title id="d6s3t">A failed canary returns new requests to healthy v1</title>
+          <desc id="d6s3d">CANARY transitions to ROLLBACK on version-specific SLO/quality guard failure. ROLLBACK publishes a higher routing revision selecting the immutable v1 bundle and returns to its already-ready serving state only if v1 is healthy and has headroom. Existing streams remain pinned.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="18" y="24" width="924" height="360" rx="18" class="boundary"/><text x="34" y="46" class="tiny">MODEL ROLLOUT · monotonic routing revision; immutable content may roll back</text>
+          <rect x="30" y="130" width="145" height="70" rx="12" class="box"/><text x="102.5" y="162" text-anchor="middle" class="label">LOADING</text><text x="102.5" y="181" text-anchor="middle" class="sub">desired g7</text>
+          <rect x="250" y="130" width="145" height="70" rx="12" class="box"/><text x="322.5" y="162" text-anchor="middle" class="label">READY</text><text x="322.5" y="181" text-anchor="middle" class="sub">warm exact tuple</text>
+          <path d="M175 156 L240 156" class="wire"/><polygon points="250,156 240,161 240,151" class="head"/><text x="212" y="144" text-anchor="middle" class="tiny">verify</text>
+          <text x="34" y="82" class="tiny">Full serving tuple + readiness + capacity must all match</text>
+          <rect x="490" y="130" width="155" height="70" rx="12" class="box"/><text x="567.5" y="162" text-anchor="middle" class="label">CANARY</text><text x="567.5" y="181" text-anchor="middle" class="sub">v2 · 10%</text>
+          <path d="M395 156 L480 156" class="wire"/><polygon points="490,156 480,161 480,151" class="head"/><text x="442" y="144" text-anchor="middle" class="tiny">publish</text>
+          <text x="34" y="107" class="tiny">20/s × 10% = 2/s to v2; 1 warm replica: assumed C=4/s</text>
+          <g class="is-new">
+            <rect x="490" y="295" width="155" height="60" rx="12" class="box bad"/><text x="567.5" y="322" text-anchor="middle" class="label">ROLLBACK</text><text x="567.5" y="341" text-anchor="middle" class="sub">new revision → v1</text>
+            <path d="M565 200 L565 285" class="wire fail"/><polygon points="565,295 560,285 570,285" class="head fail"/><text x="582" y="251" class="tiny">SLO gate</text>
+            <path d="M490 325 L458 325 Q450 325 450 317 L450 257 Q450 249 442 249 L333 249 Q325 249 325 241 L325 210" class="wire fail"/><polygon points="325,200 330,210 320,210" class="head fail"/><text x="270" y="271" class="tiny">v1 healthy + capacity</text>
+            <text x="34" y="368" class="tiny">Canary failure 5% at 10% traffic → aggregate 0.5%; version metrics expose it</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">画失败回退。灰度 5% 错误乘 10% 流量在均值里只剩 0.5%，必须按版本看。回退发布更高 revision 选旧 bundle；已开始流固定原版本，不拼接另一模型的后半段。</span><span class="lang-en">Draw rollback. Canary error 5% at 10% traffic dilutes to 0.5% overall, so inspect per-version metrics. Publish a higher revision selecting v1; do not splice models into an existing stream.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d6s4t d6s4d">
+          <title id="d6s4t">Ramp only after new capacity grows</title>
+          <desc id="d6s4d">CANARY transitions through capacity- and observation-gated ramp to FULL v2. Nine new production replicas are ready before all twenty req/s move. Nine old replicas remain warm in the rollback window, requiring twenty teaching GPUs including two small-model replicas.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="18" y="24" width="924" height="360" rx="18" class="boundary"/><text x="34" y="46" class="tiny">MODEL ROLLOUT · monotonic routing revision; immutable content may roll back</text>
+          <rect x="30" y="130" width="145" height="70" rx="12" class="box"/><text x="102.5" y="162" text-anchor="middle" class="label">LOADING</text><text x="102.5" y="181" text-anchor="middle" class="sub">desired g7</text>
+          <rect x="250" y="130" width="145" height="70" rx="12" class="box"/><text x="322.5" y="162" text-anchor="middle" class="label">READY</text><text x="322.5" y="181" text-anchor="middle" class="sub">warm exact tuple</text>
+          <path d="M175 156 L240 156" class="wire"/><polygon points="250,156 240,161 240,151" class="head"/><text x="212" y="144" text-anchor="middle" class="tiny">verify</text>
+          <text x="34" y="82" class="tiny">Full serving tuple + readiness + capacity must all match</text>
+          <rect x="490" y="130" width="155" height="70" rx="12" class="box"/><text x="567.5" y="162" text-anchor="middle" class="label">CANARY</text><text x="567.5" y="181" text-anchor="middle" class="sub">v2 · 10%</text>
+          <path d="M395 156 L480 156" class="wire"/><polygon points="490,156 480,161 480,151" class="head"/><text x="442" y="144" text-anchor="middle" class="tiny">publish</text>
+          <text x="34" y="107" class="tiny">20/s × 10% = 2/s to v2; 1 warm replica: assumed C=4/s</text>
+          <rect x="490" y="295" width="155" height="60" rx="12" class="box bad"/><text x="567.5" y="322" text-anchor="middle" class="label">ROLLBACK</text><text x="567.5" y="341" text-anchor="middle" class="sub">new revision → v1</text>
+          <path d="M565 200 L565 285" class="wire fail"/><polygon points="565,295 560,285 570,285" class="head fail"/><text x="582" y="251" class="tiny">SLO gate</text>
+          <path d="M490 325 L458 325 Q450 325 450 317 L450 257 Q450 249 442 249 L333 249 Q325 249 325 241 L325 210" class="wire fail"/><polygon points="325,200 330,210 320,210" class="head fail"/><text x="270" y="271" class="tiny">v1 healthy + capacity</text>
+          <text x="34" y="368" class="tiny">Canary failure 5% at 10% traffic → aggregate 0.5%; version metrics expose it</text>
+          <g class="is-new">
+            <rect x="735" y="130" width="185" height="70" rx="12" class="box"/><text x="827.5" y="162" text-anchor="middle" class="label">FULL v2</text><text x="827.5" y="181" text-anchor="middle" class="sub">old v1 stays warm</text>
+            <path d="M645 156 L725 156" class="wire"/><polygon points="735,156 725,161 725,151" class="head"/><text x="690" y="144" text-anchor="middle" class="tiny">ramp</text>
+            <text x="30" y="224" class="tiny">20 GPUs at full overlap</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">再加有门槛 ramp。先补足新副本、确认分版本延迟和质量，才提高权重；100% 时新旧各 9 台，含小模型为 20 卡。prompt 灰省第二份权重，但仍会改变 token 与 KV 负载。</span><span class="lang-en">Add gated ramp. Grow ready replicas and validate version latency/quality before increasing weight. Full overlap needs 9 old+9 new+2 small=20 GPUs. Prompt trials save duplicate weights but still alter token/KV load.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d6s5t d6s5d">
+          <title id="d6s5t">Full promotion keeps a real hot rollback window</title>
+          <desc id="d6s5d">FULL v2 can still transition to ROLLBACK during the retained hot-v1 window. Routing revision delivery uses bounded freshness; stale routers cannot start new work once their valid snapshot expires, and requests with unauthorized stale revisions are rejected at admission.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="18" y="24" width="924" height="360" rx="18" class="boundary"/><text x="34" y="46" class="tiny">MODEL ROLLOUT · monotonic routing revision; immutable content may roll back</text>
+          <rect x="30" y="130" width="145" height="70" rx="12" class="box"/><text x="102.5" y="162" text-anchor="middle" class="label">LOADING</text><text x="102.5" y="181" text-anchor="middle" class="sub">desired g7</text>
+          <rect x="250" y="130" width="145" height="70" rx="12" class="box"/><text x="322.5" y="162" text-anchor="middle" class="label">READY</text><text x="322.5" y="181" text-anchor="middle" class="sub">warm exact tuple</text>
+          <path d="M175 156 L240 156" class="wire"/><polygon points="250,156 240,161 240,151" class="head"/><text x="212" y="144" text-anchor="middle" class="tiny">verify</text>
+          <text x="34" y="82" class="tiny">Full serving tuple + readiness + capacity must all match</text>
+          <rect x="490" y="130" width="155" height="70" rx="12" class="box"/><text x="567.5" y="162" text-anchor="middle" class="label">CANARY</text><text x="567.5" y="181" text-anchor="middle" class="sub">v2 · 10%</text>
+          <path d="M395 156 L480 156" class="wire"/><polygon points="490,156 480,161 480,151" class="head"/><text x="442" y="144" text-anchor="middle" class="tiny">publish</text>
+          <text x="34" y="107" class="tiny">20/s × 10% = 2/s to v2; 1 warm replica: assumed C=4/s</text>
+          <rect x="490" y="295" width="155" height="60" rx="12" class="box bad"/><text x="567.5" y="322" text-anchor="middle" class="label">ROLLBACK</text><text x="567.5" y="341" text-anchor="middle" class="sub">new revision → v1</text>
+          <path d="M565 200 L565 285" class="wire fail"/><polygon points="565,295 560,285 570,285" class="head fail"/><text x="582" y="251" class="tiny">SLO gate</text>
+          <path d="M490 325 L458 325 Q450 325 450 317 L450 257 Q450 249 442 249 L333 249 Q325 249 325 241 L325 210" class="wire fail"/><polygon points="325,200 330,210 320,210" class="head fail"/><text x="270" y="271" class="tiny">v1 healthy + capacity</text>
+          <text x="34" y="368" class="tiny">Canary failure 5% at 10% traffic → aggregate 0.5%; version metrics expose it</text>
+          <rect x="735" y="130" width="185" height="70" rx="12" class="box"/><text x="827.5" y="162" text-anchor="middle" class="label">FULL v2</text><text x="827.5" y="181" text-anchor="middle" class="sub">old v1 stays warm</text>
+          <path d="M645 156 L725 156" class="wire"/><polygon points="735,156 725,161 725,151" class="head"/><text x="690" y="144" text-anchor="middle" class="tiny">ramp</text>
+          <text x="30" y="224" class="tiny">20 GPUs at full overlap</text>
+          <g class="is-new">
+            <path d="M735 185 L651 304" class="wire fail"/><polygon points="645,312 647,301 655,307" class="head fail"/><text x="730" y="254" text-anchor="middle" class="tiny">hot rollback</text>
+            <text x="30" y="252" class="tiny">Fresh route for new work</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">补全量后的热回退边。回滚不是瞬时全球一致：快照有 5 s 有效期，时钟误差保守提前失效；未拿到新快照的 Router 到期停新单，旧流按固定 permit 和期限继续。</span><span class="lang-en">Add post-promotion hot rollback. Publication is not instantaneous everywhere: expire snapshots conservatively within a five-second validity contract; stale routers stop new admission while pinned streams follow their own deadline.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d6s6t d6s6d">
+          <title id="d6s6t">Drain ends the warm rollback guarantee</title>
+          <desc id="d6s6d">After the thirty-minute teaching hot window, FULL v2 moves to DRAIN v1, stopping new v1 admissions and waiting for pinned work to physically retire before releasing devices. Once v1 is unloaded rollback requires reloading; retaining the artifact alone is not warm capacity.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="18" y="24" width="924" height="360" rx="18" class="boundary"/><text x="34" y="46" class="tiny">MODEL ROLLOUT · monotonic routing revision; immutable content may roll back</text>
+          <rect x="30" y="130" width="145" height="70" rx="12" class="box"/><text x="102.5" y="162" text-anchor="middle" class="label">LOADING</text><text x="102.5" y="181" text-anchor="middle" class="sub">desired g7</text>
+          <rect x="250" y="130" width="145" height="70" rx="12" class="box"/><text x="322.5" y="162" text-anchor="middle" class="label">READY</text><text x="322.5" y="181" text-anchor="middle" class="sub">warm exact tuple</text>
+          <path d="M175 156 L240 156" class="wire"/><polygon points="250,156 240,161 240,151" class="head"/><text x="212" y="144" text-anchor="middle" class="tiny">verify</text>
+          <text x="34" y="82" class="tiny">Full serving tuple + readiness + capacity must all match</text>
+          <rect x="490" y="130" width="155" height="70" rx="12" class="box"/><text x="567.5" y="162" text-anchor="middle" class="label">CANARY</text><text x="567.5" y="181" text-anchor="middle" class="sub">v2 · 10%</text>
+          <path d="M395 156 L480 156" class="wire"/><polygon points="490,156 480,161 480,151" class="head"/><text x="442" y="144" text-anchor="middle" class="tiny">publish</text>
+          <text x="34" y="107" class="tiny">20/s × 10% = 2/s to v2; 1 warm replica: assumed C=4/s</text>
+          <rect x="490" y="295" width="155" height="60" rx="12" class="box bad"/><text x="567.5" y="322" text-anchor="middle" class="label">ROLLBACK</text><text x="567.5" y="341" text-anchor="middle" class="sub">new revision → v1</text>
+          <path d="M565 200 L565 285" class="wire fail"/><polygon points="565,295 560,285 570,285" class="head fail"/><text x="582" y="251" class="tiny">SLO gate</text>
+          <path d="M490 325 L458 325 Q450 325 450 317 L450 257 Q450 249 442 249 L333 249 Q325 249 325 241 L325 210" class="wire fail"/><polygon points="325,200 330,210 320,210" class="head fail"/><text x="270" y="271" class="tiny">v1 healthy + capacity</text>
+          <text x="34" y="368" class="tiny">Canary failure 5% at 10% traffic → aggregate 0.5%; version metrics expose it</text>
+          <rect x="735" y="130" width="185" height="70" rx="12" class="box"/><text x="827.5" y="162" text-anchor="middle" class="label">FULL v2</text><text x="827.5" y="181" text-anchor="middle" class="sub">old v1 stays warm</text>
+          <path d="M645 156 L725 156" class="wire"/><polygon points="735,156 725,161 725,151" class="head"/><text x="690" y="144" text-anchor="middle" class="tiny">ramp</text>
+          <text x="30" y="224" class="tiny">20 GPUs at full overlap</text>
+          <path d="M735 185 L651 304" class="wire fail"/><polygon points="645,312 647,301 655,307" class="head fail"/><text x="730" y="254" text-anchor="middle" class="tiny">hot rollback</text>
+          <text x="30" y="252" class="tiny">Fresh route for new work</text>
+          <g class="is-new">
+            <rect x="735" y="295" width="185" height="60" rx="12" class="box"/><text x="827.5" y="322" text-anchor="middle" class="label">DRAIN v1</text><text x="827.5" y="341" text-anchor="middle" class="sub">stop new; wait old</text>
+            <path d="M825 200 L825 285" class="wire async"/><polygon points="825,295 820,285 830,285" class="head async"/><text x="842" y="251" class="tiny">window ends</text>
+            <text x="30" y="289" class="tiny">Unloaded v1? Reload to recover</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">最后加 drain：观察窗假设 30 分钟，到期停止旧版本新单，等在途物理退休才卸卡。卸掉 v1 后仍能找回 artifact，但不再承诺热回滚；必须说明重新加载的恢复时间。</span><span class="lang-en">Add drain after the assumed thirty-minute window. Stop old admissions, wait for physical retirement, then unload. Retained artifacts permit recovery, not hot rollback; disclose reload time.</span></figcaption>
+      </div>
+    </figure><h3><span class="lang-zh">快照、发布幂等结果与审计一起提交</span><span class="lang-en">Commit snapshot, idempotency result and audit together</span></h3><div class="bilingual"><div class="lang-zh"><p>下面实际检查完整endpoint的bundle/epoch/profile、READY与未drain，以及API/持久状态schema兼容；expected_revision竞争只赢一个。回滚是更高revision选择旧bundle。示例只实现这些元数据边界，<strong>不计算生产SLO/容量门槛，也不验证真实warmup</strong>；真实发布还须绑定已审核质量/容量证据及对应generation，不能拿fixture的ready=1当实测。</p></div><div class="lang-en"><p>The code checks exact endpoint bundle/epoch/profile, READY/non-draining state and API/persisted-state schema compatibility. Only one publisher wins expected_revision; rollback selects old content with a higher revision. The model implements these metadata boundaries, <strong>not production SLO/capacity gates or real warmup</strong>. Actual publication must bind approved quality/capacity evidence to matching generations; fixture ready=1 is not a measurement.</p></div></div><pre data-language="Python · SQLite" data-kind="runnable" data-source="ledger.py#publish"><code>def publish(db, key, expected_rev, weights, endpoints, expires, actor,
+            fail_before_audit=False):
+    payload = encoded({&#x27;weights&#x27;: weights, &#x27;endpoints&#x27;: endpoints})
+    fp = encoded([expected_rev, payload, expires, actor])
+    with write_tx(db):
+        old = db.execute(&#x27;SELECT * FROM publication WHERE key=?&#x27;, (key,)).fetchone()
+        if old:
+            if old[&#x27;fingerprint&#x27;] != fp:
+                raise Refused(&#x27;publication key conflict&#x27;)
+            return old[&#x27;rev&#x27;]
+        c = one(db, &#x27;SELECT * FROM control WHERE id=1&#x27;)
+        if c[&#x27;rev&#x27;] != expected_rev or not weights or any(type(w) is not int or w &lt;= 0 for w in weights.values()):
+            raise Refused(&#x27;revision or weights&#x27;)
+        seen = set()
+        for identity, epoch, bundle, profile in endpoints:
+            r = one(db, &#x27;SELECT * FROM replica WHERE id=?&#x27;, (identity,))
+            m = json.loads(one(db, &#x27;SELECT manifest FROM bundle WHERE hash=?&#x27;,
+                               (bundle,))[&#x27;manifest&#x27;])
+            if (not r[&#x27;ready&#x27;] or r[&#x27;draining&#x27;] or bundle not in weights
+                or (r[&#x27;epoch&#x27;], r[&#x27;bundle&#x27;], r[&#x27;profile&#x27;]) != (epoch, bundle, profile)
+                or (m[&#x27;api&#x27;], m[&#x27;state&#x27;]) != (c[&#x27;api&#x27;], c[&#x27;state_schema&#x27;])):
+                raise Refused(&#x27;unready or incompatible bundle&#x27;)
+            seen.add(bundle)
+        if seen != set(weights):
+            raise Refused(&#x27;missing endpoint&#x27;)
+        rev = expected_rev + 1
+        db.execute(&#x27;INSERT INTO snapshot VALUES(?,?,?)&#x27;, (rev, payload, expires))
+        db.execute(&#x27;UPDATE control SET rev=? WHERE id=1 AND rev=?&#x27;, (rev, expected_rev))
+        db.execute(&#x27;INSERT INTO publication VALUES(?,?,?)&#x27;, (key, fp, rev))
+        if fail_before_audit:
+            raise RuntimeError(&#x27;injected before audit&#x27;)
+        db.execute(&#x27;INSERT INTO audit VALUES(?,?)&#x27;, (rev, actor))
+        return rev</code></pre><div class="bilingual"><div class="lang-zh"><p>错误率、TTFT、输出速度、拒绝与质量按bundle、tenant、长度桶、epoch拆。坏canary5%错误×10%请求=全局0.5%，会躲过1%聚合门槛；不能简单加权两份p95。回退前验证旧版本健康、客户端契约兼容和峰值/故障预算；机房一起坏时改alias无法修好。</p><p><strong>兼容性不止权重。</strong>如果新版写了旧reader不懂的会话/checkpoint/schema，指回旧权重会读坏状态。先扩展字段和兼容reader，跨热回滚窗口保留旧格式/双读适配；等旧请求和旧writer都drain、放弃旧版本快退后，才contract删除旧格式。破坏性迁移需要独立版本namespace与显式转换/失败策略；本例直接拒绝schema不匹配，不虚构通用KV/checkpoint迁移器。</p><p><strong>路由回退不迁移正在生成的状态。</strong>当前Ledger对新hold/dispatch检查最新revision，旧缓存不能再造准入。已授权DISPATCHING仍可在原期限内被消费，RUNNING保持原bundle到退休；坏版本可明确终止，不能拼接v1后半段。A9签名/时钟在真实adapter校验，不能给permit续期超过原快照；库/签名未知均关闭新准入。通知只是重新拉完整快照的提示，乱序不降低revision。</p><p>30分钟热窗结束：先撤路由，原子阻止新dispatch并清未派发hold，等待RUNNING和派发UNKNOWN全部核查/物理退休，再卸载。旧请求到60 s触发终止，fence未证实仍保留信用。KServe Next相对权重9:1代表90/10，且提示零权重转正的backend预热风险；其force-stop promotion会释放旧GPU。<a href="#ref-9">[9]</a>本章选择付费保留热旧容量，不能照搬该步骤再声称热回滚。7天artifact支持冷恢复，卸掉旧卡后恢复至少含重新加载。</p></div><div class="lang-en"><p>Slice errors, TTFT, output speed, rejection and quality by bundle/tenant/length/epoch. A 5%-failing canary at 10% request share yields only 0.5% aggregate, below a 1% global gate. Never linearly mix p95 values. Before rollback verify old health, client compatibility and peak/failure budgets; an alias cannot repair a shared facility outage.</p><p><strong>Compatibility extends beyond weights.</strong>If v2 writes session/checkpoint schemas an old reader cannot understand, returning weights to v1 may break reads. Expand fields/compatible readers first, retaining old format or dual-read adapters across the warm rollback window. Contract only after old requests/writers drain and old rollback is relinquished. Breaking migration needs a separate namespace plus explicit conversion/failure policy. This model refuses schema mismatches; it does not implement generic KV/checkpoint migration.</p><p><strong>Routing rollback does not migrate active generation state.</strong>Ledger checks the latest revision for new holds/dispatches; stale caches cannot mint permission. Already granted DISPATCHING may be consumed within its original deadline; RUNNING retains its bundle through retirement. Explicitly terminate bad streams rather than splicing v1 output. Real adapters validate A9 signatures/clock bounds and cannot extend a permit past the original snapshot. Unknown authority/signature fails closed. Notifications prompt full reads; out-of-order hints never lower revisions.</p><p>After thirty warm minutes, withdraw routes, atomically stop dispatch/expire undispatched holds, reconcile RUNNING/unknown dispatch to physical retirement, then unload. Sixty seconds triggers termination, while missing fence evidence retains credit. KServe Next uses relative 9:1 weights for 90/10 and warns about warming zero-weight backends; force-stop promotion frees old GPUs. <a href="#ref-9">[9]</a>Here we deliberately retain warm old capacity. Seven-day artifacts enable cold recovery; unloaded devices require reloading.</p></div></div></section>
+<section><h2><span class="lang-zh">复盘：用四个反例讲完整个系统</span><span class="lang-en">Review: four counterexamples explain the system</span></h2><div class="bilingual"><div class="lang-zh"><ul><li><strong>两Router争最后一份KV：</strong>监控都显示空闲，仍只有一个事务能扣租户+replica；失败完整回滚。</li><li><strong>发出命令后回包丢失：</strong>稳定身份查原状态，查询结果不重新授予发送/启动；UNKNOWN不因TTL退款。</li><li><strong>回滚遇到新版状态：</strong>bundle与API/checkpoint兼容要一起验；破坏旧格式会毁掉热回退。</li><li><strong>去掉一台机器：</strong>先移除受影响完整group，再算19.2/s规划容量；恢复加载未完成不计容量。</li></ul><p>可运行源码/命令见<a href="../examples/ch35/README.md">examples/ch35</a>。实际验证SQLite多连接事务、进程退出、Java17复算与协议反例；没有GPU/CUDA、Kubernetes集群、SSE网络或生产压测。物理完成、签名、真实tokenization、warmup和容量/质量证据需要可信适配器，不能由内存模型证明。训练、自动KV跨版本迁移与跨地域无损续写不在本章保证内。</p></div><div class="lang-en"><ul><li><strong>Two Routers race final KV credit:</strong>both see free metrics, but only one tenant+replica transaction wins; failure rolls back fully.</li><li><strong>Lost command reply:</strong>query the stable identity; observation never regrants send/launch, and TTL does not refund UNKNOWN.</li><li><strong>Rollback after new state writes:</strong>validate bundle/API/checkpoint compatibility; breaking old formats destroys warm rollback.</li><li><strong>Lose one machine:</strong>remove affected whole groups, recompute 19.2/s planning capacity, and exclude loading replacements.</li></ul><p>See <a href="../examples/ch35/README.md">examples/ch35</a> for runnable source/commands. Execution covers SQLite multi-connection transactions/process exit, Java17 arithmetic and protocol counterexamples, not GPU/CUDA, Kubernetes clusters, network SSE or load testing. Physical completion, signatures, real tokenization, warmup and capacity/quality evidence need trusted adapters. Training, automatic cross-version KV migration and seamless cross-region continuation are outside this contract.</p></div></div></section>
+<section><h2><span class="lang-zh">引用与适用范围</span><span class="lang-en">References and applicability</span></h2><div class="bilingual"><div class="lang-zh"><p>一手资料重新核于2026-10-24；可变页按本次可见内容，固定版本按链接。A1–A12及显存算例都是教学假设，不引用生产容量或价格。完整来源/支持说法与限制见作者验收记录。</p></div><div class="lang-en"><p>Primary sources rechecked on 2026-10-24. Mutable pages describe the checked surface; versioned pages are pinned in their links. A1–A12 and the memory example are assumptions, not production capacity or prices. The author record maps sources to claims and limits.</p></div></div><ol class="references"><li id="ref-1">[1] <a href="https://www.mlflow.org/docs/latest/ml/model-registry/workflow/">MLflow · Model Registry Workflows</a> — <span class="lang-zh">可变alias引用版本，不提供本章事务保证。</span><span class="lang-en">Mutable version aliases, not our atomic publication guarantee.</span></li><li id="ref-2">[2] <a href="https://huggingface.co/docs/huggingface_hub/en/guides/download">Hugging Face · Download files</a> — <span class="lang-zh">commit revision固定下载，不支持120 s性能数。</span><span class="lang-en">Commit revision pinning, not the 120-s assumption.</span></li><li id="ref-3">[3] <a href="https://kubernetes.io/docs/concepts/scheduling-eviction/resource-bin-packing/">Kubernetes · Resource Bin Packing</a> — <span class="lang-zh">MostAllocated评分，不作GPU隔离。</span><span class="lang-en">MostAllocated scoring, not GPU isolation.</span></li><li id="ref-4">[4] <a href="https://kubernetes.io/docs/concepts/scheduling-eviction/topology-spread-constraints/">Kubernetes · Topology Spread</a> — <span class="lang-zh">DoNotSchedule与故障域，不证明幸存容量。</span><span class="lang-en">DoNotSchedule/domain distribution, not surviving capacity.</span></li><li id="ref-5">[5] <a href="https://gateway-api-inference-extension.sigs.k8s.io/">Gateway API Inference Extension · Introduction</a> — <span class="lang-zh">Endpoint Picker与代理分工。</span><span class="lang-en">Endpoint Picker versus proxy responsibilities.</span></li><li id="ref-6">[6] <a href="https://docs.vllm.ai/en/v0.15.1/configuration/optimization/">vLLM v0.15.1 · Optimization</a> — <span class="lang-zh">sequence/batch-token、KV与并行度；不支持本章容量数。</span><span class="lang-en">Sequence/batch-token, KV and parallelism, not our capacities.</span></li><li id="ref-7">[7] <a href="https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/24.9.1/gpu-sharing.html">NVIDIA GPU Operator 24.9.1 · GPU sharing</a> — <span class="lang-zh">MIG/time-slicing隔离差异。</span><span class="lang-en">MIG/time-slicing isolation differences.</span></li><li id="ref-8">[8] <a href="https://docs.vllm.ai/en/stable/usage/security/">vLLM stable · Security</a> — <span class="lang-zh">本次可见2026-10-12页；cache_salt不是租户隔离边界。</span><span class="lang-en">Page dated 2026-10-12; cache_salt is not a tenant isolation boundary.</span></li><li id="ref-9">[9] <a href="https://kserve.github.io/website/docs/next/model-serving/generative-inference/llmisvc/canary-rollout">KServe Next · Canary Rollout</a> — <span class="lang-zh">相对权重、预热风险与force-stop释放GPU。</span><span class="lang-en">Relative weights, warmup risk and GPU-releasing force-stop.</span></li><li id="ref-10">[10] <a href="https://kubernetes.io/docs/concepts/architecture/controller/">Kubernetes · Controllers</a> — <span class="lang-zh">desired/actual回路；epoch/5 s扫描为教学设计。</span><span class="lang-en">Desired/actual loops; epochs/5-s scans are our design.</span></li><li id="ref-11">[11] <a href="https://www.sqlite.org/lang_transaction.html">SQLite · Transaction</a> — <span class="lang-zh">BEGIN IMMEDIATE与单写事务；未执行PostgreSQL。</span><span class="lang-en">BEGIN IMMEDIATE/one writer; PostgreSQL was not executed.</span></li><li id="ref-12">[12] <a href="https://docs.nvidia.com/cuda/cuda-runtime-api/cuda_runtime_api/group__CUDART__EVENT.html">NVIDIA CUDA Runtime 13.4 · Events</a> — <span class="lang-zh">event仅覆盖captured work；本例未运行GPU。</span><span class="lang-en">Events cover captured work only; no GPU execution here.</span></li></ol></section>
+<section><h2><span class="lang-zh">闪卡</span><span class="lang-en">Flashcards</span></h2><div class="bilingual"><div class="lang-zh"><p>点一下翻面；先说权威边界，再给算式或失败时序。</p></div><div class="lang-en"><p>Click to flip; name the authority boundary, then arithmetic or a failure trace.</p></div></div><div class="cards-grid"><button type="button" class="flip"><span class="q"><span class="lang-zh">Ch35与Ch29/Ch32的边界？</span><span class="lang-en">How does Ch35 differ from Ch29/Ch32?</span></span><span class="a"><span class="lang-zh">Ch29管引擎/KV页；Ch32管API/token账；Ch35管bundle、设备组、准入与发布。</span><span class="lang-en">Ch29: engine/KV pages; Ch32: API/token ledger; Ch35: bundles, device groups, admission and rollout.</span></span></button><button type="button" class="flip"><span class="q"><span class="lang-zh">160÷32=5证明什么？</span><span class="lang-en">What does 160/32=5 prove?</span></span><span class="a"><span class="lang-zh">同一稳态边界的平均占用下界，未证明吞吐、尾部或故障余量。</span><span class="lang-en">A mean occupancy lower bound at one stable boundary, not throughput/tails/failure headroom.</span></span></button><button type="button" class="flip"><span class="q"><span class="lang-zh">9副本单机故障后还有多少预算？</span><span class="lang-en">What remains after node loss with nine replicas?</span></span><span class="a"><span class="lang-zh">剩6：原始24/s；80%规划19.2/s。20/s须拒绝至少0.8/s或另验降级SLO。</span><span class="lang-en">Six remain: raw 24/s, planned 19.2/s. At 20/s reject ≥0.8/s or validate degraded SLO.</span></span></button><button type="button" class="flip"><span class="q"><span class="lang-zh">故障后同80%预算，三机均衡最少几个？</span><span class="lang-en">Minimum balanced replicas preserving 80% after node loss?</span></span><span class="a"><span class="lang-zh">11按4/4/3，失4剩7×3.2=22.4/s；10按4/3/3仍只剩19.2/s。</span><span class="lang-en">Eleven at 4/4/3 retain 22.4/s; ten at 4/3/3 retain only 19.2/s.</span></span></button><button type="button" class="flip"><span class="q"><span class="lang-zh">12卡和20卡分别是什么？</span><span class="lang-en">What are twelve versus twenty GPUs?</span></span><span class="a"><span class="lang-zh">沿用9副本降级方案：9旧+1canary+2小=12；9旧+9新+2小=20，一副本一卡假设。</span><span class="lang-en">With nine degradation-allowed replicas: 9 old+1 canary+2 small=12; 9 old+9 new+2 small=20, one GPU each.</span></span></button><button type="button" class="flip"><span class="q"><span class="lang-zh">32槽足以限制显存吗？</span><span class="lang-en">Do 32 slots bound memory?</span></span><span class="a"><span class="lang-zh">不够；先扣权重/临时峰值/余量，再限KV信用。异构profile和每张卡的预算分别验。</span><span class="lang-en">No. Subtract weights/workspace/reserve, bound KV credit, and validate every device/profile separately.</span></span></button><button type="button" class="flip"><span class="q"><span class="lang-zh">READY需要哪些证据？</span><span class="lang-en">What proves READY?</span></span><span class="a"><span class="lang-zh">完整bundle/镜像、整组设备、当前epoch/generation与代表性warmup，不是端口可连。</span><span class="lang-en">Exact bundle/image, whole device group, current epoch/generation and representative warmup, not a live port.</span></span></button><button type="button" class="flip"><span class="q"><span class="lang-zh">TTL能释放DISPATCHING吗？</span><span class="lang-en">Can TTL refund DISPATCHING?</span></span><span class="a"><span class="lang-zh">不能；派发未知保留信用，核查/物理隔离后退休。只有未派发HELD可竞争过期。</span><span class="lang-en">No. Retain unknown-dispatch credit until reconciliation/fencing. Only undispatched HELD may expire.</span></span></button><button type="button" class="flip"><span class="q"><span class="lang-zh">查询到RUNNING可以补启动吗？</span><span class="lang-en">May observing RUNNING authorize another launch?</span></span><span class="a"><span class="lang-zh">不可以；只有首次consume=True的原调用者获准。丢ACK保守失败，不重新生成。</span><span class="lang-en">No. Only the original consume=True caller may launch. Unknown ACK sacrifices progress without another generation.</span></span></button><button type="button" class="flip"><span class="q"><span class="lang-zh">权威库断开还能凭快照新准入吗？</span><span class="lang-en">Can a cached route admit with Ledger unavailable?</span></span><span class="a"><span class="lang-zh">本章中央账本不能；控制器故障与库故障分开，库不可达关闭新hold，旧流继续退休。</span><span class="lang-en">No with this central Ledger. Controller failure differs from store loss; stop new holds and retire accepted work.</span></span></button><button type="button" class="flip"><span class="q"><span class="lang-zh">cache_salt等于硬件隔离吗？</span><span class="lang-en">Is cache_salt hardware isolation?</span></span><span class="a"><span class="lang-zh">它限定复用/降低特定timing风险，不隔显存/进程/宿主机或公平队列。</span><span class="lang-en">It scopes reuse/specific timing risk, not memory/process/host/fairness isolation.</span></span></button><button type="button" class="flip"><span class="q"><span class="lang-zh">回退为什么revision继续增长？</span><span class="lang-en">Why does rollback increase revision?</span></span><span class="a"><span class="lang-zh">发布顺序单调，内容可选旧bundle；CAS+幂等结果+快照+审计同事务。</span><span class="lang-en">Publication order advances while selecting old content; CAS, result, snapshot and audit commit together.</span></span></button><button type="button" class="flip"><span class="q"><span class="lang-zh">权重可回退，状态就一定兼容吗？</span><span class="lang-en">Do reversible weights imply compatible state?</span></span><span class="a"><span class="lang-zh">不一定；API/checkpoint要兼容。expand后保留旧reader/格式到热窗与旧writer drain，才contract。</span><span class="lang-en">No. Preserve compatible API/checkpoint readers/formats through warm rollback and old-writer drain before contracting.</span></span></button><button type="button" class="flip"><span class="q"><span class="lang-zh">何时结束热回滚承诺？</span><span class="lang-en">When does warm rollback end?</span></span><span class="a"><span class="lang-zh">热窗到期开始drain就不再承诺；撤路由/阻新派发并核清RUNNING与UNKNOWN，物理退休后卸卡。只留artifact是冷恢复。</span><span class="lang-en">The promise ends when the warm window expires and drain begins. Withdraw routes/dispatch, reconcile RUNNING/UNKNOWN and retire before unload. Artifacts enable cold recovery.</span></span></button></div></section>
+  <p><button type="button" class="read-toggle"><span class="when-off"><span class="lang-zh">我已学完本章</span><span class="lang-en">Mark this chapter done</span></span><span class="when-on"><span class="lang-zh">已学完本章</span><span class="lang-en">Completed</span></span></button></p>
+  <p class="cite"><span class="lang-zh">进度存在这台浏览器里。</span><span class="lang-en">Saved in this browser only.</span></p>
+</article>
+</main>
+<script src="../assets/js/nav.js"></script>
+<script src="../assets/js/lang.js"></script>
+<script src="../assets/js/slides.js"></script>
+<script src="../assets/js/progress.js"></script>
+</body>
+</html>

@@ -1,0 +1,60 @@
+{
+  "passed": true,
+  "reviewer": "ch44_author acting independently on Ch45, GPT-6.1-Sol + max",
+  "openFindings": [],
+  "closedFindings": [
+    {
+      "id": "I45-1",
+      "severity": "P1",
+      "summary": "SQLite version+1 promoted exhausted signed64 version to REAL and committed",
+      "status": "closed independently by max-1/max, schema REAL rejection, whole-TX rollback and same-key replay probes"
+    },
+    {
+      "id": "I45-2",
+      "severity": "P1",
+      "summary": "consume CAS=0 entered permanent quarantine instead of retryable rollback",
+      "status": "closed independently by controlled rowcount=0, every table unchanged, same-message re-entry and post-expiry refund decision"
+    }
+  ],
+  "sourceHashes": {
+    "chapters/ch45.html": "dbd8bd7f86bb4966e7d40edc6b8f08e9416eac4da4dbb032f2e6f9d37583b118",
+    "examples/ch45/DomainModel.java": "269ed7a55ade3d9608545ea2a038e97c30bd1aa9ad12ba03bdf3410b7fe9ddeb",
+    "examples/ch45/README.md": "eccd77ae79a336c7e69d594a1d0bd7521b42a351eb00fcd5727d7a647e4942af",
+    "examples/ch45/consume.pseudo": "52a849826336bbbe78a33748101777fe71aa8cfab40c4a4741bc1435705505df",
+    "examples/ch45/edit.pseudo": "7a7db03775359a8075b5178461bda91a9e565d40ef48266b0b8ddf153c6cb381",
+    "examples/ch45/run.py": "834556342a777cbfa0aaa07b40f49c39178ee374d415e0c7a867fefd7a4b2cba",
+    "examples/ch45/schema.sql": "51675d7a3ffd7d56ac82727c6353a968b0115be457a76cbef242c875e9072376",
+    "examples/ch45/sync.mjs": "95b69e12938d6d693f03f2d531c822fa05de35bb35f131c544b4bf55fe89665d",
+    "examples/ch45/verify.py": "326e78198b525aa658155a525f2deef8fa83252a3362619b90196bf748fdf870"
+  },
+  "sourceStableAtSignature": true,
+  "actualVerification": {
+    "newJavaChecks": 20,
+    "newStorageChecks": 15,
+    "postFixRegressionRecords": 13,
+    "arithmeticRecomputed": 12,
+    "layouts": 18,
+    "frameVisits": 148,
+    "copied": 4,
+    "mobileRecords": 20,
+    "all37SvgBytesUnchanged": true,
+    "originalLastFramesViewed": 14,
+    "denseFailureFramesViewed": 16
+  },
+  "evidence": {
+    "initialFailures": "ch45-independent-initial-probes.json",
+    "regression": "ch45-independent-regression-results.json",
+    "java": "ch45-independent-java-results.json",
+    "storage": "ch45-independent-storage-results.json",
+    "checks": "ch45-independent-check-results.json",
+    "browser": "ch45-independent-browser-results.json",
+    "mobile": "ch45-independent-mobile-results.json",
+    "visual": "ch45-independent-visual.json"
+  },
+  "limitations": [
+    "SQLite local files and serialized writers do not prove PostgreSQL MVCC or PSP/broker semantics",
+    "CAS=0 regression is explicit branch injection; later closed-state recovery uses real SQLite writes, not a real PostgreSQL race",
+    "No live PSP signatures, network loss, power failure, distributed durability, rollout or load/p99 test",
+    "Source and page reviewed; no target implementation edits by this reviewer; shared F04 remains Q"
+  ]
+}

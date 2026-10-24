@@ -1,0 +1,21 @@
+claim_gc(candidate):                               // absence/elapsed TTL alone never authorizes delete
+  BEGIN; lock namespace, then candidate_authority
+  now = authority_now()
+  if candidate.kind == UNPUBLISHED_UPLOAD:
+    require candidate.state in {OPEN, ABORTED, REJECTED}
+    require no_published_manifest_references(candidate)
+    require now >= candidate.lease_until and now >= candidate.created_at + quarantine
+  else:                                            // published version or retired layout
+    require not_current(candidate) and retention_allows_withdrawal(candidate)
+    require no_retained_manifest_references(candidate)
+  UPDATE candidate SET state=RECLAIMING, fence=fence+1
+  COMMIT                                           // publish/renew/resolve must check this same authority
+  return (candidate.exact_physical_ids, candidate.fence)
+
+sweep(claim):                                      // separate, retryable Data protocol
+  Data.close_write_generation_and_drain(claim)      // durable fence; old in-flight writes drain first
+  wait_until_all_preexisting_read_leases_expire(claim)
+  require Data.has_no_old_writer_or_valid_reader(claim)
+  Data.delete_exact_ids(claim)                      // never delete by mutable key or reused pathname
+  // Failure keeps RECLAIMING. Retry/scan late debris; never reopen the fenced generation.
+  // Unknown Metadata or Data drain state => leave bytes. A shared pack needs every record clear.

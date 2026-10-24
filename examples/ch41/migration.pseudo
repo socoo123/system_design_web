@@ -1,0 +1,22 @@
+# Teaching contract; range guards are enforced by the write authority.
+write(range, revision, operation):
+    BEGIN
+    guard = lockOwnershipRowSharedUntilCommit(range)
+    require guard.owner == thisShard
+        and guard.state == ACTIVE and guard.revision == revision
+    applyBusinessRowsAndIdempotency(operation)  # same local transaction
+    COMMIT                                    # release ownership lock
+
+cutover(moveId, range, expectedRevision = 7):
+    # Exclusive ownership lock waits for old write transactions, incl. PREPARED.
+    # Commit FROZEN durably; every later old-route writer must reject.
+    fence = source.freezeAndDrain(range, moveId, expectedRevision)
+    H = fence.finalCommittedPosition
+    proof = target.finishCopyAndReplay(range, moveId, fence.history, H)
+    require proof.copyComplete and proof.includesDeletes
+        and proof.history == fence.history and proof.appliedPrefix >= H
+    # Durable linearizable CAS validates the bound fence/proof and old owner.
+    grant = directory.publishIfOwnerIs(range, source, expectedRevision,
+                                      target, moveId, fence, proof)
+    target.activate(grant)  # persist/verify exact range, owner and new revision
+    return directory.lookup(range, moveId)  # recover a lost publication reply

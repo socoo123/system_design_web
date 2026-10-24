@@ -1,0 +1,28 @@
+# Teaching adapter pseudocode: ALL KafkaConsumer calls and tracker changes on poll thread.
+# Workers post (tracker, ticket, durable_result); never call KafkaConsumer themselves.
+onPoll(records):
+  for p in records.nextOffsets().keys:
+    tasks = tracker[p].register(records[p].offsets, records.nextOffsets()[p].offset)
+    save this poll's terminal OffsetAndMetadata from nextOffsets()[p]
+    consumer.pause({p})                 # one bounded batch per partition
+    dispatch tasks to bounded per-key-serial workers
+  apply queued successful completions; safe = tracker[p].checkpoint()
+  if tracker[p].idle(): commit map[p] = saved terminal OffsetAndMetadata
+  else: commit map[p] = new OffsetAndMetadata(safe)  # omit unknown partial-prefix epoch
+  resume current ACTIVE partitions whose tracker is idle
+
+onPartitionsRevoked(partitions):
+  stop admitting work for these partitions; tracker.beginRevocation()
+  until short drain deadline: apply already queued successful completions
+  consumer.commitSync(explicit safe-next map for THESE partitions, bounded_timeout)
+    # Rejection: replay is expected; timeout: saved outcome is UNKNOWN.
+    # Never use no-argument commitSync(): poll position may exceed completed work.
+  finally: close trackers; cancel remaining work; forget ownership
+
+onPartitionsLost(partitions):
+  close trackers; cancel remaining work; forget ownership  # NO offset commit
+
+onPartitionsAssigned(partitions):
+  create a NEW tracker for newly acquired partitions at recovered next offsets
+  retain trackers for partitions whose ownership did not move
+  # Old callbacks reference old trackers; side-effect idempotency still required.

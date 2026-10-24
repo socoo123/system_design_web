@@ -1,0 +1,30 @@
+checkout(trustedCaller, key, request):
+  binding, sortedLines = validateAndCanonicalize(request)
+  # Positive bounded quantities; merge duplicate SKUs; bind delivery_ref too.
+  BEGIN IMMEDIATE  # SQLite adapter: acquire the database writer before SELECT.
+  try:
+    prior = SELECT binding, outcome, order_id FROM idempotency
+            WHERE caller = :trustedCaller AND key = :key
+    if prior exists:
+      if prior.binding != binding: ROLLBACK; return KEY_CONFLICT
+      COMMIT; return prior.outcome, prior.order_id
+    INSERT idempotency(trustedCaller, key, binding, PENDING, NULL)
+    SAVEPOINT effect
+    orderId = newId()
+    INSERT orders(orderId, trustedCaller, request.delivery_ref)
+    outcome = CREATED
+    for (sku, qty) in sortedLines:
+      changed = execute("UPDATE inventory SET on_hand = on_hand - :qty "
+                        "WHERE sku = :sku AND on_hand >= :qty", sku, qty)
+      if changed != 1:
+        ROLLBACK TO effect  # Undo every earlier SKU and the order.
+        outcome = OUT_OF_STOCK; orderId = NULL; break
+      INSERT order_line(orderId, sku, qty)
+    RELEASE effect
+    UPDATE idempotency SET outcome = :outcome, order_id = :orderId
+      WHERE caller = :trustedCaller AND key = :key
+    COMMIT  # Return only after the configured local durability barrier.
+    return outcome, orderId
+  on database or connection error:
+    ROLLBACK if transaction is still active
+    return UNKNOWN_OR_RETRY_SAME_KEY  # Never claim a new successful order.

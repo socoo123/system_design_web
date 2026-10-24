@@ -1,0 +1,70 @@
+{
+  "passed": true,
+  "results": [
+    {
+      "command": [
+        "node",
+        "tools/check.mjs"
+      ],
+      "exit": 0,
+      "stdout": "STATS 45 chapters; 276 decks; 1411 frames; 173 code blocks (no count quotas)\nPASS structure, local resources, accessibility, bilingual nesting, chapter entries and animation preservation\n",
+      "stderr": ""
+    },
+    {
+      "command": [
+        "node",
+        "tools/audit-chapter.mjs",
+        "ch36"
+      ],
+      "exit": 0,
+      "stdout": "\nch36 STATS {\"decks\":7,\"frames\":36,\"perDeck\":[5,5,5,5,5,5,6],\"staticImages\":0,\"code\":4,\"han\":6361,\"zh\":210,\"en\":210}\nPASS structural checks; content/translation/rendering require independent review\n",
+      "stderr": ""
+    },
+    {
+      "command": [
+        "git",
+        "diff",
+        "--check"
+      ],
+      "exit": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "command": [
+        "python3",
+        "examples/ch36/run.py"
+      ],
+      "exit": 0,
+      "stdout": "{\n  \"passed\": true,\n  \"checks\": [\n    \"CAP completed-write then stale-read counterexample\",\n    \"Quorum new-old inversion without read writeback\",\n    \"Retry shares one eligible event and original deadline\",\n    \"Exactly one second is within the declared deadline\",\n    \"Late correct durable result remains bad\",\n    \"202 does not satisfy terminal checkout\",\n    \"Exposed incorrect terminal cannot be washed by a correct retry\",\n    \"Exposed non-durable terminal cannot be washed by a durable retry\",\n    \"No reply counts bad once cohort is mature\",\n    \"Non-durable 200 cannot satisfy good\",\n    \"Exclude immature cohort until its original deadline\",\n    \"Half-open lower bound excluded, upper included\",\n    \"Eligibility is fixed separately from failure\",\n    \"Reject retry reset of original start\",\n    \"A9 allowed10000 remain4000\",\n    \"Zero denominator has no SLI\",\n    \"Whole-event boundary:999 eligible permits0 bad\",\n    \"Whole-event boundary:1000 eligible permits1 bad\",\n    \"Good traffic expiry can worsen budget\",\n    \"Reject invalid counts (-1, 0)\",\n    \"Reject invalid counts (1, 2)\",\n    \"Reject invalid counts (1, -1)\",\n    \"Healthy budget permits only next canary step\",\n    \"Positive monthly balance can still HOLD on burn\",\n    \"Long hot / short healthy does not page\",\n    \"Exact14.4 is not above strict threshold\",\n    \"Second pair uses OR and threshold6\",\n    \"Exhausted balance freezes features\",\n    \"Missing window is no-data\",\n    \"Incomplete telemetry holds even when observed ratio is healthy\",\n    \"Unhealthy canary holds\",\n    \"Unreviewed reopening holds\",\n    \"Per-dependency p99s cannot simply add\"\n  ],\n  \"count\": 33,\n  \"cap\": {\n    \"write\": \"OK(1)\",\n    \"later_read\": 0,\n    \"strong_read_without_proof\": \"UNAVAILABLE\"\n  },\n  \"quorum\": {\n    \"R1\": \"x=1\",\n    \"R2_after_R1\": \"x=0\",\n    \"linearizable\": false\n  },\n  \"percentiles\": {\n    \"sum_of_p99_ms\": 2,\n    \"p99_of_path_ms\": 101\n  },\n  \"A9\": {\n    \"remaining\": \"4000\",\n    \"allowed\": \"10000\",\n    \"burn\": \"3/5\"\n  },\n  \"gate_high_burn\": \"HOLD_BURN\"\n}\n",
+      "stderr": ""
+    },
+    {
+      "command": [
+        "python3",
+        "docs/reviews/ch36-numeric.py"
+      ],
+      "exit": 0,
+      "stdout": "{\n  \"passed\": true,\n  \"checks\": 41,\n  \"values\": {\n    \"majority_N3\": \"2\",\n    \"quorum_overlap\": \"1\",\n    \"early_ms\": \"3\",\n    \"parallel_rtt4_ms\": \"7\",\n    \"parallel_rtt80_ms\": \"83\",\n    \"serial_rtt4_ms\": \"8\",\n    \"serial_rtt80_ms\": \"84\",\n    \"budget_room_ms\": \"13\",\n    \"budget_excess_ms\": \"63\",\n    \"snapshot_allowed\": \"10000\",\n    \"snapshot_remaining\": \"4000\",\n    \"snapshot_remaining_fraction\": \"2/5\",\n    \"snapshot_SLI_percent\": \"4997/50\",\n    \"window_minutes\": \"43200\",\n    \"three_nines_minutes\": \"216/5\",\n    \"four_nines_minutes\": \"108/25\",\n    \"five_nines_seconds\": \"648/25\",\n    \"events_1/1000\": \"10000\",\n    \"events_1/10000\": \"1000\",\n    \"events_1/100000\": \"100\",\n    \"steady_E\": \"2592000000\",\n    \"steady_allowed\": \"2592000\",\n    \"incident_10pct\": \"120000\",\n    \"incident_full\": \"1200000\",\n    \"tenfold_incident_E\": \"2602800000\",\n    \"tenfold_incident_allowed\": \"2602800\",\n    \"tenfold_bad\": \"12000000\",\n    \"steady_10pct_spend\": \"4.63%\",\n    \"steady_full_spend\": \"46.30%\",\n    \"tenfold_spend\": \"461.04%\",\n    \"series_percent\": \"998001/10000\",\n    \"series_burn\": \"1999/1000\",\n    \"parallel_percent\": \"999999/10000\",\n    \"burn1pct\": \"10\",\n    \"full_budget_days\": \"3\",\n    \"40pct_days\": \"6/5\",\n    \"fast_full_budget_spend\": \"1/50\",\n    \"slow_full_budget_spend\": \"1/20\",\n    \"fast_bad_percent\": \"36/25\",\n    \"slow_bad_percent\": \"3/5\",\n    \"actual_gate_burn\": \"1441/100\"\n  }\n}\n",
+      "stderr": ""
+    },
+    {
+      "command": [
+        "python3",
+        "docs/reviews/ch36-evidence.py"
+      ],
+      "exit": 0,
+      "stdout": "{\"passed\": true, \"snippets\": [{\"source\": \"partition.pseudo\", \"verbatim\": true, \"lines\": 26}, {\"source\": \"tradeoffs.py:quorum\", \"verbatim\": true, \"lines\": 14}, {\"source\": \"slo.py:count\", \"verbatim\": true, \"lines\": 24}, {\"source\": \"slo.py:gate\", \"verbatim\": true, \"lines\": 27}], \"decks\": 7, \"frames\": 36, \"idsPreserved\": 72, \"changedFrames\": [\"d1s5\", \"d2s3\", \"d2s4\", \"d2s5\", \"d4s2\", \"d4s3\", \"d4s4\", \"d4s5\", \"d5s4\", \"d5s5\", \"d7s4\", \"d7s5\", \"d7s6\"]}\n",
+      "stderr": ""
+    }
+  ],
+  "sourceHashes": {
+    "chapters/ch36.html": "1e39fcc2845046ca2da2b39146aa1c97720b976ed7031feaa865ed61695051d7",
+    "examples/ch36/README.md": "ee5e56e70abee48bde25460a6a25a16ae2ab2c3e1e0a68b75648bfb3b74f22ba",
+    "examples/ch36/partition.pseudo": "79896c19cf988d4a5eb7b37457310c7f4164d4ed5eb2ca1b4b626012b11a7e6b",
+    "examples/ch36/run.py": "4d5ac66e5670de66ae82072b4614641775d94452a7f174069ee985c511a64315",
+    "examples/ch36/slo.py": "913f1d9e906fc51ebfbefba234f3f955e94f6eefea1163e86729faff78722747",
+    "examples/ch36/tradeoffs.py": "7ebf58bd2fe71759e1085a39f728f1a7bab5121258fb061b798e638df3f70861"
+  },
+  "noBytecodeCache": true
+}

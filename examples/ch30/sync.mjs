@@ -1,0 +1,21 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+const dir=path.dirname(fileURLToPath(import.meta.url));
+const page=path.resolve(dir,'../../chapters/ch30.html');
+let html=fs.readFileSync(page,'utf8');
+const escape=s=>s.replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;').replaceAll("'",'&#x27;');
+let count=0;
+html=html.replace(/(<pre\b[^>]*data-source="([^"]+)"[^>]*><code>)([\s\S]*?)(<\/code><\/pre>)/g,(_,start,source,old,end)=>{
+  const [file,region]=source.split('#');
+  let content=fs.readFileSync(path.join(dir,file),'utf8');
+  if(region) content=content.split(`// BEGIN ${region}\n`)[1]?.split(`  // END ${region}`)[0].replace(/\n$/,'');
+  if(!content)throw new Error(`Missing source ${source}`);
+  if(region)content=content.split('\n').map(line=>line.startsWith('  ')?line.slice(2):line).join('\n');
+  content=escape(content.replace(/\n$/,''));
+  if(process.argv.includes('--check') && old!==content)throw new Error(`Source mismatch ${source}`);
+  count++;return start+content+end;
+});
+if(count!==6)throw new Error(`Expected 6 code blocks, found ${count}`);
+if(!process.argv.includes('--check'))fs.writeFileSync(page,html);
+console.log(`${count} snippets match examples/ch30 sources`);

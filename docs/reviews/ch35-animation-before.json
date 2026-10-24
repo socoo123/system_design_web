@@ -1,0 +1,365 @@
+[
+  {
+    "deck": 1,
+    "frame": 1,
+    "ids": [
+      "d1s1t",
+      "d1s1d"
+    ],
+    "title": "The business gateway calls a hosted platform",
+    "desc": "Client calls Gateway and receives responses through Gateway. A model alias is the public contract, not a replica address.",
+    "sha256": "88a665b6bc52c9c8de3ba747d13d573cbf8a97d6bc164f8a527d64a340b321de"
+  },
+  {
+    "deck": 1,
+    "frame": 2,
+    "ids": [
+      "d1s2t",
+      "d1s2d"
+    ],
+    "title": "Pin a serving tuple before endpoint selection",
+    "desc": "Gateway calls Inference Router and receives the stream back. Inference Router reads Platform Store and receives a coherent routing revision and serving tuple. Snapshots can be cached within a bounded freshness contract.",
+    "sha256": "8645efdc2f17c5bb1182c70cfbff3511fae07525fce8d5f0006bccef8b9bf120"
+  },
+  {
+    "deck": 1,
+    "frame": 3,
+    "ids": [
+      "d1s3t",
+      "d1s3d"
+    ],
+    "title": "Tokens return through every proxy",
+    "desc": "Inference Router calls Model Worker with the exact serving tuple. Model Worker returns tokens to Inference Router, then Gateway, then Client. Worker owns local KV state.",
+    "sha256": "e2e0f5b28e8ac6bdfabf27c5c2860239f7801b4f2ea9a3a184ebe9bb48a942dc"
+  },
+  {
+    "deck": 1,
+    "frame": 4,
+    "ids": [
+      "d1s4t",
+      "d1s4d"
+    ],
+    "title": "Desired replicas are durable, not a one-shot command",
+    "desc": "Fleet Controller reads and conditionally updates desired deployments in Platform Store. Platform Store acknowledges. Fleet Controller asynchronously sends create, load or drain commands to Model Worker.",
+    "sha256": "c6e881a3e65aa8011a2eb665e90f51aff3dd5be66d6d28bf53aab7355df63061"
+  },
+  {
+    "deck": 1,
+    "frame": 5,
+    "ids": [
+      "d1s5t",
+      "d1s5d"
+    ],
+    "title": "Observed readiness closes the control loop",
+    "desc": "Model Worker asynchronously reports observed generation and readiness to Fleet Controller. Controller reconciles in Platform Store; Inference Router uses only ready, matching, fresh endpoints. The request path stays Client to Gateway to Inference Router to Model Worker and reverses hop by hop.",
+    "sha256": "69ca66c7705d4e224cf5aa61b1e34a56dd6d844b38f0e3ff42384931243f4a05"
+  },
+  {
+    "deck": 2,
+    "frame": 1,
+    "ids": [
+      "d2s1t",
+      "d2s1d"
+    ],
+    "title": "Seal bytes before registering a version",
+    "desc": "Publisher calls Registry API. Registry API seals an immutable manifest in Artifact Store and receives its acknowledgment; upload/status replies return Registry API to Publisher.",
+    "sha256": "b6ddacd0361dab36f2ac40ac5bdafd56031343bee315ef88a300d7a6ddcbf020"
+  },
+  {
+    "deck": 2,
+    "frame": 2,
+    "ids": [
+      "d2s2t",
+      "d2s2d"
+    ],
+    "title": "Register the full serving bundle atomically",
+    "desc": "Registry API registers the immutable serving bundle and desired deployment in Platform Store and receives a durable acknowledgment. The bundle pins weights, tokenizer, prompt, engine image and optional adapter/base compatibility.",
+    "sha256": "8806b4f01332dde3aac66128d39103d83d8f82697c6268c408b7f2e791ea71e6"
+  },
+  {
+    "deck": 2,
+    "frame": 3,
+    "ids": [
+      "d2s3t",
+      "d2s3d"
+    ],
+    "title": "Loading follows durable desired state",
+    "desc": "Fleet Controller reads desired state from Platform Store and receives its generation. It sends a load command to Model Worker. Worker fetches the exact manifest from Artifact Store and receives bytes there.",
+    "sha256": "cdcd97b70e58a91fc967e7b10564efd48c3a5de70123e75910cc2c56533422d6"
+  },
+  {
+    "deck": 2,
+    "frame": 4,
+    "ids": [
+      "d2s4t",
+      "d2s4d"
+    ],
+    "title": "A real warmup precedes endpoint publication",
+    "desc": "After hash verification, engine load and representative warmup, Model Worker reports READY with generation 7 to Fleet Controller. Controller accepts only current generation and publishes a matching endpoint in Platform Store.",
+    "sha256": "0122d06f01006d268e5a133d7825e6ea21f5ab4ca8a0b0daf18cfb05283ee4bd"
+  },
+  {
+    "deck": 2,
+    "frame": 5,
+    "ids": [
+      "d2s5t",
+      "d2s5d"
+    ],
+    "title": "Bad content never reaches the serving endpoint set",
+    "desc": "On hash or warmup failure, Model Worker reports rejection to Fleet Controller on the alternative failure path. The controller records failed observed state without publishing an endpoint; the sealed manifest is not overwritten to repair the release.",
+    "sha256": "a82f503d9829b2582f5c69ba0438e99a8f24046c62adf3cbadc15b924d208d15"
+  },
+  {
+    "deck": 3,
+    "frame": 1,
+    "ids": [
+      "d3s1t",
+      "d3s1d"
+    ],
+    "title": "Placement begins with hard eligibility",
+    "desc": "Fleet Controller applies device memory, topology, model image and tenant eligibility constraints before scoring. Nodes A, B and C are distinct machine failure domains; no worker is placed yet.",
+    "sha256": "399ce91460db2c131948651b9d3c9b4cb31c49bce8beef8091c4939e50bbcdf4"
+  },
+  {
+    "deck": 3,
+    "frame": 2,
+    "ids": [
+      "d3s2t",
+      "d3s2d"
+    ],
+    "title": "Occupancy and benchmark throughput are independent checks",
+    "desc": "Fleet Controller places replicas r1 to r3 as Model Worker on Node A and receives observed state. Teaching arrival 20 per second times mean eight seconds gives 160 mean active sequences; 32 slots alone gives a five-replica occupancy lower bound, not throughput.",
+    "sha256": "884293be5aadb660207b57aa66adf973d6db2c64ccbf65245bbf2bfeaa709a4e"
+  },
+  {
+    "deck": 3,
+    "frame": 3,
+    "ids": [
+      "d3s3t",
+      "d3s3d"
+    ],
+    "title": "Spread changes which replicas fail together",
+    "desc": "Fleet Controller independently places replicas r4 to r6 on Node B and receives observed state. This is fan-out placement, not a chain from Node A to Node B.",
+    "sha256": "0e6d7ddb70ce13a55671d7a93a097cdfb715b204a77f62847c976ce55c75723f"
+  },
+  {
+    "deck": 3,
+    "frame": 4,
+    "ids": [
+      "d3s4t",
+      "d3s4d"
+    ],
+    "title": "Three domains with three replicas each provide bounded headroom",
+    "desc": "Fleet Controller independently places replicas r7 to r9 on Node C and receives observed state. Each node has 96 active slots and 12 req/s benchmark capacity. Nine replicas provide 288 slots and 36 req/s.",
+    "sha256": "b759f7e835a89513722c2f604ccbe4097fa4c2bbfe276c81109918752b500635"
+  },
+  {
+    "deck": 3,
+    "frame": 5,
+    "ids": [
+      "d3s5t",
+      "d3s5d"
+    ],
+    "title": "A node failure removes endpoints before replacement loads",
+    "desc": "Alternative failure notification from Node A returns to Fleet Controller. Removing its three endpoints leaves Nodes B and C with six replicas and 24 req/s. Replacement loading remains asynchronous and does not add immediate capacity.",
+    "sha256": "44802eb0219866e9f208a8f4711cb16fb2122a0c790091a0a4dc92205e5c1a38"
+  },
+  {
+    "deck": 3,
+    "frame": 6,
+    "ids": [
+      "d3s6t",
+      "d3s6d"
+    ],
+    "title": "Canary and other models are additional capacity",
+    "desc": "The final placement diagram preserves all nine production replicas across three domains and the failure lane. Canary and another model require separate additional device reservations, not the displayed production slots.",
+    "sha256": "2334dfbbc3eb9ce104b4b266b930e3ca86dd842e7a2b1ff0086658ea6a7b35f2"
+  },
+  {
+    "deck": 4,
+    "frame": 1,
+    "ids": [
+      "d4s1t",
+      "d4s1d"
+    ],
+    "title": "Reserve a permit before dispatching physical work",
+    "desc": "WAITING transitions to HELD after an atomic reservation of tenant and replica capacity. The stable request permit k9 and worker epoch identify the reservation. Arrows are admission state transitions, not network replies.",
+    "sha256": "1225bc7ab19c623886872bbcaf7b4695ad71f7d182ab5d2694e79052eac01e27"
+  },
+  {
+    "deck": 4,
+    "frame": 2,
+    "ids": [
+      "d4s2t",
+      "d4s2d"
+    ],
+    "title": "Workers consume the exact permit once",
+    "desc": "HELD transitions to RUNNING when Model Worker validates serving tuple, epoch and current permit, then records acceptance once. Duplicate dispatches retrieve acceptance for k9 instead of enqueueing another physical generation.",
+    "sha256": "386fd56b596acf47f9022f3e02b6d906a90c0f40e3eece4b21e110248e380bae"
+  },
+  {
+    "deck": 4,
+    "frame": 3,
+    "ids": [
+      "d4s3t",
+      "d4s3d"
+    ],
+    "title": "Bounded queues fail before exceeding the waiting budget",
+    "desc": "WAITING transitions to REJECTED on quota or deadline. With teaching arrival twenty per second and a 0.2-second mean queue budget, Little law gives mean queue occupancy four, not a maximum queue guarantee; the design also caps queued requests at forty with per-request deadlines.",
+    "sha256": "001cf26c553de6fd9d7b55702f552a7fac2a2d9909dc29a54e651af5d48cdb0a"
+  },
+  {
+    "deck": 4,
+    "frame": 4,
+    "ids": [
+      "d4s4t",
+      "d4s4d"
+    ],
+    "title": "Canceling the client begins retirement, not slot reuse",
+    "desc": "RUNNING transitions to RETIRING after completion or cancellation. The cancellation failure lane enters the same retirement state; a closed client connection does not imply physical GPU work has ended.",
+    "sha256": "d8b6efc3fc039da9deaae33f524040cd3194b44ddbf0d7bc9871442985569d3a"
+  },
+  {
+    "deck": 4,
+    "frame": 5,
+    "ids": [
+      "d4s5t",
+      "d4s5d"
+    ],
+    "title": "Release follows a trustworthy physical completion",
+    "desc": "RETIRING transitions to RELEASED after Model Worker confirms physical completion and GPU fence. If a node is unreachable, quarantine its capacity until the device/process is fenced or reset; lease expiry alone cannot prove it stopped.",
+    "sha256": "da694b56072de6da4f8cd6fd83a8f2e6e65fefc0e7fb2e90f18da44ab09e32b8"
+  },
+  {
+    "deck": 4,
+    "frame": 6,
+    "ids": [
+      "d4s6t",
+      "d4s6d"
+    ],
+    "title": "Only undispatched holds may expire without a GPU acknowledgment",
+    "desc": "HELD transitions to EXPIRED only while its dispatch state remains undispatched, competing atomically with dispatch. The full graph separates queue rejection, unconsumed holds, accepted work, retirement and physical release.",
+    "sha256": "005caefc4137697a6b48fc4ca3859d00b0207de8b2a4857692e2783ca014e7f1"
+  },
+  {
+    "deck": 5,
+    "frame": 1,
+    "ids": [
+      "d5s1t",
+      "d5s1d"
+    ],
+    "title": "Tenant identity comes from a trusted boundary",
+    "desc": "Tenant A calls Inference Router and receives a response. Tenant identity is derived from authenticated context passed by Gateway, not caller-supplied cache keys. Router filters model, tenant, isolation class and readiness before scoring.",
+    "sha256": "1ee41b7e9ffcff74466588fa5088865543cb36129a2c374189e64cccb6c731a4"
+  },
+  {
+    "deck": 5,
+    "frame": 2,
+    "ids": [
+      "d5s2t",
+      "d5s2d"
+    ],
+    "title": "Affinity is a preference under a real capacity limit",
+    "desc": "Inference Router selects the shared Model Worker for Tenant A and receives its stream back. Selection prefers reusable prefixes only among capacity-admissible endpoints; stale metrics remain hints and workers enforce exact permit limits.",
+    "sha256": "abe1f1d5d3add1044895ea3d62df0cee0b9f12c7a355c2cdb424f5cc266c4162"
+  },
+  {
+    "deck": 5,
+    "frame": 3,
+    "ids": [
+      "d5s3t",
+      "d5s3d"
+    ],
+    "title": "KV reuse is scoped to tenant and exact serving content",
+    "desc": "Model Worker looks up Prefix Cache and receives cached KV. Cache identity includes trusted tenant namespace, weights, tokenizer, adapter and exact token prefix; a new serving tuple cannot reuse incompatible blocks. This is worker-local KV, not semantic answer caching.",
+    "sha256": "50c8a739bc68666c2181b0eb125399c9f46bf48fba25b1d711fb474ae0ab6cf1"
+  },
+  {
+    "deck": 5,
+    "frame": 4,
+    "ids": [
+      "d5s4t",
+      "d5s4d"
+    ],
+    "title": "Sensitive tenants receive an explicit private resource boundary",
+    "desc": "Tenant B calls Inference Router, which routes to a private Model Worker and receives its stream, then returns to Tenant B. Private tier uses separately allocated device/process resources and never the shared Prefix Cache shown above.",
+    "sha256": "086f9515dc5927cb06427f40d98286f44e9cccc6b5997e88ad8b40f26bc60365"
+  },
+  {
+    "deck": 5,
+    "frame": 5,
+    "ids": [
+      "d5s5t",
+      "d5s5d"
+    ],
+    "title": "Isolation is retained under overload",
+    "desc": "The alternative failure lane returns Inference Router to Tenant B when its private tier is full. Shared resources cannot become a silent fallback. Tenant A stays within its own capacity/namespace; token quotas and slot fairness are separate contracts.",
+    "sha256": "8979c19a05f7da739cf832a2461fe08216919c27860fb402cb0acff17b878004"
+  },
+  {
+    "deck": 6,
+    "frame": 1,
+    "ids": [
+      "d6s1t",
+      "d6s1d"
+    ],
+    "title": "Loading and ready are distinct rollout states",
+    "desc": "LOADING transitions to READY only after exact bundle verification and representative warmup. Teaching cold load takes 120 seconds. Arrows are durable rollout state transitions rather than client request paths.",
+    "sha256": "8a6a226f1e49d8bb9e820b5a0bdfae4f6b70f061fce3e68c6165aee5b9ff1ad1"
+  },
+  {
+    "deck": 6,
+    "frame": 2,
+    "ids": [
+      "d6s2t",
+      "d6s2d"
+    ],
+    "title": "Publish a coherent weighted snapshot",
+    "desc": "READY transitions to CANARY by atomically publishing a new routing revision containing both serving bundles and their weights. Twenty req/s times ten percent is two req/s to v2; one teaching canary replica supports four req/s at the specified workload.",
+    "sha256": "66ad64859d5fb83f3a721b97aacc35c50d75975ea5b3af248eb05b79587a6058"
+  },
+  {
+    "deck": 6,
+    "frame": 3,
+    "ids": [
+      "d6s3t",
+      "d6s3d"
+    ],
+    "title": "A failed canary returns new requests to healthy v1",
+    "desc": "CANARY transitions to ROLLBACK on version-specific SLO/quality guard failure. ROLLBACK publishes a higher routing revision selecting the immutable v1 bundle and returns to its already-ready serving state only if v1 is healthy and has headroom. Existing streams remain pinned.",
+    "sha256": "7a449b6c294b73ba6d228941e269a9e2813d805230fa5808e40ebf78ae9e6f8a"
+  },
+  {
+    "deck": 6,
+    "frame": 4,
+    "ids": [
+      "d6s4t",
+      "d6s4d"
+    ],
+    "title": "Ramp only after new capacity grows",
+    "desc": "CANARY transitions through capacity- and observation-gated ramp to FULL v2. Nine new production replicas are ready before all twenty req/s move. Nine old replicas remain warm in the rollback window, requiring twenty teaching GPUs including two small-model replicas.",
+    "sha256": "8aa560b5884bf3d408dde81d187c8c990076b08ec74ca58161bcc8d78c5f113c"
+  },
+  {
+    "deck": 6,
+    "frame": 5,
+    "ids": [
+      "d6s5t",
+      "d6s5d"
+    ],
+    "title": "Full promotion keeps a real hot rollback window",
+    "desc": "FULL v2 can still transition to ROLLBACK during the retained hot-v1 window. Routing revision delivery uses bounded freshness; stale routers cannot start new work once their valid snapshot expires, and requests with unauthorized stale revisions are rejected at admission.",
+    "sha256": "927d81a9a42e4f997da85edbfc78f64ad24560a85ce745a1cc007c40af7310ef"
+  },
+  {
+    "deck": 6,
+    "frame": 6,
+    "ids": [
+      "d6s6t",
+      "d6s6d"
+    ],
+    "title": "Drain ends the instant rollback guarantee",
+    "desc": "After the thirty-minute teaching hot window, FULL v2 moves to DRAIN v1, stopping new v1 admissions and waiting for pinned work to physically retire before releasing devices. Once v1 is unloaded rollback requires reloading; retaining the artifact alone is not warm capacity.",
+    "sha256": "9d3b4e7529b580efceffd8d7853b195b7045715587963bc35f14130be7468561"
+  }
+]

@@ -1,0 +1,30 @@
+decideOffer(op, orderId, attemptId, generation, authenticatedCourier):
+  begin transaction
+    o = SELECT order FOR UPDATE
+    a = SELECT attempt WHERE id = attemptId
+    require a binds (orderId, generation) else CONFLICT
+    if op in {ACCEPT, REJECT}: require a.courier == authenticatedCourier else FORBIDDEN
+    if op == ACCEPT and a.acceptReceipt exists:
+      commit; return a.acceptReceipt, currentSnapshot(o) // historical, no reactivation
+    require o.currentAttempt == a.id and o.generation == generation else STALE
+    require o.state == offered and a.result == offered else STALE
+    c = SELECT courier_capacity WHERE id = a.courier FOR UPDATE
+    now = SELECT clock_timestamp()
+    if op == ACCEPT:
+      require now < a.deadline else CONFLICT
+      receipt = fixedAcceptReceipt(a)
+      UPDATE attempt SET result = assigned, acceptReceipt = receipt
+      UPDATE order SET state = assigned
+      INSERT outbox("assigned:" + a.id, currentAssignment)
+    else:
+      require op == REJECT or (op == EXPIRE and now >= a.deadline) else NOT_DUE
+      DELETE active_slot WHERE attempt_id = a.id        // require one deleted row
+      UPDATE courier_capacity SET occupied = occupied - 1 WHERE id = a.courier
+      UPDATE attempt SET result = (op == REJECT ? rejected : expired)
+      next = now >= o.matchDeadline or o.attemptCount >= 3 ? failed : pending_match
+      UPDATE order SET state = next, currentAttempt = null, generation = generation + 1
+      INSERT outbox(keyFor(orderId, generation + 1, next), nextWorkOrFailure)
+      // Persist courier cooldown with the retry work; retries do not reset budgets.
+      receipt = fixedDecisionReceipt(a, op)
+  commit; return receipt, currentSnapshot(o)
+  // Only this offered branch expires. Assigned/picked_up keep their slot.

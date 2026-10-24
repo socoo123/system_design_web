@@ -1,0 +1,35 @@
+$ node tools/check.mjs
+STATS 45 chapters; 276 decks; 1411 frames; 183 code blocks (no count quotas)
+PASS structure, local resources, accessibility, bilingual nesting, chapter entries and animation preservation
+
+$ node tools/audit-chapter.mjs ch38
+
+ch38 STATS {"decks":7,"frames":38,"perDeck":[5,6,6,5,5,5,6],"staticImages":0,"code":4,"han":5724,"zh":194,"en":194}
+PASS structural checks; content/translation/rendering require independent review
+
+$ node examples/ch38/sync.mjs --check
+4 snippets match examples/ch38
+
+$ node --check examples/ch38/sync.mjs
+
+$ node --check docs/reviews/ch38-browser.mjs
+
+$ node --check docs/reviews/ch38-render.mjs
+
+$ /Users/zy/.pyenv/versions/3.11.8/bin/python3 -B examples/ch38/run.py --out docs/reviews/ch38-example-results.json
+{"checks": 77, "SQLite": "3.51.0", "numbers": 24, "status": "passed"}
+
+$ /Library/Java/JavaVirtualMachines/jdk-17.0.10.jdk/Contents/Home/bin/java -version
+java version "17.0.10" 2024-01-16 LTS
+Java(TM) SE Runtime Environment (build 17.0.10+11-LTS-240)
+Java HotSpot(TM) 64-Bit Server VM (build 17.0.10+11-LTS-240, mixed mode, sharing)
+
+$ /Library/Java/JavaVirtualMachines/jdk-17.0.10.jdk/Contents/Home/bin/javac --release 17 -d /var/folders/5k/y6qh6sfd2g30js0v0qrv4mfr0000gn/T/ch38-java-final-z5atub5c examples/ch38/AgeBudget.java examples/ch38/SingleFlight.java
+
+$ /Library/Java/JavaVirtualMachines/jdk-17.0.10.jdk/Contents/Home/bin/java -cp /var/folders/5k/y6qh6sfd2g30js0v0qrv4mfr0000gn/T/ch38-java-final-z5atub5c AgeBudget
+AgeBudget: 14 checks passed
+
+$ /Library/Java/JavaVirtualMachines/jdk-17.0.10.jdk/Contents/Home/bin/java -cp /var/folders/5k/y6qh6sfd2g30js0v0qrv4mfr0000gn/T/ch38-java-final-z5atub5c SingleFlight
+SingleFlight: 38 checks passed
+
+$ git diff --check

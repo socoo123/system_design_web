@@ -1,0 +1,24 @@
+{
+  "checkedAt":"2026-10-24",
+  "method":"Independent web open/find of standards, original paper and official product docs; not copied from the author checklist",
+  "sources":[
+    {"url":"https://www.rfc-editor.org/rfc/rfc9111.html","sections":["3.5","4.1","4.2.3","4.3.2","5.2.2"],"verified":["Authorization has explicit shared-cache exceptions for must-revalidate/public/s-maxage; chapter deliberately uses a stricter pass policy before lookup","Vary selects matching representation inputs and does not authorize","A reused response propagates current Age rather than renewing at Shield","fresh shared responses can evaluate applicable client If-None-Match without contacting origin","private/no-store/no-cache have different unqualified semantics; strict baseline cannot casually serve stale"]},
+    {"url":"https://www.rfc-editor.org/rfc/rfc9110.html","sections":["8.8.3.2","8.8.3.3","13.1.2","15.4.3","15.5.5"],"verified":["If-None-Match on GET uses weak entity-tag comparison, accepts lists or star","validators must match the selected representation/coding semantics","302 is not generally heuristically cacheable;404 can be; explicit cache directives govern the chapter's negative profile"]},
+    {"url":"https://www.rfc-editor.org/rfc/rfc5861.html","sections":["3","4"],"verified":["SWR and stale-if-error are independent extensions, both intervals measured after staleness; the chapter's10/5/15 arithmetic is a teaching profile"]},
+    {"url":"https://www.usenix.org/system/files/conference/nsdi13/nsdi13-final170_update.pdf","sections":["2","3.2.1"],"verified":["look-aside client owns DB fetch after miss","lease token is key-bound, delete can invalidate it, and rate-controlled leases reduce same-key amplification"],"scope":"chapter floor/epoch/SQLite transaction/1s/20s/5s budgets are its own design, not the paper's measurements"},
+    {"url":"https://pkg.go.dev/golang.org/x/sync/singleflight","sections":["Group.Do","Group.Forget"],"verified":["one Group suppresses in-flight duplicate calls for a key","this does not imply cross-process origin admission, fencing or physical query cancellation"]},
+    {"url":"https://www.rfc-editor.org/rfc/rfc8246.html","sections":["1","2"],"verified":["immutable means unchanged during freshness, not permanent retention or instant revocation"]},
+    {"url":"https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/Invalidation.html","verified":["edge invalidation leaves local/browser/corporate caches until their expiry; versioned names control different bytes"]},
+    {"url":"https://docs.aws.amazon.com/cloudfront/latest/APIReference/API_GetInvalidation.html","verified":["invalidation request has a queryable identity and status; accepted request is distinct from completion; no time bound transferred into this chapter"]},
+    {"url":"https://sqlite.org/lang_transaction.html","sections":["2.1","2.2"],"verified":["one write transaction per file across connections, BEGIN IMMEDIATE obtains writer before reads; tests exercise local file serialization only"]}
+  ],
+  "handTraces":[
+    {"input":"public GET en/gzip, fresh Edge object","walk":"select exact method/URI/Vary representation then reuse Edge; no primary read is implied"},
+    {"input":"Authorization or Cookie supplied while a public object already exists at Edge","walk":"chapter pass policy runs before shared lookup; App authenticates, response private/no-store. RFC permits narrower shared exceptions but this route intentionally does not use them"},
+    {"input":"If-None-Match list contains W/tag-v7, condition reaches App","walk":"App reads a new primary snapshot under origin budget. Current selected tag-v7 permits304; version/render/representation change returns200; old L1-v7 cannot self-certify"},
+    {"input":"no current selected representation and If-None-Match:*","walk":"exists=false prevents304, returns bounded404 only with valid authoritative absence evidence; timeout/budget rejection is503no-store"},
+    {"input":"hard120s at now114s versus116.5s/117s","walk":"n=3; at116.5 n=0 but canSend true; at117 strict canSend false. The final transport must complete within1s; no fresh n is minted from an old copy"},
+    {"input":"CDN purge accepted but an Edge or browser still holds v1","walk":"query/retry per-target receipts; accepted is not global completion; hard age bounds remaining old successful responses; purge does not recall browser bytes"}
+  ],
+  "limits":"Hand traces are source/contract review, not a real HTTP parser/CDN experiment. The executable source new-input checks are reported separately."
+}

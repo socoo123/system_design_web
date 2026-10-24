@@ -1,0 +1,454 @@
+{
+  "checks": [
+    {
+      "name": "upstream identity replays original local order",
+      "passed": true
+    },
+    {
+      "name": "same upstream with changed digest",
+      "passed": true,
+      "details": "IDENTITY_PAYLOAD_CONFLICT"
+    },
+    {
+      "name": "offer durable before delivery",
+      "passed": true
+    },
+    {
+      "name": "duplicate reserve occupies once",
+      "passed": true
+    },
+    {
+      "name": "attempt cannot be rebound to another courier",
+      "passed": true,
+      "details": "ATTEMPT_BINDING"
+    },
+    {
+      "name": "lost acceptance reply replays after deadline",
+      "passed": true
+    },
+    {
+      "name": "different courier cannot replay acceptance",
+      "passed": true,
+      "details": "FORBIDDEN"
+    },
+    {
+      "name": "expiry does not release assigned",
+      "passed": true,
+      "details": "STALE"
+    },
+    {
+      "name": "GPS/offline is not custody evidence",
+      "passed": true,
+      "details": "REVIEW"
+    },
+    {
+      "name": "customer cancel cannot release picked custody",
+      "passed": true,
+      "details": "CONTROLLED_HANDOFF_REQUIRED"
+    },
+    {
+      "name": "crash after slot deletion rolls back state and slot",
+      "passed": true
+    },
+    {
+      "name": "simultaneous duplicate completion releases once",
+      "passed": true
+    },
+    {
+      "name": "historical accept cannot reactivate delivered order",
+      "passed": true
+    },
+    {
+      "name": "same completion with different evidence conflicts",
+      "passed": true,
+      "details": "EVIDENCE_CONFLICT"
+    },
+    {
+      "name": "two orders race for last courier slot",
+      "passed": true,
+      "details": [
+        [
+          "conflict",
+          "REMATCH"
+        ],
+        [
+          "ok",
+          {
+            "receipt": "offer:o1:7:B:a2",
+            "current": {
+              "order_id": "o1",
+              "scope": "city-A",
+              "upstream_order": "up1",
+              "digest": "fixed-digest",
+              "state": "offered",
+              "generation": 7,
+              "current_attempt": "a2",
+              "attempt_count": 1,
+              "match_deadline": 220,
+              "created_at": 100
+            }
+          }
+        ]
+      ]
+    },
+    {
+      "name": "two couriers race for one order",
+      "passed": true,
+      "details": [
+        [
+          "conflict",
+          "STALE"
+        ],
+        [
+          "ok",
+          {
+            "receipt": "offer:o0:7:C:a2",
+            "current": {
+              "order_id": "o0",
+              "scope": "city-A",
+              "upstream_order": "up0",
+              "digest": "fixed-digest",
+              "state": "offered",
+              "generation": 7,
+              "current_attempt": "a2",
+              "attempt_count": 1,
+              "match_deadline": 220,
+              "created_at": 100
+            }
+          }
+        ]
+      ]
+    },
+    {
+      "name": "third order cannot exceed two slots",
+      "passed": true,
+      "details": "REMATCH"
+    },
+    {
+      "name": "capacity count equals live slot count",
+      "passed": true
+    },
+    {
+      "name": "routing exhausted candidate validity before reservation",
+      "passed": true,
+      "details": "STALE_CANDIDATE"
+    },
+    {
+      "name": "candidate validity rechecked after lock acquisition",
+      "passed": true,
+      "details": "STALE_CANDIDATE"
+    },
+    {
+      "name": "reservation rollback covers attempt capacity order outbox",
+      "passed": true
+    },
+    {
+      "name": "accept-expire competition at 119",
+      "passed": true,
+      "details": [
+        [
+          "ok",
+          {
+            "receipt": "accepted:a1:7",
+            "current": {
+              "order_id": "o0",
+              "scope": "city-A",
+              "upstream_order": "up0",
+              "digest": "fixed-digest",
+              "state": "assigned",
+              "generation": 7,
+              "current_attempt": "a1",
+              "attempt_count": 1,
+              "match_deadline": 220,
+              "created_at": 100
+            }
+          }
+        ],
+        [
+          "conflict",
+          "NOT_DUE"
+        ]
+      ]
+    },
+    {
+      "name": "accept-expire competition at 120",
+      "passed": true,
+      "details": [
+        [
+          "conflict",
+          "STALE"
+        ],
+        [
+          "ok",
+          {
+            "receipt": "expired:a1",
+            "current": {
+              "order_id": "o0",
+              "scope": "city-A",
+              "upstream_order": "up0",
+              "digest": "fixed-digest",
+              "state": "pending_match",
+              "generation": 8,
+              "current_attempt": null,
+              "attempt_count": 1,
+              "match_deadline": 220,
+              "created_at": 100
+            }
+          }
+        ]
+      ]
+    },
+    {
+      "name": "expiry bumps fence once",
+      "passed": true
+    },
+    {
+      "name": "late accept after expiry is fenced",
+      "passed": true,
+      "details": "STALE"
+    },
+    {
+      "name": "duplicate expiry cannot double-release",
+      "passed": true,
+      "details": "STALE"
+    },
+    {
+      "name": "old matching worker cannot create another attempt",
+      "passed": true,
+      "details": "STALE"
+    },
+    {
+      "name": "cooldown survives rematch",
+      "passed": true,
+      "details": "COOLDOWN"
+    },
+    {
+      "name": "old pickup cannot change a new assignment",
+      "passed": true,
+      "details": "STALE"
+    },
+    {
+      "name": "clock read after lock wait rejects deadline crossing",
+      "passed": true
+    },
+    {
+      "name": "accept-cancel serialize without duplicate ownership",
+      "passed": true,
+      "details": [
+        [
+          "conflict",
+          "STALE"
+        ],
+        [
+          "ok",
+          {
+            "receipt": "cancel:a1:cancel",
+            "current": {
+              "order_id": "o0",
+              "scope": "city-A",
+              "upstream_order": "up0",
+              "digest": "fixed-digest",
+              "state": "cancelled",
+              "generation": 8,
+              "current_attempt": null,
+              "attempt_count": 1,
+              "match_deadline": 220,
+              "created_at": 100
+            }
+          }
+        ]
+      ]
+    },
+    {
+      "name": "verified release fences old acceptance and preserves receipt",
+      "passed": true
+    },
+    {
+      "name": "old deliver after controlled reassign",
+      "passed": true,
+      "details": "STALE"
+    },
+    {
+      "name": "third unanswered attempt durably fails instead of infinite retry",
+      "passed": true
+    },
+    {
+      "name": "lost queue delivery recovered from durable pending rows",
+      "passed": true
+    },
+    {
+      "name": "repeated scans expire offers and fail exhausted pending once",
+      "passed": true
+    },
+    {
+      "name": "unknown creation is fenced before compensation intent",
+      "passed": true
+    },
+    {
+      "name": "late delayed create cannot race a refund after tombstone",
+      "passed": true,
+      "details": "CREATION_FENCED"
+    },
+    {
+      "name": "stale worker cannot reserve compensated pending work",
+      "passed": true,
+      "details": "STALE"
+    },
+    {
+      "name": "session starts without a fresh point",
+      "passed": true,
+      "details": "INVALID_POINT"
+    },
+    {
+      "name": "fresh boundary accepted",
+      "passed": true
+    },
+    {
+      "name": "duplicate and old seq return current seq",
+      "passed": true
+    },
+    {
+      "name": "duplicate does not refresh capture receipt or TTL",
+      "passed": true
+    },
+    {
+      "name": "freshness reevaluated on read despite unexpired TTL",
+      "passed": true
+    },
+    {
+      "name": "higher sequence buffered old capture is rejected",
+      "passed": true,
+      "details": "INVALID_POINT"
+    },
+    {
+      "name": "future beyond trusted skew is rejected",
+      "passed": true,
+      "details": "INVALID_POINT"
+    },
+    {
+      "name": "future within trusted skew accepted conservatively",
+      "passed": true
+    },
+    {
+      "name": "NaN accuracy rejected",
+      "passed": true,
+      "details": "INVALID_POINT"
+    },
+    {
+      "name": "invalid coordinates rejected",
+      "passed": true,
+      "details": "INVALID_POINT"
+    },
+    {
+      "name": "reconnect advances epoch and invalidates old point",
+      "passed": true
+    },
+    {
+      "name": "old disconnect does not close newer connection",
+      "passed": true
+    },
+    {
+      "name": "old connection cannot upload high sequence",
+      "passed": true,
+      "details": "STALE_SESSION"
+    },
+    {
+      "name": "dropped index event repaired from latest detail",
+      "passed": true
+    },
+    {
+      "name": "old migration cannot move courier back",
+      "passed": true
+    },
+    {
+      "name": "projection current cell only",
+      "passed": true
+    },
+    {
+      "name": "disconnect immediately invalidates point",
+      "passed": true
+    },
+    {
+      "name": "uncertain clock cannot become dispatch candidate",
+      "passed": true,
+      "details": "INVALID_POINT"
+    },
+    {
+      "name": "pure freshness exact edges",
+      "passed": true
+    },
+    {
+      "name": "ETA concurrent preparation and travel",
+      "passed": true
+    },
+    {
+      "name": "ETA after pickup does not add preparation again",
+      "passed": true
+    },
+    {
+      "name": "route timeout uses bounded matching cache with low confidence",
+      "passed": true
+    },
+    {
+      "name": "missing failed element is unavailable rather than zero",
+      "passed": true
+    },
+    {
+      "name": "expired or wrong-context route cannot be reused",
+      "passed": true
+    },
+    {
+      "name": "stale point cannot be promoted by ETA degradation",
+      "passed": true
+    },
+    {
+      "name": "normalized capacity calculations",
+      "passed": true
+    },
+    {
+      "name": "queue arithmetic under constant teaching rates",
+      "passed": true
+    },
+    {
+      "name": "payload storage and subscriber arithmetic",
+      "passed": true
+    },
+    {
+      "name": "actual Java 17 compilation",
+      "passed": true,
+      "details": ""
+    },
+    {
+      "name": "actual Java 17 boundary execution",
+      "passed": true,
+      "details": "LocationGate: normal/stale/future/NaN/unbounded checks passed"
+    },
+    {
+      "name": "real Redis detail expiry does not delete GEO member",
+      "passed": true
+    }
+  ],
+  "limitations": [
+    "SQLite BEGIN IMMEDIATE serializes writers; PostgreSQL row locks/replication are not exercised.",
+    "Clock, authenticated actors, confirmed payment and custody evidence are trusted local fixtures.",
+    "No live courier, routing API, SSE/WebSocket, cross-machine clock, Redis Cluster/failover or load test."
+  ],
+  "javaVersion": "java version \"17.0.10\" 2024-01-16 LTS",
+  "redisVersion": "7.2.5",
+  "files": {
+    "examples/ch27/LocationGate.java": "75117feadea386a34c5f48e827a5e3c06a83e771ab71a6911ff493cd04788980",
+    "examples/ch27/README.md": "df7fac7f35eeea0e856897fb7733729d615c913acee6e755473d1bbf9e821568",
+    "examples/ch27/check.py": "dd337a429559e1a30ff7ceca53c137dce34d8f9ea927bab3c40a0598dd544dbd",
+    "examples/ch27/decide.pseudo": "952acdc0758c5292fd40b143ccff4a1a48896a4e3234ef1468004df9eade4ba0",
+    "examples/ch27/keys.sql": "ce0026f474dd1dd97c48877b757131bc7d158a6e853fe0a80e6af8a55fa1a4f0",
+    "examples/ch27/location.pseudo": "8360cf4b896a3f0d1e6fd3ea1ac58aaf7252726fbc7bc0894cc7dfc208a2d081",
+    "examples/ch27/model.py": "011214b436532a26de2bd815cda2079e38144a322c258e9c540d81d34c558b5a",
+    "examples/ch27/recovery.pseudo": "86a49840a2079b1cc14578b2a08114592c84e16b35b85439c87e381bf7cea394",
+    "examples/ch27/release.pseudo": "06794635fcd0b7d1a3ff02ab8a97537556cfe57892bea0c39e7baf530c72fed7",
+    "examples/ch27/reserve.pseudo": "3b49cdf7c00b730303b38ea903d10b742574ef6a7a456aa9f454ddec9154bde8",
+    "examples/ch27/schema.sql": "a8979aec18b243564542294fd5683d0764c833e685c704c85cd8b60a9e25e9f5",
+    "examples/ch27/sync.mjs": "79d87c8ed0c6e4fcea903d907d1ee7b215af9433d7e571b189ee58ba99f610b1"
+  },
+  "passed": 70,
+  "failed": 0
+}

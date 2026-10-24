@@ -1,0 +1,984 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="parchment" data-locale="zh">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ch30 · RAG 后端</title>
+  <link rel="icon" href="../favicon.ico" sizes="48x48">
+  <link rel="stylesheet" href="../assets/css/style.css">
+  <script src="../assets/js/boot.js"></script>
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="../index.html"><span class="brand-logo">SD</span><span class="lang-zh">系统设计面试</span><span class="lang-en">System Design Interview</span></a>
+  <span class="spacer"></span>
+  <a class="map-link" href="../index.html"><span class="lang-zh">课程地图</span><span class="lang-en">Map</span></a>
+  <div class="seg" role="group" aria-label="language">
+    <button type="button" data-locale-set="zh">中文</button>
+    <button type="button" data-locale-set="both"><span class="lang-zh">对照</span><span class="lang-en">Both</span></button>
+    <button type="button" data-locale-set="en">EN</button>
+  </div>
+  <div class="seg" role="group" aria-label="theme">
+    <button type="button" data-theme-set="parchment"><span class="lang-zh">护眼</span><span class="lang-en">Paper</span></button>
+    <button type="button" data-theme-set="dracula"><span class="lang-zh">深色</span><span class="lang-en">Dark</span></button>
+  </div>
+</header>
+<main class="wrap">
+<article class="chapter" id="ch30" data-ch="ch30">
+  <header>
+    <div class="ch-kicker"><span class="lang-zh">CHAPTER 30 · 大模型与 Agent 基建</span><span class="lang-en">CHAPTER 30 · LLM / Agent</span></div>
+    <h1><span class="lang-zh">RAG 后端</span><span class="lang-en">RAG backend</span></h1>
+    <p class="ch-meta-line"><span class="lang-zh">约 40 分钟 · 前置：Ch03、Ch29 · 6 组 / 32 帧渐进白板图</span><span class="lang-en">~40 min · after Ch03, Ch29 · 6 decks / 32 progressive frames</span></p>
+  </header>
+
+<section class="goal"><h2><span class="lang-zh">这一章结束你能做什么</span><span class="lang-en">What you can do after this chapter</span></h2>
+<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
+<p>用两张完整白板讲清摄取与查询：文档从持久任务走到可搜索版本，问题从鉴权走到有证据的答案，回程逐跳闭合。</p>
+<p>把文档数算成块数、向量字节和 rerank 对数；每个上限都能说明省掉了哪份工作、失败时保留什么。</p>
+<p>走通两路索引部分成功、父块越权、伪引用、删除与旧查询竞争、换 embedding 五个窗口；用检索和答案两层评测决定方案。</p>
+</div><div class="lang-en"><p class="col-kicker">English</p>
+<p>Explain complete ingest and query boards: durable work publishes searchable revisions, while authenticated questions become evidence-grounded answers with full return paths.</p>
+<p>Derive chunks, vector bytes, and rerank pairs. Explain what each cap saves and what remains available during failure.</p>
+<p>Walk partial index success, parent access, invalid citations, deletion races, and embedding migration. Evaluate retrieval and answers separately.</p>
+</div></div></section>
+
+  <section>
+<h2><span class="lang-zh">30 秒开场：先定答案的契约</span><span class="lang-en">Opening: define the answer contract</span></h2>
+<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
+<p>我设计闭库企业问答，语料是内部 wiki 与 PDF。Connector 把源版本和摄取任务写进 Catalog；Ingest 保留布局、切分、嵌入，等 Chunk Store 和两路 Hybrid Index 都可用才发布 current。在线 RAG 根据已验证身份绑定一份 query bundle，BM25 与稠密召回并行，用 RRF 合并，再对有界短名单 rerank。证据按 token 预算拼给现有推理服务，答案按句校验来源与支持关系后返回。删除先隐藏再清理，换 embedding 用新池回填和整份 bundle 切流。</p>
+<p>先问七件事：文档类型、文档和权限变更频率、用户要完整答案还是第一句、来源是否必须可点击、租户与文档 ACL 是否都存在、中英术语是否很多、是否允许公网搜索。本章固定闭库，不靠联网填缺失证据；引用必须能点到本轮用过的原文版本。没有足够证据时允许说不知道，这是一项可测试的产品行为。</p>
+<p>RAG 把外部检索证据和生成结合起来，原始论文展示了参数模型与非参数记忆的结合 [1]。本章的持久任务、权限复查和版本发布是工程设计，不能说成论文已经给出这些服务边界。生成的队列与 GPU 状态见 <a class="chip" href="ch29.html">Ch29</a>；本章把推理当服务调用，索引算法留给 Ch31。编排框架可以替换，服务责任仍须成立。</p>
+</div><div class="lang-en"><p class="col-kicker">English</p>
+<p>This closed-corpus enterprise Q&A service reads wiki and PDF revisions. Connector durably records revisions and jobs in Catalog. Ingest preserves layout, splits, and embeds; current publishes only after Chunk Store and both Hybrid Index lanes are ready. RAG authenticates, pins a query bundle, recalls lexical and dense evidence in parallel, fuses by RRF, and reranks a bounded shortlist. Evidence fits a token budget and goes to existing inference. Sentences pass source and support checks before release. Deletion hides first; embedding migration backfills another pool and switches the whole bundle.</p>
+<p>Clarify document types, content and permission update rates, complete-answer versus first-sentence targets, clickable citations, tenant and document ACLs, terminology/languages, and public-web search. Here the corpus is closed, citations resolve to the exact used revision, and insufficient evidence permits an explicit refusal.</p>
+<p>The original RAG paper combines parametric models and nonparametric retrieval memory [1]. Durable jobs, access checks, and version publication here are engineering design choices rather than services specified by that paper. <a class="chip" href="ch29.html">Ch29</a> owns generation queues and GPU state; Ch31 opens the retrieval engine. Framework choice does not replace service ownership.</p>
+</div></div><h3><span class="lang-zh">所有数字都是 assumption</span><span class="lang-en">All numbers below are assumptions</span></h3>
+<table><thead><tr><th><span class="lang-zh">编号与约束</span><span class="lang-en">ID and constraint</span></th><th><span class="lang-zh">本章取值</span><span class="lang-en">Value</span></th><th><span class="lang-zh">它改变的决定</span><span class="lang-en">Design consequence</span></th></tr>
+</thead><tbody><tr><td><span class="lang-zh">A1 · 语料</span><span class="lang-en">A1 · corpus</span></td><td><span class="lang-zh">10 万篇，每篇恰好 2,000 token 的估算模型；中英混合</span><span class="lang-en">100,000 documents, each exactly 2,000 tokens in the sizing model; mixed Chinese/English</span></td><td><span class="lang-zh">逐篇算尾块；真实分布重做清点</span><span class="lang-en">Count final chunks per document; recount real lengths</span></td></tr>
+<tr><td><span class="lang-zh">A2 · 切分</span><span class="lang-en">A2 · splitting</span></td><td><span class="lang-zh">块上限 512、overlap 64 token；演示步长 448</span><span class="lang-en">512-token cap, 64-token overlap; illustrative stride 448</span></td><td><span class="lang-zh">结构优先，12.5% 是实验起点</span><span class="lang-en">Preserve structure; 12.5% is an experiment starting point</span></td></tr>
+<tr><td><span class="lang-zh">A3 · 向量</span><span class="lang-en">A3 · vectors</span></td><td><span class="lang-zh">768 维、float32 每元素 4 B、每子块一条；父块不另建向量</span><span class="lang-en">768 dimensions, 4 B/float32, one vector per child; no extra parent vectors</span></td><td><span class="lang-zh">1.536 GB 裸向量；元数据、索引与副本另算</span><span class="lang-en">1.536 GB raw vectors; metadata, indexes, and replicas separate</span></td></tr>
+<tr><td><span class="lang-zh">A4 · 在线工作</span><span class="lang-en">A4 · online work</span></td><td><span class="lang-zh">峰值 40 req/s；两路各 100，融合后最多 80 对 rerank</span><span class="lang-en">40 peak req/s; 100 per lane, at most 80 rerank pairs</span></td><td><span class="lang-zh">最多 3,200 对/秒，超时可以回退 RRF</span><span class="lang-en">At most 3,200 pairs/s; tested fallback uses RRF</span></td></tr>
+<tr><td><span class="lang-zh">A5 · prompt</span><span class="lang-en">A5 · prompt</span></td><td><span class="lang-zh">证据最多 8 块且总计 4,096 token；其余输入预算 1,024</span><span class="lang-en">At most 8 spans and 4,096 evidence tokens; 1,024 for other input</span></td><td><span class="lang-zh">最多 5,120 输入 token，父块扩展后再量</span><span class="lang-en">At most 5,120 input tokens; recount expanded parents</span></td></tr>
+<tr><td><span class="lang-zh">A6 · 输出</span><span class="lang-en">A6 · output</span></td><td><span class="lang-zh">输出最多 512 token；模型上下文至少 5,632 token</span><span class="lang-en">512 output tokens; model context at least 5,632 tokens</span></td><td><span class="lang-zh">输入与预留输出一起校验</span><span class="lang-en">Validate input plus reserved output</span></td></tr>
+<tr><td><span class="lang-zh">A7 · 延迟</span><span class="lang-en">A7 · latency</span></td><td><span class="lang-zh">第一句合格输出目标 p95 ≤ 3 s；检索准备截止 700 ms</span><span class="lang-en">First approved sentence target p95 ≤ 3 s; retrieval-preparation deadline 700 ms</span></td><td><span class="lang-zh">端到端测量；700 ms 是单次条件预算</span><span class="lang-en">Measure end to end; 700 ms is a conditional request budget</span></td></tr>
+<tr><td><span class="lang-zh">A8 · 摄取</span><span class="lang-en">A8 · ingest</span></td><td><span class="lang-zh">每日 1% 文档变更；单池持久 job、稳定键、有租约代次</span><span class="lang-en">1% of documents change daily; durable jobs, stable keys, lease epochs</span></td><td><span class="lang-zh">每天示例 5,000 新块，失败可重试</span><span class="lang-en">5,000 new chunks/day in the example; retry safely</span></td></tr>
+<tr><td><span class="lang-zh">A9 · 新鲜度与权限</span><span class="lang-en">A9 · freshness and access</span></td><td><span class="lang-zh">内容新版本 5 min 内可查；tombstone/权限由 Catalog 权威复查</span><span class="lang-en">Content visible within 5 min; authoritative Catalog checks tombstones/access</span></td><td><span class="lang-zh">权限存储超时拒绝释放；不以 TTL 续证明</span><span class="lang-en">Deny release on authority timeout; TTL does not prove access</span></td></tr>
+<tr><td><span class="lang-zh">A10 · 检索预算</span><span class="lang-en">A10 · retrieval budget</span></td><td><span class="lang-zh">鉴权/绑定 30、query embed 60、两路 80/100、融合/取证 40、rerank 250、打包 20 ms</span><span class="lang-en">Auth/pinning 30, query embed 60, lanes 80/100, fusion/fetch 40, rerank 250, packing 20 ms</span></td><td><span class="lang-zh">单次保守预算 500 ms；剩 200 ms 给排队与补召回</span><span class="lang-en">500-ms conservative path budget; 200 ms for queues/refill</span></td></tr>
+<tr><td><span class="lang-zh">A11 · 实验</span><span class="lang-en">A11 · evaluation</span></td><td><span class="lang-zh">冻结 200 个带权限与源版本的标注问题；保留独立回归集</span><span class="lang-en">Freeze 200 labeled queries with identity and source revisions; keep held-out regressions</span></td><td><span class="lang-zh">分层比较，不能拿调参集宣布泛化</span><span class="lang-en">Compare slices; tuning-set wins do not establish generalization</span></td></tr>
+<tr><td><span class="lang-zh">A12 · 迁移</span><span class="lang-en">A12 · migration</span></td><td><span class="lang-zh">切分/embedding 改版建 g2；保留变更、快照 watermark、回放屏障</span><span class="lang-en">Build g2 for splitter/embedding changes; retain changes, snapshot watermark, replay barrier</span></td><td><span class="lang-zh">m1/g1 与 m2/g2 单次查询各自绑定</span><span class="lang-en">Pin m1/g1 or m2/g2 for each request</span></td></tr>
+</tbody></table><div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
+<p>表中的维度、QPS、时延和规模没有对应某家厂商的标称能力。目标块长与 overlap 要用自己的文档和问题比较；来源可以提供实践起点，不能替你证明 64 token 最优。权限方面也不只问租户：同一租户里离职员工和普通员工可能看不同文档，tenant_id 相同仍然可能越权。</p>
+</div><div class="lang-en"><p class="col-kicker">English</p>
+<p>Dimensions, QPS, timings, and sizes do not claim vendor capacity. Evaluate chunk and overlap settings on your corpus; guidance cannot prove sixty-four tokens optimal. Tenant identity is also insufficient for document authorization within that tenant.</p>
+</div></div></section>
+
+  <section>
+<h2><span class="lang-zh">查询闭环：每个后端都回到 RAG</span><span class="lang-en">Query loop: each backend returns to RAG</span></h2>
+<figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d1s1t d1s1d">
+          <title id="d1s1t">Authenticate before retrieval</title>
+          <desc id="d1s1d">Client sends POST to Gateway; Gateway returns through the same connection.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <g class="is-new">
+            <circle cx="44" cy="176" r="12" class="box"/><path d="M24 222 Q44 190 64 222" class="wire"/><text x="44" y="244" text-anchor="middle" class="label">Client</text>
+            <rect x="150" y="164" width="120" height="72" rx="12" class="box"/><text x="210" y="197" text-anchor="middle" class="label">Gateway</text><text x="210" y="216" text-anchor="middle" class="sub">identity / limits</text>
+            <path d="M70 191 L140 191" class="wire"/><polygon points="150,191 140,196 140,186" class="head"/><text x="110" y="182" text-anchor="middle" class="tiny">POST</text>
+            <path d="M150 209 L80 209" class="wire reply"/><polygon points="70,209 80,204 80,214" class="head reply"/>
+            <text x="30" y="35" text-anchor="start" class="label">ONLINE QUERY · request / response hops</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">先收住入口：tenant 和用户组来自已验证身份，客户端不能自报可访问租户。回程停在网关，检索尚未发生。</span><span class="lang-en">Start at authenticated ingress. Tenant and groups come from verified identity, not client claims; retrieval has not started.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d1s2t d1s2d">
+          <title id="d1s2t">Add the orchestrator</title>
+          <desc id="d1s2d">Client to Gateway to RAG; RAG replies to Gateway, then Client.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <circle cx="44" cy="176" r="12" class="box"/><path d="M24 222 Q44 190 64 222" class="wire"/><text x="44" y="244" text-anchor="middle" class="label">Client</text>
+          <rect x="150" y="164" width="120" height="72" rx="12" class="box"/><text x="210" y="197" text-anchor="middle" class="label">Gateway</text><text x="210" y="216" text-anchor="middle" class="sub">identity / limits</text>
+          <path d="M70 191 L140 191" class="wire"/><polygon points="150,191 140,196 140,186" class="head"/><text x="110" y="182" text-anchor="middle" class="tiny">POST</text>
+          <path d="M150 209 L80 209" class="wire reply"/><polygon points="70,209 80,204 80,214" class="head reply"/>
+          <text x="30" y="35" text-anchor="start" class="label">ONLINE QUERY · request / response hops</text>
+          <g class="is-new">
+            <rect x="370" y="164" width="150" height="72" rx="12" class="box"/><text x="445" y="197" text-anchor="middle" class="label">RAG</text><text x="445" y="216" text-anchor="middle" class="sub">orchestrator</text>
+            <path d="M270 191 L360 191" class="wire"/><polygon points="370,191 360,196 360,186" class="head"/><text x="320" y="182" text-anchor="middle" class="tiny">query</text>
+            <path d="M370 209 L280 209" class="wire reply"/><polygon points="270,209 280,204 280,214" class="head reply"/>
+            <text x="250" y="300" text-anchor="middle" class="tiny">One request pins one query bundle</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">加入 RAG 才能把同一问题的检索、prompt 和输出状态放在一个请求里。中途换 embedding 版本会破坏这一份绑定。</span><span class="lang-en">RAG owns retrieval, prompt, and output state for one request. Its embedding/index bundle stays pinned throughout.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d1s3t d1s3d">
+          <title id="d1s3t">Retrieve with scope</title>
+          <desc id="d1s3d">RAG calls Hybrid Index with the pinned bundle and ACL; candidate IDs return to RAG.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <circle cx="44" cy="176" r="12" class="box"/><path d="M24 222 Q44 190 64 222" class="wire"/><text x="44" y="244" text-anchor="middle" class="label">Client</text>
+          <rect x="150" y="164" width="120" height="72" rx="12" class="box"/><text x="210" y="197" text-anchor="middle" class="label">Gateway</text><text x="210" y="216" text-anchor="middle" class="sub">identity / limits</text>
+          <path d="M70 191 L140 191" class="wire"/><polygon points="150,191 140,196 140,186" class="head"/><text x="110" y="182" text-anchor="middle" class="tiny">POST</text>
+          <path d="M150 209 L80 209" class="wire reply"/><polygon points="70,209 80,204 80,214" class="head reply"/>
+          <text x="30" y="35" text-anchor="start" class="label">ONLINE QUERY · request / response hops</text>
+          <rect x="370" y="164" width="150" height="72" rx="12" class="box"/><text x="445" y="197" text-anchor="middle" class="label">RAG</text><text x="445" y="216" text-anchor="middle" class="sub">orchestrator</text>
+          <path d="M270 191 L360 191" class="wire"/><polygon points="370,191 360,196 360,186" class="head"/><text x="320" y="182" text-anchor="middle" class="tiny">query</text>
+          <path d="M370 209 L280 209" class="wire reply"/><polygon points="270,209 280,204 280,214" class="head reply"/>
+          <text x="250" y="300" text-anchor="middle" class="tiny">One request pins one query bundle</text>
+          <g class="is-new">
+            <path d="M665 60 V120 A70 12 0 0 0 805 120 V60" class="store"/><ellipse cx="735" cy="60" rx="70" ry="12" class="store"/><text x="735" y="100" text-anchor="middle" class="label">Hybrid Index</text><text x="735" y="118" text-anchor="middle" class="sub">BM25 + dense</text>
+            <path d="M400 164 L400 92 Q400 84 408 84 L655 84" class="wire"/><polygon points="665,84 655,89 655,79" class="head"/><text x="525" y="76" text-anchor="middle" class="tiny">pinned bundle + ACL</text>
+            <path d="M665 105 L438 105 Q430 105 430 113 L430 154" class="wire reply"/><polygon points="430,164 425,154 435,154" class="head reply"/><text x="540" y="122" text-anchor="middle" class="tiny">candidate IDs</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">检索是 RAG 发起的调用，索引把候选交还 RAG。两路都带租户与文档权限，底层如何执行过滤还要实测。</span><span class="lang-en">Retrieval is an RAG-owned call. Both lanes carry tenant and document permissions; measure the engine’s filtering behavior.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d1s4t d1s4d">
+          <title id="d1s4t">Rerank after recall</title>
+          <desc id="d1s4d">RAG calls Reranker on eighty eligible candidates; ranked IDs return to RAG.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <circle cx="44" cy="176" r="12" class="box"/><path d="M24 222 Q44 190 64 222" class="wire"/><text x="44" y="244" text-anchor="middle" class="label">Client</text>
+          <rect x="150" y="164" width="120" height="72" rx="12" class="box"/><text x="210" y="197" text-anchor="middle" class="label">Gateway</text><text x="210" y="216" text-anchor="middle" class="sub">identity / limits</text>
+          <path d="M70 191 L140 191" class="wire"/><polygon points="150,191 140,196 140,186" class="head"/><text x="110" y="182" text-anchor="middle" class="tiny">POST</text>
+          <path d="M150 209 L80 209" class="wire reply"/><polygon points="70,209 80,204 80,214" class="head reply"/>
+          <text x="30" y="35" text-anchor="start" class="label">ONLINE QUERY · request / response hops</text>
+          <rect x="370" y="164" width="150" height="72" rx="12" class="box"/><text x="445" y="197" text-anchor="middle" class="label">RAG</text><text x="445" y="216" text-anchor="middle" class="sub">orchestrator</text>
+          <path d="M270 191 L360 191" class="wire"/><polygon points="370,191 360,196 360,186" class="head"/><text x="320" y="182" text-anchor="middle" class="tiny">query</text>
+          <path d="M370 209 L280 209" class="wire reply"/><polygon points="270,209 280,204 280,214" class="head reply"/>
+          <text x="250" y="300" text-anchor="middle" class="tiny">One request pins one query bundle</text>
+          <path d="M665 60 V120 A70 12 0 0 0 805 120 V60" class="store"/><ellipse cx="735" cy="60" rx="70" ry="12" class="store"/><text x="735" y="100" text-anchor="middle" class="label">Hybrid Index</text><text x="735" y="118" text-anchor="middle" class="sub">BM25 + dense</text>
+          <path d="M400 164 L400 92 Q400 84 408 84 L655 84" class="wire"/><polygon points="665,84 655,89 655,79" class="head"/><text x="525" y="76" text-anchor="middle" class="tiny">pinned bundle + ACL</text>
+          <path d="M665 105 L438 105 Q430 105 430 113 L430 154" class="wire reply"/><polygon points="430,164 425,154 435,154" class="head reply"/><text x="540" y="122" text-anchor="middle" class="tiny">candidate IDs</text>
+          <g class="is-new">
+            <rect x="660" y="176" width="150" height="70" rx="12" class="box"/><text x="735" y="208" text-anchor="middle" class="label">Reranker</text><text x="735" y="227" text-anchor="middle" class="sub">bounded shortlist</text>
+            <path d="M520 190 L650 190" class="wire"/><polygon points="660,190 650,195 650,185" class="head"/><text x="590" y="182" text-anchor="middle" class="tiny">query + 80</text>
+            <path d="M660 210 L530 210" class="wire reply"/><polygon points="520,210 530,205 530,215" class="head reply"/><text x="590" y="229" text-anchor="middle" class="tiny">ranked IDs</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">80 个候选只是 A4 上限；40 req/s × 80 = 3,200 对/秒。全库 50 万块逐条 rerank 会变成 2,000 万对/秒。</span><span class="lang-en">At the A4 cap, 40 req/s × 80 is 3,200 pairs/s. Reranking all 500,000 chunks would be 20 million pairs/s.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d1s5t d1s5d">
+          <title id="d1s5t">Generate and return by hop</title>
+          <desc id="d1s5d">RAG sends authorized evidence to Inference; drafts return to RAG. After answer validation, RAG returns through Gateway to Client.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <circle cx="44" cy="176" r="12" class="box"/><path d="M24 222 Q44 190 64 222" class="wire"/><text x="44" y="244" text-anchor="middle" class="label">Client</text>
+          <rect x="150" y="164" width="120" height="72" rx="12" class="box"/><text x="210" y="197" text-anchor="middle" class="label">Gateway</text><text x="210" y="216" text-anchor="middle" class="sub">identity / limits</text>
+          <path d="M70 191 L140 191" class="wire"/><polygon points="150,191 140,196 140,186" class="head"/><text x="110" y="182" text-anchor="middle" class="tiny">POST</text>
+          <path d="M150 209 L80 209" class="wire reply"/><polygon points="70,209 80,204 80,214" class="head reply"/>
+          <text x="30" y="35" text-anchor="start" class="label">ONLINE QUERY · request / response hops</text>
+          <rect x="370" y="164" width="150" height="72" rx="12" class="box"/><text x="445" y="197" text-anchor="middle" class="label">RAG</text><text x="445" y="216" text-anchor="middle" class="sub">orchestrator</text>
+          <path d="M270 191 L360 191" class="wire"/><polygon points="370,191 360,196 360,186" class="head"/><text x="320" y="182" text-anchor="middle" class="tiny">query</text>
+          <path d="M370 209 L280 209" class="wire reply"/><polygon points="270,209 280,204 280,214" class="head reply"/>
+          <text x="250" y="300" text-anchor="middle" class="tiny">One request pins one query bundle</text>
+          <path d="M665 60 V120 A70 12 0 0 0 805 120 V60" class="store"/><ellipse cx="735" cy="60" rx="70" ry="12" class="store"/><text x="735" y="100" text-anchor="middle" class="label">Hybrid Index</text><text x="735" y="118" text-anchor="middle" class="sub">BM25 + dense</text>
+          <path d="M400 164 L400 92 Q400 84 408 84 L655 84" class="wire"/><polygon points="665,84 655,89 655,79" class="head"/><text x="525" y="76" text-anchor="middle" class="tiny">pinned bundle + ACL</text>
+          <path d="M665 105 L438 105 Q430 105 430 113 L430 154" class="wire reply"/><polygon points="430,164 425,154 435,154" class="head reply"/><text x="540" y="122" text-anchor="middle" class="tiny">candidate IDs</text>
+          <rect x="660" y="176" width="150" height="70" rx="12" class="box"/><text x="735" y="208" text-anchor="middle" class="label">Reranker</text><text x="735" y="227" text-anchor="middle" class="sub">bounded shortlist</text>
+          <path d="M520 190 L650 190" class="wire"/><polygon points="660,190 650,195 650,185" class="head"/><text x="590" y="182" text-anchor="middle" class="tiny">query + 80</text>
+          <path d="M660 210 L530 210" class="wire reply"/><polygon points="520,210 530,205 530,215" class="head reply"/><text x="590" y="229" text-anchor="middle" class="tiny">ranked IDs</text>
+          <g class="is-new">
+            <rect x="660" y="302" width="150" height="60" rx="12" class="box"/><text x="735" y="329" text-anchor="middle" class="label">Inference</text><text x="735" y="348" text-anchor="middle" class="sub">draft answer</text>
+            <path d="M455 236 L455 322 Q455 330 463 330 L650 330" class="wire"/><polygon points="660,330 650,335 650,325" class="head"/><text x="550" y="319" text-anchor="middle" class="tiny">evidence only</text>
+            <path d="M660 347 L493 347 Q485 347 485 339 L485 246" class="wire reply"/><polygon points="485,236 490,246 480,246" class="head reply"/><text x="567" y="370" text-anchor="middle" class="tiny">draft + cite IDs</text>
+            <rect x="660" y="269" width="150" height="20" rx="10" class="badge"/><text x="735" y="283" text-anchor="middle" class="badge-text">Gate before release</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">推理服务返回 draft；RAG 校验后才沿 RAG → Gateway → Client 释放答案。流式时按句缓冲的细节在第五组，不能边发边撤回。</span><span class="lang-en">Inference returns a draft. RAG validates before releasing through Gateway to Client; deck five defines sentence buffering for streaming.</span></figcaption>
+      </div>
+    </figure><div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
+<p>一条 <code>POST /v1/rag/query</code> 包含 question、客户端 request_id 和展示偏好。Gateway 解析身份、按租户限制并发与输入长度，把可信 principal 交给 RAG；tenant_id 和 groups 不从正文照抄。RAG 分配 trace_id，读 query bundle，保存本轮的模型、索引代次和配置版本。超长问题先拒绝，避免 embedding 服务和生成服务各自截断成不同问题。</p>
+<p>第一组不是 Hybrid Index 把结果直接推给 Reranker，也不是 Reranker 把 prompt 交给 Inference。三次调用的 owner 都是 RAG：召回返回候选 ID，rerank 返回排序，生成返回 draft。这样取消、截止时间、证据映射和输出状态有同一归属。生成完成后沿 RAG → Gateway → Client 回程；如果网关已经关闭连接，RAG 取消下游，不再花算力生成无人读取的答案。</p>
+<p>权限必须同时落在 BM25 与 Dense 两路，而且从可信身份构造过滤。Microsoft 的 security trimming 文档明确说，普通 principal 字符串比较本身不负责认证授权 [6]。这是索引表达范围的方法，认证和权威 ACL 校验仍由本设计承担。任一检索返回别的租户 ID，都在读原文之前丢弃并记录隔离错误；不会把它交给模型后再要求模型忽略。</p>
+<p>A10 的路径预算按 <code>30 + 60 + max(80, 100) + 40 + 250 + 20 = 500 ms</code> 算。实际 BM25 可以在 query embedding 期间先启动，这里为易口算按等 embedding 后同时发两路估，属于保守条件预算。700 − 500 = 200 ms 给有界排队与补召回。它不是“各组件 p95 相加等于端到端 p95”，上线须按同一 trace 测首句、完整回答和失败比例。</p>
+<p>检索或 Reranker 队列必须有长度与时间上限。预算已耗尽就不要启动生成；一条请求取消后，尚在队列里的 embedding、rerank 和生成工作都应带同一取消身份。检索失败只能在经过评测的降级路线内处理：稠密不可用时可用 BM25，rerank 超时时可用 RRF；证据和权限不足则返回拒答或服务错误，不能回到模型裸答当作成功。</p>
+</div><div class="lang-en"><p class="col-kicker">English</p>
+<p>The illustrative <code>POST /v1/rag/query</code> carries question, request ID, and display preferences. Gateway verifies identity, limits tenant concurrency and input length, and passes a trusted principal. RAG creates a trace, pins model/index/configuration, and rejects oversized questions before downstream services truncate differently.</p>
+<p>RAG owns all three calls: retrieval returns candidate IDs, reranking returns order, and inference returns a draft. Cancellation, deadlines, evidence maps, and output share one owner. Released answers return RAG → Gateway → Client; a closed upstream connection cancels downstream work.</p>
+<p>Both BM25 and Dense carry scope derived from trusted identity. Microsoft’s security-filter pattern performs string comparison rather than authentication/authorization [6]; this design supplies those responsibilities and authoritative ACL checks. Discard cross-tenant IDs before reading text or invoking the model.</p>
+<p>A10 budgets <code>30 + 60 + max(80,100) + 40 + 250 + 20 = 500 ms</code>. BM25 could start during query embedding; the illustration conservatively waits and then starts both lanes. The remaining 200 ms cover bounded queues/refill. This is not a sum of component p95s; measure first sentence, completion, and failures on end-to-end traces.</p>
+<p>Bound queues by both count and deadline. Do not start generation after the preparation budget expires. Propagate cancellation to embedding, rerank, and inference. Tested degradation may use BM25 alone or RRF order; insufficient authorized evidence yields refusal/error rather than an ungrounded model answer.</p>
+</div></div></section>
+
+  <section>
+<h2><span class="lang-zh">估算：算尾块，也算每次查询的工作</span><span class="lang-en">Estimate final chunks and work per query</span></h2>
+<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
+<p>A1 总正文为 <code>100,000 × 2,000 = 200,000,000 token</code>。但每篇文档都要收一个尾块，不能把所有正文连起来除步长。若长度 L ≤ 512 就一块，否则 <code>1 + ceil((L − 512) / 448)</code>。2,000-token 示例得到 5 块，起点依次 0、448、896、1,344、1,792，最后一块只有 208 token。10 万篇 × 5 = 50 万块；结构切分、标题重复与短文分布会改变这个数，真实容量要从 manifest 汇总。</p>
+<p>每篇实际嵌入的正文是 <code>4 × 512 + 208 = 2,256 token</code>，比 2,000 多 256，即 12.8%；overlap 比例 64/512 = 12.5% 和语料膨胀比例不是同一个分母。全量示例嵌入 2.256 亿 token，标题、提示前缀和失败重试还没算。每日变更 1,000 篇，生成 5,000 新块、嵌入 225.6 万 token；若不清旧版本，索引会每天继续涨，不是每天只覆盖 1%。</p>
+<p>A3 的向量体积是 <code>500,000 × 768 × 4 = 1,536,000,000 B = 1.536 GB ≈ 1.431 GiB</code>。这里 GB 用十进制，GiB 用 2<sup>30</sup>。两份副本是 3.072 GB；迁移双池且每池两份是 6.144 GB 裸向量。原文跨度、BM25 倒排、ANN 结构、元数据和暂存空间另外清点，不能给全部存储套一个没有出处的“乘 1.5”。float16 只把元素字节减半，检索质量是否接受仍要测。</p>
+<p>峰值 rerank 是 <code>40 × 80 = 3,200 query–chunk pairs/s</code>；若每次对全库算，就是 <code>40 × 500,000 = 20,000,000 pairs/s</code>，相差 6,250 倍。这个算式只证明工作减少，不证明单 GPU 做得完。生成输入上限 5,120 token，峰值为 204,800 输入 token/s；输出上限 512，满额时是 20,480 输出 token/s。平均输出与达标吞吐要交给 Ch29 的压测，不能从“40 QPS 很小”推出生成便宜。</p>
+<p>选型也不能靠“百万条”硬分界。业务元数据和向量同库能降低事务协调，但 ANN 过滤、更新频率、租户选择性和延迟目标仍可能成为瓶颈 [5]。专用引擎方便独立扩展，代价是两个存储的版本与删除协调。面试先用上述工作量、过滤条件和压测结果决定服务边界；这里不报随时间变化的 API 价格，也不把摄取一次性的账单和每日查询账单混在一起。</p>
+</div><div class="lang-en"><p class="col-kicker">English</p>
+<p>A1 holds 200 million source tokens, but every document has its own final chunk. Use one chunk for L ≤ 512, otherwise <code>1 + ceil((L − 512)/448)</code>. The 2,000-token example yields five starts: 0,448,896,1344,1792; the final span contains 208 tokens. Thus 100,000 documents yield 500,000 chunks. Real structure, repeated headings, and length distributions require manifest counts.</p>
+<p>Embedded text per document is <code>4 × 512 + 208 = 2,256 tokens</code>, 12.8% above the original. This differs from the 12.5% overlap denominator. Full ingest uses 225.6 million illustrative tokens before headings, prefixes, or retries; daily change of 1,000 documents produces 5,000 chunks and 2.256 million tokens. Retained old versions add storage.</p>
+<p>Raw vectors occupy <code>500,000 × 768 × 4 = 1,536,000,000 B = 1.536 GB ≈ 1.431 GiB</code>. Two copies use 3.072 GB; two migration pools with two copies each use 6.144 GB. Account separately for text, inverted and ANN indexes, metadata, and staging. Float16 halves element bytes, while quality still needs evaluation.</p>
+<p>Peak reranking is 3,200 pairs/s versus 20 million pairs/s over the whole corpus, a 6,250× work difference rather than a GPU capacity claim. At 40 requests/s, 5,120 input tokens imply at most 204,800 input tokens/s and 512 output tokens imply at most 20,480 output tokens/s. Benchmark means and SLO attainment separately in Ch29.</p>
+<p>A million vectors is not a universal engine threshold. Colocated business metadata can simplify transactions, but filtering, update rates, tenant selectivity, and latency remain workload constraints [5]. Dedicated engines buy independent scaling and add version/delete coordination. Use measurements, not stale API prices or comparisons between one-time ingest and daily serving bills.</p>
+</div></div></section>
+
+  <section>
+<h2><span class="lang-zh">摄取：已接收、已写入、可搜索是三件事</span><span class="lang-en">Ingest: accepted, written, and searchable differ</span></h2>
+<figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d2s1t d2s1d">
+          <title id="d2s1t">Read a source revision</title>
+          <desc id="d2s1d">Connector fetches a source revision from Source; Source returns the bytes to Connector.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <g class="is-new">
+            <rect x="28" y="104" width="122" height="70" rx="12" class="box"/><text x="89" y="136" text-anchor="middle" class="label">Source</text><text x="89" y="155" text-anchor="middle" class="sub">wiki / PDF</text>
+            <rect x="230" y="104" width="130" height="70" rx="12" class="box"/><text x="295" y="136" text-anchor="middle" class="label">Connector</text><text x="295" y="155" text-anchor="middle" class="sub">revision events</text>
+            <path d="M230 124 L160 124" class="wire"/><polygon points="150,124 160,119 160,129" class="head"/><text x="190" y="116" text-anchor="middle" class="tiny">fetch</text>
+            <path d="M150 144 L220 144" class="wire reply"/><polygon points="230,144 220,149 220,139" class="head reply"/>
+            <text x="30" y="35" text-anchor="start" class="label">INGEST · durable work before acknowledgement</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">从可重读的源版本开始。连接器读取内容、ACL 和版本号；分页导出失败只重试这一份版本，不先发布半篇内容。</span><span class="lang-en">Start from a rereadable source revision. Connector reads content, ACL, and revision; export failure retries without publishing partial text.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d2s2t d2s2d">
+          <title id="d2s2t">Persist the job</title>
+          <desc id="d2s2d">Connector commits a revision and durable job in Catalog; Catalog acknowledges the transaction to Connector.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="28" y="104" width="122" height="70" rx="12" class="box"/><text x="89" y="136" text-anchor="middle" class="label">Source</text><text x="89" y="155" text-anchor="middle" class="sub">wiki / PDF</text>
+          <rect x="230" y="104" width="130" height="70" rx="12" class="box"/><text x="295" y="136" text-anchor="middle" class="label">Connector</text><text x="295" y="155" text-anchor="middle" class="sub">revision events</text>
+          <path d="M230 124 L160 124" class="wire"/><polygon points="150,124 160,119 160,129" class="head"/><text x="190" y="116" text-anchor="middle" class="tiny">fetch</text>
+          <path d="M150 144 L220 144" class="wire reply"/><polygon points="230,144 220,149 220,139" class="head reply"/>
+          <text x="30" y="35" text-anchor="start" class="label">INGEST · durable work before acknowledgement</text>
+          <g class="is-new">
+            <path d="M410 108 V164 A75 12 0 0 0 560 164 V108" class="store"/><ellipse cx="485" cy="108" rx="75" ry="12" class="store"/><text x="485" y="146" text-anchor="middle" class="label">Catalog</text><text x="485" y="164" text-anchor="middle" class="sub">current + jobs</text>
+            <path d="M360 124 L400 124" class="wire"/><polygon points="410,124 400,129 400,119" class="head"/><text x="385" y="94" text-anchor="middle" class="tiny">commit job</text>
+            <path d="M410 144 L370 144" class="wire reply"/><polygon points="360,144 370,139 370,149" class="head reply"/>
+            <text x="470" y="70" text-anchor="middle" class="tiny">ACCEPTED is not searchable</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">202 的含义是 Catalog 已持久接收工作。权威记录与 job 同事务，连接器随后崩溃仍有待处理行；“已接收”不等于可搜索。</span><span class="lang-en">202 means Catalog durably accepted work. Revision metadata and job commit together; accepted does not mean searchable.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d2s3t d2s3d">
+          <title id="d2s3t">Claim with a lease</title>
+          <desc id="d2s3d">Ingest claims a durable Catalog job; Catalog returns the lease and source revision.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="28" y="104" width="122" height="70" rx="12" class="box"/><text x="89" y="136" text-anchor="middle" class="label">Source</text><text x="89" y="155" text-anchor="middle" class="sub">wiki / PDF</text>
+          <rect x="230" y="104" width="130" height="70" rx="12" class="box"/><text x="295" y="136" text-anchor="middle" class="label">Connector</text><text x="295" y="155" text-anchor="middle" class="sub">revision events</text>
+          <path d="M230 124 L160 124" class="wire"/><polygon points="150,124 160,119 160,129" class="head"/><text x="190" y="116" text-anchor="middle" class="tiny">fetch</text>
+          <path d="M150 144 L220 144" class="wire reply"/><polygon points="230,144 220,149 220,139" class="head reply"/>
+          <text x="30" y="35" text-anchor="start" class="label">INGEST · durable work before acknowledgement</text>
+          <path d="M410 108 V164 A75 12 0 0 0 560 164 V108" class="store"/><ellipse cx="485" cy="108" rx="75" ry="12" class="store"/><text x="485" y="146" text-anchor="middle" class="label">Catalog</text><text x="485" y="164" text-anchor="middle" class="sub">current + jobs</text>
+          <path d="M360 124 L400 124" class="wire"/><polygon points="410,124 400,129 400,119" class="head"/><text x="385" y="94" text-anchor="middle" class="tiny">commit job</text>
+          <path d="M410 144 L370 144" class="wire reply"/><polygon points="360,144 370,139 370,149" class="head reply"/>
+          <text x="470" y="70" text-anchor="middle" class="tiny">ACCEPTED is not searchable</text>
+          <g class="is-new">
+            <rect x="625" y="104" width="130" height="70" rx="12" class="box"/><text x="690" y="136" text-anchor="middle" class="label">Ingest</text><text x="690" y="155" text-anchor="middle" class="sub">lease / retry</text>
+            <path d="M625 124 L570 124" class="wire"/><polygon points="560,124 570,119 570,129" class="head"/><text x="592" y="116" text-anchor="middle" class="tiny">claim</text>
+            <path d="M560 144 L615 144" class="wire reply"/><polygon points="625,144 615,149 615,139" class="head reply"/>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">Ingest 主动领取，Catalog 保存租约和代次。崩溃后可以重领；重复执行使用稳定 chunk_id，旧 worker 不能抢先发布。</span><span class="lang-en">Ingest claims a job with lease and epoch. Retries use stable chunk IDs; an expired worker cannot publish.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d2s4t d2s4d">
+          <title id="d2s4t">Stage immutable evidence</title>
+          <desc id="d2s4d">Ingest parses and embeds, writes immutable spans to Chunk Store, then receives a durable span receipt.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="28" y="104" width="122" height="70" rx="12" class="box"/><text x="89" y="136" text-anchor="middle" class="label">Source</text><text x="89" y="155" text-anchor="middle" class="sub">wiki / PDF</text>
+          <rect x="230" y="104" width="130" height="70" rx="12" class="box"/><text x="295" y="136" text-anchor="middle" class="label">Connector</text><text x="295" y="155" text-anchor="middle" class="sub">revision events</text>
+          <path d="M230 124 L160 124" class="wire"/><polygon points="150,124 160,119 160,129" class="head"/><text x="190" y="116" text-anchor="middle" class="tiny">fetch</text>
+          <path d="M150 144 L220 144" class="wire reply"/><polygon points="230,144 220,149 220,139" class="head reply"/>
+          <text x="30" y="35" text-anchor="start" class="label">INGEST · durable work before acknowledgement</text>
+          <path d="M410 108 V164 A75 12 0 0 0 560 164 V108" class="store"/><ellipse cx="485" cy="108" rx="75" ry="12" class="store"/><text x="485" y="146" text-anchor="middle" class="label">Catalog</text><text x="485" y="164" text-anchor="middle" class="sub">current + jobs</text>
+          <path d="M360 124 L400 124" class="wire"/><polygon points="410,124 400,129 400,119" class="head"/><text x="385" y="94" text-anchor="middle" class="tiny">commit job</text>
+          <path d="M410 144 L370 144" class="wire reply"/><polygon points="360,144 370,139 370,149" class="head reply"/>
+          <text x="470" y="70" text-anchor="middle" class="tiny">ACCEPTED is not searchable</text>
+          <rect x="625" y="104" width="130" height="70" rx="12" class="box"/><text x="690" y="136" text-anchor="middle" class="label">Ingest</text><text x="690" y="155" text-anchor="middle" class="sub">lease / retry</text>
+          <path d="M625 124 L570 124" class="wire"/><polygon points="560,124 570,119 570,129" class="head"/><text x="592" y="116" text-anchor="middle" class="tiny">claim</text>
+          <path d="M560 144 L615 144" class="wire reply"/><polygon points="625,144 615,149 615,139" class="head reply"/>
+          <g class="is-new">
+            <path d="M615 280 V336 A75 12 0 0 0 765 336 V280" class="store"/><ellipse cx="690" cy="280" rx="75" ry="12" class="store"/><text x="690" y="318" text-anchor="middle" class="label">Chunk Store</text><text x="690" y="336" text-anchor="middle" class="sub">immutable spans</text>
+            <path d="M660 174 L660 227 Q660 235 668 235 L682 235 Q690 235 690 243 L690 258" class="wire async"/><polygon points="690,268 685,258 695,258" class="head async"/><text x="717" y="225" text-anchor="middle" class="tiny">parse / embed</text>
+            <path d="M690 348 L762 348 Q770 348 770 340 L770 158.5 Q770 156 767.5 156 L765 156" class="wire reply"/><polygon points="755,156 765,151 765,161" class="head reply"/><text x="810" y="305" text-anchor="middle" class="tiny">span receipt</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">先把可引用的原文跨度持久化。向量命中却找不到对应的版本正文，应被当成摄取故障，不把同名最新文档凑进 prompt。</span><span class="lang-en">Persist versioned source spans first. A vector hit without its matching immutable text is an ingest error; do not substitute the latest document.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d2s5t d2s5d">
+          <title id="d2s5t">Wait for both search lanes</title>
+          <desc id="d2s5d">Ingest writes BM25 and dense entries in Hybrid Index and receives search-visible receipts for both lanes.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="28" y="104" width="122" height="70" rx="12" class="box"/><text x="89" y="136" text-anchor="middle" class="label">Source</text><text x="89" y="155" text-anchor="middle" class="sub">wiki / PDF</text>
+          <rect x="230" y="104" width="130" height="70" rx="12" class="box"/><text x="295" y="136" text-anchor="middle" class="label">Connector</text><text x="295" y="155" text-anchor="middle" class="sub">revision events</text>
+          <path d="M230 124 L160 124" class="wire"/><polygon points="150,124 160,119 160,129" class="head"/><text x="190" y="116" text-anchor="middle" class="tiny">fetch</text>
+          <path d="M150 144 L220 144" class="wire reply"/><polygon points="230,144 220,149 220,139" class="head reply"/>
+          <text x="30" y="35" text-anchor="start" class="label">INGEST · durable work before acknowledgement</text>
+          <path d="M410 108 V164 A75 12 0 0 0 560 164 V108" class="store"/><ellipse cx="485" cy="108" rx="75" ry="12" class="store"/><text x="485" y="146" text-anchor="middle" class="label">Catalog</text><text x="485" y="164" text-anchor="middle" class="sub">current + jobs</text>
+          <path d="M360 124 L400 124" class="wire"/><polygon points="410,124 400,129 400,119" class="head"/><text x="385" y="94" text-anchor="middle" class="tiny">commit job</text>
+          <path d="M410 144 L370 144" class="wire reply"/><polygon points="360,144 370,139 370,149" class="head reply"/>
+          <text x="470" y="70" text-anchor="middle" class="tiny">ACCEPTED is not searchable</text>
+          <rect x="625" y="104" width="130" height="70" rx="12" class="box"/><text x="690" y="136" text-anchor="middle" class="label">Ingest</text><text x="690" y="155" text-anchor="middle" class="sub">lease / retry</text>
+          <path d="M625 124 L570 124" class="wire"/><polygon points="560,124 570,119 570,129" class="head"/><text x="592" y="116" text-anchor="middle" class="tiny">claim</text>
+          <path d="M560 144 L615 144" class="wire reply"/><polygon points="625,144 615,149 615,139" class="head reply"/>
+          <path d="M615 280 V336 A75 12 0 0 0 765 336 V280" class="store"/><ellipse cx="690" cy="280" rx="75" ry="12" class="store"/><text x="690" y="318" text-anchor="middle" class="label">Chunk Store</text><text x="690" y="336" text-anchor="middle" class="sub">immutable spans</text>
+          <path d="M660 174 L660 227 Q660 235 668 235 L682 235 Q690 235 690 243 L690 258" class="wire async"/><polygon points="690,268 685,258 695,258" class="head async"/><text x="717" y="225" text-anchor="middle" class="tiny">parse / embed</text>
+          <path d="M690 348 L762 348 Q770 348 770 340 L770 158.5 Q770 156 767.5 156 L765 156" class="wire reply"/><polygon points="755,156 765,151 765,161" class="head reply"/><text x="810" y="305" text-anchor="middle" class="tiny">span receipt</text>
+          <g class="is-new">
+            <path d="M790 108 V164 A70 12 0 0 0 930 164 V108" class="store"/><ellipse cx="860" cy="108" rx="70" ry="12" class="store"/><text x="860" y="146" text-anchor="middle" class="label">Hybrid Index</text><text x="860" y="164" text-anchor="middle" class="sub">BM25 + dense</text>
+            <path d="M755 124 L780 124" class="wire async"/><polygon points="790,124 780,129 780,119" class="head async"/>
+            <path d="M790 144 L765 144" class="wire reply"/><polygon points="755,144 765,139 765,149" class="head reply"/>
+            <text x="850" y="215" text-anchor="middle" class="tiny">Both lanes must be visible</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">两路索引可能部分成功。write ack 和 search-visible receipt 分开定义，任一未完成都留在 staging，旧 current 继续服务。</span><span class="lang-en">The index lanes can partially succeed. Distinguish write acknowledgements from search-visible receipts; staging stays hidden until both are ready.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d2s6t d2s6d">
+          <title id="d2s6t">Publish only after readiness</title>
+          <desc id="d2s6d">Ingest uses receipts and its valid lease epoch to compare-and-swap current revision in Catalog.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="28" y="104" width="122" height="70" rx="12" class="box"/><text x="89" y="136" text-anchor="middle" class="label">Source</text><text x="89" y="155" text-anchor="middle" class="sub">wiki / PDF</text>
+          <rect x="230" y="104" width="130" height="70" rx="12" class="box"/><text x="295" y="136" text-anchor="middle" class="label">Connector</text><text x="295" y="155" text-anchor="middle" class="sub">revision events</text>
+          <path d="M230 124 L160 124" class="wire"/><polygon points="150,124 160,119 160,129" class="head"/><text x="190" y="116" text-anchor="middle" class="tiny">fetch</text>
+          <path d="M150 144 L220 144" class="wire reply"/><polygon points="230,144 220,149 220,139" class="head reply"/>
+          <text x="30" y="35" text-anchor="start" class="label">INGEST · durable work before acknowledgement</text>
+          <path d="M410 108 V164 A75 12 0 0 0 560 164 V108" class="store"/><ellipse cx="485" cy="108" rx="75" ry="12" class="store"/><text x="485" y="146" text-anchor="middle" class="label">Catalog</text><text x="485" y="164" text-anchor="middle" class="sub">current + jobs</text>
+          <path d="M360 124 L400 124" class="wire"/><polygon points="410,124 400,129 400,119" class="head"/><text x="385" y="94" text-anchor="middle" class="tiny">commit job</text>
+          <path d="M410 144 L370 144" class="wire reply"/><polygon points="360,144 370,139 370,149" class="head reply"/>
+          <text x="470" y="70" text-anchor="middle" class="tiny">ACCEPTED is not searchable</text>
+          <rect x="625" y="104" width="130" height="70" rx="12" class="box"/><text x="690" y="136" text-anchor="middle" class="label">Ingest</text><text x="690" y="155" text-anchor="middle" class="sub">lease / retry</text>
+          <path d="M625 124 L570 124" class="wire"/><polygon points="560,124 570,119 570,129" class="head"/><text x="592" y="116" text-anchor="middle" class="tiny">claim</text>
+          <path d="M560 144 L615 144" class="wire reply"/><polygon points="625,144 615,149 615,139" class="head reply"/>
+          <path d="M615 280 V336 A75 12 0 0 0 765 336 V280" class="store"/><ellipse cx="690" cy="280" rx="75" ry="12" class="store"/><text x="690" y="318" text-anchor="middle" class="label">Chunk Store</text><text x="690" y="336" text-anchor="middle" class="sub">immutable spans</text>
+          <path d="M660 174 L660 227 Q660 235 668 235 L682 235 Q690 235 690 243 L690 258" class="wire async"/><polygon points="690,268 685,258 695,258" class="head async"/><text x="717" y="225" text-anchor="middle" class="tiny">parse / embed</text>
+          <path d="M690 348 L762 348 Q770 348 770 340 L770 158.5 Q770 156 767.5 156 L765 156" class="wire reply"/><polygon points="755,156 765,151 765,161" class="head reply"/><text x="810" y="305" text-anchor="middle" class="tiny">span receipt</text>
+          <path d="M790 108 V164 A70 12 0 0 0 930 164 V108" class="store"/><ellipse cx="860" cy="108" rx="70" ry="12" class="store"/><text x="860" y="146" text-anchor="middle" class="label">Hybrid Index</text><text x="860" y="164" text-anchor="middle" class="sub">BM25 + dense</text>
+          <path d="M755 124 L780 124" class="wire async"/><polygon points="790,124 780,129 780,119" class="head async"/>
+          <path d="M790 144 L765 144" class="wire reply"/><polygon points="755,144 765,139 765,149" class="head reply"/>
+          <text x="850" y="215" text-anchor="middle" class="tiny">Both lanes must be visible</text>
+          <g class="is-new">
+            <path d="M635 174 L635 212 Q635 220 627 220 L493 220 Q485 220 485 212 L485 186" class="wire"/><polygon points="485,176 490,186 480,186" class="head"/><text x="550" y="210" text-anchor="middle" class="tiny">CAS publish rev7</text>
+            <rect x="392" y="250" width="186" height="20" rx="10" class="badge"/><text x="485" y="264" text-anchor="middle" class="badge-text">rev7 + ACL version</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">全部 receipt 到齐后才 CAS current。Catalog 事务不是跨索引事务，查询仍须核对 active revision；进程在发布前死掉只会留下可清理的 staging。</span><span class="lang-en">Publish current by CAS after every receipt. Catalog does not create a cross-index transaction; queries still verify active revisions.</span></figcaption>
+      </div>
+    </figure><div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
+<p>Connector 读取源系统的一份 revision，保存 source locator、内容 hash、ACL version 和删除事件。Catalog 同事务写源版本状态与持久 job，提交后返回 accepted。任务可以直接由 Ingest 轮询领取，不必为这个量级另画一个 Queue。若后来换成消息队列，仍要由持久 job/outbox 驱动通知，不能“先回 202，再异步 enqueue”；那段进程崩溃会让用户等一个不存在的任务。</p>
+<p>Ingest 领取 job 后保存 lease_epoch、重试次数与截止时间。写入采用 <code>tenant/doc/revision/splitter/span</code> 的稳定键，重复执行覆盖同一内容；内容不同而键相同属于错误。租约过期的 worker 仍可能写出 staging，因此发布 current 必须 CAS 源 revision 和有效租约代次。CAS 条件还包括文档未删除、源 revision 仍是待发布目标；tombstone 后旧 worker 只能留下不可见 staging。仅靠锁超时不能阻止旧进程恢复后把 rev6 写成最新，异步索引也不是能帮你拒绝所有陈旧写的权威存储。</p>
+<p>新 revision 先写不可变 Chunk Store，再写 BM25 与 Dense 条目。manifest 列出预期 chunk_id、数量、内容 hash 和两路回执。引擎的写入成功可能还没对搜索可见，要定义 receipt 是已持久、已刷新可搜索，还是仅进入内部队列；若引擎没有对应屏障，就轮询查询 canary 和 manifest 对账。几条 canary 只能证明探针可见，不能替代全量条目核对。</p>
+<p>只有预期条目全部可读、两路索引可见，才把 manifest 标 READY 并 CAS Catalog.current。Catalog 的 current 与 source job 完成状态在本库同事务更新；这是发布控制点，不是跨三个存储的原子提交。旧 rev7 在 rev8 准备时继续可用。正文 hash 未变化也不一定跳过任务：权限、source locator、切分配置变化分别维护，ACL 更新必须传播和立即约束查询。</p>
+<p>索引尚有旧条目时，查询先做索引范围过滤，再在取原文时批量核对 Catalog.current；不匹配的条目不进入 rerank 与 prompt。若两路索引是最终一致，过滤旧条目可能让前 100 个候选不足，必须在预算内多取或返回“暂无足够证据”，不能承诺 READY 后每个查询副本立刻达到同一召回率。若要求查询看到全语料同一快照，需要整份索引代次与发布屏障，不能把单 doc 的 CAS 扩大解释。</p>
+<p>故障时分别收尾：Chunk Store 成功但索引失败，重试索引且 current 不变；两路成功但发布前崩溃，重领读取 receipt 后再 CAS；发布成功而任务 ACK 丢失，重复处理读到既有结果。定期从源清单对 Catalog、manifest 和索引做差集，发现漏删、少块和孤儿 staging。清理旧原文还须等活跃请求引用与保留期限结束，不能把引用链接变成同名最新页。</p>
+</div><div class="lang-en"><p class="col-kicker">English</p>
+<p>Connector persists source locator, content hash, ACL revision, and deletes. Catalog commits source metadata and durable job together before accepted. Ingest can poll jobs at this scale. A future queue should be driven by durable jobs/outbox, avoiding acknowledgement-before-enqueue loss.</p>
+<p>Leases carry epochs, retries, and deadlines. Stable tenant/document/revision/splitter/span keys make retries idempotent. An expired worker may still write staging, so publishing current CAS-checks both source revision and lease epoch. CAS also requires an undeleted document and the still-expected source revision. A tombstoned document admits only invisible stale staging, never publication. Lease expiry alone cannot fence stale workers in every external index.</p>
+<p>Stage immutable text, then BM25 and dense entries. Manifest records expected IDs/counts/hashes and receipts. Distinguish durable write acknowledgement from search visibility. Use supported barriers or visibility probes plus full manifest reconciliation; a few canaries do not prove all entries ready.</p>
+<p>Publish only after all expected entries are readable and both lanes searchable. Current and job completion update atomically within Catalog, without a cross-store atomic commit. Rev7 remains active during rev8 preparation. Unchanged text hash does not suppress ACL, locator, or splitter changes.</p>
+<p>Scope-filter indexes and verify Catalog.current when fetching text. Discard inactive revisions before rerank/prompt. Eventual search visibility may reduce eligible candidates; bounded refill or insufficient-evidence behavior is required. Per-document CAS does not promise a corpus-wide snapshot. Such a requirement needs a complete index-generation publication barrier.</p>
+<p>Retry partial indexing without changing current; recover receipts after prepublication crashes; return saved results after a lost job acknowledgement. Periodically reconcile source, Catalog, manifests, and indexes for missing chunks, deletes, and orphan staging. Retain exact old text while pinned requests and retention policy require it.</p>
+</div></div></section>
+
+  <section>
+<h2><span class="lang-zh">切分：检索单位、上下文和来源一起保留</span><span class="lang-en">Chunking: retain retrieval units, context, and provenance</span></h2>
+<figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d3s1t d3s1d">
+          <title id="d3s1t">Preserve document structure</title>
+          <desc id="d3s1d">Doc d9 revision seven enters Parser; Parser preserves headings, tables, and source spans.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <g class="is-new">
+            <rect x="30" y="110" width="150" height="90" rx="12" class="box"/><text x="105" y="152" text-anchor="middle" class="label">Doc d9 / rev7</text><text x="105" y="171" text-anchor="middle" class="sub">2,000 tokens</text>
+            <rect x="285" y="110" width="150" height="90" rx="12" class="box"/><text x="360" y="152" text-anchor="middle" class="label">Parser</text><text x="360" y="171" text-anchor="middle" class="sub">layout + tokenizer</text>
+            <path d="M180 145 L275 145" class="wire"/><polygon points="285,145 275,150 275,140" class="head"/><text x="230" y="136" text-anchor="middle" class="tiny">headings</text>
+            <text x="30" y="35" text-anchor="start" class="label">CHUNKS · source spans survive transformation</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">先保留页码、标题路径和跨度，再按该 embedding 的 tokenizer 限长。中文字符数不能直接当 token 数，表格不能丢掉列名。</span><span class="lang-en">Preserve pages, heading paths, and spans before limiting length with the embedding tokenizer. Character count is not token count.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d3s2t d3s2d">
+          <title id="d3s2t">Bound overlapping children</title>
+          <desc id="d3s2d">Parser creates five children with a 512-token cap and 64-token overlap and saves them in Chunk Store.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="30" y="110" width="150" height="90" rx="12" class="box"/><text x="105" y="152" text-anchor="middle" class="label">Doc d9 / rev7</text><text x="105" y="171" text-anchor="middle" class="sub">2,000 tokens</text>
+          <rect x="285" y="110" width="150" height="90" rx="12" class="box"/><text x="360" y="152" text-anchor="middle" class="label">Parser</text><text x="360" y="171" text-anchor="middle" class="sub">layout + tokenizer</text>
+          <path d="M180 145 L275 145" class="wire"/><polygon points="285,145 275,150 275,140" class="head"/><text x="230" y="136" text-anchor="middle" class="tiny">headings</text>
+          <text x="30" y="35" text-anchor="start" class="label">CHUNKS · source spans survive transformation</text>
+          <g class="is-new">
+            <path d="M555 124 V180 A75 12 0 0 0 705 180 V124" class="store"/><ellipse cx="630" cy="124" rx="75" ry="12" class="store"/><text x="630" y="162" text-anchor="middle" class="label">Chunk Store</text><text x="630" y="180" text-anchor="middle" class="sub">child + parent</text>
+            <path d="M435 145 L545 145" class="wire async"/><polygon points="555,145 545,150 545,140" class="head async"/><text x="495" y="136" text-anchor="middle" class="tiny">stable IDs</text>
+            <text x="310" y="72" text-anchor="middle" class="clock">512 cap / 64 overlap / 448 stride</text>
+            <text x="630" y="76" text-anchor="middle" class="tiny">5 children: starts 0, 448, 896, 1344, 1792</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">A2 的 512 − 64 = 448；每篇 1 + ceil((2,000 − 512) / 448) = 5 块。真实结构边界会改变块长，不能把这个结果当生产测量。</span><span class="lang-en">A2 uses 512 − 64 = 448 stride. Each document yields 1 + ceil((2,000 − 512)/448) = 5 chunks; real structural boundaries change lengths.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d3s3t d3s3d">
+          <title id="d3s3t">Keep revisioned provenance</title>
+          <desc id="d3s3d">Chunk Store retains stable document and chunk IDs, revision, offsets, parent ID, and ACL version.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="30" y="110" width="150" height="90" rx="12" class="box"/><text x="105" y="152" text-anchor="middle" class="label">Doc d9 / rev7</text><text x="105" y="171" text-anchor="middle" class="sub">2,000 tokens</text>
+          <rect x="285" y="110" width="150" height="90" rx="12" class="box"/><text x="360" y="152" text-anchor="middle" class="label">Parser</text><text x="360" y="171" text-anchor="middle" class="sub">layout + tokenizer</text>
+          <path d="M180 145 L275 145" class="wire"/><polygon points="285,145 275,150 275,140" class="head"/><text x="230" y="136" text-anchor="middle" class="tiny">headings</text>
+          <text x="30" y="35" text-anchor="start" class="label">CHUNKS · source spans survive transformation</text>
+          <path d="M555 124 V180 A75 12 0 0 0 705 180 V124" class="store"/><ellipse cx="630" cy="124" rx="75" ry="12" class="store"/><text x="630" y="162" text-anchor="middle" class="label">Chunk Store</text><text x="630" y="180" text-anchor="middle" class="sub">child + parent</text>
+          <path d="M435 145 L545 145" class="wire async"/><polygon points="555,145 545,150 545,140" class="head async"/><text x="495" y="136" text-anchor="middle" class="tiny">stable IDs</text>
+          <text x="310" y="72" text-anchor="middle" class="clock">512 cap / 64 overlap / 448 stride</text>
+          <text x="630" y="76" text-anchor="middle" class="tiny">5 children: starts 0, 448, 896, 1344, 1792</text>
+          <g class="is-new">
+            <text x="30" y="368" text-anchor="start" class="clock">chunk_id = tenant + doc + rev + splitter + span</text>
+            <rect x="754" y="125" width="175" height="20" rx="10" class="badge"/><text x="841.5" y="139" text-anchor="middle" class="badge-text">provenance / ACL</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">chunk_id 必须带文档版本与切分版本。重试命中同一个键；重新切分则创建新 manifest，不沿用可能已经指向别处的序号。</span><span class="lang-en">IDs include document and splitter revisions. Retries target the same key; changed splitting creates a new manifest.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d3s4t d3s4d">
+          <title id="d3s4t">Retrieve the authorized child</title>
+          <desc id="d3s4d">RAG fetches the eligible child by exact chunk ID and pinned revision; Chunk Store returns that child to RAG.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="30" y="110" width="150" height="90" rx="12" class="box"/><text x="105" y="152" text-anchor="middle" class="label">Doc d9 / rev7</text><text x="105" y="171" text-anchor="middle" class="sub">2,000 tokens</text>
+          <rect x="285" y="110" width="150" height="90" rx="12" class="box"/><text x="360" y="152" text-anchor="middle" class="label">Parser</text><text x="360" y="171" text-anchor="middle" class="sub">layout + tokenizer</text>
+          <path d="M180 145 L275 145" class="wire"/><polygon points="285,145 275,150 275,140" class="head"/><text x="230" y="136" text-anchor="middle" class="tiny">headings</text>
+          <text x="30" y="35" text-anchor="start" class="label">CHUNKS · source spans survive transformation</text>
+          <path d="M555 124 V180 A75 12 0 0 0 705 180 V124" class="store"/><ellipse cx="630" cy="124" rx="75" ry="12" class="store"/><text x="630" y="162" text-anchor="middle" class="label">Chunk Store</text><text x="630" y="180" text-anchor="middle" class="sub">child + parent</text>
+          <path d="M435 145 L545 145" class="wire async"/><polygon points="555,145 545,150 545,140" class="head async"/><text x="495" y="136" text-anchor="middle" class="tiny">stable IDs</text>
+          <text x="310" y="72" text-anchor="middle" class="clock">512 cap / 64 overlap / 448 stride</text>
+          <text x="630" y="76" text-anchor="middle" class="tiny">5 children: starts 0, 448, 896, 1344, 1792</text>
+          <text x="30" y="368" text-anchor="start" class="clock">chunk_id = tenant + doc + rev + splitter + span</text>
+          <rect x="754" y="125" width="175" height="20" rx="10" class="badge"/><text x="841.5" y="139" text-anchor="middle" class="badge-text">provenance / ACL</text>
+          <g class="is-new">
+            <rect x="285" y="274" width="150" height="60" rx="12" class="box"/><text x="360" y="301" text-anchor="middle" class="label">RAG</text><text x="360" y="320" text-anchor="middle" class="sub">eligible child hit</text>
+            <path d="M315 274 L315 248 Q315 240 323 240 L512 240 Q520 240 520 232 L520 166 Q520 158 528 158 L545 158" class="wire"/><polygon points="555,158 545,163 545,153" class="head"/><text x="402" y="230" text-anchor="middle" class="tiny">child ID / rev7</text>
+            <path d="M555 172 L547.5 172 Q540 172 540 179.5 L540 246 Q540 254 532 254 L355 254 Q350 254 350 259 L350 264" class="wire reply"/><polygon points="350,274 345,264 355,264" class="head reply"/>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">召回名单只带 ID，RAG 批量读精确跨度，并复查 current 与权限。overlap 让相邻块可能重复，进 prompt 前按跨度合并去重。</span><span class="lang-en">Candidate IDs resolve to exact spans. Recheck active revision and access; overlapping hits must be deduplicated before prompting.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d3s5t d3s5d">
+          <title id="d3s5t">Expand with the same scope</title>
+          <desc id="d3s5d">RAG fetches the child parent from Chunk Store; the same-revision parent returns to RAG after access checks.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="30" y="110" width="150" height="90" rx="12" class="box"/><text x="105" y="152" text-anchor="middle" class="label">Doc d9 / rev7</text><text x="105" y="171" text-anchor="middle" class="sub">2,000 tokens</text>
+          <rect x="285" y="110" width="150" height="90" rx="12" class="box"/><text x="360" y="152" text-anchor="middle" class="label">Parser</text><text x="360" y="171" text-anchor="middle" class="sub">layout + tokenizer</text>
+          <path d="M180 145 L275 145" class="wire"/><polygon points="285,145 275,150 275,140" class="head"/><text x="230" y="136" text-anchor="middle" class="tiny">headings</text>
+          <text x="30" y="35" text-anchor="start" class="label">CHUNKS · source spans survive transformation</text>
+          <path d="M555 124 V180 A75 12 0 0 0 705 180 V124" class="store"/><ellipse cx="630" cy="124" rx="75" ry="12" class="store"/><text x="630" y="162" text-anchor="middle" class="label">Chunk Store</text><text x="630" y="180" text-anchor="middle" class="sub">child + parent</text>
+          <path d="M435 145 L545 145" class="wire async"/><polygon points="555,145 545,150 545,140" class="head async"/><text x="495" y="136" text-anchor="middle" class="tiny">stable IDs</text>
+          <text x="310" y="72" text-anchor="middle" class="clock">512 cap / 64 overlap / 448 stride</text>
+          <text x="630" y="76" text-anchor="middle" class="tiny">5 children: starts 0, 448, 896, 1344, 1792</text>
+          <text x="30" y="368" text-anchor="start" class="clock">chunk_id = tenant + doc + rev + splitter + span</text>
+          <rect x="754" y="125" width="175" height="20" rx="10" class="badge"/><text x="841.5" y="139" text-anchor="middle" class="badge-text">provenance / ACL</text>
+          <rect x="285" y="274" width="150" height="60" rx="12" class="box"/><text x="360" y="301" text-anchor="middle" class="label">RAG</text><text x="360" y="320" text-anchor="middle" class="sub">eligible child hit</text>
+          <path d="M315 274 L315 248 Q315 240 323 240 L512 240 Q520 240 520 232 L520 166 Q520 158 528 158 L545 158" class="wire"/><polygon points="555,158 545,163 545,153" class="head"/><text x="402" y="230" text-anchor="middle" class="tiny">child ID / rev7</text>
+          <path d="M555 172 L547.5 172 Q540 172 540 179.5 L540 246 Q540 254 532 254 L355 254 Q350 254 350 259 L350 264" class="wire reply"/><polygon points="350,274 345,264 355,264" class="head reply"/>
+          <g class="is-new">
+            <path d="M435 292 L622 292 Q630 292 630 284 L630 202" class="wire"/><polygon points="630,192 635,202 625,202" class="head"/><text x="534" y="283" text-anchor="middle" class="tiny">fetch parent</text>
+            <path d="M705 160 L732 160 Q740 160 740 168 L740 306 Q740 314 732 314 L445 314" class="wire reply"/><polygon points="435,314 445,309 445,319" class="head reply"/><text x="610" y="337" text-anchor="middle" class="tiny">same revision + rechecked ACL</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">small-to-big 多了一次读和更多 token。父块必须属于同版本且全部可访问；超出 A5 的 4,096-token 证据预算，就退回子块。</span><span class="lang-en">Small-to-big adds a read and more tokens. The entire parent must share the revision and permissions; use the child if it exceeds the evidence budget.</span></figcaption>
+      </div>
+    </figure><div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
+<p>Parser 先做版面提取，再切文本。PDF 要保留页码与文字坐标，移掉反复出现的页眉页脚，但不能把表格标题和单位删掉；OCR 不确定的文字带质量标记。wiki 保留标题层级、列表与链接。代码按符号和函数边界，表格带列名和相关行；一个只剩“12”的格子，即使 embedding 很相似，也不能证明某产品允许值就是 12。解析失真会同时污染 BM25、向量和来源展示。</p>
+<p>先按段落、标题分，再在过长结构内递归按句和 token 缩小。A2 的 512/64 是演示参数，不是“2026 通用标准”。Microsoft 的当前指南同时列出 10–15% overlap 的固定切分例子，并在起始建议中用 512 token、25% overlap [2]；两者是不同实践建议。这里选择 12.5% 作为受控实验基线，比较零 overlap、更大 overlap 和结构切分，不能引用指南替自己宣布最优。</p>
+<p>小块让相关信号集中，却可能丢掉标题、定义或前提；大块减少缺上下文，却把多个主题压进一个向量，并挤掉其他证据。overlap 能覆盖相邻边界，不能保证跨两页的关系都在一个块里；还会复制 token、造成多个近重复命中。评价要包含跨边界问题、表格问题和专有名词，不能只挑每段开头那种问题。</p>
+<p>Chunk Store 保留 chunk_id、doc_id、source_revision、splitter_version、span offsets、heading、page、parent_id 与 ACL version。向量模型及 tokenizer/pooling 等坐标定义属于 query bundle。citation 显示 source locator 与精确跨度；用户点开时服务端重新鉴权，不能把旧 URL 当永久公开凭证。来源页面已经改版时，展示“用于回答的 rev7”，而不是让用户看到一篇内容不一致的 rev8。</p>
+<p>父子块把小块检索与大段上下文分开。索引只放子块向量，命中后按 parent_id 批量读同版本父段。多个子块指向同父段只扩一次。父段权限按全部跨度复查；若一个大节混入另一权限区，不能用子块可见性推导整节可见。超出证据预算、版本已失效或父块不可读时退回子块，必要时拒答；不会用最新父段去拼旧 child。</p>
+<p>本章允许普通结构块作为起点，不强制语义切分和父子块。语义边界检测增加离线模型工作，且会随模型变化，必须记录切分版本；父子块增加存储、回表和权限逻辑。选它们的理由应是黄金集里“相关子块已经命中但缺前提”的错误下降。若失败是根本没召回相关块，先改解析、召回和过滤，扩父块并不能补回一个从未出现的 ID。</p>
+</div><div class="lang-en"><p class="col-kicker">English</p>
+<p>Parser preserves layout before splitting. Keep PDF pages/coordinates, table headings/units, wiki heading paths, and code boundaries. Remove repeated headers carefully and flag uncertain OCR. Contextless table cells cannot establish a numeric claim; parsing errors contaminate all retrieval and citation layers.</p>
+<p>Split by structure, then recursively bound oversized sections by sentences/tokens. A2 is illustrative rather than a universal current standard. Microsoft lists a 10–15% fixed-size overlap example and separately recommends 512 tokens with 25% starting overlap [2]. Our 12.5% baseline is a controlled experiment, compared against other settings.</p>
+<p>Small chunks focus retrieval but can omit definitions or premises. Large chunks dilute relevance and consume evidence space. Overlap covers adjacent boundaries without guaranteeing distant relationships, and adds duplicates/tokens. Include boundary, table, and identifier questions in evaluation.</p>
+<p>Store chunk/document IDs, source and splitter revisions, offsets, headings, pages, parent ID, and ACL revision. The query bundle defines model, tokenizer, and pooling identity. Citation clicks reauthorize and show the exact used revision rather than a mismatching newer page.</p>
+<p>Small-to-big retrieves child vectors and batch-fetches same-revision parents. Expand each parent once and authorize every span. Child access does not grant an entire mixed-permission section. If budgets, visibility, or access fail, use children or refuse rather than substitute a newer parent.</p>
+<p>Semantic splitting and parent expansion are optional measured choices. They add offline work, versioning, reads, and policy complexity. Use them when relevant children are already recalled but lack premises; expansion cannot rescue a never-recalled ID.</p>
+</div></div></section>
+
+  <section>
+<h2><span class="lang-zh">Hybrid：融合的是排名，rerank 有明确上限</span><span class="lang-en">Hybrid: fuse ranks and bound reranking</span></h2>
+<figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d4s1t d4s1d">
+          <title id="d4s1t">Recall lexical evidence</title>
+          <desc id="d4s1d">Logical dataflow: Query plan sends terms and scope to BM25, which produces its ranked list.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <g class="is-new">
+            <rect x="30" y="172" width="125" height="76" rx="12" class="box"/><text x="92.5" y="207" text-anchor="middle" class="label">Query plan</text><text x="92.5" y="226" text-anchor="middle" class="sub">identity + bundle</text>
+            <path d="M230 70 V126 A70 12 0 0 0 370 126 V70" class="store"/><ellipse cx="300" cy="70" rx="70" ry="12" class="store"/><text x="300" y="108" text-anchor="middle" class="label">BM25</text><text x="300" y="126" text-anchor="middle" class="sub">top 100</text>
+            <path d="M80 172 L80 99 Q80 91 88 91 L220 91" class="wire"/><polygon points="230,91 220,96 220,86" class="head"/><text x="151" y="80" text-anchor="middle" class="tiny">terms + scope</text>
+            <text x="30" y="35" text-anchor="start" class="label">HYBRID · logical stages, not RPC forwarding</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">错误码、货号和内部缩写给 BM25 一个存在理由；本组画逻辑数据流，实际 RPC 全部仍由第一组 RAG 发起和接回。</span><span class="lang-en">BM25 supplies lexical evidence for codes and identifiers. This is logical dataflow; deck one shows RAG-owned RPC round trips.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d4s2t d4s2d">
+          <title id="d4s2t">Recall semantic evidence</title>
+          <desc id="d4s2d">Query plan also sends its query vector and identical scope to Dense; the two recall lanes run in parallel.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="30" y="172" width="125" height="76" rx="12" class="box"/><text x="92.5" y="207" text-anchor="middle" class="label">Query plan</text><text x="92.5" y="226" text-anchor="middle" class="sub">identity + bundle</text>
+          <path d="M230 70 V126 A70 12 0 0 0 370 126 V70" class="store"/><ellipse cx="300" cy="70" rx="70" ry="12" class="store"/><text x="300" y="108" text-anchor="middle" class="label">BM25</text><text x="300" y="126" text-anchor="middle" class="sub">top 100</text>
+          <path d="M80 172 L80 99 Q80 91 88 91 L220 91" class="wire"/><polygon points="230,91 220,96 220,86" class="head"/><text x="151" y="80" text-anchor="middle" class="tiny">terms + scope</text>
+          <text x="30" y="35" text-anchor="start" class="label">HYBRID · logical stages, not RPC forwarding</text>
+          <g class="is-new">
+            <path d="M230 282 V338 A70 12 0 0 0 370 338 V282" class="store"/><ellipse cx="300" cy="282" rx="70" ry="12" class="store"/><text x="300" y="320" text-anchor="middle" class="label">Dense</text><text x="300" y="338" text-anchor="middle" class="sub">top 100</text>
+            <path d="M80 248 L80 302 Q80 310 88 310 L220 310" class="wire"/><polygon points="230,310 220,315 220,305" class="head"/><text x="150" y="333" text-anchor="middle" class="tiny">vector + scope</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">稠密召回补改写与跨语言，和 BM25 并行，所以这段预算是 max(T_bm25, T_dense)，不是两段串行相加。</span><span class="lang-en">Dense recall complements paraphrases and multilingual queries. Parallel retrieval budgets max(T_bm25, T_dense).</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d4s3t d4s3d">
+          <title id="d4s3t">Fuse ranks and deduplicate</title>
+          <desc id="d4s3d">BM25 and Dense deliver ranked IDs to RRF, which deduplicates by canonical chunk ID and keeps a shortlist.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="30" y="172" width="125" height="76" rx="12" class="box"/><text x="92.5" y="207" text-anchor="middle" class="label">Query plan</text><text x="92.5" y="226" text-anchor="middle" class="sub">identity + bundle</text>
+          <path d="M230 70 V126 A70 12 0 0 0 370 126 V70" class="store"/><ellipse cx="300" cy="70" rx="70" ry="12" class="store"/><text x="300" y="108" text-anchor="middle" class="label">BM25</text><text x="300" y="126" text-anchor="middle" class="sub">top 100</text>
+          <path d="M80 172 L80 99 Q80 91 88 91 L220 91" class="wire"/><polygon points="230,91 220,96 220,86" class="head"/><text x="151" y="80" text-anchor="middle" class="tiny">terms + scope</text>
+          <text x="30" y="35" text-anchor="start" class="label">HYBRID · logical stages, not RPC forwarding</text>
+          <path d="M230 282 V338 A70 12 0 0 0 370 338 V282" class="store"/><ellipse cx="300" cy="282" rx="70" ry="12" class="store"/><text x="300" y="320" text-anchor="middle" class="label">Dense</text><text x="300" y="338" text-anchor="middle" class="sub">top 100</text>
+          <path d="M80 248 L80 302 Q80 310 88 310 L220 310" class="wire"/><polygon points="230,310 220,315 220,305" class="head"/><text x="150" y="333" text-anchor="middle" class="tiny">vector + scope</text>
+          <g class="is-new">
+            <rect x="465" y="172" width="125" height="76" rx="12" class="box"/><text x="527.5" y="207" text-anchor="middle" class="label">RRF</text><text x="527.5" y="226" text-anchor="middle" class="sub">k = 60</text>
+            <path d="M370 106 L507 106 Q515 106 515 114 L515 162" class="wire"/><polygon points="515,172 510,162 520,162" class="head"/><text x="450" y="94" text-anchor="middle" class="tiny">ranked IDs</text>
+            <path d="M370 310 L507 310 Q515 310 515 302 L515 258" class="wire"/><polygon points="515,248 520,258 510,258" class="head"/><text x="450" y="336" text-anchor="middle" class="tiny">ranked IDs</text>
+            <text x="680" y="80" text-anchor="middle" class="tiny">A: ranks 1 + 10 =&gt; 0.03068</text>
+            <text x="680" y="106" text-anchor="middle" class="tiny">B: ranks 5 + 5 =&gt; 0.03077</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">A = 1/61 + 1/70 ≈ 0.03068，B = 2/65 ≈ 0.03077，B 稍前。缺席某路贡献为零；原始 BM25 分数和余弦不能直接裸加 [3]。</span><span class="lang-en">A = 1/61 + 1/70 ≈ 0.03068; B = 2/65 ≈ 0.03077, so B is slightly ahead. Missing-lane contribution is zero [3].</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d4s4t d4s4d">
+          <title id="d4s4t">Bound reranking work</title>
+          <desc id="d4s4d">RRF delivers at most eighty eligible query-span pairs to Reranker; reranking operates only on that shortlist.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="30" y="172" width="125" height="76" rx="12" class="box"/><text x="92.5" y="207" text-anchor="middle" class="label">Query plan</text><text x="92.5" y="226" text-anchor="middle" class="sub">identity + bundle</text>
+          <path d="M230 70 V126 A70 12 0 0 0 370 126 V70" class="store"/><ellipse cx="300" cy="70" rx="70" ry="12" class="store"/><text x="300" y="108" text-anchor="middle" class="label">BM25</text><text x="300" y="126" text-anchor="middle" class="sub">top 100</text>
+          <path d="M80 172 L80 99 Q80 91 88 91 L220 91" class="wire"/><polygon points="230,91 220,96 220,86" class="head"/><text x="151" y="80" text-anchor="middle" class="tiny">terms + scope</text>
+          <text x="30" y="35" text-anchor="start" class="label">HYBRID · logical stages, not RPC forwarding</text>
+          <path d="M230 282 V338 A70 12 0 0 0 370 338 V282" class="store"/><ellipse cx="300" cy="282" rx="70" ry="12" class="store"/><text x="300" y="320" text-anchor="middle" class="label">Dense</text><text x="300" y="338" text-anchor="middle" class="sub">top 100</text>
+          <path d="M80 248 L80 302 Q80 310 88 310 L220 310" class="wire"/><polygon points="230,310 220,315 220,305" class="head"/><text x="150" y="333" text-anchor="middle" class="tiny">vector + scope</text>
+          <rect x="465" y="172" width="125" height="76" rx="12" class="box"/><text x="527.5" y="207" text-anchor="middle" class="label">RRF</text><text x="527.5" y="226" text-anchor="middle" class="sub">k = 60</text>
+          <path d="M370 106 L507 106 Q515 106 515 114 L515 162" class="wire"/><polygon points="515,172 510,162 520,162" class="head"/><text x="450" y="94" text-anchor="middle" class="tiny">ranked IDs</text>
+          <path d="M370 310 L507 310 Q515 310 515 302 L515 258" class="wire"/><polygon points="515,248 520,258 510,258" class="head"/><text x="450" y="336" text-anchor="middle" class="tiny">ranked IDs</text>
+          <text x="680" y="80" text-anchor="middle" class="tiny">A: ranks 1 + 10 =&gt; 0.03068</text>
+          <text x="680" y="106" text-anchor="middle" class="tiny">B: ranks 5 + 5 =&gt; 0.03077</text>
+          <g class="is-new">
+            <rect x="675" y="172" width="120" height="76" rx="12" class="box"/><text x="735" y="207" text-anchor="middle" class="label">Reranker</text><text x="735" y="226" text-anchor="middle" class="sub">top 80 input</text>
+            <path d="M590 210 L665 210" class="wire"/><polygon points="675,210 665,215 665,205" class="head"/>
+            <text x="720" y="278" text-anchor="middle" class="clock">40 x 80 = 3,200 pairs/s</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">融合前先按身份、版本过滤；短名单仍不足时，只在截止时间内补召回。rerank 超时的受测降级是使用 RRF 次序，保留相同权限检查。</span><span class="lang-en">Filter eligibility before shortlisting. Refill only within the deadline; a tested rerank-timeout fallback uses RRF order with the same access checks.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d4s5t d4s5d">
+          <title id="d4s5t">Budget actual prompt evidence</title>
+          <desc id="d4s5d">Reranker ranks the shortlist; Evidence Pack resolves at most eight spans within a 4,096-token evidence budget.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="30" y="172" width="125" height="76" rx="12" class="box"/><text x="92.5" y="207" text-anchor="middle" class="label">Query plan</text><text x="92.5" y="226" text-anchor="middle" class="sub">identity + bundle</text>
+          <path d="M230 70 V126 A70 12 0 0 0 370 126 V70" class="store"/><ellipse cx="300" cy="70" rx="70" ry="12" class="store"/><text x="300" y="108" text-anchor="middle" class="label">BM25</text><text x="300" y="126" text-anchor="middle" class="sub">top 100</text>
+          <path d="M80 172 L80 99 Q80 91 88 91 L220 91" class="wire"/><polygon points="230,91 220,96 220,86" class="head"/><text x="151" y="80" text-anchor="middle" class="tiny">terms + scope</text>
+          <text x="30" y="35" text-anchor="start" class="label">HYBRID · logical stages, not RPC forwarding</text>
+          <path d="M230 282 V338 A70 12 0 0 0 370 338 V282" class="store"/><ellipse cx="300" cy="282" rx="70" ry="12" class="store"/><text x="300" y="320" text-anchor="middle" class="label">Dense</text><text x="300" y="338" text-anchor="middle" class="sub">top 100</text>
+          <path d="M80 248 L80 302 Q80 310 88 310 L220 310" class="wire"/><polygon points="230,310 220,315 220,305" class="head"/><text x="150" y="333" text-anchor="middle" class="tiny">vector + scope</text>
+          <rect x="465" y="172" width="125" height="76" rx="12" class="box"/><text x="527.5" y="207" text-anchor="middle" class="label">RRF</text><text x="527.5" y="226" text-anchor="middle" class="sub">k = 60</text>
+          <path d="M370 106 L507 106 Q515 106 515 114 L515 162" class="wire"/><polygon points="515,172 510,162 520,162" class="head"/><text x="450" y="94" text-anchor="middle" class="tiny">ranked IDs</text>
+          <path d="M370 310 L507 310 Q515 310 515 302 L515 258" class="wire"/><polygon points="515,248 520,258 510,258" class="head"/><text x="450" y="336" text-anchor="middle" class="tiny">ranked IDs</text>
+          <text x="680" y="80" text-anchor="middle" class="tiny">A: ranks 1 + 10 =&gt; 0.03068</text>
+          <text x="680" y="106" text-anchor="middle" class="tiny">B: ranks 5 + 5 =&gt; 0.03077</text>
+          <rect x="675" y="172" width="120" height="76" rx="12" class="box"/><text x="735" y="207" text-anchor="middle" class="label">Reranker</text><text x="735" y="226" text-anchor="middle" class="sub">top 80 input</text>
+          <path d="M590 210 L665 210" class="wire"/><polygon points="675,210 665,215 665,205" class="head"/>
+          <text x="720" y="278" text-anchor="middle" class="clock">40 x 80 = 3,200 pairs/s</text>
+          <g class="is-new">
+            <rect x="820" y="172" width="120" height="76" rx="12" class="box"/><text x="880" y="207" text-anchor="middle" class="label">Evidence Pack</text><text x="880" y="226" text-anchor="middle" class="sub">&lt;= 8 spans</text>
+            <path d="M795 210 L810 210" class="wire"/><polygon points="820,210 810,215 810,205" class="head"/>
+            <text x="705" y="360" text-anchor="middle" class="clock">reject: raw-score sum / all-corpus rerank</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">8 × 512 = 4,096 是证据上限，不是固定必须塞满。父块扩展后重算实际 token，去重后编号，这一集合才是引用可用的 Evidence Pack。</span><span class="lang-en">8 × 512 = 4,096 is a ceiling, not a quota to fill. Retokenize expanded parents, deduplicate, and assign citations to this actual Evidence Pack.</span></figcaption>
+      </div>
+    </figure><div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
+<p>BM25 对错误码、名称和确切词串有用，但它不是精确短语过滤器；用户明确要引号内的短语时，还要使用引擎的短语条件。稠密模型补改写和跨语言，前提是模型确实覆盖本章的语言与领域。两路各取 100 是 A4，去重后最多 200，交给融合的是可访问且 active 的 chunk；重名不同版本不被视作同一证据。</p>
+<p>RRF 不用原始分数相加，公式为 <code>score(d) = Σ 1 / (k + rank_i(d))</code>，排名从 1 起，某路缺席贡献 0。Elastic 官方实现的 rank_constant 默认 60 [3]，本章沿用当起点。第一路第 1、第二路第 10 的 A 得 0.03068；两路都第 5 的 B 得 0.03077，B 略前。常数影响后排的贡献，融合窗口也会限制可能入选的集合，增大窗口不等于无成本提高质量。</p>
+<p>不能把“BM25 和余弦量纲不同”说成永远不能线性融合。未经校准的裸加不成立；有标注集时可以做标准化、权重学习或其他融合，与 RRF 在独立集上比较。RRF 的代价是丢弃分数差距，而且无法救回两路都漏掉的段落。图上的默认选择是一个稳健的起点，结论靠评测，而不是算法名字本身。</p>
+<p>带过滤不保证内部 pre-filter。pgvector v0.8.0 原文说明近似索引扫描后执行过滤，可能不足目标条数，iterative scans 会继续扫描直到够数或触及上限 [5]。所以“WHERE tenant_id”并不自动带来足量召回。租户只占少量数据时，可考虑分区、局部索引或精确过滤后的检索，并分别测 Recall、扫描量和延迟；不能用放松 ACL 来凑齐 100 条。</p>
+<p>Reranker 将 question 与候选文本联合打分，先召回再对短名单处理是 Sentence Transformers 展示的用法 [4]。候选必须已经通过权限与版本校验，模型服务本身也是受信数据处理边界。限制 pair 数、单段长度和批等待，超过截止时间取消并使用已评测的 RRF 顺序；降级比例要计入质量报表，不混进正常 rerank 的指标掩盖。</p>
+<p>最后按证据跨度去重与 token 总数取至多 8 块。A5 的 <code>4,096 + 1,024 = 5,120</code> 输入，再留 512 输出，需要至少 5,632 上下文；实际模型 tokenization 不一致时按生成模型重新数。重要证据排序和长上下文利用需要实验，Lost in the Middle 展示过位置改变对所测模型的影响 [9]，不能据此断言所有新模型都只能看开头结尾。增加上下文仍需看支持率与成本是否改善。</p>
+</div><div class="lang-en"><p class="col-kicker">English</p>
+<p>BM25 supports codes and literal terms but does not replace explicit phrase constraints. Dense retrieval supports paraphrases/languages when the chosen model covers them. Each A4 lane returns 100; up to 200 unique eligible active chunks enter fusion. Distinct revisions are not identical evidence.</p>
+<p>RRF uses <code>Σ 1/(k + rank_i(d))</code>, ranks starting at one and zero contribution for a missing lane. Elastic defaults rank_constant to 60 [3]. A at ranks 1/10 scores 0.03068; B at 5/5 scores 0.03077. The constant and retrieval windows affect lower-ranked influence and eligible recall.</p>
+<p>Uncalibrated raw-score addition is unjustified, but normalized/learned weighted fusion can be evaluated on held-out labels. RRF discards score margins and cannot recover chunks missed by both lanes. The chosen default remains a measured starting point.</p>
+<p>Filtering does not imply internal prefiltering. pgvector v0.8.0 applies filtering after approximate index scans; iterative scans continue until enough results or a scan cap [5]. Measure filtered recall and latency, considering partitioning, partial indexes, or exact filtered search without weakening access.</p>
+<p>Sentence Transformers demonstrates retrieving before cross-encoder reranking [4]. Apply it only to authorized, active candidates, and bound pair count, span length, and batch wait. Cancel at deadline and use a tested RRF fallback, reporting degradation separately.</p>
+<p>Deduplicate spans and choose at most eight within 4,096 evidence tokens. Adding 1,024 other input and 512 reserved output requires at least 5,632 context tokens; recount with the generation tokenizer. Lost in the Middle studied position sensitivity in tested models [9], not a universal law for all newer models. Evaluate evidence ordering, support, and cost.</p>
+</div></div></section>
+
+  <section>
+<h2><span class="lang-zh">引用：先验证证据身份，再判断支持关系</span><span class="lang-en">Citations: evidence identity precedes support</span></h2>
+<figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s1t d5s1d">
+          <title id="d5s1t">Own the output connection</title>
+          <desc id="d5s1d">Client sends query to RAG and receives output only from RAG; the Gateway hop from deck one is omitted in this detail view.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <g class="is-new">
+            <circle cx="44" cy="160" r="12" class="box"/><path d="M24 206 Q44 174 64 206" class="wire"/><text x="44" y="228" text-anchor="middle" class="label">Client</text>
+            <rect x="170" y="144" width="140" height="80" rx="12" class="box"/><text x="240" y="181" text-anchor="middle" class="label">RAG</text><text x="240" y="200" text-anchor="middle" class="sub">request owner</text>
+            <path d="M70 175 L160 175" class="wire"/><polygon points="170,175 160,180 160,170" class="head"/><text x="116" y="166" text-anchor="middle" class="tiny">query</text>
+            <path d="M170 193 L80 193" class="wire reply"/><polygon points="70,193 80,188 80,198" class="head reply"/>
+            <text x="30" y="35" text-anchor="start" class="label">ANSWER RELEASE · Gateway omitted in this detail</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">这一组放大 RAG 内的释放边界，入口网关省略已在标题注明。客户端只读 RAG 的输出，不直接接模型流。</span><span class="lang-en">This detail omits the deck-one Gateway explicitly. Client reads RAG output and has no direct model stream.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s2t d5s2d">
+          <title id="d5s2t">Freeze the actual evidence</title>
+          <desc id="d5s2d">RAG freezes this request’s Evidence Pack and receives the exact ID-to-span map.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <circle cx="44" cy="160" r="12" class="box"/><path d="M24 206 Q44 174 64 206" class="wire"/><text x="44" y="228" text-anchor="middle" class="label">Client</text>
+          <rect x="170" y="144" width="140" height="80" rx="12" class="box"/><text x="240" y="181" text-anchor="middle" class="label">RAG</text><text x="240" y="200" text-anchor="middle" class="sub">request owner</text>
+          <path d="M70 175 L160 175" class="wire"/><polygon points="170,175 160,180 160,170" class="head"/><text x="116" y="166" text-anchor="middle" class="tiny">query</text>
+          <path d="M170 193 L80 193" class="wire reply"/><polygon points="70,193 80,188 80,198" class="head reply"/>
+          <text x="30" y="35" text-anchor="start" class="label">ANSWER RELEASE · Gateway omitted in this detail</text>
+          <g class="is-new">
+            <rect x="390" y="40" width="140" height="60" rx="12" class="box"/><text x="460" y="67" text-anchor="middle" class="label">Evidence Pack</text><text x="460" y="86" text-anchor="middle" class="sub">IDs 1..8</text>
+            <path d="M200 144 L200 78 Q200 70 208 70 L380 70" class="wire"/><polygon points="390,70 380,75 380,65" class="head"/><text x="295" y="61" text-anchor="middle" class="tiny">freeze set</text>
+            <path d="M390 85 L238 85 Q230 85 230 93 L230 134" class="wire reply"/><polygon points="230,144 225,134 235,134" class="head reply"/>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">必须是实际送进 prompt 的集合，不能放宽为曾召回的 200 个 ID。记录文档版本、跨度、权限代次，编号在本次回答内稳定。</span><span class="lang-en">The allowed IDs are the actual prompt evidence, not all 200 recalled IDs. Freeze revision, span, and authorization identity.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s3t d5s3d">
+          <title id="d5s3t">Treat generation as a draft</title>
+          <desc id="d5s3d">RAG calls Inference with question and Evidence Pack; Inference returns an untrusted draft to RAG.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <circle cx="44" cy="160" r="12" class="box"/><path d="M24 206 Q44 174 64 206" class="wire"/><text x="44" y="228" text-anchor="middle" class="label">Client</text>
+          <rect x="170" y="144" width="140" height="80" rx="12" class="box"/><text x="240" y="181" text-anchor="middle" class="label">RAG</text><text x="240" y="200" text-anchor="middle" class="sub">request owner</text>
+          <path d="M70 175 L160 175" class="wire"/><polygon points="170,175 160,180 160,170" class="head"/><text x="116" y="166" text-anchor="middle" class="tiny">query</text>
+          <path d="M170 193 L80 193" class="wire reply"/><polygon points="70,193 80,188 80,198" class="head reply"/>
+          <text x="30" y="35" text-anchor="start" class="label">ANSWER RELEASE · Gateway omitted in this detail</text>
+          <rect x="390" y="40" width="140" height="60" rx="12" class="box"/><text x="460" y="67" text-anchor="middle" class="label">Evidence Pack</text><text x="460" y="86" text-anchor="middle" class="sub">IDs 1..8</text>
+          <path d="M200 144 L200 78 Q200 70 208 70 L380 70" class="wire"/><polygon points="390,70 380,75 380,65" class="head"/><text x="295" y="61" text-anchor="middle" class="tiny">freeze set</text>
+          <path d="M390 85 L238 85 Q230 85 230 93 L230 134" class="wire reply"/><polygon points="230,144 225,134 235,134" class="head reply"/>
+          <g class="is-new">
+            <rect x="390" y="144" width="140" height="80" rx="12" class="box"/><text x="460" y="181" text-anchor="middle" class="label">Inference</text><text x="460" y="200" text-anchor="middle" class="sub">untrusted draft</text>
+            <path d="M310 170 L380 170" class="wire"/><polygon points="390,170 380,175 380,165" class="head"/>
+            <path d="M390 194 L320 194" class="wire reply"/><polygon points="310,194 320,189 320,199" class="head reply"/>
+            <text x="830" y="250" text-anchor="middle" class="label">No direct stream</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">找到编号只证明来源存在。模型可以把无关句子挂到真编号上，或把文档内的“忽略指令”当命令；检索文字按不可信数据处理 [7][10]。</span><span class="lang-en">A valid ID proves source identity, not support. Treat retrieved instructions as untrusted data and verify statement support [7][10].</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s4t d5s4d">
+          <title id="d5s4t">Validate before exposure</title>
+          <desc id="d5s4d">RAG sends a buffered sentence and exact evidence to Answer Gate; validated sentences or refusals return to RAG.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <circle cx="44" cy="160" r="12" class="box"/><path d="M24 206 Q44 174 64 206" class="wire"/><text x="44" y="228" text-anchor="middle" class="label">Client</text>
+          <rect x="170" y="144" width="140" height="80" rx="12" class="box"/><text x="240" y="181" text-anchor="middle" class="label">RAG</text><text x="240" y="200" text-anchor="middle" class="sub">request owner</text>
+          <path d="M70 175 L160 175" class="wire"/><polygon points="170,175 160,180 160,170" class="head"/><text x="116" y="166" text-anchor="middle" class="tiny">query</text>
+          <path d="M170 193 L80 193" class="wire reply"/><polygon points="70,193 80,188 80,198" class="head reply"/>
+          <text x="30" y="35" text-anchor="start" class="label">ANSWER RELEASE · Gateway omitted in this detail</text>
+          <rect x="390" y="40" width="140" height="60" rx="12" class="box"/><text x="460" y="67" text-anchor="middle" class="label">Evidence Pack</text><text x="460" y="86" text-anchor="middle" class="sub">IDs 1..8</text>
+          <path d="M200 144 L200 78 Q200 70 208 70 L380 70" class="wire"/><polygon points="390,70 380,75 380,65" class="head"/><text x="295" y="61" text-anchor="middle" class="tiny">freeze set</text>
+          <path d="M390 85 L238 85 Q230 85 230 93 L230 134" class="wire reply"/><polygon points="230,144 225,134 235,134" class="head reply"/>
+          <rect x="390" y="144" width="140" height="80" rx="12" class="box"/><text x="460" y="181" text-anchor="middle" class="label">Inference</text><text x="460" y="200" text-anchor="middle" class="sub">untrusted draft</text>
+          <path d="M310 170 L380 170" class="wire"/><polygon points="390,170 380,175 380,165" class="head"/>
+          <path d="M390 194 L320 194" class="wire reply"/><polygon points="310,194 320,189 320,199" class="head reply"/>
+          <text x="830" y="250" text-anchor="middle" class="label">No direct stream</text>
+          <g class="is-new">
+            <rect x="610" y="144" width="150" height="80" rx="12" class="box"/><text x="685" y="181" text-anchor="middle" class="label">Answer Gate</text><text x="685" y="200" text-anchor="middle" class="sub">IDs / support</text>
+            <path d="M260 224 L260 272 Q260 280 268 280 L642 280 Q650 280 650 272 L650 234" class="wire"/><polygon points="650,224 655,234 645,234" class="head"/><text x="440" y="270" text-anchor="middle" class="tiny">sentence + exact evidence</text>
+            <path d="M680 224 L680 292 Q680 300 672 300 L238 300 Q230 300 230 292 L230 234" class="wire reply"/><polygon points="230,224 235,234 225,234" class="head reply"/><text x="460" y="322" text-anchor="middle" class="tiny">validated sentence / refusal</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">按句缓冲再校验 ID、来源权限和支持关系，合格才发 SSE。第一个合格句预算 3 s；不能把模型第一个 token 当用户可见首句。</span><span class="lang-en">Buffer a sentence, validate IDs, access, and support, then send SSE. The 3-second first-approved-sentence target differs from model TTFT.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s5t d5s5d">
+          <title id="d5s5t">Fail closed for unsupported claims</title>
+          <desc id="d5s5d">Answer Gate rejects invalid IDs or unsupported statements to RAG; RAG returns a refusal to Client. The normal return lane represents accepted sentences only.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <circle cx="44" cy="160" r="12" class="box"/><path d="M24 206 Q44 174 64 206" class="wire"/><text x="44" y="228" text-anchor="middle" class="label">Client</text>
+          <rect x="170" y="144" width="140" height="80" rx="12" class="box"/><text x="240" y="181" text-anchor="middle" class="label">RAG</text><text x="240" y="200" text-anchor="middle" class="sub">request owner</text>
+          <path d="M70 175 L160 175" class="wire"/><polygon points="170,175 160,180 160,170" class="head"/><text x="116" y="166" text-anchor="middle" class="tiny">query</text>
+          <path d="M170 193 L80 193" class="wire reply"/><polygon points="70,193 80,188 80,198" class="head reply"/>
+          <text x="30" y="35" text-anchor="start" class="label">ANSWER RELEASE · Gateway omitted in this detail</text>
+          <rect x="390" y="40" width="140" height="60" rx="12" class="box"/><text x="460" y="67" text-anchor="middle" class="label">Evidence Pack</text><text x="460" y="86" text-anchor="middle" class="sub">IDs 1..8</text>
+          <path d="M200 144 L200 78 Q200 70 208 70 L380 70" class="wire"/><polygon points="390,70 380,75 380,65" class="head"/><text x="295" y="61" text-anchor="middle" class="tiny">freeze set</text>
+          <path d="M390 85 L238 85 Q230 85 230 93 L230 134" class="wire reply"/><polygon points="230,144 225,134 235,134" class="head reply"/>
+          <rect x="390" y="144" width="140" height="80" rx="12" class="box"/><text x="460" y="181" text-anchor="middle" class="label">Inference</text><text x="460" y="200" text-anchor="middle" class="sub">untrusted draft</text>
+          <path d="M310 170 L380 170" class="wire"/><polygon points="390,170 380,175 380,165" class="head"/>
+          <path d="M390 194 L320 194" class="wire reply"/><polygon points="310,194 320,189 320,199" class="head reply"/>
+          <text x="830" y="250" text-anchor="middle" class="label">No direct stream</text>
+          <rect x="610" y="144" width="150" height="80" rx="12" class="box"/><text x="685" y="181" text-anchor="middle" class="label">Answer Gate</text><text x="685" y="200" text-anchor="middle" class="sub">IDs / support</text>
+          <path d="M260 224 L260 272 Q260 280 268 280 L642 280 Q650 280 650 272 L650 234" class="wire"/><polygon points="650,224 655,234 645,234" class="head"/><text x="440" y="270" text-anchor="middle" class="tiny">sentence + exact evidence</text>
+          <path d="M680 224 L680 292 Q680 300 672 300 L238 300 Q230 300 230 292 L230 234" class="wire reply"/><polygon points="230,224 235,234 225,234" class="head reply"/><text x="460" y="322" text-anchor="middle" class="tiny">validated sentence / refusal</text>
+          <g class="is-new">
+            <path d="M680 224 L680 292 Q680 300 672 300 L238 300 Q230 300 230 292 L230 234" class="wire fail"/><polygon points="230,224 235,234 225,234" class="head fail"/><path d="M170 193 L80 193" class="wire fail"/><polygon points="70,193 80,188 80,198" class="head fail"/>
+            <rect x="635" y="96" width="150" height="20" rx="10" class="badge"/><text x="710" y="110" text-anchor="middle" class="badge-text">reject: cite 9</text>
+            <text x="420" y="366" text-anchor="middle" class="clock">No evidence -&gt; bounded refusal; never delete only the footnote</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">编号 9 不在 1..8，整句不能放行；仅删脚注会留下无依据断言。超时或证据不足返回明确的未完成/不知道，已发句不能假装回滚。</span><span class="lang-en">Citation 9 is outside IDs 1..8, so block the sentence. Removing just the footnote leaves an unsupported claim; emitted sentences cannot be rolled back.</span></figcaption>
+      </div>
+    </figure><div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
+<p>Evidence Pack 是去重、授权、版本检查与预算裁剪之后，实际放入 prompt 的内容。保存本轮 ID → doc/revision/span 的映射，例如 1..8；召回过但没放进 prompt 的第 9 块不能引用。每块用明确的数据边界隔开，指令要求根据材料作答且不执行材料中的命令，遇到冲突来源注明冲突。只加一行“请引用来源”不能让这些身份约束自动成立。</p>
+<p>机械校验能确定编号在集合内、source_revision 和 span 可读、权限在复查点成立。它无法确定“这段材料是否支持这句话”。ALCE 把引用支持与引用质量单独评估，而不是把有脚注当正确 [7]。本设计为需要证据的陈述建立 cited spans，使用领域规则、支持判断器并抽样人工核对；自动判断器会误判，因此 Answer Gate 是有测量误差的质量门槛，不是无幻觉的证明器。</p>
+<p>流式释放选择按句缓冲：RAG 接模型 draft，句子完整后调用 Answer Gate，连同实际证据映射做检查。合格句才发给 Gateway。编号非法或无支持时拦整句，有限次重写后仍失败就说不知道，禁止只删掉假脚注留下断言。按句需要额外等待与判断成本，所以本章 SLO 是第一句合格输出 ≤ 3 s，和模型 TTFT 分报；若要求最终整篇都验证完，再用完整答案缓冲，首响应会更晚。</p>
+<p>权限与删除在取证和每句释放前复查，Catalog 不可用则失败关闭。复查与网络发送之间仍有竞争，本章契约是：检查线性化在撤销之后的句子不能继续用该证据；已经检查完并发送中的句子可能仍到达。要“删除确认后连已在途句子都不能再到用户”，必须定义查询与撤销的串行协议或 drain，而网络上已发的字节仍无法收回。这个边界要在接口文档里写清，不用 TTL 秒数冒充强即时撤销。</p>
+<p>检索文字里出现“忽略此前命令”“发送秘密”属于文档攻击风险，Microsoft 的 Prompt Shields 文档专门区分文档攻击 [10]。这里把材料作为数据，限制 prompt 边界，保留源信任和异常记录；闭库问答不授予生成器外部工具权限。过滤、提示分隔和检测都有局限，测试集中要含恶意材料，不把一个检测通过标志当作材料已可信的证明。</p>
+<p>用户点来源时重新鉴权并读取精确版本，删除后可以返回“来源已撤销”，不能绕过 tombstone 展示保留的旧原文。回答日志只记必要的 request 身份、配置版本、选中证据标识、拒答原因与时延；敏感原文和答案按访问权限与保留政策管理。追溯需要的是可重建当时决策的记录，不是把所有租户内容复制进一个公开调试页面。</p>
+</div><div class="lang-en"><p class="col-kicker">English</p>
+<p>Evidence Pack contains only text that survives deduplication, access/version checks, and prompt budgeting. Freeze IDs 1..8 to document/revision/span; a recalled but unprompted ninth chunk is not citable. Mark material as data, handle conflicting sources, and do not assume a citation instruction enforces identity constraints.</p>
+<p>Mechanical checks establish ID membership, readable revision/span, and access at the check point, not semantic support. ALCE evaluates citation support and quality separately [7]. Use domain rules/support judges with human calibration. Judges can fail, so Answer Gate is a measured quality threshold, not a proof of hallucination freedom.</p>
+<p>Buffer sentences from the draft and validate before releasing through Gateway. Block invalid/unsupported sentences; bound rewrites and refuse if still unsupported. Never remove just a fake footnote. Sentence buffering adds latency and judge cost, so report first approved sentence separately from model TTFT. Full-answer validation requires longer buffering.</p>
+<p>Recheck access/deletes at evidence fetch and before each sentence release; authority failure denies release. A race remains between check and send: checks linearized after revocation cannot approve affected evidence, but already approved/in-flight bytes may arrive. A stronger acknowledgement contract needs serialized queries/revocation or drain and still cannot retract sent network bytes.</p>
+<p>Prompt Shields distinguishes document attacks [10]. Treat material as data, bound instruction separation, retain source trust/alerts, and give this closed-corpus generator no external tools. Detection and delimiters are imperfect; include malicious documents in evaluation.</p>
+<p>Citation clicks reauthorize exact revisions and honor tombstones. Logs retain needed request/config/evidence identities, refusal causes, and timing, with access and retention controls for sensitive content. Traceability does not require public copies of all tenant text.</p>
+</div></div></section>
+
+  <section>
+<h2><span class="lang-zh">新鲜度与换模型：发布指针能恢复，空间不能混搜</span><span class="lang-en">Freshness and migration: publish pointers, never mix spaces</span></h2>
+<figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d6s1t d6s1d">
+          <title id="d6s1t">Pin a complete query bundle</title>
+          <desc id="d6s1d">RAG reads Catalog and receives one pinned bundle containing generation, query model, index IDs, splitter revision, and policy identity.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <g class="is-new">
+            <path d="M100 76 V132 A80 12 0 0 0 260 132 V76" class="store"/><ellipse cx="180" cy="76" rx="80" ry="12" class="store"/><text x="180" y="114" text-anchor="middle" class="label">Catalog</text><text x="180" y="132" text-anchor="middle" class="sub">bundle / tombstone</text>
+            <rect x="730" y="74" width="150" height="80" rx="12" class="box"/><text x="805" y="111" text-anchor="middle" class="label">RAG</text><text x="805" y="130" text-anchor="middle" class="sub">pin generation</text>
+            <path d="M730 94 L270 94" class="wire"/><polygon points="260,94 270,89 270,99" class="head"/><text x="500" y="85" text-anchor="middle" class="tiny">read bundle + policy</text>
+            <path d="M260 114 L720 114" class="wire reply"/><polygon points="730,114 720,119 720,109" class="head reply"/><text x="500" y="135" text-anchor="middle" class="tiny">pinned generation</text>
+            <text x="30" y="24" text-anchor="start" class="label">PUBLISH / MIGRATE · one bundle per request</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">切流单位是整份 bundle，包含 query 模型、索引与切分配置。只切 index alias 而 query embedding 仍旧，会在维度相同时静默算出无意义相似度。</span><span class="lang-en">Cut over the whole query bundle. An alias-only switch with the old query encoder can silently corrupt similarity even at equal dimensions.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d6s2t d6s2d">
+          <title id="d6s2t">Keep old requests internally consistent</title>
+          <desc id="d6s2d">An existing g1 request uses m1 and queries Index g1; results return to the pinned RAG owner.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <path d="M100 76 V132 A80 12 0 0 0 260 132 V76" class="store"/><ellipse cx="180" cy="76" rx="80" ry="12" class="store"/><text x="180" y="114" text-anchor="middle" class="label">Catalog</text><text x="180" y="132" text-anchor="middle" class="sub">bundle / tombstone</text>
+          <rect x="730" y="74" width="150" height="80" rx="12" class="box"/><text x="805" y="111" text-anchor="middle" class="label">RAG</text><text x="805" y="130" text-anchor="middle" class="sub">pin generation</text>
+          <path d="M730 94 L270 94" class="wire"/><polygon points="260,94 270,89 270,99" class="head"/><text x="500" y="85" text-anchor="middle" class="tiny">read bundle + policy</text>
+          <path d="M260 114 L720 114" class="wire reply"/><polygon points="730,114 720,119 720,109" class="head reply"/><text x="500" y="135" text-anchor="middle" class="tiny">pinned generation</text>
+          <text x="30" y="24" text-anchor="start" class="label">PUBLISH / MIGRATE · one bundle per request</text>
+          <g class="is-new">
+            <path d="M395 200 V256 A75 12 0 0 0 545 256 V200" class="store"/><ellipse cx="470" cy="200" rx="75" ry="12" class="store"/><text x="470" y="238" text-anchor="middle" class="label">Index g1</text><text x="470" y="256" text-anchor="middle" class="sub">model m1 / rev7</text>
+            <path d="M780 154 L780 172 Q780 180 772 180 L471 180 Q470 180 470 179 L470 178" class="wire"/><polygon points="470,188 465,178 475,178" class="head"/><text x="616" y="172" text-anchor="middle" class="tiny">existing g1 requests</text>
+            <path d="M545 228 L837 228 Q845 228 845 220 L845 164" class="wire reply"/><polygon points="845,154 850,164 840,164" class="head reply"/>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">迁移期间旧请求固定走 m1/g1，不在 rerank 或流式重连时读到半份新配置。旧池的退出条件是请求 drain 和回退期限，不是点击切流按钮。</span><span class="lang-en">Existing requests stay on m1/g1 through rerank and output. Retire the old pool only after drain and the rollback horizon.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d6s3t d6s3d">
+          <title id="d6s3t">Build the new generation</title>
+          <desc id="d6s3d">Catalog supplies a durable migration job to Ingest. Ingest builds Index g2 from a source snapshot plus replayed changes.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <path d="M100 76 V132 A80 12 0 0 0 260 132 V76" class="store"/><ellipse cx="180" cy="76" rx="80" ry="12" class="store"/><text x="180" y="114" text-anchor="middle" class="label">Catalog</text><text x="180" y="132" text-anchor="middle" class="sub">bundle / tombstone</text>
+          <rect x="730" y="74" width="150" height="80" rx="12" class="box"/><text x="805" y="111" text-anchor="middle" class="label">RAG</text><text x="805" y="130" text-anchor="middle" class="sub">pin generation</text>
+          <path d="M730 94 L270 94" class="wire"/><polygon points="260,94 270,89 270,99" class="head"/><text x="500" y="85" text-anchor="middle" class="tiny">read bundle + policy</text>
+          <path d="M260 114 L720 114" class="wire reply"/><polygon points="730,114 720,119 720,109" class="head reply"/><text x="500" y="135" text-anchor="middle" class="tiny">pinned generation</text>
+          <text x="30" y="24" text-anchor="start" class="label">PUBLISH / MIGRATE · one bundle per request</text>
+          <path d="M395 200 V256 A75 12 0 0 0 545 256 V200" class="store"/><ellipse cx="470" cy="200" rx="75" ry="12" class="store"/><text x="470" y="238" text-anchor="middle" class="label">Index g1</text><text x="470" y="256" text-anchor="middle" class="sub">model m1 / rev7</text>
+          <path d="M780 154 L780 172 Q780 180 772 180 L471 180 Q470 180 470 179 L470 178" class="wire"/><polygon points="470,188 465,178 475,178" class="head"/><text x="616" y="172" text-anchor="middle" class="tiny">existing g1 requests</text>
+          <path d="M545 228 L837 228 Q845 228 845 220 L845 164" class="wire reply"/><polygon points="845,154 850,164 840,164" class="head reply"/>
+          <g class="is-new">
+            <rect x="55" y="285" width="150" height="68" rx="12" class="box"/><text x="130" y="316" text-anchor="middle" class="label">Ingest</text><text x="130" y="335" text-anchor="middle" class="sub">g2 staging</text>
+            <path d="M180 144 L180 227 Q180 235 172 235 L138 235 Q130 235 130 243 L130 275" class="wire async"/><polygon points="130,285 125,275 135,275" class="head async"/><text x="245" y="250" text-anchor="middle" class="tiny">durable migration job</text>
+            <path d="M695 288 V344 A75 12 0 0 0 845 344 V288" class="store"/><ellipse cx="770" cy="288" rx="75" ry="12" class="store"/><text x="770" y="326" text-anchor="middle" class="label">Index g2</text><text x="770" y="344" text-anchor="middle" class="sub">model m2 / rev8</text>
+            <path d="M205 310 L685 310" class="wire async"/><polygon points="695,310 685,315 685,305" class="head async"/><text x="450" y="300" text-anchor="middle" class="tiny">snapshot + replay / g2</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">先订阅/保留变更，再取带 watermark 的快照；回放到同一屏障。构建期间新增、删除和 ACL 变化都必须进 g2，不能只回填静态正文。</span><span class="lang-en">Retain changes before a watermarked snapshot, then replay through a barrier. Include additions, deletions, and ACL changes in g2.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d6s4t d6s4d">
+          <title id="d6s4t">Publish after both readiness and evaluation</title>
+          <desc id="d6s4d">Index g2 returns search-visible receipts to Ingest; Ingest CAS-publishes the evaluated m2/g2 bundle in Catalog.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <path d="M100 76 V132 A80 12 0 0 0 260 132 V76" class="store"/><ellipse cx="180" cy="76" rx="80" ry="12" class="store"/><text x="180" y="114" text-anchor="middle" class="label">Catalog</text><text x="180" y="132" text-anchor="middle" class="sub">bundle / tombstone</text>
+          <rect x="730" y="74" width="150" height="80" rx="12" class="box"/><text x="805" y="111" text-anchor="middle" class="label">RAG</text><text x="805" y="130" text-anchor="middle" class="sub">pin generation</text>
+          <path d="M730 94 L270 94" class="wire"/><polygon points="260,94 270,89 270,99" class="head"/><text x="500" y="85" text-anchor="middle" class="tiny">read bundle + policy</text>
+          <path d="M260 114 L720 114" class="wire reply"/><polygon points="730,114 720,119 720,109" class="head reply"/><text x="500" y="135" text-anchor="middle" class="tiny">pinned generation</text>
+          <text x="30" y="24" text-anchor="start" class="label">PUBLISH / MIGRATE · one bundle per request</text>
+          <path d="M395 200 V256 A75 12 0 0 0 545 256 V200" class="store"/><ellipse cx="470" cy="200" rx="75" ry="12" class="store"/><text x="470" y="238" text-anchor="middle" class="label">Index g1</text><text x="470" y="256" text-anchor="middle" class="sub">model m1 / rev7</text>
+          <path d="M780 154 L780 172 Q780 180 772 180 L471 180 Q470 180 470 179 L470 178" class="wire"/><polygon points="470,188 465,178 475,178" class="head"/><text x="616" y="172" text-anchor="middle" class="tiny">existing g1 requests</text>
+          <path d="M545 228 L837 228 Q845 228 845 220 L845 164" class="wire reply"/><polygon points="845,154 850,164 840,164" class="head reply"/>
+          <rect x="55" y="285" width="150" height="68" rx="12" class="box"/><text x="130" y="316" text-anchor="middle" class="label">Ingest</text><text x="130" y="335" text-anchor="middle" class="sub">g2 staging</text>
+          <path d="M180 144 L180 227 Q180 235 172 235 L138 235 Q130 235 130 243 L130 275" class="wire async"/><polygon points="130,285 125,275 135,275" class="head async"/><text x="245" y="250" text-anchor="middle" class="tiny">durable migration job</text>
+          <path d="M695 288 V344 A75 12 0 0 0 845 344 V288" class="store"/><ellipse cx="770" cy="288" rx="75" ry="12" class="store"/><text x="770" y="326" text-anchor="middle" class="label">Index g2</text><text x="770" y="344" text-anchor="middle" class="sub">model m2 / rev8</text>
+          <path d="M205 310 L685 310" class="wire async"/><polygon points="695,310 685,315 685,305" class="head async"/><text x="450" y="300" text-anchor="middle" class="tiny">snapshot + replay / g2</text>
+          <g class="is-new">
+            <path d="M695 332 L215 332" class="wire reply"/><polygon points="205,332 215,327 215,337" class="head reply"/>
+            <path d="M90 285 L90 202 Q90 194 98 194 L142 194 Q150 194 150 186 L150 153.1" class="wire"/><polygon points="150,143.1 155,153.1 145,153.1" class="head"/><text x="65" y="183" text-anchor="middle" class="tiny">CAS</text>
+            <text x="500" y="277" text-anchor="middle" class="tiny">visible receipts + watermark + golden set</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">两路可查、删除对账通过、评测达标后再 CAS 切 bundle。切前失败继续 g1，切后回退也要把后续变更带回旧池；双池基础数据约翻倍。</span><span class="lang-en">CAS the bundle after both lanes are visible, reconciliation passes, and evaluation meets targets. Rollback requires the old pool to remain current.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d6s5t d6s5d">
+          <title id="d6s5t">Route new requests to g2</title>
+          <desc id="d6s5d">New requests pin m2/g2 and query Index g2. Existing pinned g1 requests remain on their separate path.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <path d="M100 76 V132 A80 12 0 0 0 260 132 V76" class="store"/><ellipse cx="180" cy="76" rx="80" ry="12" class="store"/><text x="180" y="114" text-anchor="middle" class="label">Catalog</text><text x="180" y="132" text-anchor="middle" class="sub">bundle / tombstone</text>
+          <rect x="730" y="74" width="150" height="80" rx="12" class="box"/><text x="805" y="111" text-anchor="middle" class="label">RAG</text><text x="805" y="130" text-anchor="middle" class="sub">pin generation</text>
+          <path d="M730 94 L270 94" class="wire"/><polygon points="260,94 270,89 270,99" class="head"/><text x="500" y="85" text-anchor="middle" class="tiny">read bundle + policy</text>
+          <path d="M260 114 L720 114" class="wire reply"/><polygon points="730,114 720,119 720,109" class="head reply"/><text x="500" y="135" text-anchor="middle" class="tiny">pinned generation</text>
+          <text x="30" y="24" text-anchor="start" class="label">PUBLISH / MIGRATE · one bundle per request</text>
+          <path d="M395 200 V256 A75 12 0 0 0 545 256 V200" class="store"/><ellipse cx="470" cy="200" rx="75" ry="12" class="store"/><text x="470" y="238" text-anchor="middle" class="label">Index g1</text><text x="470" y="256" text-anchor="middle" class="sub">model m1 / rev7</text>
+          <path d="M780 154 L780 172 Q780 180 772 180 L471 180 Q470 180 470 179 L470 178" class="wire"/><polygon points="470,188 465,178 475,178" class="head"/><text x="616" y="172" text-anchor="middle" class="tiny">existing g1 requests</text>
+          <path d="M545 228 L837 228 Q845 228 845 220 L845 164" class="wire reply"/><polygon points="845,154 850,164 840,164" class="head reply"/>
+          <rect x="55" y="285" width="150" height="68" rx="12" class="box"/><text x="130" y="316" text-anchor="middle" class="label">Ingest</text><text x="130" y="335" text-anchor="middle" class="sub">g2 staging</text>
+          <path d="M180 144 L180 227 Q180 235 172 235 L138 235 Q130 235 130 243 L130 275" class="wire async"/><polygon points="130,285 125,275 135,275" class="head async"/><text x="245" y="250" text-anchor="middle" class="tiny">durable migration job</text>
+          <path d="M695 288 V344 A75 12 0 0 0 845 344 V288" class="store"/><ellipse cx="770" cy="288" rx="75" ry="12" class="store"/><text x="770" y="326" text-anchor="middle" class="label">Index g2</text><text x="770" y="344" text-anchor="middle" class="sub">model m2 / rev8</text>
+          <path d="M205 310 L685 310" class="wire async"/><polygon points="695,310 685,315 685,305" class="head async"/><text x="450" y="300" text-anchor="middle" class="tiny">snapshot + replay / g2</text>
+          <path d="M695 332 L215 332" class="wire reply"/><polygon points="205,332 215,327 215,337" class="head reply"/>
+          <path d="M90 285 L90 202 Q90 194 98 194 L142 194 Q150 194 150 186 L150 153.1" class="wire"/><polygon points="150,143.1 155,153.1 145,153.1" class="head"/><text x="65" y="183" text-anchor="middle" class="tiny">CAS</text>
+          <text x="500" y="277" text-anchor="middle" class="tiny">visible receipts + watermark + golden set</text>
+          <g class="is-new">
+            <path d="M880 114 L892 114 Q900 114 900 122 L900 302 Q900 310 892 310 L855 310" class="wire"/><polygon points="845,310 855,305 855,315" class="head"/><text x="850" y="276" text-anchor="middle" class="tiny">new g2</text>
+            <path d="M845 330 L912 330 Q920 330 920 322 L920 144 Q920 136 912 136 L890 136" class="wire reply"/><polygon points="880,136 890,131 890,141" class="head reply"/>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">同一张图上两条路代表不同请求代次，不能在一次 query 混搜两套空间。A3 单池 1.536 GB 原始向量，双池是 3.072 GB，尚未算索引与副本。</span><span class="lang-en">The two paths are separate request cohorts, never mixed embedding spaces within one query. Two A3 vector pools require 3.072 GB before indexes or replicas.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d6s6t d6s6d">
+          <title id="d6s6t">Tombstone before cleanup</title>
+          <desc id="d6s6d">Catalog returns denial for deleted documents or revoked access. RAG checks current policy again at evidence fetch and sentence release; old index entries are asynchronously removed.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <path d="M100 76 V132 A80 12 0 0 0 260 132 V76" class="store"/><ellipse cx="180" cy="76" rx="80" ry="12" class="store"/><text x="180" y="114" text-anchor="middle" class="label">Catalog</text><text x="180" y="132" text-anchor="middle" class="sub">bundle / tombstone</text>
+          <rect x="730" y="74" width="150" height="80" rx="12" class="box"/><text x="805" y="111" text-anchor="middle" class="label">RAG</text><text x="805" y="130" text-anchor="middle" class="sub">pin generation</text>
+          <path d="M730 94 L270 94" class="wire"/><polygon points="260,94 270,89 270,99" class="head"/><text x="500" y="85" text-anchor="middle" class="tiny">read bundle + policy</text>
+          <path d="M260 114 L720 114" class="wire reply"/><polygon points="730,114 720,119 720,109" class="head reply"/><text x="500" y="135" text-anchor="middle" class="tiny">pinned generation</text>
+          <text x="30" y="24" text-anchor="start" class="label">PUBLISH / MIGRATE · one bundle per request</text>
+          <path d="M395 200 V256 A75 12 0 0 0 545 256 V200" class="store"/><ellipse cx="470" cy="200" rx="75" ry="12" class="store"/><text x="470" y="238" text-anchor="middle" class="label">Index g1</text><text x="470" y="256" text-anchor="middle" class="sub">model m1 / rev7</text>
+          <path d="M780 154 L780 172 Q780 180 772 180 L471 180 Q470 180 470 179 L470 178" class="wire"/><polygon points="470,188 465,178 475,178" class="head"/><text x="616" y="172" text-anchor="middle" class="tiny">existing g1 requests</text>
+          <path d="M545 228 L837 228 Q845 228 845 220 L845 164" class="wire reply"/><polygon points="845,154 850,164 840,164" class="head reply"/>
+          <rect x="55" y="285" width="150" height="68" rx="12" class="box"/><text x="130" y="316" text-anchor="middle" class="label">Ingest</text><text x="130" y="335" text-anchor="middle" class="sub">g2 staging</text>
+          <path d="M180 144 L180 227 Q180 235 172 235 L138 235 Q130 235 130 243 L130 275" class="wire async"/><polygon points="130,285 125,275 135,275" class="head async"/><text x="245" y="250" text-anchor="middle" class="tiny">durable migration job</text>
+          <path d="M695 288 V344 A75 12 0 0 0 845 344 V288" class="store"/><ellipse cx="770" cy="288" rx="75" ry="12" class="store"/><text x="770" y="326" text-anchor="middle" class="label">Index g2</text><text x="770" y="344" text-anchor="middle" class="sub">model m2 / rev8</text>
+          <path d="M205 310 L685 310" class="wire async"/><polygon points="695,310 685,315 685,305" class="head async"/><text x="450" y="300" text-anchor="middle" class="tiny">snapshot + replay / g2</text>
+          <path d="M695 332 L215 332" class="wire reply"/><polygon points="205,332 215,327 215,337" class="head reply"/>
+          <path d="M90 285 L90 202 Q90 194 98 194 L142 194 Q150 194 150 186 L150 153.1" class="wire"/><polygon points="150,143.1 155,153.1 145,153.1" class="head"/><text x="65" y="183" text-anchor="middle" class="tiny">CAS</text>
+          <text x="500" y="277" text-anchor="middle" class="tiny">visible receipts + watermark + golden set</text>
+          <path d="M880 114 L892 114 Q900 114 900 122 L900 302 Q900 310 892 310 L855 310" class="wire"/><polygon points="845,310 855,305 855,315" class="head"/><text x="850" y="276" text-anchor="middle" class="tiny">new g2</text>
+          <path d="M845 330 L912 330 Q920 330 920 322 L920 144 Q920 136 912 136 L890 136" class="wire reply"/><polygon points="880,136 890,131 890,141" class="head reply"/>
+          <g class="is-new">
+            <path d="M260 114 L720 114" class="wire fail"/><polygon points="730,114 720,119 720,109" class="head fail"/><rect x="350" y="42" width="235" height="20" rx="10" class="badge"/><text x="467.5" y="56" text-anchor="middle" class="badge-text">delete / ACL revoke: deny</text>
+            <text x="480" y="46" text-anchor="middle" class="tiny"></text>
+            <text x="470" y="160" text-anchor="middle" class="clock">hide now / purge later</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">删除先提交 tombstone/ACL 代次，再异步清两路索引与原文。查询取证和每句释放前复查；撤销后线性化的复查不再通过，已发送文本不能追回。</span><span class="lang-en">Commit tombstones/policy first, then purge both indexes and text. Recheck at evidence fetch and each release; already sent text cannot be revoked.</span></figcaption>
+      </div>
+    </figure><div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
+<p>内容更新采用第二组的 staging → READY → current。先删旧再写新会出现搜索空窗；只 insert 新块会把两个版本都送入 prompt。发布时旧向量可以暂留，但 current 核对让它失去资格，清理按 manifest 删除两路条目和旧 span。内容 5 min 可查是 A9 目标，应测源版本到可见发布的 lag，失败任务年龄不能只看队列平均值。</p>
+<p>删除和 ACL 撤销走更早的控制点：Catalog 先提交 tombstone 或新权限代次，查询从权威状态拒绝该证据，物理清理异步进行。删除任务必须列出该 doc 的全部 revision/manifest，而不是只清当前 5 个块。正文删除、向量删除、BM25 删除和来源点击都要验收；索引 0 命中不证明对象存储已经清空，物理擦除还有独立期限与备份策略。</p>
+<p>换 embedding 不只可能改变维度，tokenizer、pooling、归一化和输入前缀也可能改坐标含义。维度相同也不能混搜。新 bundle 带 model identity、splitter、两路 index generation 和打包配置。虽然 BM25 不用向量模型，切分变化会改它的文档统计与 chunk_id，因此也绑定到同一代；变更只影响 query model 时则按兼容性判断是否需重建。</p>
+<p>迁移先记录变更游标，再读取带 watermark 的源快照，离线生成 m2/g2。快照期间的增量按版本顺序回放，包括删除与 ACL；越过发布屏障后继续追增量。若源不提供一致快照和可保留的变更日志，选择冻结写入窗口或多轮全量对账并明示保证，不编造一个系统没有提供的原子 watermark。两路索引 READY 和 golden set 达标只是切流条件的一部分，源变更覆盖也必须验证。</p>
+<p>Catalog 原子切整份 bundle。请求开始 pin，整个 question → query embedding → Dense → rerank → prompt 都用这一份。切换前已开始的请求仍走 m1/g1，新请求走 m2/g2；图中两条绿色回程代表两个请求群，不是一个查询并行两种空间。请求 pin 不冻结权限，ACL/tombstone 总是按 A9 的权威复查，不能用“它是旧请求”逃过撤销。</p>
+<p>双池运行需要保留增量给两池，定时测 lag 与覆盖；只双写新 upsert 而不双写 delete，会让回退重新露出已删除的文档。切流失败可继续 g1，切后回退必须先确保旧池追上变更，并保持旧 query 模型可用。等待活跃请求 drain 和回退期限结束，再停止旧池增量、删旧向量与过期原文。别把回退当作仅切回一个 index alias。</p>
+<p>本章的“恢复”是从持久 job、源快照、manifest 和 query bundle 重建服务，不是从一段模型回答猜回丢掉的版本状态。即使 Index g2 全丢，也可以重建并继续让 g1 服务；若 Catalog 权威丢失且无法确认权限，查询必须停止释放相关内容。RAG 的可用性不能以丢掉文档权限为代价，这一项在正常压测和故障演练都要覆盖。</p>
+</div><div class="lang-en"><p class="col-kicker">English</p>
+<p>Updates stage, become READY, then publish current. Delete-before-insert creates a gap; insert-only leaves duplicate versions. Retained old entries become ineligible through current checks and later manifest-driven cleanup. Measure source-to-publication lag and oldest failed jobs against the A9 five-minute target.</p>
+<p>Commit tombstone/policy before asynchronous cleanup. Delete all document revisions/manifests, not only five current chunks. Verify both indexes, text, and citation access separately. Zero search hits do not prove physical erasure, which has its own deadline and backup policy.</p>
+<p>Model changes can alter tokenizer, pooling, normalization, or prefixes even at equal dimension. Pin model/splitter/index/packing identity. BM25 also needs a new generation when chunking changes its documents/statistics; query-only changes need compatibility analysis.</p>
+<p>Retain a change cursor before a watermarked source snapshot, backfill m2/g2, replay versioned additions/deletes/ACL changes through a barrier, and continue incrementals. Sources without consistent snapshots/logs require a write freeze or declared reconciliation guarantee. Index readiness and evaluation do not establish source coverage alone.</p>
+<p>Atomically switch the whole bundle. Existing requests use m1/g1 and new requests m2/g2 throughout. These are separate cohorts. A pinned request configuration never freezes access; authoritative policy/tombstone checks still apply.</p>
+<p>Feed both pools with updates and deletes through the rollback horizon. Upsert-only dual writes can resurrect deleted documents on rollback. Ensure old data and encoder remain current before switching back. Drain requests and expire rollback retention before retiring old indexes/text.</p>
+<p>Recovery rebuilds from durable jobs, snapshots, manifests, and bundles. Lost g2 can rebuild while g1 serves; uncertain Catalog authority stops affected output. Fault recovery must retain document authorization, not trade it for availability.</p>
+</div></div></section>
+
+  <section>
+<h2><span class="lang-zh">评测：先定位哪一层掉了证据</span><span class="lang-en">Evaluation: locate the layer that lost evidence</span></h2>
+<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
+<p>A11 的 200 个问题都带 principal、固定源快照、标注相关跨度与可接受答案；按错误码、改写、中英跨语言、表格、跨段、冲突材料、无答案和权限变化分层。修改切分后 chunk_id 变了，人标以 doc/revision/span 保存，再映射新块，不然“旧 chunk id 没命中”只是标注过期。调参集和回归集分开，模型、配置、裁判版本以及人工抽查规则一起记录。</p>
+<p>检索层先看相关证据是否进入候选，再看 rerank 后和最终 Evidence Pack。一次相关集合有 5 段，实际取到 4 段，Recall@k = 4/5 = 0.8；k 表示当次截断位置，平均要说明按问题等权还是按段数加权。MRR 看第一个相关结果的位置，多个证据必须合在一起才能作答时，只看 MRR 会隐藏缺段问题。nDCG 适合分级相关性；不把三项揉成一个无法解释的“RAG 总分”。</p>
+<p>答案层看正确性、对上下文的忠实、引用支持与拒答行为。RAGAS 论文把答案拆陈述，估计被上下文支持的比例 [8]；裁判判断 5 条中 4 条有支持就是 0.8，这不是检索 Recall，也不证明陈述对真实世界正确。若材料本身过时，回答可以忠实但错误。每轮回归还要人工抽看裁判误接收与误拒绝，不重复原料里“某项和人标一定更齐”的无条件说法。</p>
+<p>引用指标分开看：编号有效率检查可机械确定的 ID，citation support 看被引跨度是否支持陈述，覆盖率看需要证据的陈述是否得到支持 [7]。这三项不能用“引用数很多”代替。无答案问题要报告拒答召回与错误拒答，故意不给权限的相关文档必须是零泄漏；判断器准确率不能成为放松 ACL 的借口。</p>
+<p>最后用同一流量形状评测首句 p95、全答时长、拒答/超时比例、候选 pair 数、输入输出 token 和摄取 lag。把 80 改为 160 候选，40 × 160 = 6,400 对/秒，若最终证据 Recall 没涨但首句破 3 s，就撤回这个改动。只有离线集合和有界线上实验都过门槛，才发布 query bundle；本轮页面提供白板预算与验证方法，没有实际语料检索或模型服务压测。</p>
+</div><div class="lang-en"><p class="col-kicker">English</p>
+<p>The 200 A11 queries carry identities, fixed source snapshots, relevant spans, and acceptable answers. Slice identifiers, paraphrases, languages, tables, multi-span evidence, contradictions, absent answers, and permission changes. Label document/revision/spans so splitter changes can remap labels. Keep tuning and regression sets separate and record judge/configuration versions.</p>
+<p>Measure recall at initial candidates, after rerank, and in final evidence. Four of five relevant spans yields Recall@k = 0.8; state cutoff and averaging. MRR measures the first relevant rank and may hide missing multi-span evidence; graded relevance can use nDCG. Keep layer-specific measures interpretable.</p>
+<p>Assess correctness, faithfulness, citation support, and refusals separately. RAGAS estimates the fraction of statements supported by context [8]; four of five is 0.8, distinct from retrieval recall or real-world correctness. Stale material can produce faithful but wrong answers. Human-calibrate judge false acceptance and rejection.</p>
+<p>Separate mechanical citation-ID validity, semantic support, and coverage of evidence-requiring statements [7]. Evaluate refusal on absent answers and false refusal. Inaccessible relevant documents must not leak; judge quality does not excuse weakened ACL checks.</p>
+<p>Measure first-sentence p95, full completion, refusals/timeouts, pairs, tokens, and ingest lag under the same workload. Doubling the cap to 160 yields 6,400 pairs/s; revert if evidence recall does not improve and the three-second target fails. Publish only after offline and bounded online checks. This page provides budgets and validation methods without live retrieval/model benchmarks.</p>
+</div></div></section>
+
+  <section>
+<h2><span class="lang-zh">翻车点与面试追问</span><span class="lang-en">Failure claims and interview follow-ups</span></h2>
+<table><thead><tr><th><span class="lang-zh">翻车说法</span><span class="lang-en">Failure claim</span></th><th><span class="lang-zh">修正后的边界</span><span class="lang-en">Correct boundary</span></th></tr>
+</thead><tbody><tr><td><span class="lang-zh">202 以后再 enqueue</span><span class="lang-en">Enqueue after 202</span></td><td><span class="lang-zh">先提交持久 job，再确认；否则进程崩溃丢摄取任务</span><span class="lang-en">Commit durable job before acknowledgement or crashes lose work</span></td></tr>
+<tr><td><span class="lang-zh">两路写成功就是可查</span><span class="lang-en">Two successful writes mean searchable</span></td><td><span class="lang-zh">等待可搜索回执与 manifest 核对，再发布 current</span><span class="lang-en">Wait for search visibility and manifest reconciliation</span></td></tr>
+<tr><td><span class="lang-zh">正文 hash 没变可跳过</span><span class="lang-en">Unchanged text hash means skip</span></td><td><span class="lang-zh">ACL、locator 与切分配置变化单独处理</span><span class="lang-en">Handle ACL, locator, and splitter changes separately</span></td></tr>
+<tr><td><span class="lang-zh">过滤后不足就少带权限条件</span><span class="lang-en">Relax access filters to fill candidates</span></td><td><span class="lang-zh">有界补召回，仍不足拒答；权威检查始终成立</span><span class="lang-en">Bound refill and refuse if needed; retain authoritative access</span></td></tr>
+<tr><td><span class="lang-zh">小块可读则父块也可读</span><span class="lang-en">Child access grants parent access</span></td><td><span class="lang-zh">父块全跨度同版本且单独复查权限</span><span class="lang-en">Check the whole same-revision parent separately</span></td></tr>
+<tr><td><span class="lang-zh">有真编号就是真引用</span><span class="lang-en">Valid IDs prove citations</span></td><td><span class="lang-zh">实际 Evidence Pack 的 ID 校验与陈述支持分开</span><span class="lang-en">Separate actual Evidence Pack IDs from statement support</span></td></tr>
+<tr><td><span class="lang-zh">先流出再校验</span><span class="lang-en">Stream then validate</span></td><td><span class="lang-zh">释放前按句校验；已发内容不能回滚</span><span class="lang-en">Validate before release; sent content cannot roll back</span></td></tr>
+<tr><td><span class="lang-zh">alias 切了迁移就完了</span><span class="lang-en">Alias switch completes migration</span></td><td><span class="lang-zh">整份 bundle 绑定，两池增量含删除，等 drain 后回收</span><span class="lang-en">Pin full bundles, replay deletes to both, then drain and retire</span></td></tr>
+</tbody></table><h3><span class="lang-zh">四个追问要能指着图回答</span><span class="lang-en">Four questions to answer on the board</span></h3>
+<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
+<p>为什么不先只做向量？可以把纯向量当实验基线，但本题有错误码、术语与中英改写，需要比较互补两路。增加 BM25 的代价是倒排存储、过滤一致性与删除协调；若黄金集证明单路已经达标，可以少一条路，而不是用“主流”两个字代替论证。</p>
+<p>文档更新后为什么仍看到旧内容？区分源更新尚未摄取、索引写入尚未可查、current 尚未发布、活跃查询已经 pin 的证据。查 trace 的 doc/revision、manifest 状态与源版本，不能只刷新浏览器。如果产品要求每个回答使用回答开始时的最新文档，就在取证时按 current；如果要回答整个过程中绝不变旧，就必须定义版本变化时取消或重检索，增加时延和重试。</p>
+<p>Rerank 贵怎么办？先看 3,200 对/秒和候选长度、模型批形状及排队，实验减少候选、更小判断模型或回退 RRF。它不能修复召回遗漏；若相关段落从未进名单，投入更贵 rerank 只是更仔细地给错误候选排序。拒答率与支持率也要一起看，不能只靠少发答案提高“准确率”。</p>
+<p>最后 20 秒收尾：摄取先持久接收，再 staging、两路可查、CAS 发布；查询由 RAG 拿身份与 bundle，hybrid、RRF、有界 rerank、Evidence Pack、校验释放，回程经过网关。失败不靠裸答补洞，删除先 deny 后 purge，模型改版用双池加整份配置切流。合上页重新画出两条闭环，再用第三组解释小块和父块、第五组解释真编号为什么仍可能不支持答案。</p>
+</div><div class="lang-en"><p class="col-kicker">English</p>
+<p>Pure dense retrieval is a valid experimental baseline. This workload motivates testing complementary lexical and multilingual semantic lanes; BM25 costs storage, consistent filtering, and delete coordination. Remove it if labeled evidence supports a simpler design.</p>
+<p>Staleness may occur before ingest, search visibility, current publication, or in already pinned evidence. Inspect doc/revision, manifest, and source state. “Latest at evidence fetch” differs from “never becomes stale during an answer”; the latter needs cancellation/retrieval on version change.</p>
+<p>For costly reranking, measure 3,200 pairs/s, lengths, batch shapes, and queues. Test smaller candidate caps/models or RRF fallback. Expensive reranking cannot recover omitted evidence; evaluate refusals and support together rather than increasing accuracy by answering fewer queries.</p>
+<p>Close with durable acceptance, staged readiness, and CAS publication; RAG-owned authenticated hybrid/RRF/rerank/evidence/validated release with Gateway returns. Refuse missing evidence, deny before purge, and migrate complete bundles across current dual pools. Redraw both loops, then explain parent access and why valid IDs can still cite unsupported claims.</p>
+</div></div></section>
+
+  <section>
+<h2><span class="lang-zh">引用与延伸</span><span class="lang-en">References and follow-ups</span></h2>
+<ol class="references"><li id="ref-1">[1] Patrick Lewis et al., <a href="https://arxiv.org/abs/2005.11401v4"><em>Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks</em></a>, NeurIPS 2020, arXiv v4 (2021). <span class="lang-zh">参数与非参数记忆的结合；本章服务边界是自行推导。</span><span class="lang-en">Parametric/nonparametric memory; service boundaries here are design choices.</span></li>
+<li id="ref-2">[2] Microsoft, <a href="https://learn.microsoft.com/en-us/azure/search/vector-search-how-to-chunk-documents"><em>Chunk large documents for RAG and vector search in Azure AI Search</em></a>, documentation, checked 2026-10-07. <span class="lang-zh">结构切分；10–15% 示例与 512/25% 起始建议；本章 64 overlap 是假设。</span><span class="lang-en">Structure-aware splitting; 10–15% example and 512/25% starting recommendation; sixty-four-token overlap is our assumption.</span></li>
+<li id="ref-3">[3] Elastic, <a href="https://www.elastic.co/docs/reference/elasticsearch/rest-apis/reciprocal-rank-fusion"><em>Reciprocal rank fusion</em></a>, documentation, checked 2026-10-07. <span class="lang-zh">排名从 1 开始、缺席为零，rank_constant 默认 60。</span><span class="lang-en">Ranks start at one, missing lists contribute zero, default rank_constant sixty.</span></li>
+<li id="ref-4">[4] Sentence Transformers project, <a href="https://sbert.net/examples/sentence_transformer/applications/retrieve_rerank/README.html"><em>Retrieve & Re-Rank</em></a>, documentation, checked 2026-10-07. <span class="lang-zh">召回后对候选用 CrossEncoder；80 候选是本章预算。</span><span class="lang-en">CrossEncoder after retrieval; eighty candidates is our budget.</span></li>
+<li id="ref-5">[5] pgvector project, <a href="https://github.com/pgvector/pgvector/blob/v0.8.0/README.md"><em>README · Filtering and Iterative Index Scans</em></a>, v0.8.0 (2024). <span class="lang-zh">近似扫描后过滤，迭代扫描补足或触及上限；不证明百万条容量阈值。</span><span class="lang-en">Post-scan filtering and capped iterative scans; no universal million-row threshold.</span></li>
+<li id="ref-6">[6] Microsoft, <a href="https://learn.microsoft.com/en-us/azure/search/search-security-trimming-for-azure-search"><em>Security filters for trimming results in Azure AI Search</em></a>, documentation, checked 2026-10-07. <span class="lang-zh">principal 字符串过滤本身不做认证授权。</span><span class="lang-en">Principal-string filtering does not authenticate or authorize.</span></li>
+<li id="ref-7">[7] Tianyu Gao, Howard Yen, Jiatong Yu, Danqi Chen, <a href="https://aclanthology.org/2023.emnlp-main.398/"><em>Enabling Large Language Models to Generate Text with Citations</em></a>, EMNLP 2023. <span class="lang-zh">ALCE 引用支持/覆盖与精度，不把集合包含性当支持。</span><span class="lang-en">ALCE support/coverage and precision; ID membership does not establish support.</span></li>
+<li id="ref-8">[8] Shahul Es, Jithin James, Luis Espinosa-Anke, Steven Schockaert, <a href="https://aclanthology.org/2024.eacl-demo.16/"><em>RAGAs: Automated Evaluation of Retrieval Augmented Generation</em></a>, EACL 2024. <span class="lang-zh">拆陈述后估计上下文支持比例，裁判仍需校准。</span><span class="lang-en">Estimate supported statements; calibrate automated judges.</span></li>
+<li id="ref-9">[9] Nelson F. Liu et al., <a href="https://arxiv.org/abs/2307.03172v3"><em>Lost in the Middle: How Language Models Use Long Contexts</em></a>, arXiv v3 (2023). <span class="lang-zh">所测模型的上下文位置效应，不推广到所有新模型。</span><span class="lang-en">Context-position effects in tested models, not every newer model.</span></li>
+<li id="ref-10">[10] Microsoft, <a href="https://learn.microsoft.com/en-us/azure/foundry/openai/concepts/content-filter-prompt-shields"><em>Prompt Shields in Microsoft Foundry</em></a>, documentation, checked 2026-10-07. <span class="lang-zh">文档攻击与不可信材料；检测不能作为绝对保证。</span><span class="lang-en">Document attacks and untrusted evidence; detection is not a guarantee.</span></li>
+</ol><p class="cite"><span class="lang-zh">站内延伸：</span><span class="lang-en">Course follow-ups:</span> <a class="chip" href="ch03.html">Ch03</a> <a class="chip" href="ch29.html">Ch29</a> <a class="chip" href="ch31.html"><span class="lang-zh">Ch31</span><span class="lang-en">Ch31</span></a> <a class="chip" href="ch32.html"><span class="lang-zh">Ch32</span><span class="lang-en">Ch32</span></a> <a class="chip" href="ch37.html">Ch37</a> <a class="chip" href="ch38.html">Ch38</a> <a class="chip" href="ch41.html"><span class="lang-zh">Ch41</span><span class="lang-en">Ch41</span></a></p>
+</section>
+
+  <section>
+<h2><span class="lang-zh">闪卡</span><span class="lang-en">Flashcards</span></h2>
+<p class="cite"><span class="lang-zh">点一下翻面；先把路径和算式说出来。</span><span class="lang-en">Click to flip; explain paths and calculations first.</span></p>
+<div class="cards-grid"><button type="button" class="flip"><span class="q"><span class="lang-zh">为什么先写持久 job？</span><span class="lang-en">Why persist the job first?</span></span><span class="a"><span class="lang-zh">accepted 之后连接器崩溃，Ingest 仍能从 Catalog 领取，不丢任务。</span><span class="lang-en">After acceptance, Ingest can claim the Catalog job even if Connector crashes.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">2,000 token 有几块？</span><span class="lang-en">How many chunks for 2,000 tokens?</span></span><span class="a"><span class="lang-zh">1 + ceil((2,000 − 512)/448) = 5；尾块 208 token。</span><span class="lang-en">1 + ceil((2,000 − 512)/448) = 5; final span 208 tokens.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">裸向量有多大？</span><span class="lang-en">Raw vector size?</span></span><span class="a"><span class="lang-zh">50 万 × 768 × 4 = 1.536 GB ≈ 1.431 GiB，索引与副本另算。</span><span class="lang-en">500,000 × 768 × 4 = 1.536 GB ≈ 1.431 GiB, before indexes/copies.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">overlap 与膨胀比例一样吗？</span><span class="lang-en">Does overlap equal corpus growth?</span></span><span class="a"><span class="lang-zh">64/512 = 12.5%；示例 2,256/2,000 − 1 = 12.8%，分母不同。</span><span class="lang-en">64/512 = 12.5%; 2,256/2,000 − 1 = 12.8%, different denominators.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">RRF 怎么算？</span><span class="lang-en">How is RRF calculated?</span></span><span class="a"><span class="lang-zh">按路求 1/(60+rank)；缺席为零，不裸加原始分数。</span><span class="lang-en">Sum 1/(60+rank); missing-lane contribution zero, no raw-score addition.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">rerank 峰值工作量？</span><span class="lang-en">Peak reranking work?</span></span><span class="a"><span class="lang-zh">40 × 80 = 3,200 对/秒；容量要对实际模型压测。</span><span class="lang-en">40 × 80 = 3,200 pairs/s; benchmark actual model capacity.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">READY 在哪里发布？</span><span class="lang-en">Where does READY publish?</span></span><span class="a"><span class="lang-zh">原文与两路索引可查后 CAS Catalog.current，并核对租约代次。</span><span class="lang-en">CAS Catalog.current after text and both lanes are visible; verify lease epoch.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">父块扩展检查什么？</span><span class="lang-en">Checks for parent expansion?</span></span><span class="a"><span class="lang-zh">同 revision、全跨度 ACL、去重、生成 tokenizer 的证据预算。</span><span class="lang-en">Same revision, whole-span access, deduplication, generation-tokenizer budget.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">真编号证明什么？</span><span class="lang-en">What does a valid ID prove?</span></span><span class="a"><span class="lang-zh">实际 Evidence Pack 有此来源；还要判断陈述支持，自动判断会误判。</span><span class="lang-en">Source membership in actual Evidence Pack; semantic support remains fallible.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">流式为什么先缓冲句子？</span><span class="lang-en">Why buffer streaming sentences?</span></span><span class="a"><span class="lang-zh">校验发生在释放前；已经发送的内容不能靠后处理撤回。</span><span class="lang-en">Validate before release; sent text cannot be retracted by postprocessing.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">删除先做哪一步？</span><span class="lang-en">First step of deletion?</span></span><span class="a"><span class="lang-zh">权威 tombstone/ACL 撤销，再异步清全部版本；复查与发送有竞争边界。</span><span class="lang-en">Commit tombstone/access change, then purge all versions; checks/send have a race boundary.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">换模型只切 alias 够吗？</span><span class="lang-en">Is switching an alias enough?</span></span><span class="a"><span class="lang-zh">整份 query bundle 绑定；双池回放含删除，旧模型保留到 drain 与回退期结束。</span><span class="lang-en">Pin full bundles; replay deletes to both pools; retain old encoder through drain/rollback.</span></span></button>
+</div></section>
+
+  <p><button type="button" class="read-toggle"><span class="when-off"><span class="lang-zh">我已学完本章</span><span class="lang-en">Mark this chapter done</span></span><span class="when-on"><span class="lang-zh">已学完本章</span><span class="lang-en">Completed</span></span></button></p>
+  <p class="cite"><span class="lang-zh">进度存在这台浏览器里。</span><span class="lang-en">Saved in this browser only.</span></p>
+</article>
+</main>
+<script src="../assets/js/nav.js"></script>
+<script src="../assets/js/lang.js"></script>
+<script src="../assets/js/slides.js"></script>
+<script src="../assets/js/progress.js"></script>
+</body>
+</html>

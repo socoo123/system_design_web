@@ -1,0 +1,27 @@
+materialize(shard):                         // PostgreSQL READ COMMITTED
+  BEGIN
+  jobs = SELECT * FROM job WHERE enabled AND shard = :shard
+         AND next_run_at <= clock_timestamp()
+         ORDER BY next_run_at, id LIMIT 100 FOR UPDATE SKIP LOCKED
+  for j in jobs:
+    t = SELECT clock_timestamp()            // after acquiring this row lock
+    if calendar.is_recurring(j.spec) and (j.recovery_cutoff != null
+       or j.next_run_at < t - j.lateness_ms * 1ms):
+      continue                             // bounded misfire planner owns this case
+    fire = j.next_run_at
+    next = calendar.next_after(j.spec, fire) // null for a one-shot; else > fire
+    require next == null or next > fire
+    payload, key = freeze_input_and_business_key(j, fire)
+    inserted = INSERT INTO run(id, job_id, schedule_version, scheduled_at,
+                  payload, effect_key, state)
+               VALUES(uuid(), j.id, j.version, fire, payload, key, 'ready')
+               ON CONFLICT ON CONSTRAINT occurrence DO NOTHING RETURNING id
+    if inserted is empty:
+      old = SELECT * FROM run WHERE job_id=j.id AND schedule_version=j.version
+                                  AND scheduled_at=fire
+      require old.payload == payload and old.effect_key == key
+    UPDATE job SET next_run_at=next WHERE id=j.id
+  COMMIT                                  // do not dispatch before this succeeds
+  // Any pre-commit error rolls back runs AND cursors.
+  // Unknown COMMIT: discard connection, re-read authoritative cursor/runs.
+  // Dispatch/recovery scans persisted ready rows; duplicates retain run.id.

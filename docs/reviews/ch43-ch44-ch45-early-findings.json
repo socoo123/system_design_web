@@ -1,0 +1,71 @@
+[
+  {
+    "chapter": "ch43",
+    "severity": "P1",
+    "stage": "author implementation, primary early inspection",
+    "issue": "DirectoryStream enumerated remaining runs without checking their recorded identities/count, so a disappeared completed run could be skipped.",
+    "evidence": "Primary read of pre-fix aggregate loop; author confirmed and changed to deterministic run-i enumeration.",
+    "repair": "Use recorded count and bounded fan-in path groups; missing required run fails opening.",
+    "postFix": "RootExternalProbe: 901 rows / 29 keys / 9 chunk-fan-in pairs plus disappeared-run injection all passed.",
+    "preFixDynamicReproduction": false,
+    "status": "closed; final independent/integration signatures current"
+  },
+  {
+    "chapter": "ch44",
+    "severity": "P1",
+    "stage": "author implementation, primary early inspection",
+    "issue": "attempt_end was set before scheduling at now+220ms; worker required remaining>=220ms, rejecting every positive scheduling delay.",
+    "evidence": "Primary read of initial retry.pseudo and author confirmation.",
+    "repair": "Declare a 100ms minimum useful budget within the absolute 220ms cap, including positive scheduling time; all acquired worker resources now have outer cleanup, including quota adapters.",
+    "status": "closed; final independent/integration signatures current"
+  },
+  {
+    "chapter": "ch45",
+    "severity": "P2",
+    "stage": "author implementation, primary early inspection",
+    "issue": "Author main expected IllegalArgumentException for Math.incrementExact overflow, which actually throws ArithmeticException.",
+    "evidence": "Primary read of DomainModel.java final test.",
+    "repair": "Correct test expectation; retain actual overflow failure boundary.",
+    "status": "closed; final independent/integration signatures current"
+  },
+  {
+    "chapter": "ch43",
+    "severity": "P1",
+    "stage": "rotated independent review",
+    "issue": "A single completed run could disappear before final return; zero merge waves skipped all required-input opening.",
+    "repair": "Open/read final candidate at handoff; retaining it afterward remains owner/publication responsibility.",
+    "initialEvidence": "ch43-independent-pre-single-run-fix.json",
+    "finalEvidence": "ch43-independent-final.json",
+    "status": "closed; final independent/integration signatures current"
+  },
+  {
+    "chapter": "ch44",
+    "severity": "P1",
+    "stage": "rotated independent review",
+    "issue": "Quota adapter threw outside cleanup, leaking a local I/O slot and unfinished breaker ticket.",
+    "repair": "All worker-owned paths share outer try/catch/finally; quota uses a bounded deadline and non-granted outcomes do not dispatch.",
+    "initialEvidence": "ch44-independent-quota-before.json",
+    "finalEvidence": "ch44-independent-final.json",
+    "status": "closed; final independent/integration signatures current"
+  },
+  {
+    "chapter": "ch45",
+    "severity": "P1",
+    "stage": "rotated independent review",
+    "issue": "SQLite promoted exhausted version arithmetic to REAL and committed a version beyond Java long.",
+    "repair": "Explicit exact integer/signed64 increment check and schema type constraint; edit and capture abort atomically.",
+    "initialEvidence": "ch45-independent-initial-probes.json",
+    "finalEvidence": "ch45-independent-regression-results.json",
+    "status": "closed; final independent/integration signatures current"
+  },
+  {
+    "chapter": "ch45",
+    "severity": "P1",
+    "stage": "rotated independent review",
+    "issue": "CAS=0 was quarantined as invalid data rather than retaining a retry/no-ACK path.",
+    "repair": "RetryableConflict rolls back all participating data and leaves same-message reentry possible.",
+    "initialEvidence": "ch45-independent-initial-probes.json",
+    "finalEvidence": "ch45-independent-regression-results.json",
+    "status": "closed; final independent/integration signatures current"
+  }
+]

@@ -1,0 +1,35 @@
+$ node tools/check.mjs
+STATS 45 chapters; 276 decks; 1411 frames; 95 code blocks (no count quotas)
+WARN 1 migration/review notes; run audit-chapter.mjs for chapter details
+PASS structure, local resources, accessibility, bilingual nesting, chapter entries and animation preservation
+exit=0
+
+$ node tools/audit-chapter.mjs ch21
+
+ch21 STATS {"decks":6,"frames":29,"perDeck":[5,5,4,5,5,5],"staticImages":0,"code":7,"han":6048,"zh":213,"en":213}
+PASS structural checks; content/translation/rendering require independent review
+exit=0
+
+$ node examples/ch21/sync.mjs --check
+7 page snippets match chapter sources
+exit=0
+
+$ python3 examples/ch21/check.py
+{"passed": true, "checks": 120, "failure": null}
+exit=0
+
+$ python3 docs/reviews/ch21-animation-check.py
+{"sha256": "e516022df2f8522cbe274ffa0d3873af6a3ac025dfef4700a8632a6c595e9547", "decks": 6, "frames": 29, "perDeck": [5, 5, 4, 5, 5, 5], "sameSvgCount": 27, "geometryChanged": 0}
+exit=0
+
+$ node --check docs/reviews/ch21-browser.mjs
+exit=0
+
+$ node --check docs/reviews/ch21-render.mjs
+exit=0
+
+$ node --check examples/ch21/sync.mjs
+exit=0
+
+$ git diff --check
+exit=0

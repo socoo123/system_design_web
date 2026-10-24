@@ -1,0 +1,70 @@
+{
+  "scope": "Local SQLite transactions, Java eligibility and source inventory; not distributed fault proof",
+  "python_sqlite": "3.51.0",
+  "checks": [
+    "Four page snippets equal their source; original 8 decks/40 frames/80 title-desc IDs retained",
+    "Normal commit/lost reply reuse original response; changed request and stale state/version reject; caller key scope is independent",
+    "Two real processes competing for the final unit produce one commit and one full rollback",
+    "Injected outbox constraint error rolls back order and stock; a same-key retry after known rollback succeeds",
+    "Process exits without cleanup after stock SQL; opening the local DB recovers uncommitted order/stock",
+    "Local fence waits for an existing writer; after durable FROZEN, the same old revision cannot write",
+    "ReadGate: fresh view, stale/fork, snapshot and admission checks passed"
+  ],
+  "numeric": {
+    "local_sync_ms": 12,
+    "distant_sync_ms": 86,
+    "unrecoverable_risk_writes": 2000,
+    "balanced_per_shard": 1000.0,
+    "conditional_capacity": 9600,
+    "hot_tenant": 3200.0,
+    "hot_over_budget": 2000.0,
+    "other_shards_ideal": 685.7142857142857,
+    "hot_bucket_ideal": 400.0,
+    "full_copy_s": 4000.0,
+    "catchup_s": 3000.0,
+    "raw_retention_GB": 3.6,
+    "retransmission_MBps": 1.1
+  },
+  "passed": true,
+  "source_sha256": {
+    "chapters/ch41.html": "a9553dbd8f4bccd6310f62d9d0db263dc1809fcda88da09a2490bc91a99dd753",
+    "examples/ch41/ReadGate.java": "acbb4538508482e94ba675f5c4aa0b76f1bb4c3db2719727039a8376a06065b3",
+    "examples/ch41/ReadGateProbe.java": "5cdfa00f105aaa65aa8d07ce97990ccc816fd3f3f50674347d692c0b9fa79350",
+    "examples/ch41/migration.pseudo": "c7ce9ef08cb4c96edfecbcb914ddabbd3e3686c5963957c3f6f8402b4cce7f36",
+    "examples/ch41/schema.sql": "6c119d8d5d6b932fec3b3bd763622d43bc7412d5783d4ccca1ea5d505624dbb9",
+    "examples/ch41/storage.py": "08e935b9e7f97d678ee028a98656c9fb72b265100c49636680fd739df45ce6dd",
+    "examples/ch41/submit.pseudo": "8e508a8a29b6d39a0d105a87f3aa09015f7d43f25d8ea2de91fa6dc22353e494",
+    "examples/ch41/submit.sql": "cf9e2ec159f5d8cf9b412d9e7915dfab36251d484d85038ec8206660548635ee",
+    "examples/ch41/verify.py": "adf60e6ae0fd66a50dc98da793d1cd3d603be08fe3ce1ce55204dc6c2ef27339"
+  },
+  "race": {
+    "outcomes": [
+      "SUBMITTED",
+      "SOLD_OUT"
+    ],
+    "state": {
+      "stock": 0,
+      "orders": [
+        [
+          "o1",
+          "SUBMITTED",
+          1
+        ],
+        [
+          "o2",
+          "DRAFT",
+          0
+        ]
+      ],
+      "outbox": 1,
+      "results": 1
+    }
+  },
+  "java": "ReadGate: fresh view, stale/fork, snapshot and admission checks passed",
+  "not_experimentally_verified": [
+    "Replica history/visible-prefix production, network deadlines and promotion/fencing across independent servers",
+    "Migration snapshot/delete merging, H export, durable directory CAS and target activation adapters",
+    "PostgreSQL 40001/40P01 behavior, real prepared transactions, MQ delivery and PSP/Shipping recovery",
+    "Production hardware durability, load/latency and region disasters"
+  ]
+}

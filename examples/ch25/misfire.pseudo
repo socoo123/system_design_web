@@ -1,0 +1,33 @@
+recover_missed(job_id):                     // recurring calendars with future fires
+  BEGIN
+  j = SELECT * FROM job WHERE id=job_id FOR UPDATE
+  t = SELECT clock_timestamp()
+  if not j.enabled or j.next_run_at == null: ROLLBACK; return NONE
+  missed_before = t - j.lateness_ms * 1ms
+  if j.recovery_cutoff == null and j.next_run_at >= missed_before:
+    ROLLBACK; return NONE
+  cutoff = j.recovery_cutoff ?? calendar.first_at_or_after(j.spec, missed_before)
+  // Equality at t-tolerance remains live; use the SAME predicate as materialize.
+  // Pin this cutoff across catch-up pages. Missed fires are in [cursor, cutoff).
+  from = j.next_run_at
+  require cutoff > from
+  if j.policy == 'catch_up':
+    fires = calendar.first_at_most_100(j.spec, from, cutoff)
+    for fire in fires:
+      INSERT ready occurrence with frozen input and UNIQUE identity
+      // Same INSERT + conflict comparison as materialize; all within this T1.
+    next = calendar.next_after(j.spec, fires.last)
+  else if j.policy == 'coalesce':
+    last = calendar.last_before(j.spec, cutoff)
+    INSERT one ready occurrence at last, with immutable range [from, cutoff)
+    // The handler contract must cover the entire range; use the same T1 insert.
+    next = cutoff
+  else if j.policy == 'skip': next = cutoff
+  else: ROLLBACK; return BAD_POLICY
+  INSERT audit(job_id, version, from, next, policy)
+  UPDATE job SET next_run_at=next,
+                 recovery_cutoff=(cutoff if next < cutoff else null)
+    WHERE id=job_id
+  COMMIT
+  // No RPC in T1. Failure rolls back the page and cursor; ACK loss re-reads both.
+  // Live cutoff fires use the normal path, independently of missed intervals.

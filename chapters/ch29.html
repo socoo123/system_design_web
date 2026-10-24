@@ -28,76 +28,33 @@
   <header>
     <div class="ch-kicker"><span class="lang-zh">CHAPTER 29 · 大模型</span><span class="lang-en">CHAPTER 29 · LLM</span></div>
     <h1><span class="lang-zh">LLM 推理服务</span><span class="lang-en">LLM inference service</span></h1>
-    <p class="ch-meta-line"><span class="lang-zh">约 40 分钟 · 前置：Ch03、Ch04 · 6 组 / 31 帧演进图</span><span class="lang-en">~40 min · after Ch03, Ch04 · 6 decks / 31 evolution frames</span></p>
+    <p class="ch-meta-line"><span class="lang-zh">约 35 分钟 · 前置：Ch03、Ch04 · 6 组 / 31 帧演进图</span><span class="lang-en">~35 min · after Ch03, Ch04 · 6 decks / 31 evolution frames</span></p>
   </header>
 
-<section class="goal"><h2><span class="lang-zh">这一章结束你能做什么</span><span class="lang-en">What you can do after this chapter</span></h2>
-<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>从一条在线生成闭环画起，逐笔补上准入、KV 页、iteration 调度和流式回程；每个框都能说出为什么需要。</p>
-<p>把显存容量、输出吞吐和首 token 延迟分开算，解释为什么“放得下 128 条”不能证明“单卡每秒完成 21 条”。</p>
-<p>走通取消归还、worker 死亡、重试歧义和阶段搬运四个边界；知道哪些状态可以持久恢复，哪些只能重新计算。</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>Start with one online generation loop and add admission, KV pages, iteration scheduling, and a streaming return. Explain why each component is needed.</p>
-<p>Calculate memory capacity, output throughput, and first-token latency separately. Explain why fitting 128 requests does not establish 21 completions per second.</p>
-<p>Walk cancellation, worker loss, ambiguous retry, and phase transfer. Distinguish recoverable durable state from state that must be recomputed.</p>
-</div></div></section>
-
-  <section>
-<h2><span class="lang-zh">30 秒开场：把有状态的 GPU 讲清</span><span class="lang-en">Opening: explain stateful GPU serving</span></h2>
-<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>我设计自托管、单模型的在线聊天服务。网关鉴权并按 token 限流，Scheduler 把请求放进有界队列，检查页信用和计算预算后分配 GPU worker。worker 先 prefill 建 KV，再逐步 decode，token 经 Scheduler、网关回客户端。KV 分页解决怎么放，continuous batching 解决每轮谁进入；吞吐和 TTFT、TPOT 用实际负载基准测试确认。取消等本轮 GPU 访问退休再还页。流中断保留尝试身份，续写是用户明确发起的新请求；同卡干扰严重且搬得起 KV 时再考虑阶段分离。</p>
-<p>澄清先问：自托管还是调用外部服务，输入和输出的长度分布，用户等待首段与相邻输出的目标，是否单模型，是否支持显式续写，在线和离线是否必须隔离。这里固定为文本聊天、单地域、一个模型副本先跑同卡；离线摘要另队列、另池。RAG 会在请求前准备 prompt，向量检索和训练平台属于后续章节。</p>
-<p>请求外壳可以用 <code>POST /v1/chat/completions</code>、<code>stream=true</code>，这是本章示例接口。浏览器通过 fetch 发送 POST，再解析 SSE 格式响应；原生 EventSource 是基于 URL 建立流的接口，不能把这个 POST 直接交给它。SSE 的事件 id 和重连信息帮助标记事件位置，不会替服务器保存输出，也不会保存 GPU 状态 [9]。</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>This design self-hosts one model for online chat. API gateway authenticates and limits tokens; Scheduler queues requests and checks page credits plus compute budgets before assigning a GPU worker. The worker builds KV in prefill and decodes step by step. Tokens return through Scheduler and the gateway. Paging decides memory placement, and continuous batching decides membership per iteration. Benchmark the workload for throughput, TTFT, and TPOT. Cancel retires GPU accesses before releasing pages. Interruption retains attempt identity; continuation is an explicit new request. Consider phase separation when interference is serious and KV transfer is affordable.</p>
-<p>Clarify hosting, input and output length distributions, first-token and inter-token targets, model count, explicit continuation, and online/offline isolation. We assume text chat, one region, and a colocated model replica initially. Offline summaries use another queue and pool. RAG prepares prompts before inference; retrieval and training are later chapters.</p>
-<p>The illustrative interface is <code>POST /v1/chat/completions</code> with <code>stream=true</code>. A browser uses fetch for POST and parses an SSE-format response; native EventSource establishes a URL-based stream and does not directly issue this POST. Event IDs and reconnection metadata locate events, without storing server output or GPU state [9].</p>
-</div></div><h3><span class="lang-zh">假设先编号，后面的图只用这一份</span><span class="lang-en">Number the assumptions used by the boards</span></h3>
-<table><thead><tr><th><span class="lang-zh">假设</span><span class="lang-en">Assumption</span></th><th><span class="lang-zh">取值</span><span class="lang-en">Value</span></th><th><span class="lang-zh">改变哪个决定</span><span class="lang-en">Design consequence</span></th></tr>
+<section class="goal"><h2><span class="lang-zh">本章核心：先守承诺，再提高利用率</span><span class="lang-en">Core: honor commitments before improving utilization</span></h2><div class="bilingual"><div class="lang-zh"><p><strong>准入分两关：</strong>等待描述有界、租户份额有界；上卡时一次承诺 prompt + 最大输出的页信用，逐轮再核计算预算。</p><p><strong>取消分两步：</strong>先停后续调度，相关 GPU 访问全退休后才释放引用和信用。旧 generation、旧 worker boot 的消息不能碰新池。</p><p><strong>容量分三账：</strong>显存能放多少、目标延迟下能服务多少、用户收到多少，分别计算和测量。</p></div><div class="lang-en"><p><strong>Two admission gates:</strong> bound waiting descriptions and tenant shares. Commit prompt-plus-output-cap page credits at GPU admission, then check compute budgets each iteration.</p><p><strong>Two cancellation steps:</strong> stop future scheduling, then release references and credits after every relevant GPU access retires. Old generations and worker boots cannot touch a new pool.</p><p><strong>Three capacity ledgers:</strong> memory fit, service at target latency, and client delivery require separate calculations and measurements.</p></div></div></section>
+<section><h2><span class="lang-zh">设计范围与可替换的假设</span><span class="lang-en">Scope and replaceable assumptions</span></h2><div class="bilingual"><div class="lang-zh"><p>设计自托管、单地域、单模型的在线文本聊天服务。起点是同卡 prefill + decode；离线摘要另队列、另池。RAG只在前面准备 prompt。先问输入/输出长度分布、TTFT与输出停顿目标、模型版本以及是否允许显式续写。</p><p>主路径 <strong>Client → API gateway → Scheduler → GPU worker</strong>，输出逐跳返回。分页管存放，continuous batching管每轮成员；内核优化不能替代租户公平或生命周期。</p><p>示例接口 <code>POST /v1/chat/completions</code>、<code>stream=true</code>：浏览器用fetch发POST并解析SSE格式响应。原生EventSource不直接发该POST；事件id/Last-Event-ID也不会替服务器保存token日志或KV。<a href="#ref-9">[9]</a></p></div><div class="lang-en"><p>Self-host one model for online text chat in one region, initially colocating prefill and decode. Offline summaries have another queue and pool. RAG prepares the prompt upstream. Clarify length distributions, first-token and stall targets, model identity, and explicit continuation.</p><p>The path is <strong>Client → API gateway → Scheduler → GPU worker</strong>, with every return hop. Paging manages placement; continuous batching selects each iteration’s members. Kernel optimization does not provide tenant fairness or lifecycle safety.</p><p>The illustrative API is <code>POST /v1/chat/completions</code>, <code>stream=true</code>. Browsers use fetch for POST and parse an SSE-format response. Native EventSource does not directly issue this POST; event IDs and Last-Event-ID supply neither a server token log nor KV recovery. <a href="#ref-9">[9]</a></p></div></div><details><summary><span class="lang-zh">教学假设 A1–A12：改数时在这里统一重算</span><span class="lang-en">Teaching assumptions A1–A12: change numbers in one place</span></summary><table><thead><tr><th><span class="lang-zh">假设</span><span class="lang-en">Assumption</span></th><th><span class="lang-zh">取值</span><span class="lang-en">Value</span></th><th><span class="lang-zh">改变哪个决定</span><span class="lang-en">Design consequence</span></th></tr>
 </thead><tbody><tr><td><span class="lang-zh">A1 · 到达与长度</span><span class="lang-en">A1 · arrivals and lengths</span></td><td><span class="lang-zh">平均 10、峰值 30 req/s；输入 2,048，平均输出 256，输出上限 512 token</span><span class="lang-en">10 average, 30 peak req/s; 2,048 input, 256 mean output, 512 output cap</span></td><td><span class="lang-zh">上下文上限 2,560；长请求在分词后校验</span><span class="lang-en">Total context cap 2,560; validate after tokenization</span></td></tr>
 <tr><td><span class="lang-zh">A2 · 模型形状</span><span class="lang-en">A2 · model shape</span></td><td><span class="lang-zh">32 层、8 个 KV head、head dim 128、KV 元素 2 B；全注意力、单副本无分片</span><span class="lang-en">32 layers, 8 KV heads, head dim 128, 2 B/KV element; full attention, unsharded replica</span></td><td><span class="lang-zh">128 KiB/token；架构、并行度变化须重算</span><span class="lang-en">128 KiB/token; recompute for architecture or parallelism changes</span></td></tr>
 <tr><td><span class="lang-zh">A3 · 权重与可用池</span><span class="lang-en">A3 · weights and usable pool</span></td><td><span class="lang-zh">8B 参数 × 2 B；权重、激活峰值、工作区和图捕获留足后，KV 池可用 40 GiB</span><span class="lang-en">8B parameters × 2 B; usable KV pool 40 GiB after weights, peak activations, workspaces, and graph reserves</span></td><td><span class="lang-zh">不指定显卡型号；40 GiB 是独立预算</span><span class="lang-en">No GPU SKU assumption; forty GiB is a separate budget</span></td></tr>
-<tr><td><span class="lang-zh">A4 · 页与保守准入</span><span class="lang-en">A4 · pages and conservative admission</span></td><td><span class="lang-zh">生产页 16 token；所有活动请求预留 prompt + 输出上限；图中演示页为 4</span><span class="lang-en">16 tokens/production block; reserve prompt plus output cap; diagram toy block is 4</span></td><td><span class="lang-zh">2 MiB/页，160 页信用/请求；不押平均输出</span><span class="lang-en">2 MiB/block, 160 credits/request; do not bet on mean output</span></td></tr>
-<tr><td><span class="lang-zh">A5 · 用户侧目标</span><span class="lang-en">A5 · client-side targets</span></td><td><span class="lang-zh">TTFT p99 ≤ 800 ms；相邻输出间隔 ITL p99 ≤ 50 ms</span><span class="lang-en">TTFT p99 ≤ 800 ms; inter-token latency ITL p99 ≤ 50 ms</span></td><td><span class="lang-zh">统计相邻间隔；平均 TPOT 单独报告</span><span class="lang-en">Measure individual gaps; report average TPOT separately</span></td></tr>
-<tr><td><span class="lang-zh">A6 · 单次延迟预算</span><span class="lang-en">A6 · per-request latency budget</span></td><td><span class="lang-zh">接入/解析 50 ms、纯 prefill 150 ms、排队预算 600 ms</span><span class="lang-en">50 ms ingress/parsing, 150 ms pure prefill, 600 ms wait budget</span></td><td><span class="lang-zh">这是条件预算，分量 p99 不能直接相加</span><span class="lang-en">Conditional budget, not a sum of component p99s</span></td></tr>
-<tr><td><span class="lang-zh">A7 · 容量示例</span><span class="lang-en">A7 · capacity illustration</span></td><td><span class="lang-zh">若目标负载下单副本 goodput 测得 12 req/s，计划用 70%；占用均值假设 6 s</span><span class="lang-en">If one replica benchmarks at 12 goodput req/s, plan at 70%; assume mean occupancy 6 s</span></td><td><span class="lang-zh">尚未实际压测；示例需 4 台，N+1 为 5</span><span class="lang-en">No benchmark run here; example needs 4 replicas or 5 with N+1</span></td></tr>
+<tr><td><span class="lang-zh">A4 · 页与保守准入</span><span class="lang-en">A4 · pages and conservative admission</span></td><td><span class="lang-zh">本章页大小 16 token；所有活动请求预留 prompt + 输出上限；图中演示页为 4</span><span class="lang-en">16 tokens/design block; reserve prompt plus output cap; diagram toy block is 4</span></td><td><span class="lang-zh">2 MiB/页，160 页信用/请求；不押平均输出</span><span class="lang-en">2 MiB/block, 160 credits/request; do not bet on mean output</span></td></tr>
+<tr><td><span class="lang-zh">A5 · 延迟观测目标</span><span class="lang-en">A5 · latency observation targets</span></td><td><span class="lang-zh">每请求TTFT≤800 ms且最大worker ITL≤50 ms；联合达标≥99%</span><span class="lang-en">Per-request TTFT≤800 ms and maximum worker ITL≤50 ms; joint attainment≥99%</span></td><td><span class="lang-zh">另报客户端块间隔与请求联合达标比例</span><span class="lang-en">Also report client chunk gaps and joint request attainment</span></td></tr>
+<tr><td><span class="lang-zh">A6 · 单次延迟预算</span><span class="lang-en">A6 · per-request latency budget</span></td><td><span class="lang-zh">端到端其他开销 50 ms、纯 prefill 150 ms、排队预算 600 ms</span><span class="lang-en">50 ms other end-to-end work, 150 ms pure prefill, 600 ms wait budget</span></td><td><span class="lang-zh">这是条件预算，分量 p99 不能直接相加</span><span class="lang-en">Conditional budget, not a sum of component p99s</span></td></tr>
+<tr><td><span class="lang-zh">A7 · 容量示例</span><span class="lang-en">A7 · capacity illustration</span></td><td><span class="lang-zh">若联合达标比例≥99%时最高接纳率测得12 req/s，计划用70%；GPU驻留均值假设6 s</span><span class="lang-en">If maximum admission at ≥99% joint attainment benchmarks at 12 req/s, plan at 70%; assume 6 s mean GPU residence</span></td><td><span class="lang-zh">尚未实际压测；示例需 4 台，N+1 为 5</span><span class="lang-en">No benchmark run here; example needs 4 replicas or 5 with N+1</span></td></tr>
 <tr><td><span class="lang-zh">A8 · decode 时长例子</span><span class="lang-en">A8 · decode timing example</span></td><td><span class="lang-zh">固定成员下相邻 token 平均间隔 20 ms</span><span class="lang-en">20 ms mean gap with fixed membership</span></td><td><span class="lang-zh">只算该条件下时长，不推出 128 并发吞吐</span><span class="lang-en">Only a timing illustration, not throughput at concurrency 128</span></td></tr>
-<tr><td><span class="lang-zh">A9 · 准入与公平</span><span class="lang-en">A9 · admission and fairness</span></td><td><span class="lang-zh">队列描述最多 100；预留输入与输出 token 配额；租户输入例为 4,096 token/s</span><span class="lang-en">At most 100 queued descriptions; reserve input/output token quota; illustrative tenant input rate 4,096 token/s</span></td><td><span class="lang-zh">数量上限与 600 ms 期限同时检查</span><span class="lang-en">Enforce both count cap and 600 ms deadline</span></td></tr>
+<tr><td><span class="lang-zh">A9 · 准入与公平</span><span class="lang-en">A9 · admission and fairness</span></td><td><span class="lang-zh">全局队列100、每租户25；活动每租户32/5,120页；输入配额例4,096 token/s</span><span class="lang-en">Global queue 100, per tenant 25; tenant active cap 32/5,120 pages; input quota example 4,096 token/s</span></td><td><span class="lang-zh">数量上限与 600 ms 期限同时检查</span><span class="lang-en">Enforce both count cap and 600 ms deadline</span></td></tr>
 <tr><td><span class="lang-zh">A10 · 尝试身份</span><span class="lang-en">A10 · attempt identity</span></td><td><span class="lang-zh">同主体/key/body hash；幂等结果保留 24 h，客户端重试窗口最多 15 min</span><span class="lang-en">Principal/key/body hash identity; retain dedupe results 24 h for a client retry window of at most 15 min</span></td><td><span class="lang-zh">过期 key 不继续自动重试；epoch 隔离旧 owner</span><span class="lang-en">Expired keys stop automatic retry; epochs fence old owners</span></td></tr>
 <tr><td><span class="lang-zh">A11 · 流缓冲与取消</span><span class="lang-en">A11 · buffers and cancellation</span></td><td><span class="lang-zh">每流待发送字节上限 64 KiB；持续 2 s 无进展就取消；共享页按引用计数</span><span class="lang-en">64 KiB pending-send cap/stream; cancel after 2 s without progress; refcount shared pages</span></td><td><span class="lang-zh">等待本轮 GPU fence，再退休引用</span><span class="lang-en">Wait for the GPU fence before retiring references</span></td></tr>
 <tr><td><span class="lang-zh">A12 · 分离互连</span><span class="lang-en">A12 · split-pool interconnect</span></td><td><span class="lang-zh">有效 KV 传输带宽假设 10 GB/s；先锁 decode 目标信用，再做 prefill</span><span class="lang-en">Assumed effective KV transfer 10 GB/s; reserve decode credits before prefill</span></td><td><span class="lang-zh">prompt KV 256 MiB；搬运握手带模型与 epoch</span><span class="lang-en">256 MiB prompt KV; handshake carries model and epoch</span></td></tr>
-</tbody></table><div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>每行都是 assumption，面试官改一个数就重算受影响的那一笔。32 层和 8 个 KV head 不代表任何具体模型；40 GiB 也不是卡的标称容量。峰值激活随 batch 和 prefill chunk 变化，必须在最坏工作形状下量剩余池，不能从“显卡总容量减权重”直接拿来准入。</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>Each row is an assumption; changing one updates the relevant calculation. The shape does not identify a particular model, and forty GiB is not a GPU’s rated memory. Activation peaks depend on batch and prefill chunks. Measure the usable pool under worst workload shapes rather than subtracting weights from advertised capacity.</p>
-</div></div></section>
-
-  <section>
-<h2><span class="lang-zh">估算：显存能放下，算力还要另验</span><span class="lang-en">Estimate: memory fit still needs compute validation</span></h2>
-<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>全注意力的 KV 按 K、V 两份乘层数、KV head、head dim 和元素字节数：<code>2 × 32 × 8 × 128 × 2 = 131,072 B = 128 KiB/token</code>。用的是 KV head，不是 query head；改成 32 个 KV head 就乘 4。该公式不含权重、激活、block table 和其他运行时开销。权重是 <code>8 × 10<sup>9</sup> × 2 = 16 × 10<sup>9</sup> B ≈ 14.9 GiB</code>，与请求数无关。</p>
-<p>生产页含 16 个 token，<code>16 × 128 KiB = 2 MiB</code>。2,048 + 512 = 2,560 token 的保守承诺需要 <code>ceil(2,560 ÷ 16) = 160</code> 页，也就是 320 MiB。40 GiB = 40,960 MiB，<code>40,960 ÷ 320 = 128</code> 条满额信用。若有非整页长度，先向上取整再乘页大小；不能用未取整字节绕过尾页浪费。</p>
-<p>128 是显存信用上限，不是 batch 的最佳大小。旧版把 128 ÷ 6 ≈ 21.3 req/s 当单卡完成能力，这需要先证明满并发下仍有 6 秒平均占用、prefill 吞吐和 20 ms 的轮次，不能从显存反推这些条件。Little 定律在稳定系统中给出平均在途 <code>L = λW</code>；10 × 6 = 60 条，保守信用约 60 × 320 MiB = 18.75 GiB。若峰值 30 都能稳定完成且 W 仍为 6，才会得到 180 条、56.25 GiB；这个条件需求超过 40 GiB，说明必须拒绝、扩容或改变预算，不是证明无限队列真的稳定。</p>
-<p>算力用独立基准测试。若按 A7 的负载分布、两个延迟目标和所需达标比例测出每副本 goodput 为 12 req/s，计划值是 12 × 70% = 8.4。峰值 <code>ceil(30 ÷ 8.4) = 4</code> 个副本，若要求退出一个仍守计划预算，就配 5；剩余 4 × 8.4 = 33.6。这里的 12 是条件例子，本轮没有跑 GPU 压测。4 台既不由 128 推出，也不由论文倍数推出。</p>
-<p>输入需求平均 <code>10 × 2,048 = 20,480 token/s</code>，峰值 61,440；输出平均需求 <code>10 × 256 = 2,560 token/s</code>，峰值 7,680，成立条件是请求被接纳并按此分布完成。它们是流量需求，不是单卡实测产能。输入配额例 4,096 token/s 对标准 prompt 约允许 2 req/s，但短 prompt 长输出仍能占大量 decode，因此还要预留输出配额、限制并发和公平调度。</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>For full attention, multiply two tensors K and V by layers, KV heads, head dimension, and bytes: <code>2 × 32 × 8 × 128 × 2 = 131,072 B = 128 KiB/token</code>. Use KV heads rather than query heads; thirty-two KV heads multiply this by four. The formula excludes weights, activations, block tables, and runtime overhead. Weights are <code>8 × 10<sup>9</sup> × 2 = 16 × 10<sup>9</sup> B ≈ 14.9 GiB</code>, independent of request count.</p>
-<p>A production block contains sixteen tokens: <code>16 × 128 KiB = 2 MiB</code>. A 2,048 + 512 = 2,560-token commitment requires <code>ceil(2,560 ÷ 16) = 160</code> blocks, or 320 MiB. Forty GiB is 40,960 MiB, so <code>40,960 ÷ 320 = 128</code> full-cap reservations. Round lengths to whole blocks before counting bytes.</p>
-<p>128 limits memory credits, not optimal batch size. The old 128 ÷ 6 ≈ 21.3 req/s inference required independent evidence that six-second occupancy, prefill throughput, and twenty-ms iterations held at full concurrency. Little’s law gives average in-flight <code>L = λW</code> for a stable system: 10 × 6 = 60 requests, or 18.75 GiB of conservative credits. Only if all peak arrivals complete stably with W still six seconds does 30 × 6 imply 180 requests and 56.25 GiB. That conditional demand exceeds forty GiB and forces rejection, expansion, or a changed budget; it does not establish stability of an unlimited queue.</p>
-<p>Benchmark compute separately. If the workload, both latency targets, and required attainment fraction yield twelve goodput req/s per replica, plan at 12 × 70% = 8.4. Peak needs <code>ceil(30 ÷ 8.4) = 4</code> replicas. Five provide N+1: four survivors have 33.6 planned req/s. Twelve is a conditional example; no GPU benchmark was run here. Neither memory credits nor a paper’s speedup determines these four replicas.</p>
-<p>Input demand averages <code>10 × 2,048 = 20,480 token/s</code> and peaks at 61,440. Output demand averages <code>10 × 256 = 2,560 token/s</code> and peaks at 7,680 if requests are admitted and completed with this distribution. These describe demand, not measured card capacity. A 4,096 input-token/s tenant quota allows about two standard prompts per second. Short prompts with long output can still consume decode, requiring output credits, concurrency limits, and fairness.</p>
-</div></div></section>
-
-  <section>
-<h2><span class="lang-zh">在线闭环：等待与 GPU 所有权分开</span><span class="lang-en">Online loop: separate waiting from GPU ownership</span></h2>
-<figure class="deck">
+</tbody></table><div class="bilingual"><div class="lang-zh"><p>均为教学假设，不对应具体显卡、模型或已执行的压测。40 GiB是权重、激活峰值、工作区、页表和图捕获预留之后的KV池；峰值随batch/chunk变化，不能简单用总显存减权重。租户配额、页/活动上限和服务器信任域由服务端决定。</p></div><div class="lang-en"><p>These are teaching assumptions, not a GPU SKU, model specification, or executed benchmark. Forty GiB is the KV pool after weights, peak activations, workspaces, tables, and graph reserves. Batch/chunk shapes change peaks; advertised memory minus weights is insufficient. The server assigns quotas, page/active caps, and trust domains.</p></div></div></details></section>
+<section><h2><span class="lang-zh">估算：128条信用不是128条的吞吐</span><span class="lang-en">Estimate: 128 reservations do not establish throughput</span></h2><div class="bilingual"><div class="lang-zh"><p>全注意力KV：<code>2 × 32层 × 8 KV head × 128维 × 2 B = 128 KiB/token</code>。16 token页是2 MiB；<code>ceil((2,048 + 512) ÷ 16) = 160页 = 320 MiB/请求</code>。40 GiB = 40,960 MiB，因此最多128条满额信用；第129条会超出320 MiB。这里使用KV head，且不含权重等运行时开销。</p><p><strong>Little定律必须圈同一个边界。</strong>令λ是稳定准入并退出GPU的尝试率（含取消），W是从GPU准入到引用/信用释放的平均驻留时间，排队不计入W。若λ=10/s且W=6s，平均活动60条，保守信用18.75 GiB；若持续30/s仍保持6s，条件需求是180条/56.25 GiB，超过单池。它说明需要拒绝、扩容或改预算，不能从128÷6反推单卡产能。</p><p>算力容量另做负载基准：假设最大接纳率C=12 req/s时仍有≥99%请求同时达到TTFT≤800ms和<strong>该请求最大worker ITL≤50ms</strong>，规划用70%，即8.4 req/s。峰值30需<code>ceil(30÷8.4)=4</code>个副本；同预算N−1需5个，剩余33.6 req/s。12尚未实测；只给“goodput=12”也不能把它直接当总完成率或排队服务率。</p></div><div class="lang-en"><p>Full-attention KV is <code>2 × 32 layers × 8 KV heads × 128 dimensions × 2 B = 128 KiB/token</code>. A sixteen-token block is 2 MiB. <code>ceil((2,048 + 512) ÷ 16) = 160 blocks = 320 MiB/request</code>. Forty GiB is 40,960 MiB and fits 128 full-cap reservations; number 129 exceeds it by 320 MiB. Count KV heads, excluding weights and other runtime overhead.</p><p><strong>Little’s law needs one boundary.</strong> Let λ be stable admitted/departing attempts per second, including cancellation, and W mean residence from GPU admission through reference/credit release, excluding queueing. At λ=10/s and W=6s, mean active count is sixty and conservative credits are 18.75 GiB. Sustained thirty/s with W still six requires 180 requests/56.25 GiB. This conditional demand exceeds one pool and requires rejection, expansion, or a changed budget. It does not infer compute capacity from 128÷6.</p><p>Benchmark compute separately. Suppose maximum admission C=12 req/s still gives ≥99% of requests both TTFT≤800ms and <strong>maximum worker ITL within that request≤50ms</strong>. Plan at 70%, or 8.4 req/s. Peak thirty needs <code>ceil(30÷8.4)=4</code> replicas; five preserve the same N−1 budget, leaving 33.6 req/s. Twelve is unmeasured. A goodput of twelve alone is not total completion rate or a queue service rate.</p></div></div><details><summary><span class="lang-zh">完整需求、权重与长上下文复算</span><span class="lang-en">Demand, weights, and longer-context calculations</span></summary><div class="bilingual"><div class="lang-zh"><p>权重 <code>8×10⁹×2=16 GB≈14.9 GiB</code>。输入需求平均20,480、峰值61,440 token/s；输出平均2,560、峰值7,680 token/s，假定均接纳并按均值256输出。租户输入4,096 token/s约容许2条标准prompt/s，但长输出仍需输出预留与活动上限。</p><p>若输入改8,192、输出上限仍512，需8,704×128 KiB=1,088 MiB，40,960÷1,088≈37.65，只容37条满额信用；prefill时间和新上下文工作区仍需重测。weight-only量化不改变KV字节/token，却可能腾大可用池。</p></div><div class="lang-en"><p>Weights are <code>8×10⁹×2=16 GB≈14.9 GiB</code>. Input demand averages 20,480 and peaks at 61,440 tokens/s; output averages 2,560 and peaks at 7,680 tokens/s if all requests complete with mean output 256. A 4,096 input-token/s quota permits about two standard prompts/s, while long outputs still need output reservations and active caps.</p><p>Changing input to 8,192 with output cap 512 needs 8,704×128 KiB=1,088 MiB; 40,960÷1,088≈37.65 fits thirty-seven reservations. Remeasure prefill and workspace peaks. Weight-only quantization keeps KV bytes/token unchanged but may enlarge the usable pool.</p></div></div></details></section>
+<section><h2><span class="lang-zh">在线闭环：排队不占KV，上卡才作承诺</span><span class="lang-en">Online loop: queue without KV, commit at admission</span></h2><figure class="deck">
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d1s1t d1s1d">
           <title id="d1s1t">Start with an authenticated streaming boundary</title>
           <desc id="d1s1d">Client submits to API gateway; API gateway returns SSE or a pre-stream HTTP error to Client.</desc>
           <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
           <g class="is-new">
-            <rect x="120" y="18" width="824" height="364" rx="18" class="boundary"/><text x="136" y="38" class="tiny">ONLINE SERVING · one model · one region</text>
+            <rect x="148" y="18" width="796" height="364" rx="18" class="boundary"/><text x="164" y="38" class="tiny">ONLINE SERVING · one model · one region</text>
             <circle cx="44" cy="156" r="12" class="box"/><path d="M24 202 Q44 170 64 202" class="wire"/><text x="44" y="224" text-anchor="middle" class="label">Client</text>
             <rect x="160" y="145" width="150" height="80" rx="12" class="box"/><text x="235" y="182" text-anchor="middle" class="label">API gateway</text><text x="235" y="201" text-anchor="middle" class="sub">auth + token quota</text>
             <path d="M70 171 L150 171" class="wire"/><polygon points="160,171 150,176 150,166" class="head"/><text x="110" y="161" text-anchor="middle" class="tiny">POST</text>
@@ -111,7 +68,7 @@
           <title id="d1s2t">Add the owner-aware scheduler</title>
           <desc id="d1s2d">API gateway submits to Scheduler; Scheduler returns deltas or admission status through API gateway to Client.</desc>
           <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
-          <rect x="120" y="18" width="824" height="364" rx="18" class="boundary"/><text x="136" y="38" class="tiny">ONLINE SERVING · one model · one region</text>
+          <rect x="148" y="18" width="796" height="364" rx="18" class="boundary"/><text x="164" y="38" class="tiny">ONLINE SERVING · one model · one region</text>
           <circle cx="44" cy="156" r="12" class="box"/><path d="M24 202 Q44 170 64 202" class="wire"/><text x="44" y="224" text-anchor="middle" class="label">Client</text>
           <rect x="160" y="145" width="150" height="80" rx="12" class="box"/><text x="235" y="182" text-anchor="middle" class="label">API gateway</text><text x="235" y="201" text-anchor="middle" class="sub">auth + token quota</text>
           <path d="M70 171 L150 171" class="wire"/><polygon points="160,171 150,176 150,166" class="head"/><text x="110" y="161" text-anchor="middle" class="tiny">POST</text>
@@ -129,7 +86,7 @@
           <title id="d1s3t">Wait without holding KV</title>
           <desc id="d1s3d">Scheduler enqueues a waiting request into Online queue and takes it back only when admission is available; the waiting description owns no GPU KV.</desc>
           <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
-          <rect x="120" y="18" width="824" height="364" rx="18" class="boundary"/><text x="136" y="38" class="tiny">ONLINE SERVING · one model · one region</text>
+          <rect x="148" y="18" width="796" height="364" rx="18" class="boundary"/><text x="164" y="38" class="tiny">ONLINE SERVING · one model · one region</text>
           <circle cx="44" cy="156" r="12" class="box"/><path d="M24 202 Q44 170 64 202" class="wire"/><text x="44" y="224" text-anchor="middle" class="label">Client</text>
           <rect x="160" y="145" width="150" height="80" rx="12" class="box"/><text x="235" y="182" text-anchor="middle" class="label">API gateway</text><text x="235" y="201" text-anchor="middle" class="sub">auth + token quota</text>
           <path d="M70 171 L150 171" class="wire"/><polygon points="160,171 150,176 150,166" class="head"/><text x="110" y="161" text-anchor="middle" class="tiny">POST</text>
@@ -151,7 +108,7 @@
           <title id="d1s4t">Assign one worker and stream every hop</title>
           <desc id="d1s4d">Scheduler assigns GPU worker. GPU worker runs prefill then decode; tokens return GPU worker to Scheduler to API gateway to Client.</desc>
           <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
-          <rect x="120" y="18" width="824" height="364" rx="18" class="boundary"/><text x="136" y="38" class="tiny">ONLINE SERVING · one model · one region</text>
+          <rect x="148" y="18" width="796" height="364" rx="18" class="boundary"/><text x="164" y="38" class="tiny">ONLINE SERVING · one model · one region</text>
           <circle cx="44" cy="156" r="12" class="box"/><path d="M24 202 Q44 170 64 202" class="wire"/><text x="44" y="224" text-anchor="middle" class="label">Client</text>
           <rect x="160" y="145" width="150" height="80" rx="12" class="box"/><text x="235" y="182" text-anchor="middle" class="label">API gateway</text><text x="235" y="201" text-anchor="middle" class="sub">auth + token quota</text>
           <path d="M70 171 L150 171" class="wire"/><polygon points="160,171 150,176 150,166" class="head"/><text x="110" y="161" text-anchor="middle" class="tiny">POST</text>
@@ -177,7 +134,7 @@
           <title id="d1s5t">Load model weights before becoming ready</title>
           <desc id="d1s5d">GPU worker requests Weights at boot and receives their bytes. Weights remain resident; the token hot path reads no object storage.</desc>
           <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
-          <rect x="120" y="18" width="824" height="364" rx="18" class="boundary"/><text x="136" y="38" class="tiny">ONLINE SERVING · one model · one region</text>
+          <rect x="148" y="18" width="796" height="364" rx="18" class="boundary"/><text x="164" y="38" class="tiny">ONLINE SERVING · one model · one region</text>
           <circle cx="44" cy="156" r="12" class="box"/><path d="M24 202 Q44 170 64 202" class="wire"/><text x="44" y="224" text-anchor="middle" class="label">Client</text>
           <rect x="160" y="145" width="150" height="80" rx="12" class="box"/><text x="235" y="182" text-anchor="middle" class="label">API gateway</text><text x="235" y="201" text-anchor="middle" class="sub">auth + token quota</text>
           <path d="M70 171 L150 171" class="wire"/><polygon points="160,171 150,176 150,166" class="head"/><text x="110" y="161" text-anchor="middle" class="tiny">POST</text>
@@ -205,7 +162,7 @@
           <title id="d1s6t">Persist an attempt identity outside gateway memory</title>
           <desc id="d1s6d">API gateway claims or recovers a key in Attempt Store and receives the saved result. Scheduler conditionally assigns an owner epoch in Attempt Store and receives its result; the store contains neither KV nor replay tokens.</desc>
           <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
-          <rect x="120" y="18" width="824" height="364" rx="18" class="boundary"/><text x="136" y="38" class="tiny">ONLINE SERVING · one model · one region</text>
+          <rect x="148" y="18" width="796" height="364" rx="18" class="boundary"/><text x="164" y="38" class="tiny">ONLINE SERVING · one model · one region</text>
           <circle cx="44" cy="156" r="12" class="box"/><path d="M24 202 Q44 170 64 202" class="wire"/><text x="44" y="224" text-anchor="middle" class="label">Client</text>
           <rect x="160" y="145" width="150" height="80" rx="12" class="box"/><text x="235" y="182" text-anchor="middle" class="label">API gateway</text><text x="235" y="201" text-anchor="middle" class="sub">auth + token quota</text>
           <path d="M70 171 L150 171" class="wire"/><polygon points="160,171 150,176 150,166" class="head"/><text x="110" y="161" text-anchor="middle" class="tiny">POST</text>
@@ -230,29 +187,82 @@
         </svg>
         <figcaption><span class="lang-zh">最后补尝试记录：主体、正文哈希、key 与 owner epoch 用条件更新绑定。这里持久化的是一次准入身份，没有持久 token 日志，也没有换卡续写的能力。</span><span class="lang-en">Complete the attempt identity: conditional updates bind principal, payload hash, key, and owner epoch. This persists admission identity, without a durable token log or cross-worker continuation.</span></figcaption>
       </div>
-    </figure><h3><span class="lang-zh">正常路径与为什么这样拆</span><span class="lang-en">Normal path and why these components exist</span></h3>
-<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>Client 提交 messages、输出上限和幂等 key。网关用固定模型版本的 tokenizer 计算实际长度，检查上下文上限，校验租户输入和预留输出配额。之后用主体、key 与 body hash 在 Attempt Store 条件创建尝试；同 key 不同正文返回冲突。共享记录使换一台网关仍能识别原尝试，网关本地字典不具备这项保证。配额预留绑定 attempt，重复请求不重复扣；结果记录和配额若跨库，还要有可恢复的预留/撤销步骤，不能声称两次写天然原子。</p>
-<p>Scheduler 条件绑定 owner worker 和单调 epoch，把待运行描述放进有界在线队列。请求上卡前原子领取页信用，再按 iteration token 预算启动。prefill 为输入建 K/V，计算得到首个输出；之后每轮处理新 token 并追加它的状态。实际缓存 token 与对外输出数量可以相差一个，因为首 token 已采样却尚未作为下一步输入，容量按 prompt + 输出上限取安全侧。所有 delta 经 worker→Scheduler→API gateway→Client，一条连接不会每个 token 重新选 worker。</p>
-<p>等待队列里的请求没有 KV；已经在卡上的请求才有工作集。模型权重从对象存储加载并常驻，ready 还要求 KV 池、内核和健康状态可用。扩出新 worker 只接新工作，不能自动接管旧 worker 的 KV。权重大小不能给出冷启动秒数：对象读取、设备搬运、图捕获和预热都有开销，要记录实际 ready 时间，提前准备容量。</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>Client submits messages, output cap, and a dedupe key. The gateway tokenizes with a fixed model version, validates context length, and checks input plus reserved output quota. It conditionally creates an Attempt Store record keyed by principal, key, and body hash; conflicting payloads fail. Shared records survive a gateway change; a local dictionary does not. Quota reservations bind to the attempt and are not charged again on retry. Separate quota and result stores require recoverable reserve/revoke steps rather than an invented cross-store atomic write.</p>
-<p>Scheduler conditionally assigns a worker and increasing owner epoch, then parks the description in a bounded queue. Admission atomically claims page credits and respects the iteration token budget. Prefill builds input KV and samples the first output; subsequent iterations process new tokens and append their states. Cached state count can differ from emitted token count by one because a sampled token may not yet be processed as the next input. Prompt plus output cap is conservative. Every delta returns worker→Scheduler→API gateway→Client; a stream does not choose another worker per token.</p>
-<p>Waiting descriptions own no KV; active requests own a working set. Weights load from object storage and remain resident. Readiness also requires a usable KV pool, kernels, and health. New workers serve new work rather than automatically inheriting old KV. Weight bytes do not establish cold-start duration: reads, transfer, graph capture, and warmup need measurement and advance capacity preparation.</p>
-</div></div><h3><span class="lang-zh">替代、过载和接口边界</span><span class="lang-en">Alternatives, overload, and API boundaries</span></h3>
-<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>在线队列非空时，离线长摘要不能随意插进同一轮。另池隔离牺牲共享利用率，换来在线资源不会被离线 prefill 占住。流量很小可同池，但要限制离线 chunk、并发和 token 预算；单个正在执行的 chunk 仍可能延迟在线输出，不能只贴一个“高优先级”标签就算隔离完成。</p>
-<p>100 条只是描述数上限，不是延迟保证。按示例 μ = 12 req/s 粗算，100 ÷ 12 ≈ 8.3 秒排队量，早已超过 600 ms；即使近似 μ × 0.6 = 7.2，也不能把“队列限 7 条”当 p99 保证，服务时长和可释放信用有方差。按预计等待、最早截止时间和实时页/计算预算共同准入，到期仍未启动就撤销预留并返回过载。</p>
-<p>流开始前，租户超额或队列期限无法满足用 429，服务无健康容量用 503，上下文越界用 400；这是本章接口约定，不能仅按“显存满了”机械选状态码。SSE 头已发出后不能改成另一个 HTTP 状态，用终止事件说明失败，socket 不可用时由客户端感知断流。代理缓冲要关闭或限制，应用应及时 flush，否则 GPU 首 token 已出而用户 TTFT 仍很长。</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>With online work pending, offline summaries cannot freely join the same iteration. A separate pool sacrifices shared utilization for isolation from offline prefill. A small deployment may share capacity with bounded offline chunks, concurrency, and tokens. A running chunk can still delay online output; a priority label alone does not provide isolation.</p>
-<p>A queue cap of one hundred descriptions is not a latency guarantee. At illustrative μ = 12 req/s, 100 ÷ 12 ≈ 8.3 seconds of queued work exceeds the 600-ms budget. Even μ × 0.6 = 7.2 does not make a seven-request cap a p99 guarantee: duration and release timing vary. Admit using estimated wait, deadlines, and live page/compute budgets. Expired waits revoke reservations and return overload.</p>
-<p>Before stream start, our API uses 429 for tenant limits or unacceptable queue delay, 503 for no healthy capacity, and 400 for invalid context length. Memory pressure alone does not choose the status code. After SSE headers, emit a terminal event rather than changing HTTP status; a broken socket is detected by Client. Bound proxy buffering and flush promptly, or client TTFT stays high after the GPU produces its first token.</p>
-</div></div></section>
+    </figure><div class="bilingual"><div class="lang-zh"><p>网关固定model/template/tokenizer并按实际token校验长度。主体/key/规范正文哈希在共享Attempt Store绑定一次尝试，重复请求不重复扣输入/输出配额；换网关仍读同一记录。持久尝试与配额若跨库，必须用可恢复预留/撤销协议。下面从已持久受理且配额就绪的请求开始，不拿本地队列当持久去重。</p><p>Scheduler对一个worker boot独占调度；等待只保存有界描述。租户轮转避免被一个租户的队头堵住，分别限制队列数、活动序列与页信用。<strong>期限和数量是两条限制：</strong>若总完成率假设12/s，100条相当于约8.33秒工作量，远超600ms；限制成7条也不是p99证明。</p></div><div class="lang-en"><p>The gateway fixes model/template/tokenizer and validates actual token lengths. A shared Attempt Store binds principal/key/canonical-body hash to one attempt; input/output quota is reserved once across retries and gateway changes. Separate stores require recoverable reserve/revoke steps. The next listing starts with a durable claim and ready quota; a local queue is not durable deduplication.</p><p>One scheduler exclusively controls a worker boot. Waiting stores bounded descriptions. Rotate tenants and separately bound queued count, active sequences, and page credits. <strong>Deadlines and counts are separate limits:</strong> at an assumed total completion rate of twelve/s, one hundred requests represent about 8.33 seconds of work, exceeding 600ms. Capping at seven still does not prove p99.</p></div></div><pre data-language="Pseudocode · bounded tenant admission" data-kind="pseudocode" data-source="admission.pseudo"><code># Teaching pseudocode: one live scheduler owns this worker boot.
+# A shared Attempt Store has already claimed (principal, key, body_hash).
+# queued_total = sum(queue sizes); active_total = sum(per-tenant active counts).
+enqueue(attempt, trusted_tenant, prompt_tokens, max_output, now):
+  require fixed model/template/tokenizer; 1 &lt;= prompt_tokens &lt;= 2048
+  require 1 &lt;= max_output &lt;= 512 and prompt_tokens + max_output &lt;= 2560
+  row = read_authority_attempt(attempt)       # read failure is unknown, never an empty row
+  if row.state == TERMINAL: return row.saved_http_result
+  if row.state != ASSIGNED or row.owner != attempt.owner: return PENDING
+  if attempt is already queued or active: return saved_status(attempt)
+  if queued_total == 100 or queued[trusted_tenant].size == 25:
+    return reject_unstarted(attempt.owner, 429, OVERLOADED) # next listing
+  # Input/output quota reservation belongs to attempt, not the HTTP connection.
+  if attempt.quota != RESERVED: return PENDING # recover the same quota reservation
+  r = Entry(attempt, trusted_tenant, prompt_tokens, max_output)
+  r.wait_deadline = now + 600ms             # local monotonic time, not persisted
+  r.request_deadline = now + validated_remaining_service_budget
+  queued[trusted_tenant].append(r)
+  return QUEUED                           # no KV credit and no physical KV
 
-  <section>
-<h2><span class="lang-zh">KV 分页：信用、映射和共享三层账</span><span class="lang-en">Paged KV: credits, mapping, and sharing</span></h2>
-<figure class="deck">
+admit_waiters(now):                        # execute on the same event loop
+  for tenant in rotating_tenant_ring:      # one head/tenant per pass
+    q = queued[tenant]
+    while q and now &gt;= q.head.wait_deadline:
+      expired = q.head
+      decision = reject_unstarted(expired.owner, 429, WAIT_EXPIRED)
+      if decision == PENDING: recover_owner(q.pop()); continue # no guessed refund
+      q.pop()
+    if not q: continue
+    r = q.head
+    need = ceil((r.prompt_tokens + r.max_output) / 16)
+    if active[tenant] == 32 or tenant_page_credits[tenant] + need &gt; 5120: continue
+    if active_total == measured_safe_sequence_cap: continue
+    if not calibrated_shape_allows(r): continue
+    # Only this scheduler mutates local credits; worker validates boot/generation.
+    if not worker_ledger.admit(r.owner, r.prompt_tokens, r.max_output): continue
+    q.pop(); active[tenant] += 1; tenant_page_credits[tenant] += need
+    charged[r.owner] = (tenant, need)
+    ready[tenant].append(r)                # prefill runs in iteration(), below
+  rotate_ring_start()                      # blocked tenant does not block others
+
+on_release(owner):                         # same event loop; poll ledger transitions
+  if worker_ledger.state(owner) != RELEASED: return
+  grant = charged.get(owner)
+  if not grant: return                     # already fully settled locally
+  persist_terminal_and_quota_settlement(owner) # actual use; recover unknown commit by same attempt
+  # Failure keeps charged as retryable work; schedule retry until durable confirmation.
+  charged.remove(owner)                    # remove only after confirmed terminal/outbox
+  active[grant.tenant] -= 1; tenant_page_credits[grant.tenant] -= grant.need</code></pre><h3><span class="lang-zh">队列满也是持久终态，配额释放要可恢复</span><span class="lang-en">A full queue is a durable terminal result with recoverable quota release</span></h3><div class="bilingual"><div class="lang-zh"><p>输入已预留token配额，所以429不能只丢掉HTTP请求。先在Attempt同库事务写终态/原429结果与唯一attempt结算事件；同key以后仍取该429，即使队列已空也不再入队。quota服务按attempt原子释放未消费预留，relay确认后才ACK；回包丢失或释放后未ACK都可重复。依赖故障时保留pending结算并持续重试，不能承诺故障期固定秒数退款。</p><p>首次GPU提交前先条件取得RUN_GRANTED；拒绝事务只允许仍为ASSIGNED的owner，因此与启动竞争最多一个获胜。已经启动/结果未知不能用“未消费”全退。本地on_release先确认持久终态/结算outbox，再删除charged并退租户计数；失败或提交未知保留charged待办，原attempt查询并重试，不能先删本地待办。该段为教学伪代码，另有实际双SQLite适配验证事务/重投，未运行跨机配额服务。</p></div><div class="lang-en"><p>Input quota is already reserved, so 429 cannot merely discard HTTP state. Commit the terminal attempt, original 429 result, and a unique attempt settlement event in one database transaction. Same-key retries keep that 429 even after capacity returns. The quota authority atomically releases unused reservations once per attempt; acknowledge the outbox only after confirmation. Lost replies and release-before-ACK crashes safely retry. Outages retain pending settlement for recovery, without a fixed refund-time promise.</p><p>Before first GPU submission, conditionally obtain RUN_GRANTED. Rejection accepts only the still-ASSIGNED owner, so it races execution with one winner. Started or unknown execution cannot receive a blanket unused refund. Local on_release confirms the durable terminal/outbox before removing charged and decrementing tenant counters. Failed or unknown commits keep charged retryable under the same attempt. This is teaching pseudocode, with an actual two-SQLite adaptation for transaction/redelivery checks, not a cross-machine quota experiment.</p></div></div><pre data-language="Pseudocode · durable rejection" data-kind="pseudocode" data-source="reject.pseudo"><code># Teaching pseudocode: Attempt + SettlementOutbox share one authoritative DB.
+reject_unstarted(owner, status, reason):
+  BEGIN; row = SELECT Attempt WHERE id=owner.attempt FOR UPDATE
+  if row.state == TERMINAL: COMMIT; return row.saved_http_result
+  if row.owner != owner or row.state != ASSIGNED: COMMIT; return PENDING
+  UPDATE Attempt SET state=TERMINAL, saved_http_result=(status, reason)
+    WHERE id=:attempt_id AND owner=:owner AND state=ASSIGNED
+  require affected_rows == 1
+  INSERT SettlementOutbox(attempt_id, command=RELEASE_UNSPENT)
+    # UNIQUE(attempt_id); immutable command for this unstarted terminal attempt
+  COMMIT                                    # unknown: query same attempt; do not re-enqueue
+  return saved_http_result                  # same-key retry returns this 429
+
+before_first_gpu_issue(owner):
+  UPDATE Attempt SET state=RUN_GRANTED WHERE id=owner.attempt
+    AND owner=:owner AND state=ASSIGNED
+  # One confirmed row / previously confirmed same grant authorizes this owner.
+  # Terminal denies launch. Unknown commit is queried before any GPU submission.
+
+settlement_relay(event):                     # durable retries, independent quota service
+  quota.release_unspent_once(event.attempt_id)
+  # Quota authority atomically changes RESERVED -&gt; RELEASED once for that attempt.
+  # A lost reply / crash before ACK may repeat the same call without another refund.
+  mark_outbox_acked(event.attempt_id)
+# HTTP success/failure is not the cleanup trigger. Persist intent before replying.
+# During dependency outage settlement remains pending; healthy delivery retries drain it.
+# Do not promise a wall-clock refund bound during an unavailable quota authority.</code></pre><div class="bilingual"><div class="lang-zh"><p>这是单Scheduler事件循环伪代码，输入是已验证请求；输出QUEUED、过期/超额或ready。25/32/5,120是教学政策。等待用本地单调时间，重启不沿用旧时钟值；持久ASSIGNED恢复后查询原worker或隔离并明确中断，不能悄悄重放内存队列。当前代码不实现跨库配额预留。</p><p>健康容量缺失用503；租户超额/等待不可接受用429；上下文错误用400，均为本章接口约定。流头发出后改用终止事件，socket断了由客户端检测。权重加载、KV池和内核预热完成才ready；新worker只接新请求。离线另池；同池优先级不能中断一个已执行的长chunk。</p></div><div class="lang-en"><p>This single-scheduler event-loop pseudocode maps validated requests to QUEUED, expiry/denial, or ready. The 25/32/5,120 caps are teaching policy. Waiting uses local monotonic time; restart does not reuse old clock values. Recover ASSIGNED by querying its worker or fencing and explicitly interrupting, without silently replaying a lost queue. Cross-store quota reservations are not implemented.</p><p>Our API uses 503 for unavailable healthy capacity, 429 for tenant/excessive-wait denial, and 400 for context errors. After stream headers, send a terminal event; broken sockets are detected by Client. Become ready after weight loading, pool setup, and warmup. New workers take new requests. Offline uses another pool; a priority label cannot interrupt a running long chunk.</p></div></div></section>
+<section><h2><span class="lang-zh">KV分页：信用、物理页和共享引用</span><span class="lang-en">Paged KV: credits, physical pages, and shared references</span></h2><figure class="deck">
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d2s1t d2s1d">
           <title id="d2s1t">Separate reservation credits from physical KV</title>
@@ -373,29 +383,41 @@
         </svg>
         <figcaption><span class="lang-zh">完整图：R1 按逻辑页映射到散落的物理页；R2 留在准入之外。严守信用可避免输出一起变长时超订，代价是利用率较保守。</span><span class="lang-en">Complete board: R1 maps ordered logical pages to scattered physical pages; R2 remains outside admission. Strict credits avoid overcommit when outputs grow together, at the cost of conservative utilization.</span></figcaption>
       </div>
-    </figure><h3><span class="lang-zh">正常路径：逻辑连续，物理不必连续</span><span class="lang-en">Normal path: ordered logical blocks, scattered physical blocks</span></h3>
-<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>图的页表把 R1 的 L0、L1、L2 分别指到 P7、P2、P9；编号散落不是网络跳转。演示页大小 4：7 个 prompt 状态占两页，下一步写第 8 个状态填第二页，第 9 个才需第三页。生产页大小 16 来自 A4，不能把演示页的数字直接套进 320 MiB。PagedAttention 的关键是 attention 可以通过映射访问非连续 KV，减少连续大块预留带来的碎片 [2]。</p>
-<p>本章选严格信用：每条活动请求承诺最大长度，但物理页按当前状态增长，未来信用尚未兑现。于是“池有空闲物理页”和“可以承诺新请求”是不同条件。第 129 条会让承诺变成 129 × 320 = 41,280 MiB，比 40,960 MiB 超出 320 MiB。把每次乘法写全，避免只背第 129 条这个结论。真正需要守的是所有承诺之和不超过可用池。</p>
-<p>严格信用保守，但在所有输出接近上限时不用临时赶人。替代是按活页准入、预算不够时抢占或重算；这样空闲位置更少，代价是被抢占请求等待变长、重新 prefill 增加计算。分页解决物理碎片，不自动解决逻辑超订。已有请求若已经拿到完整信用，下一页在理论上应有额度；频繁“突然没页”说明共享/COW 开销、页表或激活预算没有算全。</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>R1’s L0, L1, and L2 point to P7, P2, and P9. Scattered IDs are not network hops. With four-state toy pages, seven prompt states occupy two pages; state eight fills page two and state nine requires a third. Production pages hold sixteen states under A4; toy sizes do not determine 320 MiB. PagedAttention uses mapping-aware attention over noncontiguous KV to reduce fragmentation from contiguous reservations [2].</p>
-<p>Our conservative policy promises full length per active request while allocating physical pages as states grow. Unused future credits are not yet physical allocations. Free physical pages and available new-request credits are therefore different. The full-cap credit total for request 129 is <code>129 × 320 = 41,280 MiB</code>, exceeding 40,960 MiB by 320 MiB. Preserve the complete multiplication rather than just memorizing request 129. Total commitments must fit the usable pool.</p>
-<p>Strict credits are conservative but avoid emergency eviction when every output approaches its cap. Live-page admission with preemption or recomputation improves utilization while increasing waiting and prefill work for victims. Paging fixes physical fragmentation, not logical overcommit. If a fully credited request unexpectedly lacks a page, recheck sharing/COW overhead, tables, and activation budgets.</p>
-</div></div><h3><span class="lang-zh">前缀缓存的收益和失效边界</span><span class="lang-en">Prefix reuse and invalidation</span></h3>
-<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>前缀复用比较的是实际 token 前缀及其计算身份，不能简单说“多一个空格整段必失效”。不同文本可能分成相同 token，模板或位置变化也可能让看似相同文本变成不同计算。固定模型版本、tokenizer、位置语义和 LoRA，完整块按父哈希、块 token 和额外身份构成键；vLLM v0.15.1 文档还列出 LoRA、多模态哈希与 cache salt，并说明缓存完整块 [5]。模型升级切新命名空间，不能把旧 KV 拿给新权重。</p>
-<p>复用时新增请求引用，生成时写入私有尾块；若实现共享未满尾页，就必须 copy-on-write。共享完整前缀还可在请求结束后作为可淘汰缓存保留，所以“引用归零”不等于“当场把物理页擦空”。需要分清活动引用、可驱逐缓存和真正空闲页。保守承诺默认不计命中收益，能简化所有输出变长时的预算；若把共享收益用于提高准入，就必须为尾页复制和缓存驱逐建立同一账本。</p>
-<p>APC 减少重复 prefill，不缩短需要生成的后缀步数，官方限制明确如此 [6]。前缀不匹配、页被驱逐或模型身份变化都回到正常计算，不能把 miss 算生成失败。多租户共享还要防时延泄露，本章采用服务器按信任域生成 salt；任由请求者选择别人的 salt 不构成隔离。缓存省算力，不应让一次热命中绕过输出额度。</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>Prefix reuse compares token IDs and computation identity, not a blanket rule that one extra space invalidates everything. Distinct text may tokenize identically; templates and position changes may alter apparently identical text. Fix model version, tokenizer, position semantics, and LoRA. vLLM v0.15.1 keys complete blocks using parent hash, block tokens, and extra identities including LoRA, multimodal hashes, and cache salt [5]. Model upgrades use a new namespace; old KV cannot serve new weights.</p>
-<p>Reuse adds an active reference and generation writes a private tail. Sharing a partial tail requires copy-on-write. Completed full prefixes may remain evictable cache entries, so zero active references do not imply immediate physical erasure. Distinguish active refs, evictable cache, and free pages. Conservative commitments ignore cache-hit savings. Using sharing to increase admission requires one ledger for tail copies and eviction.</p>
-<p>APC reduces repeated prefill without shortening suffix generation steps [6]. Prefix mismatches, eviction, and model changes compute normally rather than failing generation. To avoid timing leakage across tenants, our server assigns salt by trust domain; a client choosing another tenant’s salt is not isolation. Cache savings do not bypass output quota.</p>
-</div></div></section>
+    </figure><div class="bilingual"><div class="lang-zh"><p>图的L0/L1/L2映射到P7/P2/P9，表示物理地址可分散；attention按block table读KV。演示页4个状态：7→8填P2，8→9才加P9；它不同于容量假设的16 token页。PagedAttention减少连续分配造成的碎片，不自动解决逻辑超订。<a href="#ref-2">[2]</a></p><p>保守策略为每个请求预留prompt+最大输出的完整信用，物理页随实际状态增长。即使物理页空着，也可能已承诺给活动请求未来输出；只有总承诺有余量才再准入。下面Java17可运行模型把信用补判扣与物理分配串行化在<strong>一个worker的CPU锁</strong>内；分布式尝试身份仍由共享记录负责。</p></div><div class="lang-en"><p>L0/L1/L2 map to P7/P2/P9: physical blocks may be scattered while attention follows the block table. Toy pages hold four states; 7→8 fills P2 and 8→9 adds P9. Capacity assumptions use sixteen-token pages. PagedAttention reduces contiguous-allocation fragmentation without solving logical overcommit. <a href="#ref-2">[2]</a></p><p>Our conservative policy reserves prompt-plus-output-cap credits while allocating physical blocks on demand. Empty physical blocks may already be promised to active requests’ future output. Admission needs uncommitted credits. This runnable Java17 model serializes credit checks/debits and allocation under <strong>one worker’s CPU lock</strong>; shared records separately govern distributed attempt identity.</p></div></div><pre data-language="Java17 · runnable model excerpt" data-kind="runnable" data-source="KvLedger.java#admission"><code>public synchronized boolean admit(Owner owner, int prompt, int maxOutput) {
+    long total = (long) prompt + maxOutput;
+    if (prompt &lt;= 0 || maxOutput &lt;= 0 || total &gt; contextLimit)
+        throw new IllegalArgumentException(&quot;Token limits&quot;);
+    if (!healthy || !boot.equals(owner.boot())) return false;
+    int need = (int) ((total + BLOCK - 1) / BLOCK);
+    Generation prior = generations.get(owner);
+    if (prior != null) {
+        if (prior.credits != need) throw new IllegalArgumentException(&quot;Changed request&quot;);
+        return prior.state == State.RUNNING;
+    }
+    boolean oldOwnerLive = generations.entrySet().stream().anyMatch(e -&gt;
+            e.getKey().attempt().equals(owner.attempt()) &amp;&amp; e.getValue().state != State.RELEASED);
+    if (oldOwnerLive || need &gt; pool.length - reserved) return false;
+    generations.put(owner, new Generation(need));
+    reserved += need;                    // promise full output; allocate no page yet
+    return true;
+}
 
-  <section>
-<h2><span class="lang-zh">Continuous batching：每轮改变成员</span><span class="lang-en">Continuous batching: membership per iteration</span></h2>
-<figure class="deck">
+public synchronized Handle allocate(Owner owner) {
+    Generation gen = mutable(owner);
+    if (gen.pages.size() &gt;= gen.credits) throw new IllegalStateException(&quot;Credit exhausted&quot;);
+    for (int i = 0; i &lt; pool.length; i++) {
+        Page page = pool[i];
+        if (page.refs != 0 || page.pins != 0) continue;
+        page.incarnation = Math.incrementExact(page.incarnation);
+        page.cached = page.sealed = false; // evict an unused cache entry if needed
+        page.refs = 1;
+        Handle h = new Handle(boot, i, page.incarnation);
+        gen.pages.add(h);
+        return h;
+    }
+    throw new IllegalStateException(&quot;Pool accounting violated&quot;);
+}</code></pre><div class="bilingual"><div class="lang-zh"><p>输入owner=(attempt,generation,worker boot)、prompt与最大输出；输出信用是否受理、或一个带incarnation的页Handle。源码的generation保留页集合，页分别计活动引用refs和在途访问pins。只共享已完成的不可变完整块；未满尾页共享/COW不在此模型中。真实引擎若超订、COW或有隐藏workspace，必须另外补入同一预算。</p><p>前缀命中比较token与计算身份，固定模型/LoRA、位置语义和信任域。vLLM v0.15.1按父哈希、块token与额外身份缓存完整块；cache salt隔离复用，本设计由服务器按信任域赋值。APC减少重复prefill，不减少待生成后缀步数；miss正常重算。模型升级换命名空间，输出额度不随命中减少。<a href="#ref-5">[5]</a> <a href="#ref-6">[6]</a></p><p>完整前缀可在refs=0时留作可驱逐缓存；有refs或pins就不能复用地址。本策略不把共享收益卖成更多信用，简化最坏输出承诺；活页超订则需明确抢占/重算以及被抢占请求的延迟代价。</p></div><div class="lang-en"><p>Inputs are owner=(attempt,generation,worker boot), prompt, and output cap. Outputs are admission or an incarnation-stamped block Handle. The source tracks a generation’s page set, with separate active references and in-flight pins per page. It shares only complete immutable blocks; partial-tail sharing/COW is outside this model. Real overcommit, COW, and hidden workspaces need the same explicit budget.</p><p>Reuse compares tokens and computation identity, fixing model/LoRA, positions, and trust domain. vLLM v0.15.1 caches complete blocks using parent hashes, block tokens, and extra identity. Cache salts isolate reuse; this design assigns them by server trust domain. APC saves repeated prefill, not suffix steps; misses compute normally. Model upgrades change namespaces and hits never bypass output quota. <a href="#ref-5">[5]</a> <a href="#ref-6">[6]</a></p><p>A full prefix with refs=0 may remain an evictable cache entry. References or pins prevent address reuse. We do not sell sharing savings as more credits, simplifying worst-output promises. Live-page overcommit instead needs explicit preemption/recomputation and its waiting cost.</p></div></div></section>
+<section><h2><span class="lang-zh">逐轮batch：换成员，也要限制本轮工作</span><span class="lang-en">Iteration batching: change members and bound work</span></h2><figure class="deck">
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d3s1t d3s1d">
           <title id="d3s1t">One decode iteration with D waiting</title>
@@ -530,34 +552,54 @@
           <rect x="680" y="301" width="165" height="48" rx="12" class="box"/><text x="762.5" y="322" text-anchor="middle" class="label">D decode</text><text x="762.5" y="341" text-anchor="middle" class="sub">first suffix step</text>
           <path d="M600 325 L670 325" class="wire"/><polygon points="680,325 670,330 670,320" class="head"/>
           <g class="is-new">
-            <path d="M270 349 L270 361 Q270 369 278 369 L755 369 Q760 369 760 364 L760 359" class="wire fail"/><polygon points="760,349 765,359 755,359" class="head fail"/><text x="505" y="359" text-anchor="middle" class="tiny">reject: D waits for all of A</text>
+            <path d="M270 349 L270 361 Q270 369 278 369 L755 369 Q760 369 760 364 L760 359" class="wire fail"/><polygon points="760,349 765,359 755,359" class="head fail"/><text x="762.5" y="177" text-anchor="middle" class="tiny">rejected barrier:</text><text x="762.5" y="197" text-anchor="middle" class="tiny">D waits for all of A</text>
           </g>
         </svg>
         <figcaption><span class="lang-zh">完整图否决的是“D 等 A 整段结束”。逐轮凑批提高空位利用率，仍不能保证只等一轮，也不能消灭排队、长输出或 prefill 干扰。</span><span class="lang-en">The complete board rejects waiting for all of A. Iteration scheduling reuses capacity sooner, without guaranteeing one-iteration waiting or removing queueing, long output, or prefill interference.</span></figcaption>
       </div>
-    </figure><h3><span class="lang-zh">正常路径与调度层次</span><span class="lang-en">Normal scheduling and its layers</span></h3>
-<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>图按时间累积：t 有 A、B、C，D 等待；B EOS 后退休引用；t+1 检查预算让 D prefill；t+2 D 开始 decode。Orca 提出 iteration-level scheduling 与 selective batching [1]。这解决整请求级批次的进入/退出屏障；实际新请求仍可能因显存、计算、公平性或优先级等待多轮。“下一轮可考虑”不能翻译成“所有新请求最多等一轮”。</p>
-<p>CPU Scheduler 决定本轮 token 数、活跃序列和 chunk，GPU 内核执行这些算子。decode 多请求可以分摊权重访问，但每轮成本取决于活跃上下文和内核；128 条长上下文不会天然保持单条请求的 20 ms。调 batch 时同时观察用户间隔、prefill 完成速度和页压力，取延迟与显存约束中更紧的那个。FlashAttention 优化 HBM 与片上 SRAM 的 IO，是 attention 内核 [4]；它不会替你实现租户公平或取消生命周期。</p>
-<p>公平至少同时计输入工作、decode 步数和占用页。单租户大量小 prompt 可以用输出填满所有轮次；另一租户的大 prompt 若一直让位也会饿死。用租户队列、受预算限制的加权份额和等待年龄提升选择新工作，限制单轮总 token；这些是本章设计选择，不把某引擎当前默认 FCFS 说成全部场景最优。</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>The history accumulates t with A/B/C and waiting D, B’s EOS retirement, D’s budget-checked prefill in t+1, and D’s decode in t+2. Orca introduced iteration-level scheduling and selective batching [1]. These remove whole-request batch entry/exit barriers. Memory, compute, fairness, and priority can still delay arrivals multiple iterations. Eligible for consideration next iteration does not mean every arrival waits at most one iteration.</p>
-<p>CPU Scheduler selects tokens, active sequences, and chunks; GPU kernels execute them. Batched decode can amortize weight access, but cost depends on contexts and kernels. 128 long-context requests need not retain a single request’s twenty-ms gap. Tune batches against user gaps, prefill completion, and page pressure, using the tighter memory or latency constraint. FlashAttention reduces HBM/SRAM IO inside attention [4]; it does not implement tenant fairness or cancellation.</p>
-<p>Fairness accounts for input work, decode steps, and page occupancy. One tenant’s short prompts can fill decode iterations with long outputs, while another’s large prompts starve. Our policy uses tenant queues, budgeted weighted shares, and wait-age escalation with a per-iteration token cap. These are design choices, not claims that one engine’s default FCFS is universally optimal.</p>
-</div></div><h3><span class="lang-zh">三种延迟不能用一个 TPS 掩盖</span><span class="lang-en">Three latency effects cannot hide behind TPS</span></h3>
-<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>用户 TTFT 从发送请求计到收到首个内容。A6 的单请求预算是 50 + 排队 + 150 ≤ 800，所以留给等待 600 ms；网络、模板处理和发送缓冲都不能凭空省掉。这是一次请求的预算，不是“50 的 p99 加 150 的 p99”得到整条链 p99，相关性和联合尾部要端到端测量。</p>
-<p>首 token 已在 prefill 结束时产生，若输出共 N 个，后续相邻间隔只有 N−1 个。固定间隔 20 ms 的例子：256 个输出剩 255 × 20 = 5,100 ms；加 200 ms 无排队首段预算约 5.3 秒。按 50 ms 算是 255 × 50 = 12.75 秒，但 p99 50 ms 不是每一步的硬上限，不能当总时长保证。输出上限、端到端截止时间和交互产品目标要另定。</p>
-<p>TPOT 常用整请求 decode 时长除以输出间隔数，平均值会掩盖某一步停顿；本章另外统计 ITL 的相邻输出间隔 p99。排队影响 TTFT，长输出影响总时长，同轮 prefill 干扰影响 ITL。三个监控要分开。chunked prefill 把长输入切短并与 decode 组批，vLLM v0.15.1 的调优文档说明 token 预算影响 ITL 与 TTFT [7]，它仍是约束下的选择，不保证两边都随 chunk 变小而改善。</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>Client TTFT spans sending the request to receiving first content. A6’s per-request budget is 50 + wait + 150 ≤ 800, leaving 600 ms for waiting. Network, template processing, and send buffering remain. This is a request budget, not a sum of component p99s; correlations and joint tails require end-to-end measurement.</p>
-<p>Prefill already produces the first token, so N outputs have N−1 subsequent gaps. With twenty-ms fixed gaps, 256 outputs add 255 × 20 = 5,100 ms; a two-hundred-ms no-queue first-token budget gives about 5.3 seconds total. At fifty-ms gaps the added time is 12.75 seconds. A fifty-ms p99 is not a hard per-step ceiling or total-duration guarantee. Set output caps and end-to-end deadlines separately.</p>
-<p>TPOT commonly averages decode time across output intervals and can hide a single stall. We separately measure p99 ITL over individual adjacent-output gaps. Queueing affects TTFT, long output affects total time, and mixed prefill affects ITL. vLLM v0.15.1 tuning explains how chunked-prefill token budgets trade ITL against TTFT [7]; smaller chunks do not guarantee both improve.</p>
-</div></div></section>
-
-  <section>
-<h2><span class="lang-zh">取消与内存压力：先退休访问，再归还</span><span class="lang-en">Cancel and memory pressure: retire accesses before release</span></h2>
-<figure class="deck">
+    </figure><div class="bilingual"><div class="lang-zh"><p>t轮A/B/C，B结束并退休引用；t+1可考虑D prefill，t+2 D decode。Orca的iteration-level scheduling消除整请求batch屏障；D仍会因页、计算或公平等待多轮。CPU选成员和chunk，attention内核执行；FlashAttention优化IO，不替调度器实现公平。<a href="#ref-1">[1]</a> <a href="#ref-4">[4]</a></p><p>每租户保留deficit和请求游标，成本由context、phase与token数计；余额跨轮累积、上限至少容纳最大合法chunk。轮转起点防同一租户总先占剩余预算。准入还限租户活动数/页份额；单轮选出每条请求最多一个chunk或一个decode步。高权重是相对份额，不是硬实时保证。</p></div><div class="lang-en"><p>Iteration t has A/B/C. B finishes and retires references; t+1 may admit D’s prefill and t+2 decodes D. Orca’s iteration scheduling removes the whole-request batch barrier, but pages, compute, and fairness may still delay D many rounds. CPU selects members/chunks and kernels execute. FlashAttention optimizes IO rather than scheduler fairness. <a href="#ref-1">[1]</a> <a href="#ref-4">[4]</a></p><p>Keep tenant deficits and request cursors. Charge by context, phase, and token count; carry balances across rounds with a cap large enough for the largest legal chunk. Rotate the first tenant so the same tenant does not always consume residual budget first. Admission also caps tenant active/page shares. Each request contributes at most one chunk or decode step per iteration. Weights are relative shares, not real-time guarantees.</p></div></div><pre data-language="Pseudocode · iteration planning" data-kind="pseudocode" data-source="iteration.pseudo"><code># Teaching pseudocode: issue at most one outstanding iteration per sequence.
+# Slots/page limits constrain admission; profile(context, batch, chunk) constrains compute.
+iteration(now):
+  retire_only_completed_gpu_tickets()       # apply phase/output progress once, then on_release
+  admit_waiters(now)
+  batch = []; budget = measured_iteration_envelope
+  for tenant in rotating_ready_tenant_ring:
+    deficit[tenant] = min(deficit_cap, deficit[tenant] + weight[tenant] * quantum)
+    # Each tenant&#x27;s request cursor survives across iterations.
+    for r in ready[tenant].one_round_from_cursor():
+      if r.state != RUNNING or r.in_flight: continue
+      if now &gt;= r.request_deadline or (not r.prefill_started and now &gt;= r.wait_deadline):
+        worker_ledger.stop(r.owner, DEADLINE); continue
+      if r.outputs &gt;= r.max_output:
+        worker_ledger.stop(r.owner, EOS); continue
+      if r.send_buffer &gt;= 64KiB or r.no_progress &gt;= 2s:
+        worker_ledger.stop(r.owner, CANCEL); continue
+      if r.prefill_remaining:
+        n = min(r.prefill_remaining, chunk_cap, budget.remaining_tokens)
+        n = largest_positive_chunk_fitting_profile(r, n, batch, budget)
+      else:
+        n = 1                             # one decode step, never entire output
+      if n == 0: continue
+      cost = profile_cost(r.context, n, r.phase)
+      if cost &gt; deficit[tenant] or not budget.fits(r, n, batch): continue
+      if not ensure_blocks_within_reserved_credit(r, n): fail_worker_accounting()
+      batch.append(r.owner, r.phase, n)
+      deficit[tenant] -= cost; budget.consume(r, n)
+      # This r can enter only once in this iteration.
+    advance_request_cursor(tenant)
+  rotate_ready_tenant_ring_start()
+  if batch:
+    batch = keep_confirmed_run_grants(batch) # first issue: ASSIGNED -&gt; RUN_GRANTED or saved same grant
+    # Terminal grant denial stops the local generation; unknown grants park for recovery.
+    if not batch: return                   # denied/unknown grants must not launch
+    ticket = worker_ledger.issue(batch.owners)  # snapshot refs and pin before launch
+    launch_gpu(batch, ticket)               # record all-stream/copy completion fence
+  # Deficits carry over; choose cap &gt;= largest legal chunk cost.
+  # No fit means wait/expire; this is no promise of a one-iteration bound.
+# On a fence, complete(ticket,eos) must return true before applying result progress.
+# Publish only matching owners without CANCEL/DEADLINE; count sampled outputs once.
+# Never accept output beyond max_output; complete() itself handles pins, refs and credits.</code></pre><div class="bilingual"><div class="lang-zh"><p>输入ready队列和经过测量的profile/envelope，输出batch和GPU ticket。<code>budget.fits</code>同时检查本轮token/序列数、上下文对应工作区与预测执行时长；<code>ensure_blocks</code>只在既有信用中扩页。profile是适配依赖，不能用它宣称已经测过GPU。decode优先或prefill保底份额都要测TTFT/停顿；vLLM v0.15.1也把chunk token预算列为ITL/TTFT取舍。<a href="#ref-7">[7]</a></p></div><div class="lang-en"><p>Inputs are ready queues and a measured profile/envelope; outputs are a batch and GPU ticket. <code>budget.fits</code> checks tokens/sequences, context-dependent workspace, and predicted duration. <code>ensure_blocks</code> grows pages within existing credits. The profile is an adapter dependency, not evidence of a GPU experiment. Measure TTFT and stalls when choosing decode priority or prefill shares; vLLM v0.15.1 also documents the token-budget tradeoff. <a href="#ref-7">[7]</a></p></div></div><h3><span class="lang-zh">延迟指标必须写清起止点</span><span class="lang-en">Latency metrics need explicit endpoints</span></h3><div class="bilingual"><div class="lang-zh"><p><strong>客户端TTFT</strong>从发送请求到收到首个内容，含排队、网络和flush；A6是单次条件预算50+等待+150≤800，分量p99不能相加。<strong>worker ITL</strong>统计相邻token-ready时间差；客户端SSE块可合并多个token，块到达间隔另报，不冒充GPU步时长。</p><p><strong>TPOT</strong>用同一worker时间轴的<code>(末token−首token)/(N−1)</code>，N=1无此平均值；它会掩盖单步停顿。256个输出有255个后续间隔，固定20ms例子是5.1s；另加假设200ms首段约5.3s。ITL p99=50ms不能当每步硬上限，也不能推整请求总时长。<strong>goodput</strong>计每秒联合达标的完成请求，分母/联合达标比例另报；TTFT和ITL各自p99不等于99%请求联合达标。</p></div><div class="lang-en"><p><strong>Client TTFT</strong> spans request send to first content, including queueing, network, and flush. A6’s 50+wait+150≤800 is a conditional per-request budget, not summed p99s. <strong>Worker ITL</strong> is the gap between adjacent token-ready times. SSE chunks may combine tokens, so separately report client chunk-arrival gaps rather than calling them GPU step times.</p><p><strong>TPOT</strong> is <code>(last token−first token)/(N−1)</code> on the same worker clock; it is undefined for N=1 and may hide a stall. 256 outputs have 255 later gaps: at fixed twenty ms, 5.1s, or approximately 5.3s with an assumed 200ms first-token path. A fifty-ms ITL p99 is no hard step or total-duration bound. <strong>Goodput</strong> counts jointly compliant completions/s; also report its denominator and joint attainment. Separate TTFT/ITL p99s do not establish 99% joint request attainment.</p></div></div></section>
+<section><h2><span class="lang-zh">取消与完成：先退休访问，再释放页</span><span class="lang-en">Cancel and completion: retire accesses before releasing pages</span></h2><figure class="deck">
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d4s1t d4s1d">
           <title id="d4s1t">Generation holds an explicit ownership reference</title>
@@ -668,27 +710,59 @@
         </svg>
         <figcaption><span class="lang-zh">完整生命周期是 RUNNING→CANCEL_PENDING→RETIRED→RELEASED→下一次准入。终止事件能发则发；已断开的客户端无法接收，不能把“尝试发送”算成送达。</span><span class="lang-en">Complete lifecycle: RUNNING→CANCEL_PENDING→RETIRED→RELEASED→next admission. Emit a terminal event when possible; a disconnected client cannot receive it, so an attempted send is not delivery.</span></figcaption>
       </div>
-    </figure><h3><span class="lang-zh">正常生命周期与并发竞争</span><span class="lang-en">Lifecycle and competing events</span></h3>
-<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>取消可能来自用户关流、服务 deadline 或缓冲超限。网关向 Scheduler 发 attempt/epoch，Scheduler 只对匹配的 owner 标 CANCEL_PENDING，阻止后续调度。GPU 执行是异步的，已发出的共享 kernel 可以跑完；等访问相关页的 stream/fence 完成，才从请求的 block table 退休引用。EOS 和 cancel 同时发生时，单次状态转换决定谁做清理，重复消息返回已有终态，不能归还两次。</p>
-<p>独占页在引用归零后可以复用，共享前缀还被其他请求持有就不能动。前缀缓存留存也要遵守驱逐规则，释放“这条请求的引用”和释放“缓存的物理页”是两步。Q1 只能在账本确认可复用后领页，不能在 CPU 已收到取消而 GPU 还没完成时提前写同一地址。取消之后继续占页的僵尸，会把本来可服务的信用吃掉；监控 cancel→retire→release 三段时间。</p>
-<p>慢读者不应该拖住整批 GPU，也不能把每个 delta 无限存进网关。A11 给每流 64 KiB 待发送上限和 2 秒无进展期限；达到限制时暂停该请求的后续调度或取消，其他请求继续。必须先统计已缓存内容和输出额度，不能因为 HTTP 还活着就无限生成。128 条都顶格缓冲是 128 × 64 KiB = 8 MiB/网关承载集合，部署上按实际流数汇总，不能当全站固定值。</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>Cancel originates from client disconnect, service deadline, or buffer limits. The gateway sends attempt/epoch; Scheduler marks only the matching owner CANCEL_PENDING and prevents later scheduling. GPU work is asynchronous, so a shared issued kernel may finish. Retire block-table references after all relevant streams/fences complete. If EOS races cancel, one state transition owns cleanup; duplicate messages return the saved terminal state without releasing twice.</p>
-<p>Exclusive pages can be reused at zero references; shared prefixes held elsewhere cannot. Cached prefixes follow eviction rules, separating request-reference release from physical-cache release. Q1 claims pages only after the ledger confirms reuse, not merely when the CPU receives cancel. Zombie ownership consumes capacity; monitor cancel→retire→release intervals.</p>
-<p>A slow reader must neither stall the entire batch nor create unlimited gateway buffering. A11 caps pending bytes at 64 KiB per stream and cancels after two seconds without progress. Pause later scheduling for that request or cancel it, while others continue. Track buffered output and quota rather than generating forever while HTTP lives. 128 full buffers total 8 MiB for that gateway’s stream set; aggregate actual stream counts in deployment.</p>
-</div></div><h3><span class="lang-zh">分配拒绝与致命 CUDA 错误分开</span><span class="lang-en">Allocation denial versus fatal CUDA errors</span></h3>
-<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>没有页信用是一条可控准入拒绝：新请求继续等或过载返回，活动请求按已有承诺继续。活页策略中，可在新 kernel 发出前抢占个别序列。实际 OOM 可能来自激活峰值、图捕获工作区或隐藏分配，不能一律说“只失败申请页的那条，其他都继续”。先确认引擎能回滚分配且 CUDA context 健康，才能走局部清理。</p>
-<p>非法访存、设备致命错误或进程被杀，按 worker 死亡处理，标记这张 worker 不可准入，终止其全部在途尝试并重启恢复。CUDA Runtime 文档对 illegal address 等错误明确要求重新启动进程 [8]。失效显存并非可原地归还给旧进程的正常池；持久 owner 账本要失效，重启后新 epoch、新池。把全部 OOM 画成“释放一个 block 就好了”会掩盖这条故障域。</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>Missing page credits produce controlled admission denial: new work waits or receives overload while previously committed work continues. Live-page policies may preempt sequences before another kernel is issued. Actual OOM can come from activation peaks, graph workspaces, or hidden allocations, so it is not universally isolated to the requesting sequence. Local rollback requires a healthy context and engine-supported recovery.</p>
-<p>Illegal memory access, fatal device errors, or process death are worker loss: remove admission, terminate all in-flight attempts, and restart. CUDA Runtime documentation requires process relaunch for illegal-address errors [8]. Failed device memory is not a reusable pool in the old process. Invalidate durable ownership and restart with a new epoch and pool. Treating every OOM as one block release hides this failure domain.</p>
-</div></div></section>
+    </figure><div class="bilingual"><div class="lang-zh"><p>对应图的RUNNING → CANCEL_PENDING → RETIRED → RELEASED。Java把等待退休记作RETIRING；<code>inFlight==0</code>是进入RETIRED并立即释放的条件，不多存一个瞬态字段。发GPU前，ticket固定owner/页快照并pin；取消只标停止，EOS与取消用同一锁竞争首个停止原因。</p></div><div class="lang-en"><p>The diagram is RUNNING → CANCEL_PENDING → RETIRED → RELEASED. Java calls the waiting state RETIRING; <code>inFlight==0</code> allows RETIRED and immediate release without storing that transient phase. Before launch, a ticket snapshots owners/pages and pins them. Cancel marks stop; EOS and cancel contend for the first stop reason under the same lock.</p></div></div><pre data-language="Java17 · runnable model excerpt" data-kind="runnable" data-source="KvLedger.java#issue-stop"><code>public synchronized Ticket issue(List&lt;Owner&gt; batch) {
+    if (!healthy || batch.isEmpty() || new HashSet&lt;&gt;(batch).size() != batch.size())
+        throw new IllegalArgumentException(&quot;Invalid batch&quot;);
+    List&lt;Hold&gt; holds = new ArrayList&lt;&gt;();
+    for (Owner owner : batch) {
+        Generation gen = mutable(owner);
+        if (gen.pages.isEmpty()) throw new IllegalStateException(&quot;Missing KV&quot;);
+        holds.add(new Hold(owner, List.copyOf(gen.pages)));
+    }                                   // validate everything before mutating
+    long id = Math.incrementExact(nextTicket);
+    for (Hold hold : holds) {
+        generations.get(hold.owner()).inFlight++;
+        for (Handle h : hold.pages()) page(h).pins++;
+    }
+    nextTicket = id;
+    launches.put(id, List.copyOf(holds));
+    return new Ticket(boot, id);          // pin before submitting any GPU access
+}
 
-  <section>
-<h2><span class="lang-zh">流中断：尝试幂等不等于 token 送达</span><span class="lang-en">Interrupted stream: attempt dedupe is not delivery</span></h2>
-<figure class="deck">
+public synchronized boolean stop(Owner owner, Reason reason) {
+    Objects.requireNonNull(reason);
+    Generation gen = generations.get(owner);
+    if (!healthy || gen == null || gen.state != State.RUNNING) return false;
+    gen.reason = reason;                 // first stop/EOS wins
+    gen.state = State.RETIRING;           // prevents all later issue calls
+    releaseIfRetired(gen);
+    return true;
+}</code></pre><div class="bilingual"><div class="lang-zh"><p>真实适配器必须把所有读写KV、block table和相关copy的stream依赖纳入同一完成证据。CUDA event只证明其捕获工作/依赖完成；不能随手查一个不相关stream就还页。下面模型由测试手工调用<code>complete</code>模拟“证据已成立”，没有执行CUDA。<a href="#ref-10">[10]</a></p></div><div class="lang-en"><p>A real adapter must cover every stream dependency accessing KV, block tables, or related copies. A CUDA event proves completion only for the work/dependencies it captures; querying an unrelated stream cannot authorize release. Tests manually call <code>complete</code> to simulate established completion evidence. They do not execute CUDA. <a href="#ref-10">[10]</a></p></div></div><pre data-language="Java17 · runnable model excerpt" data-kind="runnable" data-source="KvLedger.java#retire"><code>public synchronized boolean complete(Ticket ticket, Set&lt;Owner&gt; eos) {
+    if (!healthy || !boot.equals(ticket.boot())) return false;
+    List&lt;Hold&gt; holds = launches.remove(ticket.id());
+    if (holds == null) return false;      // duplicate/old completion
+    for (Hold hold : holds) {
+        for (Handle h : hold.pages()) page(h).pins--;
+        Generation gen = generations.get(hold.owner());
+        gen.inFlight--;
+        if (eos.contains(hold.owner()) &amp;&amp; gen.state == State.RUNNING) {
+            gen.reason = Reason.EOS;
+            gen.state = State.RETIRING;
+        }
+        releaseIfRetired(gen);
+    }
+    return true;
+}
+
+private void releaseIfRetired(Generation gen) {
+    if (gen.state != State.RETIRING || gen.inFlight != 0) return;
+    for (Handle h : gen.pages) page(h).refs--;
+    gen.pages.clear();
+    reserved -= gen.credits;             // return promise exactly once
+    gen.state = State.RELEASED;
+    // A page is reusable only at refs==0 &amp;&amp; pins==0; cached data may remain.
+}</code></pre><div class="bilingual"><div class="lang-zh"><p><strong>危险反例：</strong>A持2页信用、只实占1页，kernel仍读P7；cancel到达后若立刻归还信用，B就能获准并覆盖P7，A仍可能读到B的KV。示例直到ticket完成才释放，重复完成先从launch表删除一次，旧Handle的incarnation也不能指向B的新分配。共享前缀即使A退出，B的refs/pins仍保护它。正常EOS走相同释放门。</p><p>慢读者按64 KiB待发送上限/2s无进展停止后续调度或取消，别条请求继续。128条流都顶格是8 MiB缓冲，只是该承载集合的教学上界。页不足是可控准入拒绝；激活峰值OOM能否局部回滚取决于引擎/context健康。illegal address等致命错误按整worker死亡，隔离旧池、新boot重建，不能把旧池“释放一个block”后继续用。<a href="#ref-8">[8]</a></p></div><div class="lang-en"><p><strong>Dangerous trace:</strong> A reserves two blocks but occupies one while its kernel still reads P7. Returning credits on cancel could admit B and overwrite P7 while A reads it. This example waits for the ticket, removes each launch once, and stamps reused handles with a new incarnation. A shared prefix remains protected by B’s refs/pins after A leaves. Normal EOS uses the same release gate.</p><p>Stop future scheduling or cancel a slow reader at 64 KiB pending sends or two seconds without progress, while others continue. At 128 capped streams this is 8 MiB for that serving set, not a global constant. Missing credits are controlled denial. Local recovery from activation OOM requires a healthy context and engine support. Fatal errors such as illegal addresses mean worker loss: quarantine the old pool and rebuild under a new boot, rather than freeing one block and continuing. <a href="#ref-8">[8]</a></p></div></div></section>
+<section><h2><span class="lang-zh">流中断：尝试幂等不等于token送达</span><span class="lang-en">Interrupted streams: attempt dedupe is not token delivery</span></h2><figure class="deck">
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s1t d5s1d">
           <title id="d5s1t">An attempt record is not a durable event replay log</title>
@@ -801,29 +875,39 @@
         </svg>
         <figcaption><span class="lang-zh">完整图没有“write 成功就至少一次送达”的承诺。若产品要可重放，另做持久事件日志、保留期和客户端去重；日志能重放已存内容，仍不能自动复活旧 KV。</span><span class="lang-en">The complete board makes no at-least-once promise from a successful write. Replay requires a durable event log, retention, and client deduplication. A log replays stored content, without reviving old KV.</span></figcaption>
       </div>
-    </figure><h3><span class="lang-zh">失败路径与重试语义</span><span class="lang-en">Failure path and retry semantics</span></h3>
-<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>worker decode 中途死亡，KV、采样状态与未保存输出都可能消失。健康探测阻止新准入，匹配 attempt/epoch 的终态更新为 INTERRUPTED；若连接可用，worker 故障经 Scheduler、网关逐跳发终止事件。网关自身死亡时旧 worker 未必死，恢复者先查询并取消旧 owner，或让其执行租约过期并拒绝旧 epoch 的输出，不能仅因为没有 heartbeat 就并发生成第二份。</p>
-<p>同 key 重试恢复已保存结果：QUEUED/RUNNING 返回状态并拒绝另开流，DONE 返回完成元数据，INTERRUPTED 示例用 409 提示显式选择。这是本章设计约定，不是所有兼容 API 的默认行为。尚无字节写出也不自动重算，因为“没有记录”可能是记录落后，旧 owner 仍在生成。24 小时保留覆盖 15 分钟重试窗口；过期 key 先人工或产品确认结果，不能无限自动换 key 重发。</p>
-<p>网关 seq=37 write 成功，只证明发送调用接受了字节，不能证明 Client 已解析或展示 37。客户端 ack 能标记它处理到哪里，也不能恢复死卡 KV。没有持久输出日志时，连“至少一次送达”都没有证据，更谈不上原 token 恰好一次。若产品需要重放，先把事件按 attempt/seq 持久保存，再发送，客户端去重并提供处理游标，保留期与恢复接口配套；这增加写延迟、存储和日志访问权限，不是本章基线的隐藏功能。</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>Mid-decode worker death can lose KV, sampling state, and unsaved output. Health checks stop new admission; the matching attempt/epoch becomes INTERRUPTED. If the connection works, the terminal event traverses Scheduler and gateway. Gateway death does not prove worker death. A recovery owner first queries and cancels the old owner or waits for its execution lease to expire while fencing old-epoch output. A missing heartbeat alone cannot authorize concurrent duplicate generation.</p>
-<p>Same-key retries recover saved state: QUEUED/RUNNING report status without a second stream, DONE reports completion metadata, and INTERRUPTED illustratively returns 409 for explicit choice. This is our API contract, not a universal compatible-server default. Zero recorded writes does not authorize automatic recomputation; records may lag a live owner. Twenty-four-hour retention covers fifteen-minute retries. Expired keys need result confirmation rather than endless automatic new-key retries.</p>
-<p>A successful gateway write at seq=37 means bytes were accepted by the send call, not that Client parsed or rendered event 37. Client acknowledgement can identify processing progress without restoring dead KV. Without a durable output log, neither at-least-once nor exactly-once delivery is established. Replay would persist attempt/seq events before sending, deduplicate at Client, and define cursor plus retention. This adds latency, storage, and access controls rather than being a hidden baseline capability.</p>
-</div></div><h3><span class="lang-zh">续写、重新生成和观测</span><span class="lang-en">Continuation, regeneration, and observation</span></h3>
-<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>用户可以明确重新生成整段，也可以提交自己收到的前缀作为新请求。续写用新 key、新显存信用、新 prefill；需要重新校验拼装后的实际 token 长度。把文本塞回 assistant 消息可能加入新的模板控制 token，不能保证等价于原来的原始 token 前缀。若想重算后继续同一 token 串，需要固定模型版本、模板、原始 token 序列和采样状态协议；即便这样也不凭空恢复已丢失的随机状态。</p>
-<p>max_tokens 指新的生成额度，减少多少按客户端确认的 token 计，不按网关 write 次数计；SSE 一个 delta 可能对应多个 token 或不完整文本片段。客户端不能拿 UTF-8 字节偏移当 tokenizer 位置。残缺终止事件、断在多字节字符中间和重连重复都要由流解析器处理。没有日志的基线提供明确失败与显式新尝试，不提供“409 body 一定有完整已交付文本”。</p>
-<p>观测按端到端与资源分层：用户 TTFT/ITL/总时长，输入/输出 token 需求与 goodput，队列年龄、过期和租户拒绝，预留信用、活页、缓存页与激活峰值，以及取消退休时长和 worker 致命错误。还要统计重试命中、旧 epoch 丢弃和缓冲超限。GPU 利用率高而达标比例下降，可能只是把更多迟到 token 算出来；容量决策必须回到目标负载下的 goodput。</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>A user can explicitly regenerate or submit the actually received prefix in a new request. Continuation uses a new key, credits, and prefill, validating the assembled token length again. Text inserted into an assistant message can introduce template tokens and need not match the old raw prefix. Recomputing the same token sequence requires fixed model/template versions, raw tokens, and a sampling-state protocol; missing random state is not restored automatically.</p>
-<p>max_tokens controls the new allowance. Reductions use client-confirmed tokens rather than gateway write calls; one SSE delta may contain multiple tokens or partial text. UTF-8 byte offsets are not tokenizer positions. The parser handles partial terminal events, split multibyte characters, and reconnect duplicates. Without a log, the baseline offers explicit failure and new attempts, not a guaranteed complete delivered prefix in a 409 body.</p>
-<p>Observe end-to-end TTFT/ITL/total duration, input/output demand and goodput, queue age/expiry and tenant denials, reserved credits/live/cached pages plus activation peaks, cancellation retirement, and fatal worker errors. Count dedupe hits, rejected old epochs, and buffer caps too. High GPU utilization with falling attainment may just produce more late tokens. Capacity decisions return to workload-specific goodput.</p>
-</div></div></section>
+    </figure><div class="bilingual"><div class="lang-zh"><p>worker死亡可能丢KV、采样状态和未保存输出；匹配owner的尝试记INTERRUPTED，连接尚通就逐跳返回终止事件。只有网关失联时worker未必死：先查询/取消旧owner，或隔离其输出与后续执行；不能仅凭没heartbeat就开第二份。同key不重新生成，即使记录“尚无write”。</p><p>下面伪代码的唯一行与条件更新在一个权威数据库；适用于D1受理/D5恢复。真实实现需NOT NULL字段、主体/key唯一、可靠提交结果读取与鉴权；正文哈希含模型、模板、采样参数与输出上限。它没有持久token日志，也没有跨卡续写。<a href="#ref-11">[11]</a></p></div><div class="lang-en"><p>Worker loss may erase KV, sampling state, and unsaved output. Mark the matching owner INTERRUPTED and return a terminal event if the stream survives. A lost gateway does not prove a dead worker: query/cancel the old owner or fence its output and future execution. Missing heartbeats alone cannot authorize a duplicate. Same-key retries do not regenerate even if no writes were recorded.</p><p>This pseudocode uses one authoritative row and conditional updates for D1 admission/D5 recovery. A real implementation requires NOT NULL fields, a principal/key unique constraint, reliable commit-result reads, and authorization. Hash model/template/sampling parameters/output cap with the body. It supplies neither a durable token log nor cross-worker continuation. <a href="#ref-11">[11]</a></p></div></div><pre data-language="Pseudocode · durable attempt transitions" data-kind="pseudocode" data-source="attempt.pseudo"><code># Teaching pseudocode: one authoritative DB; UNIQUE(principal, key), NOT NULL hash.
+claim(principal, key, canonical_body_hash, now):
+  BEGIN ISOLATION LEVEL READ COMMITTED
+  INSERT attempt(principal,key,body_hash,state,expires_at)
+    VALUES(principal,key,canonical_body_hash,&#x27;CLAIMED&#x27;,now + 24h)
+    ON CONFLICT(principal,key) DO NOTHING
+  row = SELECT ... WHERE principal=? AND key=? FOR UPDATE
+  if row.body_hash != canonical_body_hash: ROLLBACK; return CONFLICT
+  if row.expires_at &lt;= authority_now_after_lock(): ROLLBACK; return RETRY_WINDOW_CLOSED
+  COMMIT; return row                     # same key never starts a new generation
 
-  <section>
-<h2><span class="lang-zh">同卡到分离：把搬运和接收确认画出来</span><span class="lang-en">Colocation to separation: transfer and acceptance</span></h2>
-<figure class="deck">
+bind_owner(principal, key, boot, generation):
+  UPDATE attempt SET state=&#x27;ASSIGNED&#x27;, owner_boot=boot, owner_gen=generation
+    WHERE principal=? AND key=? AND state=&#x27;CLAIMED&#x27; AND owner_boot IS NULL
+  # Exactly one changed row authorizes delivery; zero rows means recover saved state.
+  # Redeliver the SAME (attempt,boot,generation); worker deduplicates that identity.
+
+finish(principal, key, boot, generation, terminal_metadata):
+  UPDATE attempt SET state=&#x27;TERMINAL&#x27;, metadata=terminal_metadata
+    WHERE principal=? AND key=? AND owner_boot=boot AND owner_gen=generation
+      AND state IN (&#x27;ASSIGNED&#x27;, &#x27;RUN_GRANTED&#x27;) # old/duplicate terminal cannot overwrite
+
+retry(principal, key, hash):
+  row = claim(principal, key, hash, authority_now())
+  if conflict_or_expired(row): return row
+  if row.state in [CLAIMED, ASSIGNED, RUN_GRANTED]: return PENDING_WITHOUT_SECOND_STREAM
+  if row.saved_http_status == 429: return row.saved_http_result # no new queue admission
+  if row.metadata.reason == DONE: return COMPLETION_METADATA
+  return INTERRUPTED_REQUIRES_EXPLICIT_NEW_KEY
+# Unknown dispatch/terminal commits are queried by the same key, never guessed.
+# Crash after ASSIGNED before enqueue may fail closed as INTERRUPTED after fencing.
+# Token logs, replay, cross-worker live migration, and quota atomicity are separate.</code></pre><div class="bilingual"><div class="lang-zh"><p>正常：claim → 唯一bind → 同owner投递 → 匹配终态。同key异正文冲突；两Scheduler争bind只一个更新成功。bind成功却投递前崩溃，可查询旧owner，隔离后失败关闭为INTERRUPTED；不承诺每个受理都执行。终态回包未知就查原key，重复/旧终态不覆盖。24h保留覆盖客户端15min自动重试；活跃行不被TTL删除，终态到期后不提供无限去重保证。</p><p><strong>seq=37 write成功不证明客户端展示37。</strong>要重放需attempt/seq事件先持久再发送、客户端游标/去重与保留期，客户端ACK也不恢复死卡KV。基线同key只取已存状态/元数据，OVERLOADED重放原429、INTERRUPTED示例返回409；明确重新生成/续写用新key、新信用、新prefill，重新校验实际token长度。文本塞回assistant消息可能改模板，不保证等于旧token前缀。</p></div><div class="lang-en"><p>Normal: claim → one binding → same-owner delivery → matching terminal. Different body conflicts; only one of two schedulers binds successfully. A crash after binding but before delivery may query the owner, then fence and fail closed as INTERRUPTED; admission does not promise execution. Unknown terminal commits are queried by the original key; duplicate/old terminals do not overwrite. Twenty-four-hour retention covers fifteen-minute client retries. Active rows are not TTL-deleted; expired terminal rows do not promise unbounded deduplication.</p><p><strong>A successful seq=37 write does not prove client display.</strong> Replay needs attempt/seq events persisted before sending, client cursors/deduplication, and retention. Client ACK does not restore dead KV. Baseline same-key retries return saved status/metadata: OVERLOADED replays its 429, while INTERRUPTED illustratively returns 409. Explicit regeneration/continuation uses a new key, credits, and prefill with renewed token-length checks. Text reinserted as an assistant message may alter templates rather than match the old token prefix.</p></div></div></section>
+<section><h2><span class="lang-zh">阶段分离：先测干扰，再算搬运</span><span class="lang-en">Phase separation: measure interference and transfer cost</span></h2><figure class="deck">
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d6s1t d6s1d">
           <title id="d6s1t">Start with the colocated alternative</title>
@@ -934,30 +1018,9 @@
         </svg>
         <figcaption><span class="lang-zh">完整图：接受握手和失败清理都带 epoch，超时不等于对方没收页。30 req/s 时仅 prompt KV 就约 8.05 GB/s；分池扩容必须同时买算力、目标页和互连余量。</span><span class="lang-en">Complete board: acceptance and cleanup carry epochs; timeout does not prove the destination received nothing. At 30 req/s prompt KV alone is about 8.05 GB/s. Split-pool scaling must cover compute, target pages, and interconnect headroom.</span></figcaption>
       </div>
-    </figure><h3><span class="lang-zh">先用测量决定是否拆</span><span class="lang-en">Use measurements to decide whether to split</span></h3>
-<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>prefill 对长 prompt 常偏计算，decode 常偏内存带宽，但具体瓶颈随模型、batch 和硬件变化。两阶段共卡时，长 prefill 会推迟别人的下一个输出；先用 chunk、每轮预算与并发上限调优。如果 TTFT 和 ITL 仍无法同时满足、资源规模足够，再考虑 Prefill worker 与 Decode worker 分池。DistServe 用两个延迟约束下的 goodput 指导分离 [3]；本章不能因为平均显存 18.75 GiB 就宣称同卡已经达标，也不把分离写成所有流量的必选项。</p>
-<p>图上的 A、B 是互斥方案，同一请求不同时跑两份。A 是共卡并限制 chunk，B 是目标 decode 页信用先保留，prefill 完成后把 KV 搬给该目标。首个采样 token 或初始 logits 与必要的采样元数据一并传给目标，Decode worker 接受后把首段和后续 delta 送回 Scheduler。目标验模型/LoRA、request、epoch、序列长度和 block manifest，接收成功才发送匹配的接受确认。源端在确认或有隔离保证的撤销完成后退休引用。metadata 到达不是 KV 字节到达，不能在发起复制时就释放源页。</p>
-<p>搬运只算输入 KV：2,048 × 128 KiB = 256 MiB = 268,435,456 B。有效带宽假设 10 GB/s = 10<sup>10</sup> B/s，纯传输 <code>268,435,456 ÷ 10<sup>10</sup> ≈ 26.8 ms</code>。30 req/s 都分离时是 <code>30 × 256 MiB = 7.5 GiB/s ≈ 8.05 GB/s ≈ 64.4 Gb/s</code>，已经占示例有效带宽约 80.5%。这还没算排队、内存复制、握手和重复传输；带宽额定值不是可用值，并发搬运要封顶。</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>Long-prompt prefill often leans compute-bound and decode bandwidth-bound, but model, batch, and hardware change bottlenecks. Colocation can let long prefill delay others’ next output. First tune chunks, per-iteration budgets, and concurrency. Consider split pools if TTFT and ITL still cannot coexist at adequate scale. DistServe optimizes goodput under both latency constraints [3]. Mean memory occupancy of 18.75 GiB neither establishes colocation’s SLO compliance nor makes splitting universally necessary.</p>
-<p>A and B are mutually exclusive designs; a request does not execute both. A colocates bounded chunks. B first reserves destination decode credits, then transfers completed prompt KV. Transfer the first sampled token or initial logits and required sampling metadata too; Decode worker returns first content and later deltas to Scheduler after acceptance. The destination validates model/LoRA, request, epoch, length, and block manifest before acknowledging acceptance. Source references retire after matching acceptance or fenced abort cleanup. Metadata receipt is not byte receipt, so launching a copy does not authorize source release.</p>
-<p>Prompt KV is 2,048 × 128 KiB = 256 MiB = 268,435,456 B. At assumed effective 10 GB/s = 10<sup>10</sup> B/s, ideal transfer is <code>268,435,456 ÷ 10<sup>10</sup> ≈ 26.8 ms</code>. Thirty split requests/s demand <code>30 × 256 MiB = 7.5 GiB/s ≈ 8.05 GB/s ≈ 64.4 Gb/s</code>, about 80.5% of the example effective bandwidth before queues, copies, handshakes, or retries. Rated bandwidth is not usable bandwidth; bound concurrent transfers.</p>
-</div></div><h3><span class="lang-zh">失败窗口与扩缩容</span><span class="lang-en">Transfer failures and scaling</span></h3>
-<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>发送方超时可能只是接收确认丢了，目标已占页。以 transfer id/epoch 查询或重试确认，重复接收返回已有结果；终止时隔离旧 owner，再分别清理两端引用。若目标死了，源端还保留的输入 KV 也只覆盖当时的 prompt，不一定包含后来 decode 的后缀与采样状态。已经流出内容的请求仍走上一组的明确中断或新 prefill，不把“源端还在”当无感恢复保证。</p>
-<p>两池分别扩容时同时看 prefill 排队、decode 活跃页和互连。TTFT 紧且 decode 留有空位，增加 prefill；decode 间隔坏、页压力大，就增加或调整 decode。目标不足却无限增加 prefill，只会制造已算完但搬不过去的 KV。缩容先摘新准入，drain 已有尝试到结束或明确取消；截止未到不能把活请求直接搬走。多卡 tensor parallel 时每个 rank 的权重、KV 与通信另算，不能把本章无分片的 40 GiB 除法原样套上去。</p>
-<p>对外报告的是达标比例和成本。论文评测中的提升倍数带模型、工作负载、基线和延迟目标，不是生产保证；本章用一组可替换的假设完成白板推导，没有 GPU 实测吞吐。选共卡省搬运和两池闲置，选分离买独立阶段调度，代价是传输协议、重复暂存和更多故障点。两个方案都要守同一条取消、流失败和重试契约。</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>Sender timeout may mean the destination accepted pages but its acknowledgement was lost. Query or retry by transfer ID/epoch; duplicate acceptance returns the saved result. Abort fences ownership and cleans both sides. Even retained source prompt KV need not include later decoded suffix or sampling state. Once content has streamed, use explicit interruption or new prefill rather than a promise of seamless recovery because the source survives.</p>
-<p>Scale using prefill wait, decode live pages, and interconnect pressure. Tight TTFT with decode headroom suggests more prefill; poor output gaps or page pressure require decode adjustment. More prefill without destination capacity merely accumulates undeliverable KV. For scale-in, stop new admission and drain or explicitly cancel existing attempts. Do not silently migrate live requests. Tensor-parallel ranks require separate weight, KV, and communication accounting; the unsharded forty-GiB calculation cannot be copied unchanged.</p>
-<p>Report attainment and cost. Paper speedups carry models, workloads, baselines, and targets rather than production guarantees. This chapter supplies replaceable whiteboard assumptions without measured GPU throughput. Colocation saves transfers and idle split pools; separation buys independent phase scheduling at the cost of a transfer protocol, duplicate staging, and more failure points. Both retain the same cancel, stream-failure, and retry contract.</p>
-</div></div></section>
-
-  <section>
-<h2><span class="lang-zh">追问与收尾：每个承诺都有边界</span><span class="lang-en">Follow-ups and closing contracts</span></h2>
-<table><thead><tr><th><span class="lang-zh">翻车说法</span><span class="lang-en">Failure claim</span></th><th><span class="lang-zh">正确推导或边界</span><span class="lang-en">Correction or boundary</span></th></tr>
-</thead><tbody><tr><td><span class="lang-zh">40 GiB 能放 128 条，所以单卡 21.3 req/s</span><span class="lang-en">Forty GiB fits 128, so the card serves 21.3 req/s</span></td><td><span class="lang-zh">128 是信用容量，goodput 和满并发轮次需基准测试</span><span class="lang-en">128 is credit capacity; benchmark goodput and full-concurrency iteration timing</span></td></tr>
+    </figure><div class="bilingual"><div class="lang-zh"><p>先以chunk、逐轮预算与并发上限调优同卡。长prefill常偏计算、decode常偏带宽，但瓶颈随模型/上下文/batch/硬件变化；两种延迟仍不能同时满足且资源规模足够，才考虑两池。DistServe按延迟目标与达标比例优化goodput，不把论文倍数当本站容量。图A/B是互斥方案。<a href="#ref-3">[3]</a></p><p>分离先保留Decode目标页信用，再prefill/传输。目标收到KV字节与首个采样token或初始logits/采样元数据，验证模型/LoRA、request、epoch、长度、manifest后接受。源端等匹配接受或已隔离撤销后退休引用；发起copy或收到metadata都不代表可以释放。Decode直接回Scheduler，输出不绕Prefill。</p><p>prompt KV=<code>2,048×128 KiB=256 MiB=268,435,456 B</code>。假设有效10 GB/s，纯搬运26.84ms；30/s是7.5 GiB/s≈8.05 GB/s≈64.42 Gb/s，占80.53%。这不含排队、复制、握手、重传和两端暂存。目标不足时多加Prefill只会堆积KV。</p></div><div class="lang-en"><p>First tune colocation with chunks, iteration budgets, and active caps. Long prefill is often compute-heavy and decode bandwidth-heavy, but bottlenecks vary by model/context/batch/hardware. Split only when both latency goals still conflict at sufficient scale. DistServe optimizes goodput under latency and attainment goals; paper speedups are not our capacity. A/B in the diagram are mutually exclusive. <a href="#ref-3">[3]</a></p><p>Reserve destination Decode credits before prefill/transfer. The target receives KV bytes plus the first sampled token or initial logits/sampling metadata; it validates model/LoRA, request, epoch, length, and manifest before accepting. Retire source references only after matching acceptance or a fenced abort. Starting a copy or receiving metadata is insufficient. Decode returns directly to Scheduler rather than through Prefill.</p><p>Prompt KV is <code>2,048×128 KiB=256 MiB=268,435,456 B</code>. At assumed effective ten GB/s, ideal transfer is 26.84ms. Thirty/s is 7.5 GiB/s≈8.05 GB/s≈64.42 Gb/s, or 80.53%, excluding queues, copies, handshakes, retries, and duplicate staging. More Prefill without target capacity merely accumulates KV.</p></div></div><details><summary><span class="lang-zh">接受丢ACK、池死亡与扩缩容</span><span class="lang-en">Lost acceptance ACK, pool loss, and scaling</span></summary><div class="bilingual"><div class="lang-zh"><p>发送方超时可能只是接受ACK丢失；用transfer id/epoch查已有结果，重复接收不再占一份。撤销先隔离旧owner，再清两端引用。源prompt KV不包含后续decode/采样状态，目标死亡后仍按上一节明确中断或显式新prefill，不承诺无感恢复。</p><p>扩容一起看Prefill等待、Decode活页/间隔和互连；缩容摘新准入，drain或明确取消旧请求。多卡tensor parallel另算各rank权重、KV、通信。这里没有真实GPU、网络搬运或故障实验，Java内存模型不验证生产吞吐、CUDA正确性或分布式恢复。</p></div><div class="lang-en"><p>Sender timeout may follow accepted transfer with a lost ACK. Query by transfer ID/epoch and make repeated acceptance return the existing result. Abort fences the owner before cleaning both references. Source prompt KV omits subsequent decode/sampling state; target loss still means explicit interruption or new prefill, not seamless recovery.</p><p>Scale against Prefill wait, Decode pages/gaps, and interconnect together. Scale-in stops admission and drains or explicitly cancels old requests. Tensor-parallel ranks need separate weight/KV/communication accounting. No real GPU, transfer, or device-failure experiment was performed. The Java memory model proves neither production throughput, CUDA correctness, nor distributed recovery.</p></div></div></details></section>
+<section><h2><span class="lang-zh">面试复盘：用一条请求讲清边界</span><span class="lang-en">Review: follow one request through its boundaries</span></h2><table><thead><tr><th><span class="lang-zh">翻车说法</span><span class="lang-en">Failure claim</span></th><th><span class="lang-zh">正确推导或边界</span><span class="lang-en">Correction or boundary</span></th></tr>
+</thead><tbody><tr><td><span class="lang-zh">40 GiB 能放 128 条，所以单卡 21.3 req/s</span><span class="lang-en">Forty GiB fits 128, so the card serves 21.3 req/s</span></td><td><span class="lang-zh">128 是信用容量，目标联合达标比例下的接纳率和轮次需基准测试</span><span class="lang-en">128 is credit capacity; benchmark admissible rate at the joint attainment target and iteration timing</span></td></tr>
 <tr><td><span class="lang-zh">物理页没满就可以再接</span><span class="lang-en">Free physical pages imply more admission</span></td><td><span class="lang-zh">未来输出信用已承诺；不能重复出售</span><span class="lang-en">Future-output credits are already promised; do not sell them twice</span></td></tr>
 <tr><td><span class="lang-zh">weight-only 量化不改变准入</span><span class="lang-en">Weight-only quantization cannot change admission</span></td><td><span class="lang-zh">每 token 的 KV 不变，但权重变小可能腾出更大 KV 池；重算有效预算</span><span class="lang-en">KV bytes/token stay unchanged, but smaller weights may free a larger KV pool; recompute the usable budget</span></td></tr>
 <tr><td><span class="lang-zh">取消后马上复用地址</span><span class="lang-en">Reuse addresses immediately after cancel</span></td><td><span class="lang-zh">等待 GPU fence，退休请求引用；共享页不一定释放</span><span class="lang-en">Wait for GPU fences and retire request refs; shared pages may remain</span></td></tr>
@@ -965,45 +1028,30 @@
 <tr><td><span class="lang-zh">任何 OOM 只影响一条</span><span class="lang-en">Every OOM affects one sequence</span></td><td><span class="lang-zh">健康分配拒绝可局部处理；context 致命错误终止整 worker</span><span class="lang-en">Healthy allocation denial may be local; fatal context errors terminate the worker</span></td></tr>
 <tr><td><span class="lang-zh">800 ms = TTFT 分量 p99 相加</span><span class="lang-en">Eight hundred ms is the sum of component p99s</span></td><td><span class="lang-zh">分量预算只是一次条件路径，联合尾部需端到端测量</span><span class="lang-en">Component budgets describe a conditional path; measure the joint tail end to end</span></td></tr>
 <tr><td><span class="lang-zh">KV 开始搬就可以释放源</span><span class="lang-en">Release source KV when copying starts</span></td><td><span class="lang-zh">等待匹配 epoch 接受确认或隔离撤销；超时可能已接收</span><span class="lang-en">Wait for matching-epoch acceptance or fenced abort; timeout may follow receipt</span></td></tr>
-</tbody></table><div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>上下文改成输入 8,192、输出上限仍 512：8,704 × 128 KiB = 1,088 MiB，40,960 ÷ 1,088 ≈ 37.65，只容纳 37 条满额信用。这只是显存上限，长输入的 prefill 时间也要重新压测。仅改 batch 的 max_sequences 不会弥补输入膨胀，租户配额和等待期限也要改。</p>
-<p>最后 20 秒：在线路径 Client→API gateway→Scheduler→GPU worker，token 每跳回来。128 条来自显存信用，不是吞吐承诺；分页管布局、逐轮调度管成员、内核管计算。取消等 GPU 完成再还引用，流中断保留尝试状态，续写显式新 prefill。阶段分离增加 256 MiB prompt KV 的搬运与接受握手，只有 goodput 和成本证据支持时才加。</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>With 8,192 input tokens and the same 512 output cap, 8,704 × 128 KiB = 1,088 MiB; 40,960 ÷ 1,088 ≈ 37.65 fits thirty-seven full-cap reservations. This is only memory capacity; benchmark longer prefill. Changing max_sequences alone does not address expanded input, and quotas plus wait budgets must be revisited.</p>
-<p>Closing: Client→API gateway→Scheduler→GPU worker, with every return hop drawn. 128 comes from memory credits, not promised throughput. Paging manages placement, iteration scheduling manages membership, and kernels compute. Cancel waits for GPU completion before reference release. Interruption retains attempt status; continuation explicitly starts new prefill. Phase separation adds a 256-MiB prompt transfer and acceptance protocol only when goodput and cost evidence support it.</p>
-</div></div></section>
-
-  <section>
-<h2><span class="lang-zh">引用与延伸阅读</span><span class="lang-en">References and further reading</span></h2>
-<ol class="references"><li id="ref-1">[1] Gyeong-In Yu et al., <a href="https://www.usenix.org/system/files/osdi22-yu.pdf"><em>Orca: A Distributed Serving System for Transformer-Based Generative Models</em></a>, OSDI 2022. <span class="lang-zh">iteration-level scheduling 与 selective batching；本章不把论文吞吐倍数当容量。</span><span class="lang-en">Iteration-level scheduling and selective batching; no paper speedup is used as our capacity.</span></li>
+</tbody></table><div class="bilingual"><div class="lang-zh"><p>复述顺序：持久尝试身份 → 有界租户队列 → 最大输出信用 → 本轮预算 → token逐跳返回 → 停止/退休/释放。先讲128条是显存承诺，再讲C=12是未测的容量假设；流中断不把同key偷偷变成新生成。</p><p>监控分层：客户端TTFT/块停顿；worker ITL/请求TPOT与联合goodput；排队年龄/到期/租户拒绝；信用、refs/pins、缓存/可复用页；取消退休时长、旧epoch丢弃与worker致命错误。利用率高而联合达标比例低，可能只是算出更多迟到token。<a href="../examples/ch29/README.md">示例与验证边界</a>。</p></div><div class="lang-en"><p>Retell: durable attempt identity → bounded tenant queues → output-cap credits → iteration budget → return hops → stop/retire/release. Explain that 128 is a memory commitment and C=12 is an unmeasured capacity assumption. Interrupted same-key requests never silently become a new generation.</p><p>Observe client TTFT/chunk stalls; worker ITL/request TPOT and joint goodput; queue age/expiry/tenant denials; credits, refs/pins, cached/reusable pages; cancellation retirement, rejected old epochs, and fatal errors. High utilization with poor joint attainment may merely produce late tokens. <a href="../examples/ch29/README.md">Examples and validation limits</a>.</p></div></div></section>
+<section><h2><span class="lang-zh">引用与延伸阅读</span><span class="lang-en">References and further reading</span></h2><ol class="references"><li id="ref-1">[1] Gyeong-In Yu et al., <a href="https://www.usenix.org/system/files/osdi22-yu.pdf"><em>Orca: A Distributed Serving System for Transformer-Based Generative Models</em></a>, OSDI 2022. <span class="lang-zh">iteration-level scheduling 与 selective batching；本章不把论文吞吐倍数当容量。</span><span class="lang-en">Iteration-level scheduling and selective batching; no paper speedup is used as our capacity.</span></li>
 <li id="ref-2">[2] Woosuk Kwon et al., <a href="https://arxiv.org/pdf/2309.06180"><em>Efficient Memory Management for Large Language Model Serving with PagedAttention</em></a>, SOSP 2023. <span class="lang-zh">逻辑/物理页映射、共享与抢占；128 KiB 和 128 条来自本章假设。</span><span class="lang-en">Logical/physical mapping, sharing, and preemption; 128 KiB and 128 requests are our assumptions.</span></li>
 <li id="ref-3">[3] Yinmin Zhong et al., <a href="https://www.usenix.org/system/files/osdi24-zhong-yinmin.pdf"><em>DistServe: Disaggregating Prefill and Decoding for Goodput-optimized Large Language Model Serving</em></a>, OSDI 2024. <span class="lang-zh">阶段干扰与 goodput；10 GB/s 为本章示例，不采用论文的 90% 作为本站 p99。</span><span class="lang-en">Phase interference and goodput; 10 GB/s is our illustration, and the paper’s 90% goal is not our p99 target.</span></li>
 <li id="ref-4">[4] Tri Dao et al., <a href="https://arxiv.org/pdf/2205.14135"><em>FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness</em></a>, 2022. <span class="lang-zh">HBM/SRAM 的 attention IO 优化，区别于服务调度。</span><span class="lang-en">Attention IO between HBM and SRAM, distinct from serving scheduling.</span></li>
 <li id="ref-5">[5] vLLM project, <a href="https://docs.vllm.ai/en/v0.15.1/design/prefix_caching/"><em>Automatic Prefix Caching · design</em></a>, v0.15.1. <span class="lang-zh">父哈希、token、额外身份、完整块与 cache salt；不承诺字节变化必 miss。</span><span class="lang-en">Parent hash, token IDs, extra identities, complete blocks, and cache salt; byte changes do not necessarily imply a miss.</span></li>
 <li id="ref-6">[6] vLLM project, <a href="https://docs.vllm.ai/en/v0.15.1/features/automatic_prefix_caching/"><em>Automatic Prefix Caching · features</em></a>, v0.15.1. <span class="lang-zh">APC 只减少重复 prefill，不缩短后缀 decode。</span><span class="lang-en">APC reduces repeated prefill without shortening suffix decode.</span></li>
 <li id="ref-7">[7] vLLM project, <a href="https://docs.vllm.ai/en/v0.15.1/configuration/optimization/"><em>Optimization and Tuning · Chunked Prefill</em></a>, v0.15.1. <span class="lang-zh">每轮 token 预算和 ITL/TTFT 取舍；本文不承诺固定 20 ms。</span><span class="lang-en">Iteration token budgets and ITL/TTFT tradeoffs; this chapter promises no fixed twenty-ms iteration.</span></li>
-<li id="ref-8">[8] NVIDIA, <a href="https://docs.nvidia.com/cuda/cuda-runtime-api/cuda_runtime_api/group__CUDART__TYPES.html"><em>CUDA Runtime API · Data types used by CUDA Runtime</em></a>, 13.4 · checked 2026-10-07. <span class="lang-zh">未完成异步操作、illegal address 与致命 context 的重启要求。</span><span class="lang-en">Incomplete asynchronous operations, illegal addresses, and fatal-context relaunch requirements.</span></li>
-<li id="ref-9">[9] WHATWG, <a href="https://html.spec.whatwg.org/multipage/server-sent-events.html"><em>HTML Standard · Server-sent events</em></a>, Living Standard · checked 2026-10-07. <span class="lang-zh">EventSource、事件 id 和 Last-Event-ID；不提供服务器持久重放或 KV 恢复。</span><span class="lang-en">EventSource, event IDs, and Last-Event-ID; no server-side durable replay or KV recovery is supplied.</span></li>
-</ol><p class="cite"><span class="lang-zh">站内延伸：</span><span class="lang-en">Course follow-ups:</span> <a class="chip" href="ch03.html">Ch03</a> <a class="chip" href="ch04.html">Ch04</a> <a class="chip" href="ch30.html"><span class="lang-zh">Ch30</span><span class="lang-en">Ch30</span></a> <a class="chip" href="ch32.html"><span class="lang-zh">Ch32</span><span class="lang-en">Ch32</span></a> <a class="chip" href="ch35.html"><span class="lang-zh">Ch35</span><span class="lang-en">Ch35</span></a> <a class="chip" href="ch40.html"><span class="lang-zh">Ch40</span><span class="lang-en">Ch40</span></a> <a class="chip" href="ch42.html"><span class="lang-zh">Ch42</span><span class="lang-en">Ch42</span></a></p>
-</section>
-
-  <section>
-<h2><span class="lang-zh">闪卡</span><span class="lang-en">Flashcards</span></h2>
-<p class="cite"><span class="lang-zh">点一下翻面。把容量、送达与所有权三条边界讲清。</span><span class="lang-en">Click to flip. Explain capacity, delivery, and ownership boundaries.</span></p>
-<div class="cards-grid"><button type="button" class="flip"><span class="q"><span class="lang-zh">128 条证明什么？</span><span class="lang-en">What does 128 establish?</span></span><span class="a"><span class="lang-zh">40,960 ÷ 320 = 128 条满额 KV 信用；吞吐与延迟仍需基准测试。</span><span class="lang-en">40,960 ÷ 320 = 128 full-cap KV reservations; benchmark throughput and latency separately.</span></span></button>
+<li id="ref-8">[8] NVIDIA, <a href="https://docs.nvidia.com/cuda/cuda-runtime-api/cuda_runtime_api/group__CUDART__TYPES.html"><em>CUDA Runtime API · Data types used by CUDA Runtime</em></a>, 13.4 · checked 2026-10-24. <span class="lang-zh">未完成异步操作、illegal address 与致命 context 的重启要求。</span><span class="lang-en">Incomplete asynchronous operations, illegal addresses, and fatal-context relaunch requirements.</span></li>
+<li id="ref-9">[9] WHATWG, <a href="https://html.spec.whatwg.org/multipage/server-sent-events.html"><em>HTML Standard · Server-sent events</em></a>, Living Standard · checked 2026-10-24. <span class="lang-zh">EventSource、事件 id 和 Last-Event-ID；不提供服务器持久重放或 KV 恢复。</span><span class="lang-en">EventSource, event IDs, and Last-Event-ID; no server-side durable replay or KV recovery is supplied.</span></li>
+<li id="ref-10">[10] NVIDIA, <a href="https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__EVENT.html">CUDA Runtime API 13.4 · Event Management</a> · checked 2026-10-24. <span class="lang-zh">event捕获的工作与依赖、查询和同步完成；Java模型不执行CUDA。</span><span class="lang-en">Captured work/dependencies, queries and synchronization; the Java model does not execute CUDA.</span></li><li id="ref-11">[11] PostgreSQL, <a href="https://www.postgresql.org/docs/18/sql-insert.html">PostgreSQL 18 · INSERT / ON CONFLICT</a> and <a href="https://www.postgresql.org/docs/18/explicit-locking.html#LOCKING-ROWS">row locks</a> · checked 2026-10-24. <span class="lang-zh">attempt唯一行与条件更新的数据库适配前提；本章没有运行PostgreSQL。</span><span class="lang-en">Database assumptions for unique attempt rows and conditional updates; PostgreSQL was not run.</span></li></ol><p class="cite"><a class="chip" href="ch03.html">Ch03</a> <a class="chip" href="ch04.html">Ch04</a> <a class="chip" href="ch30.html">Ch30</a> <a class="chip" href="ch32.html">Ch32</a> <a class="chip" href="ch35.html">Ch35</a> <a class="chip" href="ch40.html">Ch40</a></p></section>
+<section><h2><span class="lang-zh">闪卡</span><span class="lang-en">Flashcards</span></h2><p class="cite"><span class="lang-zh">点按或用Enter/Space翻面，回答时说出账本与失败边界。</span><span class="lang-en">Click or press Enter/Space; name the ledger and failure boundary.</span></p><div class="cards-grid"><button type="button" class="flip"><span class="q"><span class="lang-zh">128 条证明什么？</span><span class="lang-en">What does 128 establish?</span></span><span class="a"><span class="lang-zh">40,960 ÷ 320 = 128 条满额 KV 信用；吞吐与延迟仍需基准测试。</span><span class="lang-en">40,960 ÷ 320 = 128 full-cap KV reservations; benchmark throughput and latency separately.</span></span></button>
 <button type="button" class="flip"><span class="q"><span class="lang-zh">页信用和物理页一样吗？</span><span class="lang-en">Are credits physical pages?</span></span><span class="a"><span class="lang-zh">信用承诺未来上限，物理页按实际状态增长，空闲页不能重复承诺。</span><span class="lang-en">Credits commit future capacity; physical pages grow on demand and cannot be promised twice.</span></span></button>
 <button type="button" class="flip"><span class="q"><span class="lang-zh">单 token KV 怎么算？</span><span class="lang-en">KV bytes per token?</span></span><span class="a"><span class="lang-zh">2 × 层 × KV head × head dim × 元素字节；本章是 128 KiB。</span><span class="lang-en">2 × layers × KV heads × head dimension × bytes; 128 KiB here.</span></span></button>
 <button type="button" class="flip"><span class="q"><span class="lang-zh">256 个输出有多少间隔？</span><span class="lang-en">How many gaps for 256 outputs?</span></span><span class="a"><span class="lang-zh">首个已由 prefill 产生，后续是 255 个；20 ms 例子共 5.1 s。</span><span class="lang-en">Prefill already produces the first; 255 later gaps total 5.1 s at twenty ms.</span></span></button>
-<button type="button" class="flip"><span class="q"><span class="lang-zh">TPOT 与 ITL 为什么分报？</span><span class="lang-en">Why report TPOT and ITL separately?</span></span><span class="a"><span class="lang-zh">整请求平均 TPOT 可掩盖单步停顿；ITL 统计相邻输出间隔。</span><span class="lang-en">Request-average TPOT can hide a stall; ITL measures individual adjacent-output gaps.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">TPOT 与 ITL 为什么分报？</span><span class="lang-en">Why report TPOT and ITL separately?</span></span><span class="a"><span class="lang-zh">TPOT是N−1间隔均值；worker ITL统计token-ready间隔，客户端块间隔另报。</span><span class="lang-en">TPOT averages N−1 gaps; worker ITL measures token-ready gaps. Report client chunk gaps separately.</span></span></button>
 <button type="button" class="flip"><span class="q"><span class="lang-zh">新请求最多等一轮吗？</span><span class="lang-en">Does an arrival wait at most one iteration?</span></span><span class="a"><span class="lang-zh">只是下一轮可考虑；页信用、计算预算和公平仍可延迟。</span><span class="lang-en">It can be considered next iteration; credits, compute, and fairness may delay it.</span></span></button>
-<button type="button" class="flip"><span class="q"><span class="lang-zh">取消何时还页？</span><span class="lang-en">When does cancellation release pages?</span></span><span class="a"><span class="lang-zh">停止后续调度，等待 GPU fence，再单次退休请求引用。</span><span class="lang-en">Stop later scheduling, wait for the GPU fence, then retire request references once.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">取消何时还页？</span><span class="lang-en">When does cancellation release pages?</span></span><span class="a"><span class="lang-zh">停后续调度；全部相关GPU访问完成才单次释放引用/信用，共享页仍看refs/pins。</span><span class="lang-en">Stop scheduling; retire all GPU accesses, then release refs/credits once. Shared pages still need zero refs/pins.</span></span></button>
 <button type="button" class="flip"><span class="q"><span class="lang-zh">每种 OOM 都局部处理吗？</span><span class="lang-en">Is every OOM local?</span></span><span class="a"><span class="lang-zh">健康分配拒绝可局部处理；致命 CUDA context 按 worker 死亡重启。</span><span class="lang-en">Healthy allocation denial may be local; fatal CUDA contexts require worker restart.</span></span></button>
 <button type="button" class="flip"><span class="q"><span class="lang-zh">write 成功证明送达吗？</span><span class="lang-en">Does write success prove delivery?</span></span><span class="a"><span class="lang-zh">不证明。无持久事件日志和重放，无法承诺至少一次或恰好一次。</span><span class="lang-en">No. Without durable events and replay, neither at-least-once nor exactly-once delivery is promised.</span></span></button>
 <button type="button" class="flip"><span class="q"><span class="lang-zh">同 key 怎样处理中断？</span><span class="lang-en">Same-key retry after interruption?</span></span><span class="a"><span class="lang-zh">恢复 INTERRUPTED 状态，不盲开第二条；明确续写用新 key 和 prefill。</span><span class="lang-en">Recover INTERRUPTED without a second generation; explicit continuation uses a new key and prefill.</span></span></button>
 <button type="button" class="flip"><span class="q"><span class="lang-zh">前缀缓存改变哪段？</span><span class="lang-en">Which phase benefits from prefix caching?</span></span><span class="a"><span class="lang-zh">只减少重复 prefill；固定 token 计算身份与信任域，后缀步数不变。</span><span class="lang-en">It reduces repeated prefill with fixed token identity and trust domain; suffix steps remain.</span></span></button>
 <button type="button" class="flip"><span class="q"><span class="lang-zh">分离至少搬多少 KV？</span><span class="lang-en">How much KV does separation transfer?</span></span><span class="a"><span class="lang-zh">prompt 256 MiB，30/s 约 8.05 GB/s；确认 epoch 接受后再释放源。</span><span class="lang-en">256 MiB/prompt; thirty/s is about 8.05 GB/s. Release source only after matching-epoch acceptance.</span></span></button>
-</div></section>
-
+<button type="button" class="flip"><span class="q"><span class="lang-zh">两个p99能证明99%请求联合达标吗？</span><span class="lang-en">Do two p99s prove 99% joint request attainment?</span></span><span class="a"><span class="lang-zh">不能；逐请求核TTFT和最大worker ITL，再报达标完成率与分母。</span><span class="lang-en">No. Check each request’s TTFT and maximum worker ITL, then report compliant completions and the denominator.</span></span></button><button type="button" class="flip"><span class="q"><span class="lang-zh">队列满429后配额怎样释放？</span><span class="lang-en">How does a full-queue 429 release quota?</span></span><span class="a"><span class="lang-zh">终态/原429与结算outbox同事务；按attempt释放一次。同key只重放429，不重新排队。</span><span class="lang-en">Commit terminal 429 and settlement outbox together; release once per attempt. Same-key retries replay 429 without requeueing.</span></span></button></div></section>
   <p><button type="button" class="read-toggle"><span class="when-off"><span class="lang-zh">我已学完本章</span><span class="lang-en">Mark this chapter done</span></span><span class="when-on"><span class="lang-zh">已学完本章</span><span class="lang-en">Completed</span></span></button></p>
   <p class="cite"><span class="lang-zh">进度存在这台浏览器里。</span><span class="lang-en">Saved in this browser only.</span></p>
 </article>

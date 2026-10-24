@@ -1,0 +1,22 @@
+claim(run_id, owner):                       // owner = boot UUID + claim UUID
+  BEGIN
+  r = SELECT * FROM run WHERE id=run_id FOR UPDATE
+  t = SELECT clock_timestamp()             // not transaction-start now()
+  if r is absent or r.cancel_requested: ROLLBACK; return NOT_CLAIMED
+  eligible = (r.state == 'ready')
+          or (r.state == 'retry_wait' and r.retry_at <= t)
+          or (r.state == 'running' and r.lease_until <= t)
+  if not eligible: ROLLBACK; return BUSY_OR_TERMINAL
+  if r.attempts == 5:
+    UPDATE run SET state='review', owner=null, lease_until=null,
+                   effect_unknown=true WHERE id=run_id
+    COMMIT; return REVIEW
+  UPDATE run SET state='running', attempts=attempts+1, generation=generation+1,
+                 owner=:owner, lease_until=t+30s, retry_at=null,
+                 effect_unknown=true WHERE id=run_id
+    RETURNING id, owner, generation, lease_until, payload, effect_key
+  COMMIT
+  return committed claim                   // handler runs outside the transaction
+  // A lost commit ACK is not a failed claim. Read this owner from the primary
+  // and obtain its current generation/valid lease before issuing any effect.
+  // Do not create another occurrence or issue an RPC from an unconfirmed claim.

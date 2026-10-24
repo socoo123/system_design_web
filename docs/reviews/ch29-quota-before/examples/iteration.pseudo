@@ -1,0 +1,39 @@
+# Teaching pseudocode: issue at most one outstanding iteration per sequence.
+# Slots/page limits constrain admission; profile(context, batch, chunk) constrains compute.
+iteration(now):
+  retire_only_completed_gpu_tickets()       # apply phase/output progress once, then on_release
+  admit_waiters(now)
+  batch = []; budget = measured_iteration_envelope
+  for tenant in rotating_ready_tenant_ring:
+    deficit[tenant] = min(deficit_cap, deficit[tenant] + weight[tenant] * quantum)
+    # Each tenant's request cursor survives across iterations.
+    for r in ready[tenant].one_round_from_cursor():
+      if r.state != RUNNING or r.in_flight: continue
+      if now >= r.request_deadline or (not r.prefill_started and now >= r.wait_deadline):
+        worker_ledger.stop(r.owner, DEADLINE); continue
+      if r.outputs >= r.max_output:
+        worker_ledger.stop(r.owner, EOS); continue
+      if r.send_buffer >= 64KiB or r.no_progress >= 2s:
+        worker_ledger.stop(r.owner, CANCEL); continue
+      if r.prefill_remaining:
+        n = min(r.prefill_remaining, chunk_cap, budget.remaining_tokens)
+        n = largest_positive_chunk_fitting_profile(r, n, batch, budget)
+      else:
+        n = 1                             # one decode step, never entire output
+      if n == 0: continue
+      cost = profile_cost(r.context, n, r.phase)
+      if cost > deficit[tenant] or not budget.fits(r, n, batch): continue
+      if not ensure_blocks_within_reserved_credit(r, n): fail_worker_accounting()
+      batch.append(r.owner, r.phase, n)
+      deficit[tenant] -= cost; budget.consume(r, n)
+      # This r can enter only once in this iteration.
+    advance_request_cursor(tenant)
+  rotate_ready_tenant_ring_start()
+  if batch:
+    ticket = worker_ledger.issue(batch.owners)  # snapshot refs and pin before launch
+    launch_gpu(batch, ticket)               # record all-stream/copy completion fence
+  # Deficits carry over; choose cap >= largest legal chunk cost.
+  # No fit means wait/expire; this is no promise of a one-iteration bound.
+# On a fence, complete(ticket,eos) must return true before applying result progress.
+# Publish only matching owners without CANCEL/DEADLINE; count sampled outputs once.
+# Never accept output beyond max_output; complete() itself handles pins, refs and credits.

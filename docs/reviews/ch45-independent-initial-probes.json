@@ -1,0 +1,54 @@
+{
+  "sourceHashes": {
+    "chapters/ch45.html": "dbd8bd7f86bb4966e7d40edc6b8f08e9416eac4da4dbb032f2e6f9d37583b118",
+    "examples/ch45/DomainModel.java": "269ed7a55ade3d9608545ea2a038e97c30bd1aa9ad12ba03bdf3410b7fe9ddeb",
+    "examples/ch45/README.md": "58be91f95445d95c4c3b18667a5fbd7100728c4bbf70efc848fca23efa64e29d",
+    "examples/ch45/consume.pseudo": "52a849826336bbbe78a33748101777fe71aa8cfab40c4a4741bc1435705505df",
+    "examples/ch45/edit.pseudo": "7a7db03775359a8075b5178461bda91a9e565d40ef48266b0b8ddf153c6cb381",
+    "examples/ch45/run.py": "834556342a777cbfa0aaa07b40f49c39178ee374d415e0c7a867fefd7a4b2cba",
+    "examples/ch45/schema.sql": "301fe624ae85931c52d8129cc06b2508c0d4a90c48d35099540b6192db4eacfd",
+    "examples/ch45/sync.mjs": "95b69e12938d6d693f03f2d531c822fa05de35bb35f131c544b4bf55fe89665d",
+    "examples/ch45/verify.py": "a2900a0539c468a58eda46097502776321b3e13df0a559cb0416049791d9e9fa"
+  },
+  "observations": [
+    {
+      "case": "signed64 version exhaustion before edit",
+      "expected": "reject and roll back root/lines/receipt",
+      "actual": {
+        "receipt": {
+          "version": 9223372036854775808,
+          "total": 10999,
+          "currency": "USD"
+        }
+      },
+      "row": {
+        "version": 9.223372036854776e+18,
+        "storage": "real",
+        "total": 10999
+      },
+      "unchanged": false
+    },
+    {
+      "case": "consume CAS=0 handling",
+      "method": "controlled rowcount=0 injection into unchanged adapter, not a real PG race",
+      "expected": "whole-TX rollback and bounded reload/no ACK on exhaustion; do not classify as invalid capture",
+      "actual": "QUARANTINED",
+      "counts": {
+        "inbox": 0,
+        "capture_result": 0,
+        "refund_work": 0,
+        "outbox": 0,
+        "quarantine": 1
+      },
+      "quarantine": [
+        {
+          "source": "pay",
+          "event_id": "independent-zero-cas",
+          "payload_hash": "29f7064ffd795bf7cbf8f26d04e803da794add5770eda7ebf16c36a31b12c145",
+          "reason": "CAS_CONFLICT",
+          "payload": "{\"source\": \"pay\", \"version\": 1, \"event_id\": \"independent-zero-cas\", \"tenant\": \"t1\", \"order_id\": \"o42\", \"payment_id\": \"p9\", \"attempt\": \"a9\", \"amount\": 10999, \"currency\": \"USD\", \"pay_version\": 3}"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,927 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="parchment" data-locale="zh">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ch19 · 邻近服务 / LBS</title>
+  <link rel="icon" href="../favicon.ico" sizes="48x48">
+  <link rel="stylesheet" href="../assets/css/style.css">
+  <script src="../assets/js/boot.js"></script>
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="../index.html"><span class="brand-logo">SD</span><span class="lang-zh">系统设计面试</span> <span class="lang-en">System Design Interview</span></a>
+  <span class="spacer"></span>
+  <a class="map-link" href="../index.html"><span class="lang-zh">课程地图</span> <span class="lang-en">Map</span></a>
+  <div class="seg" role="group" aria-label="language">
+    <button type="button" data-locale-set="zh">中文</button>
+    <button type="button" data-locale-set="both"><span class="lang-zh">对照</span> <span class="lang-en">Both</span></button>
+    <button type="button" data-locale-set="en">EN</button>
+  </div>
+  <div class="seg" role="group" aria-label="theme">
+    <button type="button" data-theme-set="parchment"><span class="lang-zh">护眼</span> <span class="lang-en">Paper</span></button>
+    <button type="button" data-theme-set="dracula"><span class="lang-zh">深色</span> <span class="lang-en">Dark</span></button>
+  </div>
+</header>
+<main class="wrap">
+<article class="chapter" id="ch19" data-ch="ch19">
+  <header>
+    <div class="ch-kicker"><span class="lang-zh">CHAPTER 19 · 设计题</span> <span class="lang-en">CHAPTER 19 · case</span></div>
+    <h1><span class="lang-zh">邻近服务 / LBS</span> <span class="lang-en">Nearby / LBS</span></h1>
+    <p class="ch-meta-line"><span class="lang-zh">约 35 分钟 · 前置：Ch03、Ch05 · 覆盖、筛选、投影与迁移</span> <span class="lang-en">~35 min · after Ch03 and Ch05 · cover, filter, project and migrate</span></p>
+  </header>
+
+<section class="goal"><h2><span class="lang-zh">本章核心：覆盖、权威、可见性</span><span class="lang-en">Core: coverage, authority and visibility</span></h2><div class="bilingual"><div class="lang-zh"><p>附近查询分三步：<strong>完整覆盖格子 → 校验权威状态后测距 → 选全局最近 20</strong>。重点回答：边格为何会漏？哪份坐标和权限能决定输出？写确认、索引水位和样本年龄分别承诺什么？</p><p>先做公开地点，数据量允许单库。独立索引、移动端和热格拆分都是后续约束；六组原动画分别保留查询、覆盖、缓存、投影、迁移和故障路径。</p></div><div class="lang-en"><p>A nearby query has three steps: <strong>cover every relevant cell → validate authority and measure → select the global nearest 20</strong>. Explain border misses, the coordinates and permissions that govern output, and the separate meanings of write acknowledgment, projection progress and sample age.</p><p>Start with published places; one database fits the assumed scale. Separate indexes, movers and hot-cell splits are extensions. Six retained decks trace queries, covering, cache, projection, migration and failures.</p></div></div></section>
+
+<section><h2><span class="lang-zh">30 秒开场：先固定附近商家，再谈变化</span> <span class="lang-en">The 30-second open: places first, then extensions</span></h2>
+<div class="bilingual"><div class="lang-zh"><p>客户端给坐标、类型及 <code>500/1000/2000/5000 m</code> 半径，返回半径内合格地点的最近 20 个，距离相同按 id 排序。空结果不自动扩大半径。主线单库在同一数据库快照内完成索引查询与状态过滤；独立异步索引则明确返回 <code>index_as_of</code>，记录各格快照的水位/时间，只承诺<strong>已召回候选的距离排序</strong>，不冒充当前权威全集的精确 top 20。</p><p>先问会改设计的条件：公开地点还是私人移动端、半径上限、是否允许最终召回、编辑多久可见。教学输入是 200 万地点、约 0.127 次编辑/秒、峰值约 1,111 查询/秒；原始索引 128 MB，尚未逼出分布式拆库。容量/SLO 均是假设，未做压测；以下 GB/MB 使用十进制。</p></div><div class="lang-en"><p>Clients supply coordinates, type and a <code>500/1000/2000/5000 m</code> radius. Return up to 20 eligible places in distance/id order without silently enlarging the radius. A single database can query its index and filter state in one snapshot. A separate async index exposes <code>index_as_of</code> with each cell snapshot’s offsets/time and guarantees <strong>distance order among recalled candidates</strong>, not the exact top 20 of current authority.</p><p>Clarify published places versus private movers, radius limits, eventual recall and edit visibility. Teaching inputs are 2 million places, about 0.127 edits/s and 1,111 peak queries/s. A 128 MB raw index has not forced distributed shards. Capacity and SLOs are assumptions, not load tests; MB/GB are decimal.</p></div></div><details><summary><span class="lang-zh">完整假设与容量推导（A1–A8）</span><span class="lang-en">Full assumptions and capacity derivation (A1–A8)</span></summary><table><thead><tr><th><span class="lang-zh">假设编号</span> <span class="lang-en">Assumption</span></th><th><span class="lang-zh">取值与单位</span> <span class="lang-en">Value and unit</span></th><th><span class="lang-zh">推动的决定</span> <span class="lang-en">Decision</span></th></tr></thead><tbody><tr><td><span class="lang-zh">A1 · 地点目录</span> <span class="lang-en">A1 · place catalog</span></td><td><span class="lang-zh">200 万地点；每地点每年两次编辑；详情 1 KB；索引行 64 B</span> <span class="lang-en">2 million places; two edits/place/year; 1 KB details; 64 B index row</span></td><td><span class="lang-zh">约 0.13 编辑/秒，详情 2 GB、索引原始 128 MB；不先分布式拆库</span> <span class="lang-en">About 0.13 edits/s; 2 GB details and 128 MB raw index; no distributed shards initially</span></td></tr>
+<tr><td><span class="lang-zh">A2 · 查询量与峰值</span> <span class="lang-en">A2 · query volume and peak</span></td><td><span class="lang-zh">800 万次/天，日常峰值 ×12；每页 20，响应 4 KB</span> <span class="lang-en">8 million/day, 12× daily peak; 20/page, 4 KB response</span></td><td><span class="lang-zh">约 93 平均、1,111 峰值 QPS；出口约 4.44 MB/s</span> <span class="lang-en">About 93 average and 1,111 peak QPS; about 4.44 MB/s egress</span></td></tr>
+<tr><td><span class="lang-zh">A3 · 热格子</span> <span class="lang-en">A3 · hot cell</span></td><td><span class="lang-zh">占峰值查询 20%；一万个 id；id 16 B，完整成员 64 B</span> <span class="lang-en">20% of peak queries; 10,000 IDs; 16 B/ID, 64 B/full member</span></td><td><span class="lang-zh">222 次/秒：仅 id 约 35.6 MB/s，完整快照约 142 MB/s</span> <span class="lang-en">222/s: IDs alone about 35.6 MB/s, full snapshots about 142 MB/s</span></td></tr>
+<tr><td><span class="lang-zh">A4 · 缓存与路由</span> <span class="lang-en">A4 · cache and routing</span></td><td><span class="lang-zh">快照 TTL 最多 2 s；热点命中目标 90%；路由缓存最多 5 s；回源上限 100 次/秒</span> <span class="lang-en">Snapshot TTL at most 2 s; 90% hot-cell hit target; route cache at most 5 s; origin cap 100/s</span></td><td><span class="lang-zh">版本回填、合并回源；迁移保留旧父格到读者退出</span> <span class="lang-en">Guard fills, coalesce loads; retain migrating parent until readers finish</span></td></tr>
+<tr><td><span class="lang-zh">A5 · 移动端扩展</span> <span class="lang-en">A5 · mover extension</span></td><td><span class="lang-zh">高峰 8 万实体；每实体最多 4 次/分钟；最新行原始 96 B；热格 6,000 实体</span> <span class="lang-en">80,000 peak movers; at most 4 reports/minute/entity; 96 B raw latest row; 6,000 movers in hot cell</span></td><td><span class="lang-zh">约 5,333 写/秒；最新行 7.68 MB；热格 400 写/秒</span> <span class="lang-en">About 5,333 writes/s; 7.68 MB latest rows; hot cell 400 writes/s</span></td></tr>
+<tr><td><span class="lang-zh">A6 · 几何与接口</span> <span class="lang-en">A6 · geometry and API</span></td><td><span class="lang-zh">约 40°N；每度 111 km；geohash 长度 6；半径 500/1,000/2,000/5,000 m</span> <span class="lang-en">Near 40°N; 111 km/degree; geohash length 6; radii 500/1,000/2,000/5,000 m</span></td><td><span class="lang-zh">一格约 0.934 × 0.610 km；逐格生成保守覆盖</span> <span class="lang-en">About 0.934 × 0.610 km/cell; generate a conservative cover</span></td></tr>
+<tr><td><span class="lang-zh">A7 · 工作目标</span> <span class="lang-en">A7 · working targets</span></td><td><span class="lang-zh">查询 99.9%、服务端 p99 ≤100 ms；写确认 p99 ≤80 ms；索引可见 p99 ≤2 s</span> <span class="lang-en">Read 99.9%, server p99 ≤100 ms; durable ack p99 ≤80 ms; index visibility p99 ≤2 s</span></td><td><span class="lang-zh">这些是目标；宕机时可见延迟没有两秒硬上界</span> <span class="lang-en">Targets, not measurements; visibility lag has no hard two-second bound during failure</span></td></tr>
+<tr><td><span class="lang-zh">A8 · 新鲜度与权限</span> <span class="lang-en">A8 · freshness and permissions</span></td><td><span class="lang-zh">移动端观测年龄 ≤30 s，示例车速 60 km/h；地点同步最多落后 24 h；授权距离桶 100 m</span> <span class="lang-en">Mover observation age ≤30 s, example speed 60 km/h; place projection lag at most 24 h; authorized distance buckets 100 m</span></td><td><span class="lang-zh">过龄移动端剔除；地点不按最后编辑时间过期；私人位置默认不公开</span> <span class="lang-en">Drop overdue movers; places do not expire by edit age; private location closed by default</span></td></tr></tbody></table><div class="bilingual"><div class="lang-zh"><p>A1 给出的编辑率是 2,000,000 × 2 ÷ (365 × 86,400) ≈ 0.127 次/秒。详情按每条一 KB 是 2 GB；空间行按六十四字节是 128 MB，未计树节点、分配器、副本和备份。两者都是可放进单集群的原始量级，所以本章的分片是热格负载触发，不是「有地理位置就必须分布式」。</p>
+<p>A2 的平均查询为 8,000,000 ÷ 86,400 ≈ 92.6 QPS，十二倍峰值约 1,111。1,111 × 4,000 ≈ 4.44 MB/s，约 35.6 Mb/s，是整个服务层的出口。平均流量不能证明球场热格能扛住；热点占比、每次拉取的成员字节和距离计算 CPU 要分别量。</p></div><div class="lang-en"><p>A1 gives 2,000,000 × 2 ÷ (365 × 86,400) ≈ 0.127 edits/s. Details at one KB each total 2 GB. Sixty-four-byte spatial rows total 128 MB before tree nodes, allocation, replicas and backups. Both fit the raw scale of one cluster. Sharding responds to hot-cell load, not the mere presence of geography.</p>
+<p>A2 gives 8,000,000 ÷ 86,400 ≈ 92.6 average QPS and about 1,111 at a 12× peak. 1,111 × 4,000 ≈ 4.44 MB/s, about 35.6 Mb/s, is aggregate service egress. Average traffic cannot prove a stadium cell fits. Measure concentration, candidate bytes and distance CPU separately.</p></div></div>
+</details></section>
+
+<section><h2><span class="lang-zh">权威地点与派生索引：先画完整查询</span> <span class="lang-en">Authoritative places and a derived index: complete the query</span></h2>
+<figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d1s1t d1s1d">
+          <title id="d1s1t">One admitted query enters Edge</title>
+          <desc id="d1s1d">Client sends GET to Edge; Edge returns an admission response to Client.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <g class="is-new">
+            <rect x="120" y="18" width="824" height="364" rx="18" class="boundary"/><text x="136" y="38" class="tiny">NEARBY · published places first</text>
+            <circle cx="44" cy="166" r="12" class="box"/><path d="M24 212 Q44 180 64 212" class="wire"/><text x="44" y="234" text-anchor="middle" class="label">Client</text>
+            <rect x="165" y="150" width="110" height="80" rx="12" class="box"/><text x="220" y="187" text-anchor="middle" class="label">Edge</text><text x="220" y="206" text-anchor="middle" class="sub">TLS / quota</text>
+            <path d="M70 181 L155 181" class="wire"/><polygon points="165,181 155,186 155,176" class="head"/><text x="147" y="173" text-anchor="middle" class="tiny">GET</text>
+            <path d="M165 209 L80 209" class="wire reply"/><polygon points="70,209 80,204 80,214" class="head reply"/>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">先画入口闭环。800 万次/天 ÷ 86,400 × 12 ≈ 1,111 QPS；Edge 负责准入，暂时没有理由画全球多地域。</span> <span class="lang-en">Start with admission. 8 million/day ÷ 86,400 × 12 ≈ 1,111 QPS; Edge gates requests. There is no capacity reason for global regions yet.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d1s2t d1s2d">
+          <title id="d1s2t">The service owns radius and policy</title>
+          <desc id="d1s2d">Edge forwards to Location Service; responses return Location Service to Edge to Client.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="18" width="824" height="364" rx="18" class="boundary"/><text x="136" y="38" class="tiny">NEARBY · published places first</text>
+          <circle cx="44" cy="166" r="12" class="box"/><path d="M24 212 Q44 180 64 212" class="wire"/><text x="44" y="234" text-anchor="middle" class="label">Client</text>
+          <rect x="165" y="150" width="110" height="80" rx="12" class="box"/><text x="220" y="187" text-anchor="middle" class="label">Edge</text><text x="220" y="206" text-anchor="middle" class="sub">TLS / quota</text>
+          <path d="M70 181 L155 181" class="wire"/><polygon points="165,181 155,186 155,176" class="head"/><text x="147" y="173" text-anchor="middle" class="tiny">GET</text>
+          <path d="M165 209 L80 209" class="wire reply"/><polygon points="70,209 80,204 80,214" class="head reply"/>
+          <g class="is-new">
+            <rect x="385" y="150" width="170" height="80" rx="12" class="box"/><text x="470" y="187" text-anchor="middle" class="label">Location Service</text><text x="470" y="206" text-anchor="middle" class="sub">cover / rank / policy</text>
+            <path d="M275 181 L375 181" class="wire"/><polygon points="385,181 375,186 375,176" class="head"/>
+            <path d="M385 209 L285 209" class="wire reply"/><polygon points="275,209 285,204 285,214" class="head reply"/>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">加服务，是为了让半径校验、覆盖算法和字段权限只有一个入口。读目标 100 ms 是 A7 的预算，不能把 TLS 入口当距离计算器。</span> <span class="lang-en">Add the service so radius validation, covering, and field permissions have one entry. The 100 ms read target is assumption A7. TLS admission does not calculate distance.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d1s3t d1s3d">
+          <title id="d1s3t">Cell recall completes the first read</title>
+          <desc id="d1s3d">Location Service reads k cells from Spatial Index. Members return Spatial Index to Location Service to Edge to Client.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="18" width="824" height="364" rx="18" class="boundary"/><text x="136" y="38" class="tiny">NEARBY · published places first</text>
+          <circle cx="44" cy="166" r="12" class="box"/><path d="M24 212 Q44 180 64 212" class="wire"/><text x="44" y="234" text-anchor="middle" class="label">Client</text>
+          <rect x="165" y="150" width="110" height="80" rx="12" class="box"/><text x="220" y="187" text-anchor="middle" class="label">Edge</text><text x="220" y="206" text-anchor="middle" class="sub">TLS / quota</text>
+          <path d="M70 181 L155 181" class="wire"/><polygon points="165,181 155,186 155,176" class="head"/><text x="147" y="173" text-anchor="middle" class="tiny">GET</text>
+          <path d="M165 209 L80 209" class="wire reply"/><polygon points="70,209 80,204 80,214" class="head reply"/>
+          <rect x="385" y="150" width="170" height="80" rx="12" class="box"/><text x="470" y="187" text-anchor="middle" class="label">Location Service</text><text x="470" y="206" text-anchor="middle" class="sub">cover / rank / policy</text>
+          <path d="M275 181 L375 181" class="wire"/><polygon points="385,181 375,186 375,176" class="head"/>
+          <path d="M385 209 L285 209" class="wire reply"/><polygon points="275,209 285,204 285,214" class="head reply"/>
+          <g class="is-new">
+            <path d="M595 270 V330 A85 12 0 0 0 765 330 V270" class="store"/><ellipse cx="680" cy="270" rx="85" ry="12" class="store"/><text x="680" y="310" text-anchor="middle" class="label">Spatial Index</text><text x="680" y="328" text-anchor="middle" class="sub">cell → members</text>
+            <path d="M455 230 L455 284 Q455 292 463 292 L585 292" class="wire"/><polygon points="595,292 585,297 585,287" class="head"/><text x="534" y="281" text-anchor="middle" class="tiny">read k cells</text>
+            <path d="M595 310 L483 310 Q475 310 475 302 L475 240" class="wire reply"/><polygon points="475,230 480,240 470,240" class="head reply"/>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">200 万地点先按格子召回，再算真实距离。格子数只限定键访问；一个热格有多少成员还要另算。</span> <span class="lang-en">Recall 2 million places by cell, then measure distance. Cell count bounds key lookups, while the member count of a hot cell is a separate budget.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d1s4t d1s4d">
+          <title id="d1s4t">Authority remains in the latest row</title>
+          <desc id="d1s4d">Location Service hydrates selected IDs or commits an edit in Location Store; its response returns to Location Service, Edge, Client. The independent recall still uses Spatial Index.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="18" width="824" height="364" rx="18" class="boundary"/><text x="136" y="38" class="tiny">NEARBY · published places first</text>
+          <circle cx="44" cy="166" r="12" class="box"/><path d="M24 212 Q44 180 64 212" class="wire"/><text x="44" y="234" text-anchor="middle" class="label">Client</text>
+          <rect x="165" y="150" width="110" height="80" rx="12" class="box"/><text x="220" y="187" text-anchor="middle" class="label">Edge</text><text x="220" y="206" text-anchor="middle" class="sub">TLS / quota</text>
+          <path d="M70 181 L155 181" class="wire"/><polygon points="165,181 155,186 155,176" class="head"/><text x="147" y="173" text-anchor="middle" class="tiny">GET</text>
+          <path d="M165 209 L80 209" class="wire reply"/><polygon points="70,209 80,204 80,214" class="head reply"/>
+          <rect x="385" y="150" width="170" height="80" rx="12" class="box"/><text x="470" y="187" text-anchor="middle" class="label">Location Service</text><text x="470" y="206" text-anchor="middle" class="sub">cover / rank / policy</text>
+          <path d="M275 181 L375 181" class="wire"/><polygon points="385,181 375,186 375,176" class="head"/>
+          <path d="M385 209 L285 209" class="wire reply"/><polygon points="275,209 285,204 285,214" class="head reply"/>
+          <path d="M595 270 V330 A85 12 0 0 0 765 330 V270" class="store"/><ellipse cx="680" cy="270" rx="85" ry="12" class="store"/><text x="680" y="310" text-anchor="middle" class="label">Spatial Index</text><text x="680" y="328" text-anchor="middle" class="sub">cell → members</text>
+          <path d="M455 230 L455 284 Q455 292 463 292 L585 292" class="wire"/><polygon points="595,292 585,297 585,287" class="head"/><text x="534" y="281" text-anchor="middle" class="tiny">read k cells</text>
+          <path d="M595 310 L483 310 Q475 310 475 302 L475 240" class="wire reply"/><polygon points="475,230 480,240 470,240" class="head reply"/>
+          <g class="is-new">
+            <path d="M595 70 V120 A85 12 0 0 0 765 120 V70" class="store"/><ellipse cx="680" cy="70" rx="85" ry="12" class="store"/><text x="680" y="105" text-anchor="middle" class="label">Location Store</text><text x="680" y="123" text-anchor="middle" class="sub">latest + outbox</text>
+            <path d="M495 150 L495 102 Q495 94 503 94 L585 94" class="wire"/><polygon points="595,94 585,99 585,89" class="head"/><text x="490" y="77" class="tiny">hydrate / edit</text>
+            <path d="M595 112 L523 112 Q515 112 515 120 L515 140" class="wire reply"/><polygon points="515,150 510,140 520,140" class="head reply"/>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">补权威行，是为了让删除状态、公开权限和详情不由旧索引决定。主线地点编辑约 0.13 次/秒，单库同步空间索引也成立。</span> <span class="lang-en">Add authority so an old index does not decide deletion, visibility, or details. Place edits are about 0.13/s; one database with a synchronous spatial index is also valid.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d1s5t d1s5d">
+          <title id="d1s5t">A durable projection path closes the async variant</title>
+          <desc id="d1s5d">Location Store committed outbox feeds Outbox Relay, Cell Queue, Index Writer, Spatial Index. The write reply still returns Location Store to Location Service to Edge to Client.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="18" width="824" height="364" rx="18" class="boundary"/><text x="136" y="38" class="tiny">NEARBY · published places first</text>
+          <circle cx="44" cy="166" r="12" class="box"/><path d="M24 212 Q44 180 64 212" class="wire"/><text x="44" y="234" text-anchor="middle" class="label">Client</text>
+          <rect x="165" y="150" width="110" height="80" rx="12" class="box"/><text x="220" y="187" text-anchor="middle" class="label">Edge</text><text x="220" y="206" text-anchor="middle" class="sub">TLS / quota</text>
+          <path d="M70 181 L155 181" class="wire"/><polygon points="165,181 155,186 155,176" class="head"/><text x="147" y="173" text-anchor="middle" class="tiny">GET</text>
+          <path d="M165 209 L80 209" class="wire reply"/><polygon points="70,209 80,204 80,214" class="head reply"/>
+          <rect x="385" y="150" width="170" height="80" rx="12" class="box"/><text x="470" y="187" text-anchor="middle" class="label">Location Service</text><text x="470" y="206" text-anchor="middle" class="sub">cover / rank / policy</text>
+          <path d="M275 181 L375 181" class="wire"/><polygon points="385,181 375,186 375,176" class="head"/>
+          <path d="M385 209 L285 209" class="wire reply"/><polygon points="275,209 285,204 285,214" class="head reply"/>
+          <path d="M595 270 V330 A85 12 0 0 0 765 330 V270" class="store"/><ellipse cx="680" cy="270" rx="85" ry="12" class="store"/><text x="680" y="310" text-anchor="middle" class="label">Spatial Index</text><text x="680" y="328" text-anchor="middle" class="sub">cell → members</text>
+          <path d="M455 230 L455 284 Q455 292 463 292 L585 292" class="wire"/><polygon points="595,292 585,297 585,287" class="head"/><text x="534" y="281" text-anchor="middle" class="tiny">read k cells</text>
+          <path d="M595 310 L483 310 Q475 310 475 302 L475 240" class="wire reply"/><polygon points="475,230 480,240 470,240" class="head reply"/>
+          <path d="M595 70 V120 A85 12 0 0 0 765 120 V70" class="store"/><ellipse cx="680" cy="70" rx="85" ry="12" class="store"/><text x="680" y="105" text-anchor="middle" class="label">Location Store</text><text x="680" y="123" text-anchor="middle" class="sub">latest + outbox</text>
+          <path d="M495 150 L495 102 Q495 94 503 94 L585 94" class="wire"/><polygon points="595,94 585,99 585,89" class="head"/><text x="490" y="77" class="tiny">hydrate / edit</text>
+          <path d="M595 112 L523 112 Q515 112 515 120 L515 140" class="wire reply"/><polygon points="515,150 510,140 520,140" class="head reply"/>
+          <g class="is-new">
+            <rect x="815" y="70" width="110" height="60" rx="12" class="box"/><text x="870" y="97" text-anchor="middle" class="label">Outbox Relay</text><text x="870" y="116" text-anchor="middle" class="sub">retry publish</text>
+            <path d="M800 170 h98 a30 30 0 0 1 0 60 h-98 a30 30 0 0 1 0 -60" class="queue"/><path d="M900 179 v42" class="queue"/><path d="M892 179 v42" class="queue"/><path d="M884 179 v42" class="queue"/><text x="833" y="206" text-anchor="middle" class="label">Cell Queue</text>
+            <rect x="815" y="280" width="110" height="60" rx="12" class="box"/><text x="870" y="307" text-anchor="middle" class="label">Index Writer</text><text x="870" y="326" text-anchor="middle" class="sub">version guards</text>
+            <path d="M765 100 L805 100" class="wire async"/><polygon points="815,100 805,105 805,95" class="head async"/><path d="M870 130 L870 160" class="wire async"/><polygon points="870,170 865,160 875,160" class="head async"/><path d="M870 230 L870 270" class="wire async"/><polygon points="870,280 865,270 875,270" class="head async"/><path d="M815 310 L775 310" class="wire async"/><polygon points="765,310 775,305 775,315" class="head async"/>
+            <text x="135" y="365" class="tiny">ASYNC VARIANT · commit row + outbox together; response does not wait for Index Writer</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">索引独立部署时才加这条异步链：最新行和 outbox 同事务，relay 重投，Writer 更新索引。200 确认权威事务耐久性契约，不能证明邻近查询已可见。</span> <span class="lang-en">Add this async chain when the index is deployed separately: latest row and outbox share a transaction, relay retries, and Writer projects. A 200 acknowledges authority durability under its storage contract, not visibility in nearby queries.</span></figcaption>
+      </div>
+    </figure><div class="bilingual"><div class="lang-zh"><p>正常读路径是 Client → Edge → Location Service → Spatial Index，再由 Service 读取 Location Store 的权威行、过滤并返回。索引按 <code>cell_id + entity_id</code> 组织召回，权威按 <code>entity_id</code> 组织编辑。索引坐标可能陈旧；<strong>不能先用旧距离丢掉 id，再期待回表找回它</strong>。删除、营业状态、受众权限和最终距离均由读取到的权威版本决定。</p><p>单库是合理第一版：PostGIS 的 <code>geography ST_DWithin</code> 使用米、默认椭球测距，且包含可利用空间索引的外接框比较 [3]。同库事务修改地点与数据库维护的索引，省掉跨系统事件窗口。独立经纬度 B 树是否有效取决于选择性和执行计划，不必一概否定。</p><p>独立索引用来隔离读取和练习热格迁移，代价是重放、版本和晚到。权威行与 outbox 同事务提交，relay 重投；图第 5 帧的 200 只确认该权威事务的耐久性契约，不代表 Index Writer 已处理。需要当前完整精确结果时回到一致的同步索引路径，或支付同步可见屏障的成本。</p></div><div class="lang-en"><p>The read path is Client → Edge → Location Service → Spatial Index, then Service loads authoritative Location Store rows, filters and replies. The index groups recall by <code>cell_id + entity_id</code>; authority groups edits by <code>entity_id</code>. Index coordinates can be stale: <strong>discarding an ID by its old distance prevents later hydration from recovering it</strong>. Deletion, business state, audience and final distance use the authoritative version read.</p><p>One database is a valid first version. PostGIS <code>geography ST_DWithin</code> takes metres, defaults to spheroidal measurement and includes an index-assisted bounding-box comparison [3]. A transaction updates both places and the database-maintained index. Independent coordinate B-trees depend on selectivity and plans.</p><p>A separate index isolates recall load but adds replay, versions and delayed visibility. Commit authority and outbox together, then let relay retry. The 200 in frame 5 confirms only the authority transaction under its durability contract. Current complete exact results need a consistent synchronous index path or an explicit synchronous visibility barrier.</p></div></div>
+</section>
+
+<section><h2><span class="lang-zh">半径与格子：前缀不能代替覆盖</span> <span class="lang-en">Radius and cells: prefixes do not replace covering</span></h2>
+<figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d2s1t d2s1d">
+          <title id="d2s1t">A point is one cell, not one radius</title>
+          <desc id="d2s1d">A physical length-6 grid at 40 degrees north has 0.934 by 0.610 km cells. The query point is at the center of wx4g0b.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <g class="is-new">
+            <rect x="98" y="18" width="342" height="364" rx="18" class="boundary"/><text x="114" y="38" class="tiny">GEOHASH 6 · 40°N · 100 px/km</text><rect x="120" y="60" width="93.4" height="61" class="box muted"/><rect x="213.4" y="60" width="93.4" height="61" class="box muted"/><rect x="306.8" y="60" width="93.4" height="61" class="box muted"/><rect x="120" y="121" width="93.4" height="61" class="box muted"/><rect x="213.4" y="121" width="93.4" height="61" class="box muted"/><rect x="306.8" y="121" width="93.4" height="61" class="box muted"/><rect x="120" y="182" width="93.4" height="61" class="box muted"/><rect x="213.4" y="182" width="93.4" height="61" class="box muted"/><rect x="306.8" y="182" width="93.4" height="61" class="box muted"/><rect x="120" y="243" width="93.4" height="61" class="box muted"/><rect x="213.4" y="243" width="93.4" height="61" class="box muted"/><rect x="306.8" y="243" width="93.4" height="61" class="box muted"/><rect x="120" y="304" width="93.4" height="61" class="box muted"/><rect x="213.4" y="304" width="93.4" height="61" class="box muted"/><rect x="306.8" y="304" width="93.4" height="61" class="box muted"/>
+            <rect x="213.4" y="182" width="93.4" height="61" class="box ok"/><circle cx="260.1" cy="212.5" r="4" class="head"/><text x="260.1" y="237" text-anchor="middle" class="tiny">wx4g0b</text>
+            <text x="490" y="92" class="label">30 bits = 15 longitude + 15 latitude</text>
+            <text x="490" y="122" class="tiny">w = 360 / 2^15 × 111 × cos(40°) = 0.934 km</text>
+            <text x="490" y="150" class="tiny">h = 180 / 2^15 × 111 = 0.610 km</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">交错 30 比特把二维点变成一个键。0.934 × 0.610 km 是 A6 的本地近似；它没有说明 1 km 圆只查这一个键。</span> <span class="lang-en">Interleaving 30 bits gives one key for a point. The 0.934 × 0.610 km size is the local approximation in A6; it does not mean one key covers a 1 km circle.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d2s2t d2s2d">
+          <title id="d2s2t">One kilometer reaches beyond immediate neighbors</title>
+          <desc id="d2s2d">A circle with radius 1 km is centered in wx4g0b. Its north edge crosses the second row beyond the center because 1.5 times 0.610 is less than 1.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="98" y="18" width="342" height="364" rx="18" class="boundary"/><text x="114" y="38" class="tiny">GEOHASH 6 · 40°N · 100 px/km</text><rect x="120" y="60" width="93.4" height="61" class="box muted"/><rect x="213.4" y="60" width="93.4" height="61" class="box muted"/><rect x="306.8" y="60" width="93.4" height="61" class="box muted"/><rect x="120" y="121" width="93.4" height="61" class="box muted"/><rect x="213.4" y="121" width="93.4" height="61" class="box muted"/><rect x="306.8" y="121" width="93.4" height="61" class="box muted"/><rect x="120" y="182" width="93.4" height="61" class="box muted"/><rect x="213.4" y="182" width="93.4" height="61" class="box muted"/><rect x="306.8" y="182" width="93.4" height="61" class="box muted"/><rect x="120" y="243" width="93.4" height="61" class="box muted"/><rect x="213.4" y="243" width="93.4" height="61" class="box muted"/><rect x="306.8" y="243" width="93.4" height="61" class="box muted"/><rect x="120" y="304" width="93.4" height="61" class="box muted"/><rect x="213.4" y="304" width="93.4" height="61" class="box muted"/><rect x="306.8" y="304" width="93.4" height="61" class="box muted"/>
+          <rect x="213.4" y="182" width="93.4" height="61" class="box ok"/><circle cx="260.1" cy="212.5" r="4" class="head"/><text x="260.1" y="237" text-anchor="middle" class="tiny">wx4g0b</text>
+          <text x="490" y="92" class="label">30 bits = 15 longitude + 15 latitude</text>
+          <text x="490" y="122" class="tiny">w = 360 / 2^15 × 111 × cos(40°) = 0.934 km</text>
+          <text x="490" y="150" class="tiny">h = 180 / 2^15 × 111 = 0.610 km</text>
+          <g class="is-new">
+            <circle cx="260.1" cy="212.5" r="100" class="wire"/>
+            <text x="490" y="194" class="clock">r = 1 km; query at the CELL CENTER</text>
+            <text x="490" y="223" class="tiny">second cell north begins at 1.5h = 0.915 km</text>
+            <text x="490" y="248" class="tiny">reject: current cell + fixed 8 neighbors</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">加圆才看见漏召回：1.5 × 0.610 ≈ 0.915 km &lt; 1 km，所以北边第二格也要查。固定九格在这个精度下不足。</span> <span class="lang-en">The circle exposes a miss: 1.5 × 0.610 ≈ 0.915 km &lt; 1 km, so the second cell north must be read. Nine fixed cells are insufficient at this precision.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d2s3t d2s3d">
+          <title id="d2s3t">Circle intersection differs from its bounding box</title>
+          <desc id="d2s3d">Eleven blue cells intersect this centered circle. Four corner cells of the fifteen-cell centered bounding box do not. The southern cell wx4fbz has a different prefix.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="98" y="18" width="342" height="364" rx="18" class="boundary"/><text x="114" y="38" class="tiny">GEOHASH 6 · 40°N · 100 px/km</text><rect x="120" y="60" width="93.4" height="61" class="box muted"/><rect x="213.4" y="60" width="93.4" height="61" class="box muted"/><rect x="306.8" y="60" width="93.4" height="61" class="box muted"/><rect x="120" y="121" width="93.4" height="61" class="box muted"/><rect x="213.4" y="121" width="93.4" height="61" class="box muted"/><rect x="306.8" y="121" width="93.4" height="61" class="box muted"/><rect x="120" y="182" width="93.4" height="61" class="box muted"/><rect x="213.4" y="182" width="93.4" height="61" class="box muted"/><rect x="306.8" y="182" width="93.4" height="61" class="box muted"/><rect x="120" y="243" width="93.4" height="61" class="box muted"/><rect x="213.4" y="243" width="93.4" height="61" class="box muted"/><rect x="306.8" y="243" width="93.4" height="61" class="box muted"/><rect x="120" y="304" width="93.4" height="61" class="box muted"/><rect x="213.4" y="304" width="93.4" height="61" class="box muted"/><rect x="306.8" y="304" width="93.4" height="61" class="box muted"/>
+          <rect x="213.4" y="182" width="93.4" height="61" class="box ok"/><circle cx="260.1" cy="212.5" r="4" class="head"/><text x="260.1" y="237" text-anchor="middle" class="tiny">wx4g0b</text>
+          <text x="490" y="92" class="label">30 bits = 15 longitude + 15 latitude</text>
+          <text x="490" y="122" class="tiny">w = 360 / 2^15 × 111 × cos(40°) = 0.934 km</text>
+          <text x="490" y="150" class="tiny">h = 180 / 2^15 × 111 = 0.610 km</text>
+          <circle cx="260.1" cy="212.5" r="100" class="wire"/>
+          <text x="490" y="194" class="clock">r = 1 km; query at the CELL CENTER</text>
+          <text x="490" y="223" class="tiny">second cell north begins at 1.5h = 0.915 km</text>
+          <text x="490" y="248" class="tiny">reject: current cell + fixed 8 neighbors</text>
+          <g class="is-new">
+            <rect x="213.4" y="60" width="93.4" height="61" class="box alt"/><rect x="120" y="121" width="93.4" height="61" class="box alt"/><rect x="213.4" y="121" width="93.4" height="61" class="box alt"/><rect x="306.8" y="121" width="93.4" height="61" class="box alt"/><rect x="120" y="182" width="93.4" height="61" class="box alt"/><rect x="306.8" y="182" width="93.4" height="61" class="box alt"/><rect x="120" y="243" width="93.4" height="61" class="box alt"/><rect x="213.4" y="243" width="93.4" height="61" class="box alt"/><rect x="306.8" y="243" width="93.4" height="61" class="box alt"/><rect x="213.4" y="304" width="93.4" height="61" class="box alt"/>
+            <circle cx="260.1" cy="212.5" r="100" class="wire"/>
+            <text x="260.1" y="86" text-anchor="middle" class="tiny">2nd north</text>
+            <text x="260.1" y="292" text-anchor="middle" class="tiny">wx4fbz</text>
+            <text x="490" y="291" class="label">blue cells intersect the circle: 11 here</text>
+            <text x="490" y="317" class="tiny">centered bounding box: 15; any-center upper bound: 20</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">按相交选择是图示的 11 格；外接盒是 15 格，任意中心最坏盒是 20 格。三个数不能互换，跨边点也不能用同一字符串前缀概括。</span> <span class="lang-en">Intersection gives 11 cells in this centered example; its bounding box has 15, and an arbitrary center has a 20-cell worst-case box. These counts differ. A shared string prefix also misses cross-border points.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d2s4t d2s4d">
+          <title id="d2s4t">Radius tiers change request fan-out, not density</title>
+          <desc id="d2s4d">The same circle and eleven cells remain. A note explains that larger radii require coarser prefix range reads and a separate candidate budget.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="98" y="18" width="342" height="364" rx="18" class="boundary"/><text x="114" y="38" class="tiny">GEOHASH 6 · 40°N · 100 px/km</text><rect x="120" y="60" width="93.4" height="61" class="box muted"/><rect x="213.4" y="60" width="93.4" height="61" class="box muted"/><rect x="306.8" y="60" width="93.4" height="61" class="box muted"/><rect x="120" y="121" width="93.4" height="61" class="box muted"/><rect x="213.4" y="121" width="93.4" height="61" class="box muted"/><rect x="306.8" y="121" width="93.4" height="61" class="box muted"/><rect x="120" y="182" width="93.4" height="61" class="box muted"/><rect x="213.4" y="182" width="93.4" height="61" class="box muted"/><rect x="306.8" y="182" width="93.4" height="61" class="box muted"/><rect x="120" y="243" width="93.4" height="61" class="box muted"/><rect x="213.4" y="243" width="93.4" height="61" class="box muted"/><rect x="306.8" y="243" width="93.4" height="61" class="box muted"/><rect x="120" y="304" width="93.4" height="61" class="box muted"/><rect x="213.4" y="304" width="93.4" height="61" class="box muted"/><rect x="306.8" y="304" width="93.4" height="61" class="box muted"/>
+          <rect x="213.4" y="182" width="93.4" height="61" class="box ok"/><circle cx="260.1" cy="212.5" r="4" class="head"/><text x="260.1" y="237" text-anchor="middle" class="tiny">wx4g0b</text>
+          <text x="490" y="92" class="label">30 bits = 15 longitude + 15 latitude</text>
+          <text x="490" y="122" class="tiny">w = 360 / 2^15 × 111 × cos(40°) = 0.934 km</text>
+          <text x="490" y="150" class="tiny">h = 180 / 2^15 × 111 = 0.610 km</text>
+          <circle cx="260.1" cy="212.5" r="100" class="wire"/>
+          <text x="490" y="194" class="clock">r = 1 km; query at the CELL CENTER</text>
+          <text x="490" y="223" class="tiny">second cell north begins at 1.5h = 0.915 km</text>
+          <text x="490" y="248" class="tiny">reject: current cell + fixed 8 neighbors</text>
+          <rect x="213.4" y="60" width="93.4" height="61" class="box alt"/><rect x="120" y="121" width="93.4" height="61" class="box alt"/><rect x="213.4" y="121" width="93.4" height="61" class="box alt"/><rect x="306.8" y="121" width="93.4" height="61" class="box alt"/><rect x="120" y="182" width="93.4" height="61" class="box alt"/><rect x="306.8" y="182" width="93.4" height="61" class="box alt"/><rect x="120" y="243" width="93.4" height="61" class="box alt"/><rect x="213.4" y="243" width="93.4" height="61" class="box alt"/><rect x="306.8" y="243" width="93.4" height="61" class="box alt"/><rect x="213.4" y="304" width="93.4" height="61" class="box alt"/>
+          <circle cx="260.1" cy="212.5" r="100" class="wire"/>
+          <text x="260.1" y="86" text-anchor="middle" class="tiny">2nd north</text>
+          <text x="260.1" y="292" text-anchor="middle" class="tiny">wx4fbz</text>
+          <text x="490" y="291" class="label">blue cells intersect the circle: 11 here</text>
+          <text x="490" y="317" class="tiny">centered bounding box: 15; any-center upper bound: 20</text>
+          <g class="is-new">
+            <text x="490" y="353" class="clock">5 km ⇒ coarse ranges; candidates still grow</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">5 km 改用长度 5 的前缀范围，最坏约 16 个范围；范围内仍有很多成员。半径加大后必须重算候选量，不能把少几个请求说成少几个结果。</span> <span class="lang-en">For 5 km, length-5 prefix ranges need at most about 16 range requests. Each range can still contain many members. Recalculate candidates instead of equating fewer requests with fewer results.</span></figcaption>
+      </div>
+    </figure><div class="bilingual"><div class="lang-zh"><p>长度 6 的 geohash 有 30 比特，经纬各 15 位。A6 的局部平面近似给出：高 <code>180/32768×111≈0.609741 km</code>，宽 <code>360/32768×111×cos40°≈0.934178 km</code>。图示格心一公里圆越过北邻远边 <code>1.5h≈0.914612 km</code>；15 格外接盒的四角距圆至少约 1.027 km，所以相交 11 格。11 是图示结果，任意中心的保守盒上界是 <code>(ceil(2/0.610)+1)×(ceil(2/0.934)+1)=20</code>，固定九格不成立。</p><p>相邻点可没有长公共前缀，如 <code>wx4g0b</code> 南邻是 <code>wx4fbz</code>；枚举覆盖，别只查 <code>LIKE wx4g0%</code>。跨反经线拆经度区间；圆触及极点就覆盖所有经度。高纬不能搬用四十度的 20 格预算。覆盖需保守包含边界，超预算必须拒绝或选择更粗的已维护层级，不能截掉最后几格。</p><p>同一局部近似下，2 km/5 km 的六位外接盒上界是 48/216 格；5 km 改五位约 <code>3.737×4.878 km</code> 的范围，可降至 16 次范围读取。完整 geohash 有序行才能做前缀范围，离散的六位 Redis key 不自带五位聚合。1→5 km 面积增至 25 倍，少范围请求不等于少候选。</p><p>Redis 的内部 52 比特编码、动态覆盖区间 [1]，以及 H3 的 <code>gridDisk(k)</code> 都不是“任意一公里固定九格”的依据。H3 的 k 是网格跳数、输出无序 [5]，每层有 12 个五边形、同层面积也随位置变化 [4]。</p></div><div class="lang-en"><p>A length-6 geohash has 30 bits, 15 per axis. A6’s local planar approximation gives height <code>180/32768×111≈0.609741 km</code> and width <code>360/32768×111×cos40°≈0.934178 km</code>. The centered 1 km circle passes the northern neighbor at <code>1.5 h≈0.914612 km</code>. Four corners of its 15-cell box start about 1.027 km away, leaving 11 intersecting cells. Eleven is diagram-specific; the arbitrary-center box bound is <code>(ceil(2/0.610)+1)×(ceil(2/0.934)+1)=20</code>, not a fixed nine.</p><p>Nearby points may lose a shared prefix: <code>wx4g0b</code> has southern neighbor <code>wx4fbz</code>, outside <code>LIKE wx4g0%</code>. Enumerate the cover. Split longitude intervals at the antimeridian; a cap touching a pole needs every longitude. The 40-degree 20-cell budget does not hold at high latitudes. Include boundary points conservatively; reject excess work or choose a maintained coarser level, never truncate a cover.</p><p>The same local approximation gives 48/216 length-6 box cells at 2/5 km. Length-5 ranges are about <code>3.737×4.878 km</code> and reduce 5 km to at most 16 range reads. That requires rows ordered by full geohash; separate length-6 Redis keys provide no implicit length-5 aggregate. Area grows 25× from 1 to 5 km; fewer ranges do not imply fewer candidates.</p><p>Redis’s 52-bit encoding and adaptive internal ranges [1], or H3 <code>gridDisk(k)</code>, do not justify fixed nine-cell queries. H3 k counts grid hops with unordered output [5]; each resolution has 12 pentagons and location-dependent areas [4].</p></div></div><h3><span class="lang-zh">覆盖实现：先声明距离模型</span><span class="lang-en">Cover implementation: declare the distance model</span></h3><div class="bilingual"><div class="lang-zh"><p>下面是可运行 Java 17 的节选，输入坐标、允许半径、精度和格数预算，输出完整的经纬网格集合；格坐标再交错成 geohash。<strong>覆盖与后续 Haversine 共用半径 R=6,371,008.8 m 的球面模型</strong>，不宣称椭球或 GPS 真值精确。主方法保守包住球面圆；辅助方法枚举闭区间并在超预算时抛错。微小向外余量防止边界舍入，不是定位误差预算。</p></div><div class="lang-en"><p>This runnable Java 17 excerpt takes coordinates, an allowed radius, precision and cell budget, returning a complete grid cover; interleave grid coordinates to form geohashes. <strong>Covering and final Haversine distance share the chosen R=6,371,008.8 m sphere</strong>. They do not promise spheroidal or GPS ground-truth accuracy. The helper enumerates closed ranges and throws on excess work. Tiny outward padding handles rounding, not location error.</p></div></div><pre data-language="Java 17 · runnable excerpt" data-kind="teaching" data-source="Nearby.java#cover"><code>public static Set&lt;Cell&gt; cover(Point q, double radius, int precision, int maxCells) {
+    if (!Set.of(500d, 1000d, 2000d, 5000d).contains(radius)
+            || precision &lt; 1 || precision &gt; 6 || maxCells &lt; 1)
+        throw new IllegalArgumentException("radius / precision / budget");
+    int bits = 5 * precision, nx = 1 &lt;&lt; ((bits + 1) / 2), ny = 1 &lt;&lt; (bits / 2);
+    double phi = Math.toRadians(q.lat), lambda = q.lon;
+    double angular = radius / R + 1e-12; // Outward rounding guard (~6 micrometres).
+    double south = Math.max(-90, Math.toDegrees(phi - angular));
+    double north = Math.min(90, Math.toDegrees(phi + angular));
+    List&lt;Span&gt; longitude = new ArrayList&lt;&gt;();
+    if (Math.abs(phi) + angular &gt;= Math.PI / 2) {
+        longitude.add(new Span(-180, 180)); // A cap touching a pole needs all longitudes.
+    } else {
+        double dl = Math.toDegrees(Math.asin(Math.min(1, Math.sin(angular) / Math.cos(phi))));
+        double lo = lambda - dl, hi = lambda + dl;
+        if (lo &lt; -180) {
+            longitude.add(new Span(lo + 360, 180));
+            longitude.add(new Span(-180, hi));
+        } else if (hi &gt; 180) {
+            longitude.add(new Span(lo, 180));
+            longitude.add(new Span(-180, hi - 360));
+        } else longitude.add(new Span(lo, hi));
+    }
+    Set&lt;Cell&gt; cells = new HashSet&lt;&gt;();
+    for (Span span : longitude)
+        addClosedBox(cells, span, south, north, nx, ny, precision, maxCells);
+    return Set.copyOf(cells); // Budget failures throw; never return a truncated cover.
+}</code></pre><div class="bilingual"><div class="lang-zh"><p>完整类与运行命令见 <a href="../examples/ch19/README.md">示例说明</a>。极区在六位精度可能触发工作量错误，可使用更粗层级或专门的球面索引；Redis GEO 自身只支持约 ±85.05112878° 纬度 [1]，本例全纬度模型不等于 Redis 能接收极点。</p></div><div class="lang-en"><p>See the <a href="../examples/ch19/README.md">example contract</a> for the full class and commands. Polar covers at precision six can exceed budget; use a coarser maintained level or an appropriate spherical index. Redis GEO itself accepts only about ±85.05112878° latitude [1]; this full-latitude model does not make Redis accept a pole.</p></div></div>
+</section>
+
+<section><h2><span class="lang-zh">查询闭环：缓存旁路，排序不能提前</span> <span class="lang-en">The query loop: side cache and global ranking</span></h2>
+<figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d3s1t d3s1d">
+          <title id="d3s1t">The query is bounded before fan-out</title>
+          <desc id="d3s1d">Client sends a radius query through Edge to Location Service. The service validates radius and candidate-work limits before accessing storage.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <g class="is-new">
+            <rect x="120" y="18" width="824" height="364" rx="18" class="boundary"/><text x="136" y="38" class="tiny">QUERY · cache is look-aside; Location Service owns merge</text>
+            <circle cx="44" cy="166" r="12" class="box"/><path d="M24 212 Q44 180 64 212" class="wire"/><text x="44" y="234" text-anchor="middle" class="label">Client</text>
+            <rect x="165" y="150" width="110" height="80" rx="12" class="box"/><text x="220" y="187" text-anchor="middle" class="label">Edge</text><text x="220" y="206" text-anchor="middle" class="sub">TLS / quota</text>
+            <rect x="385" y="150" width="170" height="80" rx="12" class="box"/><text x="470" y="187" text-anchor="middle" class="label">Location Service</text><text x="470" y="206" text-anchor="middle" class="sub">cover / rank / policy</text>
+            <path d="M70 181 L155 181" class="wire"/><polygon points="165,181 155,186 155,176" class="head"/><text x="147" y="173" text-anchor="middle" class="tiny">GET</text>
+            <path d="M275 181 L375 181" class="wire"/><polygon points="385,181 375,186 375,176" class="head"/>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">先检查允许的半径和类型。只接受 0.5、1、2、5 km；拒绝 50 km 发生在列出约 1.8 万格之前。</span> <span class="lang-en">Validate radius and type first. Accept 0.5, 1, 2, and 5 km; reject 50 km before listing about 18,000 cells.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d3s2t d3s2d">
+          <title id="d3s2t">Read a cell snapshot from a side cache</title>
+          <desc id="d3s2d">Location Service asks Cell Cache for a versioned snapshot. Cell Cache returns directly to Location Service.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="18" width="824" height="364" rx="18" class="boundary"/><text x="136" y="38" class="tiny">QUERY · cache is look-aside; Location Service owns merge</text>
+          <circle cx="44" cy="166" r="12" class="box"/><path d="M24 212 Q44 180 64 212" class="wire"/><text x="44" y="234" text-anchor="middle" class="label">Client</text>
+          <rect x="165" y="150" width="110" height="80" rx="12" class="box"/><text x="220" y="187" text-anchor="middle" class="label">Edge</text><text x="220" y="206" text-anchor="middle" class="sub">TLS / quota</text>
+          <rect x="385" y="150" width="170" height="80" rx="12" class="box"/><text x="470" y="187" text-anchor="middle" class="label">Location Service</text><text x="470" y="206" text-anchor="middle" class="sub">cover / rank / policy</text>
+          <path d="M70 181 L155 181" class="wire"/><polygon points="165,181 155,186 155,176" class="head"/><text x="147" y="173" text-anchor="middle" class="tiny">GET</text>
+          <path d="M275 181 L375 181" class="wire"/><polygon points="385,181 375,186 375,176" class="head"/>
+          <g class="is-new">
+            <rect x="727" y="82" width="180" height="65" rx="8" class="cache"/><rect x="720" y="75" width="180" height="65" rx="8" class="cache"/><text x="810" y="104.5" text-anchor="middle" class="label">Cell Cache</text><text x="810" y="123.5" text-anchor="middle" class="sub">cell + epoch + version</text>
+            <path d="M495 150 L495 113 Q495 105 503 105 L710 105" class="wire"/><polygon points="720,105 710,110 710,100" class="head"/><text x="600" y="96" text-anchor="middle" class="tiny">lookup cell snapshot</text>
+            <path d="M720 123 L523 123 Q515 123 515 131 L515 140" class="wire reply"/><polygon points="515,150 510,140 520,140" class="head reply"/>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">缓存只回服务，不自行查索引。键含 cell、路由 epoch 和 cell_version；缓存值含坐标与观测时间，才能在同一快照上过滤。</span> <span class="lang-en">The cache replies to the service and never queries the index. Keys contain cell, route epoch, and cell_version. Snapshot values include coordinates and observation times for filtering.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d3s3t d3s3d">
+          <title id="d3s3t">A miss is loaded by the service</title>
+          <desc id="d3s3d">On a miss Location Service reads Spatial Index, receives members back, and fills Cell Cache on a guarded asynchronous path. Cache is not inline.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="18" width="824" height="364" rx="18" class="boundary"/><text x="136" y="38" class="tiny">QUERY · cache is look-aside; Location Service owns merge</text>
+          <circle cx="44" cy="166" r="12" class="box"/><path d="M24 212 Q44 180 64 212" class="wire"/><text x="44" y="234" text-anchor="middle" class="label">Client</text>
+          <rect x="165" y="150" width="110" height="80" rx="12" class="box"/><text x="220" y="187" text-anchor="middle" class="label">Edge</text><text x="220" y="206" text-anchor="middle" class="sub">TLS / quota</text>
+          <rect x="385" y="150" width="170" height="80" rx="12" class="box"/><text x="470" y="187" text-anchor="middle" class="label">Location Service</text><text x="470" y="206" text-anchor="middle" class="sub">cover / rank / policy</text>
+          <path d="M70 181 L155 181" class="wire"/><polygon points="165,181 155,186 155,176" class="head"/><text x="147" y="173" text-anchor="middle" class="tiny">GET</text>
+          <path d="M275 181 L375 181" class="wire"/><polygon points="385,181 375,186 375,176" class="head"/>
+          <rect x="727" y="82" width="180" height="65" rx="8" class="cache"/><rect x="720" y="75" width="180" height="65" rx="8" class="cache"/><text x="810" y="104.5" text-anchor="middle" class="label">Cell Cache</text><text x="810" y="123.5" text-anchor="middle" class="sub">cell + epoch + version</text>
+          <path d="M495 150 L495 113 Q495 105 503 105 L710 105" class="wire"/><polygon points="720,105 710,110 710,100" class="head"/><text x="600" y="96" text-anchor="middle" class="tiny">lookup cell snapshot</text>
+          <path d="M720 123 L523 123 Q515 123 515 131 L515 140" class="wire reply"/><polygon points="515,150 510,140 520,140" class="head reply"/>
+          <g class="is-new">
+            <path d="M720 265 V325 A90 12 0 0 0 900 325 V265" class="store"/><ellipse cx="810" cy="265" rx="90" ry="12" class="store"/><text x="810" y="305" text-anchor="middle" class="label">Spatial Index</text><text x="810" y="323" text-anchor="middle" class="sub">members + coordinates</text>
+            <path d="M555 181 L657 181 Q665 181 665 189 L665 277 Q665 285 673 285 L710 285" class="wire"/><polygon points="720,285 710,290 710,280" class="head"/><text x="680" y="246" class="tiny">miss: load</text>
+            <path d="M720 303 L653 303 Q645 303 645 295 L645 217 Q645 209 637 209 L565 209" class="wire reply"/><polygon points="555,209 565,204 565,214" class="head reply"/>
+            <path d="M555 164 L610.5 164 Q615 164 615 159.5 L615 159.5 Q615 155 619.5 155 L807.5 155 Q810 155 810 152.5 L810 150" class="wire async"/><polygon points="810,140 815,150 805,150" class="head async"/><text x="695" y="177" text-anchor="middle" class="tiny">guarded fill</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">未命中由服务回源，再带版本回填。相同键合并回源；旧快照晚到时不能覆盖新版本，否则删掉的地点会被复活。</span> <span class="lang-en">On a miss the service loads and fills with a version. Coalesce loads per key. A delayed old snapshot cannot overwrite a new version and revive a deleted place.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d3s4t d3s4d">
+          <title id="d3s4t">Recall must finish before global top K</title>
+          <desc id="d3s4d">Location Service merges candidates, deduplicates entity IDs, validates authoritative state and coordinates, filters, and selects top 20 among recalled candidates. Partial shard failure is not represented as a complete empty list.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="18" width="824" height="364" rx="18" class="boundary"/><text x="136" y="38" class="tiny">QUERY · cache is look-aside; Location Service owns merge</text>
+          <circle cx="44" cy="166" r="12" class="box"/><path d="M24 212 Q44 180 64 212" class="wire"/><text x="44" y="234" text-anchor="middle" class="label">Client</text>
+          <rect x="165" y="150" width="110" height="80" rx="12" class="box"/><text x="220" y="187" text-anchor="middle" class="label">Edge</text><text x="220" y="206" text-anchor="middle" class="sub">TLS / quota</text>
+          <rect x="385" y="150" width="170" height="80" rx="12" class="box"/><text x="470" y="187" text-anchor="middle" class="label">Location Service</text><text x="470" y="206" text-anchor="middle" class="sub">cover / rank / policy</text>
+          <path d="M70 181 L155 181" class="wire"/><polygon points="165,181 155,186 155,176" class="head"/><text x="147" y="173" text-anchor="middle" class="tiny">GET</text>
+          <path d="M275 181 L375 181" class="wire"/><polygon points="385,181 375,186 375,176" class="head"/>
+          <rect x="727" y="82" width="180" height="65" rx="8" class="cache"/><rect x="720" y="75" width="180" height="65" rx="8" class="cache"/><text x="810" y="104.5" text-anchor="middle" class="label">Cell Cache</text><text x="810" y="123.5" text-anchor="middle" class="sub">cell + epoch + version</text>
+          <path d="M495 150 L495 113 Q495 105 503 105 L710 105" class="wire"/><polygon points="720,105 710,110 710,100" class="head"/><text x="600" y="96" text-anchor="middle" class="tiny">lookup cell snapshot</text>
+          <path d="M720 123 L523 123 Q515 123 515 131 L515 140" class="wire reply"/><polygon points="515,150 510,140 520,140" class="head reply"/>
+          <path d="M720 265 V325 A90 12 0 0 0 900 325 V265" class="store"/><ellipse cx="810" cy="265" rx="90" ry="12" class="store"/><text x="810" y="305" text-anchor="middle" class="label">Spatial Index</text><text x="810" y="323" text-anchor="middle" class="sub">members + coordinates</text>
+          <path d="M555 181 L657 181 Q665 181 665 189 L665 277 Q665 285 673 285 L710 285" class="wire"/><polygon points="720,285 710,290 710,280" class="head"/><text x="680" y="246" class="tiny">miss: load</text>
+          <path d="M720 303 L653 303 Q645 303 645 295 L645 217 Q645 209 637 209 L565 209" class="wire reply"/><polygon points="555,209 565,204 565,214" class="head reply"/>
+          <path d="M555 164 L610.5 164 Q615 164 615 159.5 L615 159.5 Q615 155 619.5 155 L807.5 155 Q810 155 810 152.5 L810 150" class="wire async"/><polygon points="810,140 815,150 805,150" class="head async"/><text x="695" y="177" text-anchor="middle" class="tiny">guarded fill</text>
+          <g class="is-new">
+            <rect x="160" y="306" width="405" height="20" rx="10" class="badge"/><text x="362.5" y="320" text-anchor="middle" class="badge-text">MERGE → AUTHORITY → FILTER → TOP 20</text>
+            <text x="160" y="352" class="tiny">partial shard timeout ⇒ 503 or explicit partial=true; never a complete empty list</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">把候选合并并校验权威行，再按距离取 20。异步索引仍可能漏尚未召回的实体。每格先任意截 20、再筛营业状态，会漏掉本来该出现的店；超预算要明确失败或标部分结果。</span> <span class="lang-en">Merge and validate authority before selecting 20 by distance. An async index can still omit unrecalled entities. Taking arbitrary 20 per cell before filtering hours can omit eligible shops. Work-limit failures must be explicit or marked partial.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d3s5t d3s5d">
+          <title id="d3s5t">The filtered result returns through every hop</title>
+          <desc id="d3s5d">After authoritative filtering and policy checks Location Service returns to Edge, which returns to Client. Every storage reply stayed inside the service.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="18" width="824" height="364" rx="18" class="boundary"/><text x="136" y="38" class="tiny">QUERY · cache is look-aside; Location Service owns merge</text>
+          <circle cx="44" cy="166" r="12" class="box"/><path d="M24 212 Q44 180 64 212" class="wire"/><text x="44" y="234" text-anchor="middle" class="label">Client</text>
+          <rect x="165" y="150" width="110" height="80" rx="12" class="box"/><text x="220" y="187" text-anchor="middle" class="label">Edge</text><text x="220" y="206" text-anchor="middle" class="sub">TLS / quota</text>
+          <rect x="385" y="150" width="170" height="80" rx="12" class="box"/><text x="470" y="187" text-anchor="middle" class="label">Location Service</text><text x="470" y="206" text-anchor="middle" class="sub">cover / rank / policy</text>
+          <path d="M70 181 L155 181" class="wire"/><polygon points="165,181 155,186 155,176" class="head"/><text x="147" y="173" text-anchor="middle" class="tiny">GET</text>
+          <path d="M275 181 L375 181" class="wire"/><polygon points="385,181 375,186 375,176" class="head"/>
+          <rect x="727" y="82" width="180" height="65" rx="8" class="cache"/><rect x="720" y="75" width="180" height="65" rx="8" class="cache"/><text x="810" y="104.5" text-anchor="middle" class="label">Cell Cache</text><text x="810" y="123.5" text-anchor="middle" class="sub">cell + epoch + version</text>
+          <path d="M495 150 L495 113 Q495 105 503 105 L710 105" class="wire"/><polygon points="720,105 710,110 710,100" class="head"/><text x="600" y="96" text-anchor="middle" class="tiny">lookup cell snapshot</text>
+          <path d="M720 123 L523 123 Q515 123 515 131 L515 140" class="wire reply"/><polygon points="515,150 510,140 520,140" class="head reply"/>
+          <path d="M720 265 V325 A90 12 0 0 0 900 325 V265" class="store"/><ellipse cx="810" cy="265" rx="90" ry="12" class="store"/><text x="810" y="305" text-anchor="middle" class="label">Spatial Index</text><text x="810" y="323" text-anchor="middle" class="sub">members + coordinates</text>
+          <path d="M555 181 L657 181 Q665 181 665 189 L665 277 Q665 285 673 285 L710 285" class="wire"/><polygon points="720,285 710,290 710,280" class="head"/><text x="680" y="246" class="tiny">miss: load</text>
+          <path d="M720 303 L653 303 Q645 303 645 295 L645 217 Q645 209 637 209 L565 209" class="wire reply"/><polygon points="555,209 565,204 565,214" class="head reply"/>
+          <path d="M555 164 L610.5 164 Q615 164 615 159.5 L615 159.5 Q615 155 619.5 155 L807.5 155 Q810 155 810 152.5 L810 150" class="wire async"/><polygon points="810,140 815,150 805,150" class="head async"/><text x="695" y="177" text-anchor="middle" class="tiny">guarded fill</text>
+          <rect x="160" y="306" width="405" height="20" rx="10" class="badge"/><text x="362.5" y="320" text-anchor="middle" class="badge-text">MERGE → AUTHORITY → FILTER → TOP 20</text>
+          <text x="160" y="352" class="tiny">partial shard timeout ⇒ 503 or explicit partial=true; never a complete empty list</text>
+          <g class="is-new">
+            <path d="M385 209 L285 209" class="wire reply"/><polygon points="275,209 285,204 285,214" class="head reply"/>
+            <path d="M165 209 L80 209" class="wire reply"/><polygon points="70,209 80,204 80,214" class="head reply"/>
+            <text x="305" y="244" class="tiny">ranked + policy-filtered response</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">回程已经做距离和权限过滤。约 1,111 × 4 KB ≈ 4.44 MB/s 是整层出口；公开地点可有图钉，移动端的可见性另按授权判断。</span> <span class="lang-en">Replies have passed distance and policy checks. About 1,111 × 4 KB ≈ 4.44 MB/s is aggregate egress. Published places may include pins; mover visibility requires separate authorization.</span></figcaption>
+      </div>
+    </figure><div class="bilingual"><div class="lang-zh"><p>对应第 2–5 帧：Cell Cache 是旁路，miss 时由 Service 读索引、拿快照并回填。合并完整覆盖的成员，按 id 去重，<strong>读取权威状态/坐标 → 权限、业务和年龄过滤 → 最终距离 → 全局 top 20</strong>。同一 id 可因迁移出现在两格；回表版本至少不低于候选版本，权威读取失败不能伪装成已删除。</p><p>任意截每格 20 个再过滤会漏：前 20 家已关门，第 21 家应当出现。无严格距离下界的读取必须继续至全部候选，或明确失败/标为 partial。Redis <code>GEOSEARCH ASC COUNT 20</code> 后再过滤也可能不足 20；<code>COUNT ANY</code> 更不能保证最近的那些匹配 [2]。Redis 文档的球面误差最多约 0.5% [1]，一公里约五米量级，不能冒充椭球严格边界。</p></div><div class="lang-en"><p>Frames 2–5 use a side cache: Service loads an index snapshot and fills on a miss. Merge the full cover, deduplicate IDs, then <strong>read authoritative state/coordinates → filter policy, business and age → measure → global top 20</strong>. Migration can duplicate an ID across cells. Authority must be at least as new as each candidate; a failed authority read is not confirmed deletion.</p><p>Arbitrary twenty-per-cell limits miss the 21st open shop after twenty closed shops. Without a proven distance bound, continue through all candidates or fail/mark partial. Filtering after Redis <code>GEOSEARCH ASC COUNT 20</code> can also underfill; <code>COUNT ANY</code> does not guarantee the closest matches [2]. Redis documents up to about 0.5% spherical error [1], roughly five metres per kilometre, rather than strict spheroidal boundaries.</p></div></div><h3><span class="lang-zh">筛选实现：权威版本在距离之前</span><span class="lang-en">Filtering implementation: authority before distance</span></h3><div class="bilingual"><div class="lang-zh"><p>同源 Java 输入完整候选和新鲜权威快照：Map 缺键表示未完成读取，<code>Optional.empty()</code> 才是确认不存在。输出按球面真实距离/id 排序的至多 20 条；私人移动端只返回 100 m 距离桶，不返回坐标。<code>sendBy</code> 是整条响应的最晚发送时点，<code>clockError</code> 是已验证的设备时钟误差上界；发送逾期必须重新校验或失败。快照后发生的撤回影响下一次权威读取，已发客户端副本不能收回。</p></div><div class="lang-en"><p>The same-source Java takes complete candidates and a fresh authority snapshot. A missing Map key means an unfinished read; only <code>Optional.empty()</code> confirms absence. Output contains up to 20 hits sorted by actual spherical distance/id. Private movers expose only a 100 m distance bucket and no coordinates. <code>sendBy</code> is the response send deadline, and <code>clockError</code> is a verified device-clock error bound. If sending misses the deadline, revalidate or fail. Revocations committed after the snapshot affect later authority reads; already delivered copies cannot be recalled.</p></div></div><pre data-language="Java 17 · runnable excerpt" data-kind="teaching" data-source="Nearby.java#rank"><code>public static List&lt;Hit&gt; rank(Point query, double radius, String type, long viewer,
+        Collection&lt;Member&gt; members, Map&lt;Long, Optional&lt;Row&gt;&gt; authority,
+        long sendBy, long clockError, int maxCandidates) {
+    if (clockError &lt; 0 || maxCandidates &lt; 1 || !Set.of(500d, 1000d, 2000d, 5000d).contains(radius))
+        throw new IllegalArgumentException("policy");
+    if (members.size() &gt; maxCandidates) throw new Unavailable("candidate budget");
+    Map&lt;Long, Long&gt; recalled = new HashMap&lt;&gt;();
+    for (Member m : members) recalled.merge(m.id, m.version, Math::max);
+    List&lt;Ranked&gt; eligible = new ArrayList&lt;&gt;();
+    for (var entry : recalled.entrySet()) {
+        Optional&lt;Row&gt; value = authority.get(entry.getKey());
+        if (value == null) throw new Unavailable("authority missing, not confirmed absent");
+        if (value.isEmpty()) continue; // Confirmed absent in the authoritative snapshot.
+        Row row = value.get();
+        if (row.id != entry.getKey() || row.version &lt; entry.getValue())
+            throw new Unavailable("authority behind candidate");
+        if (row.deleted || !row.open || !row.type.equals(type)) continue;
+        if ((!row.published || row.mover) &amp;&amp; !row.audience.contains(viewer)) continue;
+        if (row.mover) {
+            double ageUpper = (double) sendBy - row.observedAt + clockError;
+            if (ageUpper &lt; 0 || ageUpper &gt; 30_000) continue;
+        }
+        double metres = distance(query, row.point); // Latest permitted coordinates first.
+        if (metres &lt;= radius) eligible.add(new Ranked(row, metres));
+    }
+    eligible.sort(Comparator.comparingDouble(Ranked::metres).thenComparingLong(r -&gt; r.row.id));
+    return eligible.stream().limit(20).map(r -&gt; new Hit(r.row.id, r.row.version,
+            r.row.mover ? Math.floor(r.metres / 100) * 100 : r.metres,
+            r.row.mover ? null : r.row.point)).toList(); // Never serialize private coordinates.
+}</code></pre><div class="bilingual"><div class="lang-zh"><p>候选完整不等于当前权威全集完整：实体已从未查询的旧格移进圈内，而事件尚未到新格时，仍召回不到 id。此代码只能纠正已有候选；独立异步索引的 <code>index_as_of</code> 与最终可见合同必须保留。缺格、预算超限默认 503；显式 partial 结果也不能叫全局精确 top 20。</p><p>缓存键含 cell、route_epoch、cell_revision；entity_version 属于实体，revision 属于格快照。版本与成员同一次 MVCC 快照读取，回填写入匹配版本键。快照从<strong>开始索引读取</strong>起带绝对 <code>not_after≤start+2s</code>，迟到回填和命中均不重置；当前版本读取或可接受旧快照二者需选明。索引两秒 p99 目标加缓存最多两秒只解释正常窗口，积压时没有四秒硬上界。</p><p>热格 10,000×64 B=640 KB，一次全快照×222.22/s≈142.22 MB/s。90% 命中目标可把回源降到约22.22/s、14.22 MB/s；400次写/s且每次变revision的移动热格不能继承该命中率。缓存全失时222.22/s高于100/s整层回源预算，要合并且限流；进程内合并不是全局一次。</p></div><div class="lang-en"><p>Complete candidates do not imply complete current authority: a mover can enter the circle from an unread old cell before its new-cell event arrives. This code corrects recalled IDs only. Preserve the async index’s <code>index_as_of</code> and eventual-visibility contract. Missing cells or work-limit failures default to 503; explicit partial results cannot claim the exact global top 20.</p><p>Cache keys include cell, route_epoch and cell_revision; entity_version belongs to an entity. Read revision and members in one MVCC snapshot, then fill its matching version key. From the <strong>start of the index read</strong>, retain an absolute <code>not_after≤start+2 s</code>; neither delayed fills nor hits reset it. Choose current-version reads or bounded-old snapshots explicitly. A 2 s projection p99 target plus 2 s cache age explains a healthy window, not a four-second failure bound.</p><p>A hot snapshot is 10,000×64 B=640 KB, or about 142.22 MB/s at 222.22/s. A 90% hit target leaves 22.22 origin reads/s and 14.22 MB/s. A 400-write/s moving cell that changes revision per write needs a new measured hit rate. Total cache loss demands 222.22/s against the 100/s aggregate origin budget; coalesce and limit. Process-local coalescing is not globally once.</p></div></div>
+</section>
+
+<section><h2><span class="lang-zh">移动端扩展：持久化成功仍可能漏新格</span> <span class="lang-en">Mover extension: durable success can still miss the new cell</span></h2>
+<figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d4s1t d4s1d">
+          <title id="d4s1t">Movers add validated ordered reports</title>
+          <desc id="d4s1d">A mover report travels Client to Edge to Location Service, where credentials, sample age, sequence and quotas are validated.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <g class="is-new">
+            <rect x="120" y="18" width="824" height="364" rx="18" class="boundary"/><text x="136" y="38" class="tiny">OPTIONAL MOVERS · report acknowledgment ≠ index visibility</text>
+            <circle cx="44" cy="116" r="12" class="box"/><path d="M24 162 Q44 130 64 162" class="wire"/><text x="44" y="184" text-anchor="middle" class="label">Client</text>
+            <rect x="150" y="100" width="100" height="80" rx="12" class="box"/><text x="200" y="137" text-anchor="middle" class="label">Edge</text><text x="200" y="156" text-anchor="middle" class="sub">auth / quota</text>
+            <rect x="340" y="100" width="160" height="80" rx="12" class="box"/><text x="420" y="137" text-anchor="middle" class="label">Location Service</text><text x="420" y="156" text-anchor="middle" class="sub">validate / sequence</text>
+            <path d="M70 131 L140 131" class="wire"/><polygon points="150,131 140,136 140,126" class="head"/>
+            <path d="M250 131 L330 131" class="wire"/><polygon points="340,131 330,136 330,126" class="head"/>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">题目改成移动端，才加四次/分钟的准入和采样时间校验。8 万实体 × 4 ÷ 60 ≈ 5,333 次/秒是假设上限；四次/分钟不保证均匀每 15 秒一次。</span> <span class="lang-en">Only the mover extension adds four accepts/minute and sample-age validation. 80,000 × 4 ÷ 60 ≈ 5,333/s is an assumed cap; it does not guarantee one report every 15 seconds.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d4s2t d4s2d">
+          <title id="d4s2t">Latest row and outbox share one transaction</title>
+          <desc id="d4s2d">Location Service commits latest row v42 and outbox together in Location Store. The acknowledgment returns Store to Service to Edge to Client.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="18" width="824" height="364" rx="18" class="boundary"/><text x="136" y="38" class="tiny">OPTIONAL MOVERS · report acknowledgment ≠ index visibility</text>
+          <circle cx="44" cy="116" r="12" class="box"/><path d="M24 162 Q44 130 64 162" class="wire"/><text x="44" y="184" text-anchor="middle" class="label">Client</text>
+          <rect x="150" y="100" width="100" height="80" rx="12" class="box"/><text x="200" y="137" text-anchor="middle" class="label">Edge</text><text x="200" y="156" text-anchor="middle" class="sub">auth / quota</text>
+          <rect x="340" y="100" width="160" height="80" rx="12" class="box"/><text x="420" y="137" text-anchor="middle" class="label">Location Service</text><text x="420" y="156" text-anchor="middle" class="sub">validate / sequence</text>
+          <path d="M70 131 L140 131" class="wire"/><polygon points="150,131 140,136 140,126" class="head"/>
+          <path d="M250 131 L330 131" class="wire"/><polygon points="340,131 330,136 330,126" class="head"/>
+          <g class="is-new">
+            <path d="M560 85 V155 A90 12 0 0 0 740 155 V85" class="store"/><ellipse cx="650" cy="85" rx="90" ry="12" class="store"/><text x="650" y="130" text-anchor="middle" class="label">Location Store</text><text x="650" y="148" text-anchor="middle" class="sub">latest + outbox · v42</text>
+            <path d="M500 131 L550 131" class="wire"/><polygon points="560,131 550,136 550,126" class="head"/><text x="530" y="121" text-anchor="middle" class="tiny">tx</text>
+            <path d="M560 149 L510 149" class="wire reply"/><polygon points="500,149 510,144 510,154" class="head reply"/>
+            <path d="M340 149 L260 149" class="wire reply"/><polygon points="250,149 260,144 260,154" class="head reply"/>
+            <path d="M150 149 L80 149" class="wire reply"/><polygon points="70,149 80,144 80,154" class="head reply"/>
+            <text x="160" y="199" class="tiny">200: durable v42; index=pending</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">版本由权威事务递增，最新行与 outbox 一起落盘后才确认。不能先回 200、再从内存发消息；进程死在中间会永久漏新格。</span> <span class="lang-en">Authority increments the version and commits latest row plus outbox before acknowledgment. A 200 followed by an in-memory publish can permanently miss the new cell after a crash.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d4s3t d4s3d">
+          <title id="d4s3t">Committed work is retried through the queue</title>
+          <desc id="d4s3d">Location Store committed outbox feeds Outbox Relay, which retries publishing to Cell Queue.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="18" width="824" height="364" rx="18" class="boundary"/><text x="136" y="38" class="tiny">OPTIONAL MOVERS · report acknowledgment ≠ index visibility</text>
+          <circle cx="44" cy="116" r="12" class="box"/><path d="M24 162 Q44 130 64 162" class="wire"/><text x="44" y="184" text-anchor="middle" class="label">Client</text>
+          <rect x="150" y="100" width="100" height="80" rx="12" class="box"/><text x="200" y="137" text-anchor="middle" class="label">Edge</text><text x="200" y="156" text-anchor="middle" class="sub">auth / quota</text>
+          <rect x="340" y="100" width="160" height="80" rx="12" class="box"/><text x="420" y="137" text-anchor="middle" class="label">Location Service</text><text x="420" y="156" text-anchor="middle" class="sub">validate / sequence</text>
+          <path d="M70 131 L140 131" class="wire"/><polygon points="150,131 140,136 140,126" class="head"/>
+          <path d="M250 131 L330 131" class="wire"/><polygon points="340,131 330,136 330,126" class="head"/>
+          <path d="M560 85 V155 A90 12 0 0 0 740 155 V85" class="store"/><ellipse cx="650" cy="85" rx="90" ry="12" class="store"/><text x="650" y="130" text-anchor="middle" class="label">Location Store</text><text x="650" y="148" text-anchor="middle" class="sub">latest + outbox · v42</text>
+          <path d="M500 131 L550 131" class="wire"/><polygon points="560,131 550,136 550,126" class="head"/><text x="530" y="121" text-anchor="middle" class="tiny">tx</text>
+          <path d="M560 149 L510 149" class="wire reply"/><polygon points="500,149 510,144 510,154" class="head reply"/>
+          <path d="M340 149 L260 149" class="wire reply"/><polygon points="250,149 260,144 260,154" class="head reply"/>
+          <path d="M150 149 L80 149" class="wire reply"/><polygon points="70,149 80,144 80,154" class="head reply"/>
+          <text x="160" y="199" class="tiny">200: durable v42; index=pending</text>
+          <g class="is-new">
+            <rect x="190" y="270" width="110" height="60" rx="12" class="box"/><text x="245" y="297" text-anchor="middle" class="label">Outbox Relay</text><text x="245" y="316" text-anchor="middle" class="sub">retry safely</text>
+            <path d="M370 270 h95 a30 30 0 0 1 0 60 h-95 a30 30 0 0 1 0 -60" class="queue"/><path d="M467 279 v42" class="queue"/><path d="M459 279 v42" class="queue"/><path d="M451 279 v42" class="queue"/><text x="401.5" y="306" text-anchor="middle" class="label">Cell Queue</text>
+            <path d="M650 167 L650 212 Q650 220 642 220 L253 220 Q245 220 245 228 L245 260" class="wire async"/><polygon points="245,270 240,260 250,260" class="head async"/><text x="410" y="245" text-anchor="middle" class="tiny">committed event · entity_id partition</text>
+            <path d="M300 300 L330 300" class="wire async"/><polygon points="340,300 330,305 330,295" class="head async"/>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">relay 可重复投递，以 entity_id 分区并保持发布顺序；版本守卫可安全重放。队列重试不刷新 observed_at，也不能给坐标续上新的三十秒寿命。</span> <span class="lang-en">Relay may republish. Key by entity_id and preserve publish order; version guards make replay safe. Retries never refresh observed_at or renew a location for another thirty seconds.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d4s4t d4s4d">
+          <title id="d4s4t">Versioned projection adds new before removing old</title>
+          <desc id="d4s4d">Cell Queue delivers v42 to Index Writer. Writer adds the new cell before conditionally removing the old membership in Spatial Index and receives an apply acknowledgment.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="18" width="824" height="364" rx="18" class="boundary"/><text x="136" y="38" class="tiny">OPTIONAL MOVERS · report acknowledgment ≠ index visibility</text>
+          <circle cx="44" cy="116" r="12" class="box"/><path d="M24 162 Q44 130 64 162" class="wire"/><text x="44" y="184" text-anchor="middle" class="label">Client</text>
+          <rect x="150" y="100" width="100" height="80" rx="12" class="box"/><text x="200" y="137" text-anchor="middle" class="label">Edge</text><text x="200" y="156" text-anchor="middle" class="sub">auth / quota</text>
+          <rect x="340" y="100" width="160" height="80" rx="12" class="box"/><text x="420" y="137" text-anchor="middle" class="label">Location Service</text><text x="420" y="156" text-anchor="middle" class="sub">validate / sequence</text>
+          <path d="M70 131 L140 131" class="wire"/><polygon points="150,131 140,136 140,126" class="head"/>
+          <path d="M250 131 L330 131" class="wire"/><polygon points="340,131 330,136 330,126" class="head"/>
+          <path d="M560 85 V155 A90 12 0 0 0 740 155 V85" class="store"/><ellipse cx="650" cy="85" rx="90" ry="12" class="store"/><text x="650" y="130" text-anchor="middle" class="label">Location Store</text><text x="650" y="148" text-anchor="middle" class="sub">latest + outbox · v42</text>
+          <path d="M500 131 L550 131" class="wire"/><polygon points="560,131 550,136 550,126" class="head"/><text x="530" y="121" text-anchor="middle" class="tiny">tx</text>
+          <path d="M560 149 L510 149" class="wire reply"/><polygon points="500,149 510,144 510,154" class="head reply"/>
+          <path d="M340 149 L260 149" class="wire reply"/><polygon points="250,149 260,144 260,154" class="head reply"/>
+          <path d="M150 149 L80 149" class="wire reply"/><polygon points="70,149 80,144 80,154" class="head reply"/>
+          <text x="160" y="199" class="tiny">200: durable v42; index=pending</text>
+          <rect x="190" y="270" width="110" height="60" rx="12" class="box"/><text x="245" y="297" text-anchor="middle" class="label">Outbox Relay</text><text x="245" y="316" text-anchor="middle" class="sub">retry safely</text>
+          <path d="M370 270 h95 a30 30 0 0 1 0 60 h-95 a30 30 0 0 1 0 -60" class="queue"/><path d="M467 279 v42" class="queue"/><path d="M459 279 v42" class="queue"/><path d="M451 279 v42" class="queue"/><text x="401.5" y="306" text-anchor="middle" class="label">Cell Queue</text>
+          <path d="M650 167 L650 212 Q650 220 642 220 L253 220 Q245 220 245 228 L245 260" class="wire async"/><polygon points="245,270 240,260 250,260" class="head async"/><text x="410" y="245" text-anchor="middle" class="tiny">committed event · entity_id partition</text>
+          <path d="M300 300 L330 300" class="wire async"/><polygon points="340,300 330,305 330,295" class="head async"/>
+          <g class="is-new">
+            <rect x="580" y="270" width="150" height="80" rx="12" class="box"/><text x="655" y="307" text-anchor="middle" class="label">Index Writer</text><text x="655" y="326" text-anchor="middle" class="sub">replay-safe v42</text>
+            <path d="M795 265 V325 A60 12 0 0 0 915 325 V265" class="store"/><ellipse cx="855" cy="265" rx="60" ry="12" class="store"/><text x="855" y="305" text-anchor="middle" class="label">Spatial Index</text><text x="855" y="323" text-anchor="middle" class="sub">old / new cells</text>
+            <path d="M495 300 L570 300" class="wire async"/><polygon points="580,300 570,305 570,295" class="head async"/>
+            <path d="M730 292 L785 292" class="wire"/><polygon points="795,292 785,297 785,287" class="head"/><path d="M795 310 L740 310" class="wire reply"/><polygon points="730,310 740,305 740,315" class="head reply"/>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">先加新格，再按版本删旧格，只解决处理到该事件后的删除空洞。事件尚未到新格时仍会漏召回；读权威行只能剔错，不能找回没召回的实体。</span> <span class="lang-en">Add the new cell, then conditionally remove the old version. This avoids an apply-time deletion gap. Before delivery the new cell still misses the entity. Authority reads remove wrong candidates but cannot recover an unrecalled entity.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d4s5t d4s5d">
+          <title id="d4s5t">Acknowledgment, duplicates and visibility have distinct meanings</title>
+          <desc id="d4s5d">Writer acknowledges queue processing only after versioned add and conditional remove. The target for projection visibility is p99 at most 2 seconds, distinct from the durable client acknowledgment.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="18" width="824" height="364" rx="18" class="boundary"/><text x="136" y="38" class="tiny">OPTIONAL MOVERS · report acknowledgment ≠ index visibility</text>
+          <circle cx="44" cy="116" r="12" class="box"/><path d="M24 162 Q44 130 64 162" class="wire"/><text x="44" y="184" text-anchor="middle" class="label">Client</text>
+          <rect x="150" y="100" width="100" height="80" rx="12" class="box"/><text x="200" y="137" text-anchor="middle" class="label">Edge</text><text x="200" y="156" text-anchor="middle" class="sub">auth / quota</text>
+          <rect x="340" y="100" width="160" height="80" rx="12" class="box"/><text x="420" y="137" text-anchor="middle" class="label">Location Service</text><text x="420" y="156" text-anchor="middle" class="sub">validate / sequence</text>
+          <path d="M70 131 L140 131" class="wire"/><polygon points="150,131 140,136 140,126" class="head"/>
+          <path d="M250 131 L330 131" class="wire"/><polygon points="340,131 330,136 330,126" class="head"/>
+          <path d="M560 85 V155 A90 12 0 0 0 740 155 V85" class="store"/><ellipse cx="650" cy="85" rx="90" ry="12" class="store"/><text x="650" y="130" text-anchor="middle" class="label">Location Store</text><text x="650" y="148" text-anchor="middle" class="sub">latest + outbox · v42</text>
+          <path d="M500 131 L550 131" class="wire"/><polygon points="560,131 550,136 550,126" class="head"/><text x="530" y="121" text-anchor="middle" class="tiny">tx</text>
+          <path d="M560 149 L510 149" class="wire reply"/><polygon points="500,149 510,144 510,154" class="head reply"/>
+          <path d="M340 149 L260 149" class="wire reply"/><polygon points="250,149 260,144 260,154" class="head reply"/>
+          <path d="M150 149 L80 149" class="wire reply"/><polygon points="70,149 80,144 80,154" class="head reply"/>
+          <text x="160" y="199" class="tiny">200: durable v42; index=pending</text>
+          <rect x="190" y="270" width="110" height="60" rx="12" class="box"/><text x="245" y="297" text-anchor="middle" class="label">Outbox Relay</text><text x="245" y="316" text-anchor="middle" class="sub">retry safely</text>
+          <path d="M370 270 h95 a30 30 0 0 1 0 60 h-95 a30 30 0 0 1 0 -60" class="queue"/><path d="M467 279 v42" class="queue"/><path d="M459 279 v42" class="queue"/><path d="M451 279 v42" class="queue"/><text x="401.5" y="306" text-anchor="middle" class="label">Cell Queue</text>
+          <path d="M650 167 L650 212 Q650 220 642 220 L253 220 Q245 220 245 228 L245 260" class="wire async"/><polygon points="245,270 240,260 250,260" class="head async"/><text x="410" y="245" text-anchor="middle" class="tiny">committed event · entity_id partition</text>
+          <path d="M300 300 L330 300" class="wire async"/><polygon points="340,300 330,305 330,295" class="head async"/>
+          <rect x="580" y="270" width="150" height="80" rx="12" class="box"/><text x="655" y="307" text-anchor="middle" class="label">Index Writer</text><text x="655" y="326" text-anchor="middle" class="sub">replay-safe v42</text>
+          <path d="M795 265 V325 A60 12 0 0 0 915 325 V265" class="store"/><ellipse cx="855" cy="265" rx="60" ry="12" class="store"/><text x="855" y="305" text-anchor="middle" class="label">Spatial Index</text><text x="855" y="323" text-anchor="middle" class="sub">old / new cells</text>
+          <path d="M495 300 L570 300" class="wire async"/><polygon points="580,300 570,305 570,295" class="head async"/>
+          <path d="M730 292 L785 292" class="wire"/><polygon points="795,292 785,297 785,287" class="head"/><path d="M795 310 L740 310" class="wire reply"/><polygon points="730,310 740,305 740,315" class="head reply"/>
+          <g class="is-new">
+            <path d="M580 335 L525 335 Q520 335 520 340 L520 340 Q520 345 515 345 L427.5 345 Q425 345 425 342.5 L425 340" class="wire reply"/><polygon points="425,330 430,340 420,340" class="head reply"/><text x="450" y="363" class="tiny">ack only after add / conditional remove</text>
+            <text x="690" y="200" class="clock">visibility p99 target ≤ 2 s</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">Writer 完成更新才 ack 队列。2 秒是索引可见 p99 目标，不是故障上界；若业务要求更新后一搜必见，就等可见水位，或让新鲜写进入额外召回层。</span> <span class="lang-en">Writer acknowledges processing after apply. Two seconds is a p99 visibility target, not a failure bound. Read-after-write recall needs a visibility watermark or an additional recent-write recall layer.</span></figcaption>
+      </div>
+    </figure><div class="bilingual"><div class="lang-zh"><p>移动端扩展才引入持续上报。80,000×4/60≈5,333.33次/s，最新96 B行共7.68 MB；逐次追加则44.2368 GB/天，三份约132.71 GB/天，日志/队列/索引另计。每分钟四次是额度，不保证均匀每15秒一次；一分钟初连报四次后，30秒年龄阈值可能把它隐藏。</p><p>先验证属主、共享政策、设备会话和递增序号。客户端时间只有在<strong>误差上界可验证</strong>时才能支持样本年龄合同；否则只能承诺服务收到多久，不能称GPS观测新鲜。稳定 request_id 绑定完整意图；锁住实体后先回放已提交回执，再检查时间与额度，避免丢响应重试变成第五次上报。</p></div><div class="lang-en"><p>Continuous reports belong to the mover extension. 80,000×4/60≈5,333.33/s gives 7.68 MB of 96 B latest rows. Append-only samples would produce 44.2368 GB/day, or 132.71 GB/day for three copies, before logs, queues and indexes. Four/minute is a quota, not one report every 15 s; clustered reports can leave a mover hidden by the 30 s age threshold.</p><p>Validate ownership, sharing, device session and increasing sequence. Client timestamps support an observation-age contract only with a <strong>verified clock-error bound</strong>. Otherwise promise receipt age, not fresh GPS observations. A stable request_id binds the complete intent. Under the entity lock, recover committed receipts before time/quota checks so a lost response does not turn a retry into a fifth report.</p></div></div><h3><span class="lang-zh">权威提交：行、额度、回执与outbox同事务</span><span class="lang-en">Authority commit: row, quota, receipt and outbox together</span></h3><pre data-language="Pseudocode · authority report" data-kind="pseudocode" data-source="report.pseudo"><code>report(auth, request_id, intent):
+  authenticate owner; validate request shape and immutable intent hash
+  BEGIN on the authoritative entity shard
+  row = SELECT Entity WHERE id = intent.entity FOR UPDATE
+  require row.owner = auth.owner
+  receipt = SELECT Receipt WHERE (entity, request_id) = (...)
+  if receipt exists:
+    require receipt.intent_hash = hash(intent), otherwise 409
+    COMMIT; return receipt.original_response
+  require active device session, sequence &gt; row.last_sequence
+  require bounded device clock, valid sample age and current sharing policy
+  require accepted_count_in_window &lt; 4, otherwise ROLLBACK and 429
+  v = row.version + 1
+  UPDATE Entity SET point, observed_at, session, sequence, version = v
+  INSERT AcceptedReport(entity, accepted_at) // Same shard; charged once.
+  INSERT Outbox(event_id, entity, v, old_point, new_point, original_sample)
+  INSERT Receipt(entity, request_id, intent_hash, {version:v, index:"pending"})
+  COMMIT // Entity lock + unique(entity, request_id) + one DB transaction.
+  return 200 with stored response
+on unknown commit outcome: retry the SAME request_id and SAME intent
+// Authorization/read errors are 503, never absence. A rejected transaction charges nothing.
+// Session/sequence, quota, receipt and outbox share this DB. No cross-service atomic claim.</code></pre><div class="bilingual"><div class="lang-zh"><p>该事务由同一实体分片的数据库行锁、唯一回执键和提交提供；连接/提交超时是结果未知，保持原键重试。会话或权限依赖不可用返回503。outbox的event_id可用于去重，entity_id作为aggregate键有助于同分区顺序 [6]，但relay自己仍要保持该顺序，不能从“分了同一片”推导发布一定有序。</p></div><div class="lang-en"><p>One entity-shard database provides the row lock, unique receipt and commit. A connection/commit timeout leaves an unknown outcome: retry the same identity. Unavailable session/policy checks return 503. Outbox event_id supports deduplication and entity_id as aggregate key supports partition order [6], but the relay must preserve that order; a shared partition alone does not order publication.</p></div></div><h3><span class="lang-zh">投影提交：每格有原子边界，跨格靠重试</span><span class="lang-en">Projection commit: local cell atomicity and cross-cell retries</span></h3><pre data-language="Pseudocode · versioned projection" data-kind="pseudocode" data-source="project.pseudo"><code>apply(event): // Immutable event; route before/after points to old/new cell for this generation.
+  if event.new_cell exists:
+    put_if_newer(event.new_cell, event.entity, event.version, LIVE, event.sample)
+  if event.old_cell exists and event.old_cell != event.new_cell:
+    put_if_newer(event.old_cell, event.entity, event.version, TOMBSTONE, null)
+  // A delete has no new_cell; a same-cell move updates coordinates without self-deletion.
+  ACK source offset only after every required write is durably acknowledged
+  // A crash between writes retries both; no distributed transaction across cells.
+
+put_if_newer(cell, entity, version, state, sample):
+  BEGIN on this CELL's database shard
+  guard = INSERT CellGuard(cell) IF ABSENT
+  SELECT guard FOR UPDATE // Serializes revision and all membership changes for this cell.
+  old = SELECT Membership WHERE (cell, entity) = (...)
+  if old exists and old.version &gt; version: COMMIT; return STALE
+  if old exists and old.version == version:
+    require identical state and immutable payload, otherwise corruption alarm
+    COMMIT; return DUPLICATE
+  UPSERT Membership(cell, entity, version, state, sample)
+  UPDATE CellGuard SET revision = revision + 1
+  COMMIT // Row/state/revision are one local transaction, including tombstones.
+// Read revision + members in one MVCC snapshot; cache fills inherit its absolute expiry.
+// Retain tombstones while older events/snapshots may replay. GC needs a durable replay fence.
+// Migration invokes apply for both generations; unknown-child tombstones copy to all four.
+// Queue order helps efficiency; versions and durable retries handle duplicates and re-entry.</code></pre><div class="bilingual"><div class="lang-zh"><p>新格先写LIVE，再给旧格写同版本TOMBSTONE；同格更新只改坐标，删除只有墓碑。v43重返旧格后，迟到v42不得删掉它；墓碑也不能被更老复制复活。事件保留更新前后坐标，由路由目录映射各代目标格；复制时无孩子坐标的墓碑保守写入四个孩子。每格事务同时维护成员与revision，跨格没有原子事务；中途崩溃重放未完成事件，全部成功才推进连续消费水位。没有可靠重放边界就保留墓碑，不按普通TTL随意清掉。</p><p>先加后删只消除<strong>处理中的删除空洞</strong>。事件尚未到新格仍会漏，读权威也找不回未召回id。写后必见需要等待相关消费水位、绕过旧缓存并使用兼容路由，或合并受限的新写召回层；单等ACK不够。两秒积压约10,667条，只是p99工作目标；长期丢事件需按权威对账重建。所有队列重试保留原observed_at，不刷新30秒寿命。</p></div><div class="lang-en"><p>Write LIVE in the new cell before a same-version TOMBSTONE in the old. Same-cell moves update coordinates without deleting themselves; deletion writes a tombstone. A delayed v42 cannot delete v43 after re-entry, nor can an old copy revive a tombstone. Events retain before/after points so routing resolves target cells for each generation. Copy a tombstone without a child location to all four children. Each cell transaction updates membership and revision together; there is no cross-cell atomic commit. Retry interrupted events and advance the contiguous consumer watermark only after every effect succeeds. Retain tombstones unless a durable replay fence excludes older events/copies.</p><p>Add-first closes only an <strong>apply-time deletion gap</strong>. Delivery lag still omits IDs from the new cell, and authority cannot recover unrecalled IDs. Read-after-write recall needs the relevant watermark, old-cache bypass and compatible routing, or a bounded recent-write recall layer; a queue ACK alone is insufficient. A two-second backlog is about 10,667 events, a p99 target rather than a failure bound. Reconcile permanent gaps from authority. Queue retries retain original observed_at, never a renewed 30 s lifetime.</p></div></div>
+</section>
+
+<section><h2><span class="lang-zh">热格拆分：复制、双读、水位、回收</span> <span class="lang-en">Hot-cell splits: copy, dual reads, watermark and retirement</span></h2>
+<figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s1t d5s1d">
+          <title id="d5s1t">A hot cell is one routed key</title>
+          <desc id="d5s1d">Client query travels through Edge and Location Service to the parent Spatial Index cell. The response returns parent to Service to Edge to Client.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <g class="is-new">
+            <rect x="120" y="18" width="824" height="364" rx="18" class="boundary"/><text x="136" y="38" class="tiny">HOT CELL · migrate routing without losing recall</text>
+            <circle cx="44" cy="156" r="12" class="box"/><path d="M24 202 Q44 170 64 202" class="wire"/><text x="44" y="224" text-anchor="middle" class="label">Client</text>
+            <rect x="145" y="140" width="100" height="80" rx="12" class="box"/><text x="195" y="177" text-anchor="middle" class="label">Edge</text><text x="195" y="196" text-anchor="middle" class="sub">quota</text>
+            <rect x="340" y="140" width="150" height="80" rx="12" class="box"/><text x="415" y="177" text-anchor="middle" class="label">Location Service</text><text x="415" y="196" text-anchor="middle" class="sub">route epoch / merge</text>
+            <path d="M70 171 L135 171" class="wire"/><polygon points="145,171 135,176 135,166" class="head"/>
+            <path d="M145 189 L80 189" class="wire reply"/><polygon points="70,189 80,184 80,194" class="head reply"/>
+            <path d="M245 171 L330 171" class="wire"/><polygon points="340,171 330,176 330,166" class="head"/>
+            <path d="M340 189 L255 189" class="wire reply"/><polygon points="245,189 255,184 255,194" class="head reply"/>
+            <path d="M620 80 V140 A80 12 0 0 0 780 140 V80" class="store"/><ellipse cx="700" cy="80" rx="80" ry="12" class="store"/><text x="700" y="120" text-anchor="middle" class="label">Spatial Index</text><text x="700" y="138" text-anchor="middle" class="sub">parent cell · epoch e</text>
+            <path d="M490 159 L527 159 Q535 159 535 151 L535 116 Q535 108 543 108 L610 108" class="wire"/><polygon points="620,108 610,113 610,103" class="head"/>
+            <path d="M620 126 L563 126 Q555 126 555 134 L555 169 Q555 177 547 177 L500 177" class="wire reply"/><polygon points="490,177 500,172 500,182" class="head reply"/>
+            <text x="160" y="92" class="clock">hot key: cell:wx4g0b · 222 reads/s</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">20% × 1,111 ≈ 222 次/秒集中在一个格子。先量成员条数和查询字节；总 QPS 不能证明所有格子都该分片。</span> <span class="lang-en">20% × 1,111 ≈ 222/s focuses on one cell. Measure members and query bytes first. Aggregate QPS does not prove that every cell needs sharding.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s2t d5s2d">
+          <title id="d5s2t">Build children while the parent still serves</title>
+          <desc id="d5s2d">Index Writer copies the parent and replays subsequent versioned changes to four child partitions in Spatial Index, while queries still read the parent.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="18" width="824" height="364" rx="18" class="boundary"/><text x="136" y="38" class="tiny">HOT CELL · migrate routing without losing recall</text>
+          <circle cx="44" cy="156" r="12" class="box"/><path d="M24 202 Q44 170 64 202" class="wire"/><text x="44" y="224" text-anchor="middle" class="label">Client</text>
+          <rect x="145" y="140" width="100" height="80" rx="12" class="box"/><text x="195" y="177" text-anchor="middle" class="label">Edge</text><text x="195" y="196" text-anchor="middle" class="sub">quota</text>
+          <rect x="340" y="140" width="150" height="80" rx="12" class="box"/><text x="415" y="177" text-anchor="middle" class="label">Location Service</text><text x="415" y="196" text-anchor="middle" class="sub">route epoch / merge</text>
+          <path d="M70 171 L135 171" class="wire"/><polygon points="145,171 135,176 135,166" class="head"/>
+          <path d="M145 189 L80 189" class="wire reply"/><polygon points="70,189 80,184 80,194" class="head reply"/>
+          <path d="M245 171 L330 171" class="wire"/><polygon points="340,171 330,176 330,166" class="head"/>
+          <path d="M340 189 L255 189" class="wire reply"/><polygon points="245,189 255,184 255,194" class="head reply"/>
+          <path d="M620 80 V140 A80 12 0 0 0 780 140 V80" class="store"/><ellipse cx="700" cy="80" rx="80" ry="12" class="store"/><text x="700" y="120" text-anchor="middle" class="label">Spatial Index</text><text x="700" y="138" text-anchor="middle" class="sub">parent cell · epoch e</text>
+          <path d="M490 159 L527 159 Q535 159 535 151 L535 116 Q535 108 543 108 L610 108" class="wire"/><polygon points="620,108 610,113 610,103" class="head"/>
+          <path d="M620 126 L563 126 Q555 126 555 134 L555 169 Q555 177 547 177 L500 177" class="wire reply"/><polygon points="490,177 500,172 500,182" class="head reply"/>
+          <text x="160" y="92" class="clock">hot key: cell:wx4g0b · 222 reads/s</text>
+          <g class="is-new">
+            <path d="M600 270 V330 A160 12 0 0 0 920 330 V270" class="store"/><ellipse cx="760" cy="270" rx="160" ry="12" class="store"/><text x="760" y="310" text-anchor="middle" class="label">Spatial Index</text><text x="760" y="328" text-anchor="middle" class="sub">e+1 · #00  #01  #10  #11</text>
+            <rect x="765" y="165" width="135" height="60" rx="12" class="box"/><text x="832.5" y="192" text-anchor="middle" class="label">Index Writer</text><text x="832.5" y="211" text-anchor="middle" class="sub">copy + replay</text>
+            <path d="M700 152 L700 187 Q700 195 708 195 L755 195" class="wire async"/><polygon points="765,195 755,200 755,190" class="head async"/><path d="M832 225 L832 237 Q832 245 824 245 L761.5 245 Q760 245 760 246.5 L760 248" class="wire async"/><polygon points="760,258 755,248 765,248" class="head async"/>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">给热父格加两个空间比特，得到四个孩子，这是自定义层级，不等于换成 S2。复制快照之后还要追增量，否则搬完会丢掉迁移中的编辑。</span> <span class="lang-en">Add two spatial bits to obtain four children. This is a custom hierarchy, not a switch to S2. Replay changes after the snapshot so migration does not lose concurrent edits.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s3t d5s3d">
+          <title id="d5s3t">Dual reads bridge routing generations</title>
+          <desc id="d5s3d">Location Service reads parent and children during migration and merges by entity ID and authoritative version. Each reply returns to Location Service.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="18" width="824" height="364" rx="18" class="boundary"/><text x="136" y="38" class="tiny">HOT CELL · migrate routing without losing recall</text>
+          <circle cx="44" cy="156" r="12" class="box"/><path d="M24 202 Q44 170 64 202" class="wire"/><text x="44" y="224" text-anchor="middle" class="label">Client</text>
+          <rect x="145" y="140" width="100" height="80" rx="12" class="box"/><text x="195" y="177" text-anchor="middle" class="label">Edge</text><text x="195" y="196" text-anchor="middle" class="sub">quota</text>
+          <rect x="340" y="140" width="150" height="80" rx="12" class="box"/><text x="415" y="177" text-anchor="middle" class="label">Location Service</text><text x="415" y="196" text-anchor="middle" class="sub">route epoch / merge</text>
+          <path d="M70 171 L135 171" class="wire"/><polygon points="145,171 135,176 135,166" class="head"/>
+          <path d="M145 189 L80 189" class="wire reply"/><polygon points="70,189 80,184 80,194" class="head reply"/>
+          <path d="M245 171 L330 171" class="wire"/><polygon points="340,171 330,176 330,166" class="head"/>
+          <path d="M340 189 L255 189" class="wire reply"/><polygon points="245,189 255,184 255,194" class="head reply"/>
+          <path d="M620 80 V140 A80 12 0 0 0 780 140 V80" class="store"/><ellipse cx="700" cy="80" rx="80" ry="12" class="store"/><text x="700" y="120" text-anchor="middle" class="label">Spatial Index</text><text x="700" y="138" text-anchor="middle" class="sub">parent cell · epoch e</text>
+          <path d="M490 159 L527 159 Q535 159 535 151 L535 116 Q535 108 543 108 L610 108" class="wire"/><polygon points="620,108 610,113 610,103" class="head"/>
+          <path d="M620 126 L563 126 Q555 126 555 134 L555 169 Q555 177 547 177 L500 177" class="wire reply"/><polygon points="490,177 500,172 500,182" class="head reply"/>
+          <text x="160" y="92" class="clock">hot key: cell:wx4g0b · 222 reads/s</text>
+          <path d="M600 270 V330 A160 12 0 0 0 920 330 V270" class="store"/><ellipse cx="760" cy="270" rx="160" ry="12" class="store"/><text x="760" y="310" text-anchor="middle" class="label">Spatial Index</text><text x="760" y="328" text-anchor="middle" class="sub">e+1 · #00  #01  #10  #11</text>
+          <rect x="765" y="165" width="135" height="60" rx="12" class="box"/><text x="832.5" y="192" text-anchor="middle" class="label">Index Writer</text><text x="832.5" y="211" text-anchor="middle" class="sub">copy + replay</text>
+          <path d="M700 152 L700 187 Q700 195 708 195 L755 195" class="wire async"/><polygon points="765,195 755,200 755,190" class="head async"/><path d="M832 225 L832 237 Q832 245 824 245 L761.5 245 Q760 245 760 246.5 L760 248" class="wire async"/><polygon points="760,258 755,248 765,248" class="head async"/>
+          <g class="is-new">
+            <path d="M490 190 L527 190 Q535 190 535 198 L535 271 Q535 279 543 279 L590 279" class="wire"/><polygon points="600,279 590,284 590,274" class="head"/>
+            <path d="M600 297 L523 297 Q515 297 515 289 L515 212.5 Q515 205 507.5 205 L500 205" class="wire reply"/><polygon points="490,205 500,200 500,210" class="head reply"/>
+            <rect x="160" y="270" width="345" height="20" rx="10" class="badge"/><text x="332.5" y="284" text-anchor="middle" class="badge-text">MIGRATING: read parent + children; dedupe</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">迁移期双读并按实体版本去重，允许重复、避免漏。稳态父格换成四个孩子最多 23 次，迁移期父格与孩子双读最多 24 次；不能宣称扇出不变。</span> <span class="lang-en">Dual-read and deduplicate by entity version during migration. Replacing a parent with four children gives at most 23 steady reads; dual-reading parent plus children gives at most 24 during migration.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s4t d5s4d">
+          <title id="d5s4t">Cutover waits for a known applied watermark</title>
+          <desc id="d5s4d">The parent, child and copy paths remain. A route e+1 cutover is gated on every required child passing the chosen contiguous per-partition watermark vector.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="18" width="824" height="364" rx="18" class="boundary"/><text x="136" y="38" class="tiny">HOT CELL · migrate routing without losing recall</text>
+          <circle cx="44" cy="156" r="12" class="box"/><path d="M24 202 Q44 170 64 202" class="wire"/><text x="44" y="224" text-anchor="middle" class="label">Client</text>
+          <rect x="145" y="140" width="100" height="80" rx="12" class="box"/><text x="195" y="177" text-anchor="middle" class="label">Edge</text><text x="195" y="196" text-anchor="middle" class="sub">quota</text>
+          <rect x="340" y="140" width="150" height="80" rx="12" class="box"/><text x="415" y="177" text-anchor="middle" class="label">Location Service</text><text x="415" y="196" text-anchor="middle" class="sub">route epoch / merge</text>
+          <path d="M70 171 L135 171" class="wire"/><polygon points="145,171 135,176 135,166" class="head"/>
+          <path d="M145 189 L80 189" class="wire reply"/><polygon points="70,189 80,184 80,194" class="head reply"/>
+          <path d="M245 171 L330 171" class="wire"/><polygon points="340,171 330,176 330,166" class="head"/>
+          <path d="M340 189 L255 189" class="wire reply"/><polygon points="245,189 255,184 255,194" class="head reply"/>
+          <path d="M620 80 V140 A80 12 0 0 0 780 140 V80" class="store"/><ellipse cx="700" cy="80" rx="80" ry="12" class="store"/><text x="700" y="120" text-anchor="middle" class="label">Spatial Index</text><text x="700" y="138" text-anchor="middle" class="sub">parent cell · epoch e</text>
+          <path d="M490 159 L527 159 Q535 159 535 151 L535 116 Q535 108 543 108 L610 108" class="wire"/><polygon points="620,108 610,113 610,103" class="head"/>
+          <path d="M620 126 L563 126 Q555 126 555 134 L555 169 Q555 177 547 177 L500 177" class="wire reply"/><polygon points="490,177 500,172 500,182" class="head reply"/>
+          <text x="160" y="92" class="clock">hot key: cell:wx4g0b · 222 reads/s</text>
+          <path d="M600 270 V330 A160 12 0 0 0 920 330 V270" class="store"/><ellipse cx="760" cy="270" rx="160" ry="12" class="store"/><text x="760" y="310" text-anchor="middle" class="label">Spatial Index</text><text x="760" y="328" text-anchor="middle" class="sub">e+1 · #00  #01  #10  #11</text>
+          <rect x="765" y="165" width="135" height="60" rx="12" class="box"/><text x="832.5" y="192" text-anchor="middle" class="label">Index Writer</text><text x="832.5" y="211" text-anchor="middle" class="sub">copy + replay</text>
+          <path d="M700 152 L700 187 Q700 195 708 195 L755 195" class="wire async"/><polygon points="765,195 755,200 755,190" class="head async"/><path d="M832 225 L832 237 Q832 245 824 245 L761.5 245 Q760 245 760 246.5 L760 248" class="wire async"/><polygon points="760,258 755,248 765,248" class="head async"/>
+          <path d="M490 190 L527 190 Q535 190 535 198 L535 271 Q535 279 543 279 L590 279" class="wire"/><polygon points="600,279 590,284 590,274" class="head"/>
+          <path d="M600 297 L523 297 Q515 297 515 289 L515 212.5 Q515 205 507.5 205 L500 205" class="wire reply"/><polygon points="490,205 500,200 500,210" class="head reply"/>
+          <rect x="160" y="270" width="345" height="20" rx="10" class="badge"/><text x="332.5" y="284" text-anchor="middle" class="badge-text">MIGRATING: read parent + children; dedupe</text>
+          <g class="is-new">
+            <text x="160" y="324" class="clock">cutover only when all applied[p] ≥ W[p]</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">切换条件是孩子追到全部分区连续水位 W，路由 epoch 原子发布；过渡期父格持续更新。只把 parent 标记为 split 就让读者查孩子，空孩子会制造整片漏召回。</span> <span class="lang-en">Cut over after children reach every contiguous partition watermark W; publish a route epoch atomically and keep updating the parent during grace. Marking a parent split before children are ready causes missing recall.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s5t d5s5d">
+          <title id="d5s5t">Old readers must finish before the parent is retired</title>
+          <desc id="d5s5d">The complete migration graph retains the parent until old route lifetimes expire and every old reader finishes. No path is removed prematurely.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="18" width="824" height="364" rx="18" class="boundary"/><text x="136" y="38" class="tiny">HOT CELL · migrate routing without losing recall</text>
+          <circle cx="44" cy="156" r="12" class="box"/><path d="M24 202 Q44 170 64 202" class="wire"/><text x="44" y="224" text-anchor="middle" class="label">Client</text>
+          <rect x="145" y="140" width="100" height="80" rx="12" class="box"/><text x="195" y="177" text-anchor="middle" class="label">Edge</text><text x="195" y="196" text-anchor="middle" class="sub">quota</text>
+          <rect x="340" y="140" width="150" height="80" rx="12" class="box"/><text x="415" y="177" text-anchor="middle" class="label">Location Service</text><text x="415" y="196" text-anchor="middle" class="sub">route epoch / merge</text>
+          <path d="M70 171 L135 171" class="wire"/><polygon points="145,171 135,176 135,166" class="head"/>
+          <path d="M145 189 L80 189" class="wire reply"/><polygon points="70,189 80,184 80,194" class="head reply"/>
+          <path d="M245 171 L330 171" class="wire"/><polygon points="340,171 330,176 330,166" class="head"/>
+          <path d="M340 189 L255 189" class="wire reply"/><polygon points="245,189 255,184 255,194" class="head reply"/>
+          <path d="M620 80 V140 A80 12 0 0 0 780 140 V80" class="store"/><ellipse cx="700" cy="80" rx="80" ry="12" class="store"/><text x="700" y="120" text-anchor="middle" class="label">Spatial Index</text><text x="700" y="138" text-anchor="middle" class="sub">parent cell · epoch e</text>
+          <path d="M490 159 L527 159 Q535 159 535 151 L535 116 Q535 108 543 108 L610 108" class="wire"/><polygon points="620,108 610,113 610,103" class="head"/>
+          <path d="M620 126 L563 126 Q555 126 555 134 L555 169 Q555 177 547 177 L500 177" class="wire reply"/><polygon points="490,177 500,172 500,182" class="head reply"/>
+          <text x="160" y="92" class="clock">hot key: cell:wx4g0b · 222 reads/s</text>
+          <path d="M600 270 V330 A160 12 0 0 0 920 330 V270" class="store"/><ellipse cx="760" cy="270" rx="160" ry="12" class="store"/><text x="760" y="310" text-anchor="middle" class="label">Spatial Index</text><text x="760" y="328" text-anchor="middle" class="sub">e+1 · #00  #01  #10  #11</text>
+          <rect x="765" y="165" width="135" height="60" rx="12" class="box"/><text x="832.5" y="192" text-anchor="middle" class="label">Index Writer</text><text x="832.5" y="211" text-anchor="middle" class="sub">copy + replay</text>
+          <path d="M700 152 L700 187 Q700 195 708 195 L755 195" class="wire async"/><polygon points="765,195 755,200 755,190" class="head async"/><path d="M832 225 L832 237 Q832 245 824 245 L761.5 245 Q760 245 760 246.5 L760 248" class="wire async"/><polygon points="760,258 755,248 765,248" class="head async"/>
+          <path d="M490 190 L527 190 Q535 190 535 198 L535 271 Q535 279 543 279 L590 279" class="wire"/><polygon points="600,279 590,284 590,274" class="head"/>
+          <path d="M600 297 L523 297 Q515 297 515 289 L515 212.5 Q515 205 507.5 205 L500 205" class="wire reply"/><polygon points="490,205 500,200 500,210" class="head reply"/>
+          <rect x="160" y="270" width="345" height="20" rx="10" class="badge"/><text x="332.5" y="284" text-anchor="middle" class="badge-text">MIGRATING: read parent + children; dedupe</text>
+          <text x="160" y="324" class="clock">cutover only when all applied[p] ≥ W[p]</text>
+          <g class="is-new">
+            <text x="160" y="353" class="tiny">retire: old routes expired AND old readers finished</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">旧路由缓存到期且旧读者退出后才能回收父格。四分也不保证均匀：400 次写/秒都在同一看台时仍打一个孩子，要限流或再拆。</span> <span class="lang-en">Retire the parent after old routes expire AND old readers finish. Four children need not be balanced: 400 writes/s in one stand can still hit one child, requiring limits or another split.</span></figcaption>
+      </div>
+    </figure><div class="bilingual"><div class="lang-zh"><p>只拆实测打满的区域。A3热格约222.22读/s、10,000成员；移动扩展的6,000实体×4/60=400写/s可能先压垮一个键，邻格仍很冷。先尝试热点快照、读副本与准入；空间四分不保证负载四等分，实体都在同一看台时仍打一个孩子。四个逻辑key也不自动增加物理容量。</p><p>本章加两个空间比特得到四孩子；加一个完整geohash字符是五比特、32孩子，两者不同。目录持久化parent/children/状态/epoch，查询不能猜分裂状态。20格只拆一格时稳态最多20−1+4=23次，迁移双读最多20+4=24次；全拆可能80次。</p></div><div class="lang-en"><p>Split only a measured hot region. A3 has about 222.22 reads/s and 10,000 members; 6,000 movers×4/60=400 writes/s can overload one key while neighbors stay cold. Try snapshots, replicas and admission first. Four spatial children need not balance load, and four logical keys do not automatically add physical capacity.</p><p>Two extra spatial bits create four children here. One full geohash character adds five bits and 32 children. Persist parent, children, state and epoch in a directory. Replacing one of 20 cells gives at most 20−1+4=23 steady reads and 20+4=24 dual reads; splitting all can give 80.</p></div></div><h3><span class="lang-zh">迁移实现：连续分区水位，而不是最大实体版本</span><span class="lang-en">Migration: contiguous partition offsets, not maximum entity versions</span></h3><div class="bilingual"><div class="lang-zh"><p>S/W都是来源日志每分区的向量，表示连续前缀的全部副作用已完成，不能拿“见过最大offset”或某实体v42代替。本教学方案在两个短屏障暂停相关投影写者；先排空并围住旧写者，再取父格快照，避免神奇的跨库一致快照。若来源按entity_id分片，可能所有分区都能向该区域移动，屏障范围也可能是全体；这是简化方案的代价。权威仍可提交，日志保存积压。</p></div><div class="lang-en"><p>S/W are source-log vectors whose contiguous prefixes have all required effects complete, not maximum-seen offsets or entity v42. This teaching protocol briefly pauses relevant projectors at two barriers. Drain/fence old workers before taking the parent snapshot, rather than assume a magic cross-database snapshot. With entity-hashed source logs, every partition may emit a move into this region, so all may participate. Authority can keep committing to the durable log; projection visibility pauses.</p></div></div><pre data-language="Pseudocode · copy / replay / cutover" data-kind="pseudocode" data-source="migrate.pseudo"><code>split(parent, route_epoch):
+  P = ALL source partitions that can emit a move into or out of parent
+  pause projectors at hole-free applied offsets S[p] for every p in P
+  snapshot = read parent members + tombstones while its writers are fenced
+  resume parent projection; COPY live rows by point and tombstones to ALL four children
+  // Copy guards compare versions, even if a newer live replay arrived first.
+  REPLAY source offsets &gt; S[p] to children; do not skip deletes or cross-border moves
+  CAS durable route directory: PARENT(e) -&gt; MIGRATING(e, parent + children)
+  // Parent keeps receiving all live changes; copy/replay may safely retry.
+  pause every relevant projector at offsets W[p] after its in-flight writes finish
+  drain child replay until applied[p] &gt;= W[p] for ALL p in P
+  // Advance applied[p] only over a contiguous prefix with all destination effects durable.
+  CAS directory: MIGRATING(e) -&gt; CHILDREN(e+1)
+  invalidate route/cell-cache pointers; retain their ORIGINAL not_after deadlines
+  resume projection to BOTH parent and children through the old-reader grace period
+  wait until all old routes expired AND all readers using them finished/expired
+  fence old parent writers/readers; retire parent; project only to children
+on failure before cutover: keep parent serving; resume from durable migration state
+// Pauses affect index visibility, not authority commits; events stay in the durable log.
+// An entity version is NOT a cross-entity offset. W is a per-partition vector.
+// Leases/epochs are checked by storage; a late worker cannot continue on a retired parent.
+// CAS changes one directory record. It does not atomically copy data across shards.</code></pre><div class="bilingual"><div class="lang-zh"><p>切换前父格始终接收新写；孩子追到W后才CAS发布epoch。切换后宽限期仍双写父/子，旧路由读者才不会读到停止更新的父格。缓存指针绑定epoch并继承绝对有效期；回收条件是<strong>旧路由到期且旧读者全部结束</strong>，不能写成二选一。无法登记读者时，要强制最大路由寿命+最大请求期限+时钟余量，超时读者停止读取。存储验证写者/读者代次拒绝迟到者。</p><p>任一步失败保留父格和持久迁移状态，重放按版本幂等。确认过的事件不能在Writer过载时丢弃；应在权威事务前限流，或接受可观测的投影积压。目录CAS只原子发布一个路由记录，不让跨格复制变成原子操作。</p></div><div class="lang-en"><p>Keep updating the parent before cutover. Publish a new epoch by CAS only after children reach W. Continue projecting to both generations during grace so old-route readers do not see a frozen parent. Epoch-bound cache pointers keep their original deadlines. Retirement needs <strong>old routes expired AND all old readers finished</strong>. Without reader registration, enforce maximum route lifetime + maximum request duration + clock margin; expired readers stop reading. Storage rejects late reader/writer epochs.</p><p>Failure retains the parent and durable migration state; versioned replay is idempotent. Writer overload must not discard acknowledged events. Reject before authority commit or expose projection backlog. Directory CAS atomically changes one route record, not the cross-cell copy.</p></div></div>
+</section>
+
+<section><h2><span class="lang-zh">故障与隐私：陈旧结果必须有边界</span> <span class="lang-en">Failures and privacy: stale results need a boundary</span></h2>
+<figure class="deck">
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d6s1t d6s1d">
+          <title id="d6s1t">Freshness is checked at response time</title>
+          <desc id="d6s1d">Client reads through Edge and Location Service from Spatial Index. The successful response returns Index to Service to Edge to Client after observed_at and policy checks.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <g class="is-new">
+            <rect x="120" y="18" width="824" height="364" rx="18" class="boundary"/><text x="136" y="38" class="tiny">FAILURE CONTRACTS · cases shown together, not simultaneous incidents</text>
+            <circle cx="44" cy="166" r="12" class="box"/><path d="M24 212 Q44 180 64 212" class="wire"/><text x="44" y="234" text-anchor="middle" class="label">Client</text>
+            <rect x="165" y="145" width="110" height="110" rx="12" class="box"/><text x="220" y="197" text-anchor="middle" class="label">Edge</text><text x="220" y="216" text-anchor="middle" class="sub">route / quota</text>
+            <rect x="385" y="145" width="170" height="110" rx="12" class="box"/><text x="470" y="197" text-anchor="middle" class="label">Location Service</text><text x="470" y="216" text-anchor="middle" class="sub">freshness / policy</text>
+            <path d="M740 165 V235 A75 12 0 0 0 890 235 V165" class="store"/><ellipse cx="815" cy="165" rx="75" ry="12" class="store"/><text x="815" y="210" text-anchor="middle" class="label">Spatial Index</text><text x="815" y="228" text-anchor="middle" class="sub">observed_at + version</text>
+            <path d="M70 181 L155 181" class="wire"/><polygon points="165,181 155,186 155,176" class="head"/>
+            <path d="M275 181 L375 181" class="wire"/><polygon points="385,181 375,186 375,176" class="head"/>
+            <path d="M555 181 L730 181" class="wire"/><polygon points="740,181 730,186 730,176" class="head"/>
+            <path d="M740 209 L565 209" class="wire reply"/><polygon points="555,209 565,204 565,214" class="head reply"/>
+            <path d="M385 209 L285 209" class="wire reply"/><polygon points="275,209 285,204 285,214" class="head reply"/>
+            <path d="M165 209 L80 209" class="wire reply"/><polygon points="70,209 80,204 80,214" class="head reply"/>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">稳态每次响应仍检查观测年龄。缓存刚填充不等于位置刚采样，2 秒缓存 TTL 不能替代 30 秒移动端年龄阈值。</span> <span class="lang-en">Even in steady state check observation age on every response. A newly filled cache is not a newly sampled position. A 2-second cache TTL cannot replace the 30-second mover-age threshold.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d6s2t d6s2d">
+          <title id="d6s2t">Index failure propagates hop by hop</title>
+          <desc id="d6s2d">Location Service detects no response from Spatial Index and generates 503 locally. Red arrows show failed-dependency propagation Index to Service to Edge to Client; they are not a 503 network packet from Index.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="18" width="824" height="364" rx="18" class="boundary"/><text x="136" y="38" class="tiny">FAILURE CONTRACTS · cases shown together, not simultaneous incidents</text>
+          <circle cx="44" cy="166" r="12" class="box"/><path d="M24 212 Q44 180 64 212" class="wire"/><text x="44" y="234" text-anchor="middle" class="label">Client</text>
+          <rect x="165" y="145" width="110" height="110" rx="12" class="box"/><text x="220" y="197" text-anchor="middle" class="label">Edge</text><text x="220" y="216" text-anchor="middle" class="sub">route / quota</text>
+          <rect x="385" y="145" width="170" height="110" rx="12" class="box"/><text x="470" y="197" text-anchor="middle" class="label">Location Service</text><text x="470" y="216" text-anchor="middle" class="sub">freshness / policy</text>
+          <path d="M740 165 V235 A75 12 0 0 0 890 235 V165" class="store"/><ellipse cx="815" cy="165" rx="75" ry="12" class="store"/><text x="815" y="210" text-anchor="middle" class="label">Spatial Index</text><text x="815" y="228" text-anchor="middle" class="sub">observed_at + version</text>
+          <path d="M70 181 L155 181" class="wire"/><polygon points="165,181 155,186 155,176" class="head"/>
+          <path d="M275 181 L375 181" class="wire"/><polygon points="385,181 375,186 375,176" class="head"/>
+          <path d="M555 181 L730 181" class="wire"/><polygon points="740,181 730,186 730,176" class="head"/>
+          <path d="M740 209 L565 209" class="wire reply muted"/><polygon points="555,209 565,204 565,214" class="head reply muted"/>
+          <path d="M385 209 L285 209" class="wire reply muted"/><polygon points="275,209 285,204 285,214" class="head reply muted"/>
+          <path d="M165 209 L80 209" class="wire reply muted"/><polygon points="70,209 80,204 80,214" class="head reply muted"/>
+          <g class="is-new">
+            <path d="M740 225 L565 225" class="wire fail"/><polygon points="555,225 565,220 565,230" class="head fail"/><path d="M385 225 L285 225" class="wire fail"/><polygon points="275,225 285,220 285,230" class="head fail"/><path d="M165 225 L118 225 Q110 225 110 217 L110 217 Q110 209 102 209 L80 209" class="wire fail"/><polygon points="70,209 80,204 80,214" class="head fail"/>
+            <text x="580" y="258" class="clock">index unavailable ⇒ 503 (not empty)</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">服务本地检测索引超时，产生 503；红线按 Index → Service → Edge → Client 表示依赖失败逐跳传播。空列表表示完整查询无合格地点；缺一片不能冒充完整空列表。</span> <span class="lang-en">The service detects an index timeout locally and produces 503. Red dependency failure propagates Index → Service → Edge → Client. Empty means complete recall found no eligible place; a missing shard cannot masquerade as complete empty success.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d6s3t d6s3d">
+          <title id="d6s3t">A stopped writer differs from a stopped API</title>
+          <desc id="d6s3d">A note distinguishes writer loss from API loss: a healthy Location Service may query the readable index when Writer is stopped, but drops movers older than 30 seconds.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="18" width="824" height="364" rx="18" class="boundary"/><text x="136" y="38" class="tiny">FAILURE CONTRACTS · cases shown together, not simultaneous incidents</text>
+          <circle cx="44" cy="166" r="12" class="box"/><path d="M24 212 Q44 180 64 212" class="wire"/><text x="44" y="234" text-anchor="middle" class="label">Client</text>
+          <rect x="165" y="145" width="110" height="110" rx="12" class="box"/><text x="220" y="197" text-anchor="middle" class="label">Edge</text><text x="220" y="216" text-anchor="middle" class="sub">route / quota</text>
+          <rect x="385" y="145" width="170" height="110" rx="12" class="box"/><text x="470" y="197" text-anchor="middle" class="label">Location Service</text><text x="470" y="216" text-anchor="middle" class="sub">freshness / policy</text>
+          <path d="M740 165 V235 A75 12 0 0 0 890 235 V165" class="store"/><ellipse cx="815" cy="165" rx="75" ry="12" class="store"/><text x="815" y="210" text-anchor="middle" class="label">Spatial Index</text><text x="815" y="228" text-anchor="middle" class="sub">observed_at + version</text>
+          <path d="M70 181 L155 181" class="wire"/><polygon points="165,181 155,186 155,176" class="head"/>
+          <path d="M275 181 L375 181" class="wire"/><polygon points="385,181 375,186 375,176" class="head"/>
+          <path d="M555 181 L730 181" class="wire"/><polygon points="740,181 730,186 730,176" class="head"/>
+          <path d="M740 209 L565 209" class="wire reply muted"/><polygon points="555,209 565,204 565,214" class="head reply muted"/>
+          <path d="M385 209 L285 209" class="wire reply muted"/><polygon points="275,209 285,204 285,214" class="head reply muted"/>
+          <path d="M165 209 L80 209" class="wire reply muted"/><polygon points="70,209 80,204 80,214" class="head reply muted"/>
+          <path d="M740 225 L565 225" class="wire fail"/><polygon points="555,225 565,220 565,230" class="head fail"/><path d="M385 225 L285 225" class="wire fail"/><polygon points="275,225 285,220 285,230" class="head fail"/><path d="M165 225 L118 225 Q110 225 110 217 L110 217 Q110 209 102 209 L80 209" class="wire fail"/><polygon points="70,209 80,204 80,214" class="head fail"/>
+          <text x="580" y="258" class="clock">index unavailable ⇒ 503 (not empty)</text>
+          <g class="is-new">
+            <text x="160" y="299" class="clock">Writer down: GET may run; mover observed age &gt; 30 s ⇒ DROP</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">Writer 停了，健康服务仍可读索引，但过龄移动端剔除；整层 Service 都停了，GET 和 PUT 都失败。两种故障不能画成同一条可用路径。</span> <span class="lang-en">With Writer stopped, healthy services may read the index and remove overdue movers. If the whole service is down, both GET and PUT fail. These are different failures.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d6s4t d6s4d">
+          <title id="d6s4t">Place freshness is about projection, not edit age</title>
+          <desc id="d6s4d">A published unchanged pin remains valid. A projection that has not caught up for over 24 hours is degraded or unavailable under the chosen assumption.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="18" width="824" height="364" rx="18" class="boundary"/><text x="136" y="38" class="tiny">FAILURE CONTRACTS · cases shown together, not simultaneous incidents</text>
+          <circle cx="44" cy="166" r="12" class="box"/><path d="M24 212 Q44 180 64 212" class="wire"/><text x="44" y="234" text-anchor="middle" class="label">Client</text>
+          <rect x="165" y="145" width="110" height="110" rx="12" class="box"/><text x="220" y="197" text-anchor="middle" class="label">Edge</text><text x="220" y="216" text-anchor="middle" class="sub">route / quota</text>
+          <rect x="385" y="145" width="170" height="110" rx="12" class="box"/><text x="470" y="197" text-anchor="middle" class="label">Location Service</text><text x="470" y="216" text-anchor="middle" class="sub">freshness / policy</text>
+          <path d="M740 165 V235 A75 12 0 0 0 890 235 V165" class="store"/><ellipse cx="815" cy="165" rx="75" ry="12" class="store"/><text x="815" y="210" text-anchor="middle" class="label">Spatial Index</text><text x="815" y="228" text-anchor="middle" class="sub">observed_at + version</text>
+          <path d="M70 181 L155 181" class="wire"/><polygon points="165,181 155,186 155,176" class="head"/>
+          <path d="M275 181 L375 181" class="wire"/><polygon points="385,181 375,186 375,176" class="head"/>
+          <path d="M555 181 L730 181" class="wire"/><polygon points="740,181 730,186 730,176" class="head"/>
+          <path d="M740 209 L565 209" class="wire reply muted"/><polygon points="555,209 565,204 565,214" class="head reply muted"/>
+          <path d="M385 209 L285 209" class="wire reply muted"/><polygon points="275,209 285,204 285,214" class="head reply muted"/>
+          <path d="M165 209 L80 209" class="wire reply muted"/><polygon points="70,209 80,204 80,214" class="head reply muted"/>
+          <path d="M740 225 L565 225" class="wire fail"/><polygon points="555,225 565,220 565,230" class="head fail"/><path d="M385 225 L285 225" class="wire fail"/><polygon points="275,225 285,220 285,230" class="head fail"/><path d="M165 225 L118 225 Q110 225 110 217 L110 217 Q110 209 102 209 L80 209" class="wire fail"/><polygon points="70,209 80,204 80,214" class="head fail"/>
+          <text x="580" y="258" class="clock">index unavailable ⇒ 503 (not empty)</text>
+          <text x="160" y="299" class="clock">Writer down: GET may run; mover observed age &gt; 30 s ⇒ DROP</text>
+          <g class="is-new">
+            <text x="160" y="326" class="tiny">POI projection stale &gt; 24 h ⇒ degraded / 503; unchanged pin is valid</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">餐馆一年没改坐标仍可能有效；24 小时约束的是目录同步进度。拿地点的 last_modified 判断过期，会把正常营业的老店全部删掉。</span> <span class="lang-en">A restaurant unchanged for a year may still be valid. The 24-hour bound concerns projection progress. Expiring places by last_modified would remove established shops.</span></figcaption>
+      </div>
+      <div class="slide">
+        <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d6s5t d6s5d">
+          <title id="d6s5t">A distance bucket still needs access control</title>
+          <desc id="d6s5d">The complete diagram keeps coordinate and freshness checks inside Location Service. Public pins may leave; movers require an authorized audience, and a 100 m distance bucket is not an anonymity guarantee.</desc>
+          <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
+          <rect x="120" y="18" width="824" height="364" rx="18" class="boundary"/><text x="136" y="38" class="tiny">FAILURE CONTRACTS · cases shown together, not simultaneous incidents</text>
+          <circle cx="44" cy="166" r="12" class="box"/><path d="M24 212 Q44 180 64 212" class="wire"/><text x="44" y="234" text-anchor="middle" class="label">Client</text>
+          <rect x="165" y="145" width="110" height="110" rx="12" class="box"/><text x="220" y="197" text-anchor="middle" class="label">Edge</text><text x="220" y="216" text-anchor="middle" class="sub">route / quota</text>
+          <rect x="385" y="145" width="170" height="110" rx="12" class="box"/><text x="470" y="197" text-anchor="middle" class="label">Location Service</text><text x="470" y="216" text-anchor="middle" class="sub">freshness / policy</text>
+          <path d="M740 165 V235 A75 12 0 0 0 890 235 V165" class="store"/><ellipse cx="815" cy="165" rx="75" ry="12" class="store"/><text x="815" y="210" text-anchor="middle" class="label">Spatial Index</text><text x="815" y="228" text-anchor="middle" class="sub">observed_at + version</text>
+          <path d="M70 181 L155 181" class="wire"/><polygon points="165,181 155,186 155,176" class="head"/>
+          <path d="M275 181 L375 181" class="wire"/><polygon points="385,181 375,186 375,176" class="head"/>
+          <path d="M555 181 L730 181" class="wire"/><polygon points="740,181 730,186 730,176" class="head"/>
+          <path d="M740 209 L565 209" class="wire reply muted"/><polygon points="555,209 565,204 565,214" class="head reply muted"/>
+          <path d="M385 209 L285 209" class="wire reply muted"/><polygon points="275,209 285,204 285,214" class="head reply muted"/>
+          <path d="M165 209 L80 209" class="wire reply muted"/><polygon points="70,209 80,204 80,214" class="head reply muted"/>
+          <path d="M740 225 L565 225" class="wire fail"/><polygon points="555,225 565,220 565,230" class="head fail"/><path d="M385 225 L285 225" class="wire fail"/><polygon points="275,225 285,220 285,230" class="head fail"/><path d="M165 225 L118 225 Q110 225 110 217 L110 217 Q110 209 102 209 L80 209" class="wire fail"/><polygon points="70,209 80,204 80,214" class="head fail"/>
+          <text x="580" y="258" class="clock">index unavailable ⇒ 503 (not empty)</text>
+          <text x="160" y="299" class="clock">Writer down: GET may run; mover observed age &gt; 30 s ⇒ DROP</text>
+          <text x="160" y="326" class="tiny">POI projection stale &gt; 24 h ⇒ degraded / 503; unchanged pin is valid</text>
+          <g class="is-new">
+            <text x="160" y="353" class="clock">MOVERS: authorized audience; 100 m bucket ≠ anonymity</text>
+          </g>
+        </svg>
+        <figcaption><span class="lang-zh">100 米桶仍可被多点查询交叉定位。私人移动端默认不对陌生人开放；授权、撤回、频率限制先于字段脱敏，拒绝旧权限快照复活共享。</span> <span class="lang-en">Multiple probe locations can intersect 100 m buckets to infer position. Private movers are closed to strangers by default. Authorization, revocation and rate limits precede redaction; stale policy cannot restore sharing.</span></figcaption>
+      </div>
+    </figure><div class="bilingual"><div class="lang-zh"><p>故障先分部件：Writer停但API/索引健康，可以读越来越旧的索引；整层API停，GET/PUT都失败。缺格/索引超时默认503，不能给“完整空列表”。公开地点一年没改坐标仍有效，A8的24小时约束投影/同步进度，不是last_modified年龄。</p><p>移动端每次输出都检查<strong>原观测时间+时钟余量+发送截止</strong>，缓存刚填不代表GPS刚采样。Redis EXPIRE是整个key的寿命 [7]，不会逐GEO成员保证新鲜。后台删除过龄成员节省空间，在线年龄检查决定能否显示。60km/h约16.67m/s，2秒走33.33m、30秒走500m；100m桶也不会防止跨格。</p><p>私人移动端默认对陌生人关闭。权威受众/共享状态在当前读取快照校验，依赖失败拒绝私人结果；属主按entity_id读取自己最新行走鉴权路径。100m桶不保证匿名，多中心距离环、排序和成员出现与否均泄漏约束，仍需授权、撤回、限频和短保留。W3C的隐私建议是非规范性说明 [8]，没有承诺桶宽阻止定位。</p><p>监控覆盖格数、候选数/字节、缺片与partial率、连续投影水位/延迟、样本年龄、route epoch错误、回源与拒绝率。已知跨格样本探针可揭示“HTTP 200但新格漏召回”。删除/撤回的保留策略同时覆盖索引缓存、outbox/队列及备份，不能只删最新行。</p></div><div class="lang-en"><p>Distinguish components: Writer loss with healthy API/index permits increasingly old recall; total API loss fails GET and PUT. Missing cells/index timeouts default to 503, never complete-empty success. An unchanged year-old restaurant remains valid: A8’s 24 h limit concerns projection/synchronization progress, not last_modified age.</p><p>For movers, each output checks <strong>original observation time, clock margin and send deadline</strong>. Redis EXPIRE applies to a whole key [7], not each GEO member’s freshness. Background cleanup saves space; online age checks determine visibility. At 60 km/h a mover travels 33.33 m in 2 s or 500 m in 30 s; a 100 m bucket does not prevent cell crossings.</p><p>Private movers are closed to strangers by default. Check authoritative audience/sharing state in the current read snapshot; unavailable checks fail private results closed. Owners read their entity ID through authenticated authority access. 100 m buckets do not guarantee anonymity: intersecting probe annuli, ranking and membership still leak constraints. Keep authorization, revocation, rate limits and short retention. W3C’s privacy discussion is non-normative [8] and makes no bucket-anonymity promise.</p><p>Monitor covered cells, candidate count/bytes, missing/partial rates, contiguous projection offsets/lag, sample ages, route errors, origin loads and rejections. Known cross-border probes detect new-cell misses behind HTTP 200. Deletion/retention covers caches, outbox/queues and backups as well as latest rows.</p></div></div>
+</section>
+
+<section><h2><span class="lang-zh">追问与容易翻车的答案</span> <span class="lang-en">Follow-ups and answers that fail</span></h2>
+<div class="bilingual"><div class="lang-zh"><p>若改成每3秒上报，80,000×20/60≈26,666.67次/s，是原预算5倍；96B历史约221.184GB/天，最新行工作集仍7.68MB。需重算Writer、队列和热格，而不是只改TTL。50km半径不是当前产品接口，六位局部盒约166×109=18,094格，先拒绝再算覆盖。</p></div><div class="lang-en"><p>Reporting every 3 s yields 80,000×20/60≈26,666.67/s, 5× the base. 96 B history reaches 221.184 GB/day while latest rows still total 7.68 MB. Resize Writer, queue and hot cells rather than only changing TTL. 50 km is outside this API; its local length-6 box would have about 166×109=18,094 cells. Reject before covering.</p></div></div><table><thead><tr><th><span class="lang-zh">翻车说法</span> <span class="lang-en">Bad claim</span></th><th><span class="lang-zh">缺少的判断</span> <span class="lang-en">Missing decision</span></th><th><span class="lang-zh">可口述的修正</span> <span class="lang-en">Correction</span></th></tr></thead><tbody><tr><td><span class="lang-zh">固定当前格加八邻居</span> <span class="lang-en">Always current plus eight</span></td><td><span class="lang-zh">半径与精度没有匹配</span> <span class="lang-en">Radius and precision may not fit</span></td><td><span class="lang-zh">完整覆盖，权威校验后测距；图示局部格心十一、最坏盒二十</span> <span class="lang-en">Cover completely and validate authority before distance; eleven local centered intersections, twenty box cells</span></td></tr>
+<tr><td><span class="lang-zh">200 已证明附近查询可见</span> <span class="lang-en">A 200 proves nearby visibility</span></td><td><span class="lang-zh">事务确认与投影确认混在一起</span> <span class="lang-en">Durability and projection acknowledgment differ</span></td><td><span class="lang-zh">提交 latest + outbox/回执，响应 pending；强可见需消费水位、缓存与路由屏障</span> <span class="lang-en">Commit latest + outbox/receipt, return pending; strong visibility needs offset, cache and route barriers</span></td></tr>
+<tr><td><span class="lang-zh">先加后删就永不漏</span> <span class="lang-en">Add-first can never miss</span></td><td><span class="lang-zh">事件还没到新格时会漏召回</span> <span class="lang-en">Delivery lag still misses new-cell recall</span></td><td><span class="lang-zh">处理期避免删除空洞，传播期缺口单独约定</span> <span class="lang-en">Prevent apply-time deletion gaps; contract separately for delivery lag</span></td></tr>
+<tr><td><span class="lang-zh">缓存刚填，位置一定新</span> <span class="lang-en">New cache means fresh location</span></td><td><span class="lang-zh">缓存时间与观测时间不同</span> <span class="lang-en">Cache age and sample age differ</span></td><td><span class="lang-zh">保留 observed_at，计时钟误差与发送截止后检查三十秒阈值</span> <span class="lang-en">Preserve observed_at; apply the thirty-second age rule at response</span></td></tr>
+<tr><td><span class="lang-zh">拆四格就平均四分流量</span> <span class="lang-en">Four cells mean equal load</span></td><td><span class="lang-zh">空间倾斜和物理部署未改变</span> <span class="lang-en">Skew and placement may remain</span></td><td><span class="lang-zh">追增量后切路由，量子格压力，确认事件不丢弃</span> <span class="lang-en">Replay before cutover, measure child pressure, never discard acknowledged events</span></td></tr>
+<tr><td><span class="lang-zh">不回坐标就没有隐私风险</span> <span class="lang-en">No coordinates means no privacy risk</span></td><td><span class="lang-zh">距离、排序与多点探测可推断</span> <span class="lang-en">Distance, rank and probes leak constraints</span></td><td><span class="lang-zh">先授权受众与撤回，再做桶化、限频、短保留</span> <span class="lang-en">Authorize audience and revocation, then bucket, limit and retain briefly</span></td></tr></tbody></table>
+</section>
+
+<section><h2><span class="lang-zh">收尾：三个约束必须落到图上</span> <span class="lang-en">Close: three constraints must change the drawing</span></h2>
+<div class="bilingual"><div class="lang-zh"><p>面试主线是一条查询、一个权威行和一个派生格索引：完整覆盖防边界漏格；权威校验后再测距/排序；版本、墓碑和连续消费水位解释写入与迁移。异步投影仍有未召回窗口，缓存TTL不替代样本年龄。热格按实测拆，私人位置先授权再减少精度。下一章展开队列重放与消费确认。</p></div><div class="lang-en"><p>End with one query, one authoritative row and one derived cell index: complete covering, authority-first filtering/ranking, and versions/tombstones/contiguous offsets for writes and migration. Async projection still has recall gaps; cache TTL does not replace sample age. Split measured hotspots and authorize private audiences before reducing precision. The next chapter expands queue replay and acknowledgments.</p></div></div></section>
+
+<section><h2><span class="lang-zh">引用与延伸阅读</span> <span class="lang-en">References and further reading</span></h2>
+<ol class="references"><li id="ref-1">[1] Redis, <a href="https://redis.io/docs/latest/commands/geoadd/">GEOADD</a>, 2026 accessed. <span class="lang-zh">使用五十二比特交错、有序集合、内部覆盖区间、纬度范围及球面距离最坏约 0.5% 误差；格子边长另按假设推算。</span> <span class="lang-en">52-bit interleaving, sorted-set storage, internal 1+8 ranges, latitude bounds ±85.05112878°, and up to 0.5% spherical-distance error. Cell dimensions are this chapter’s derivation.</span></li>
+<li id="ref-2">[2] Redis, <a href="https://redis.io/docs/latest/commands/geosearch/">GEOSEARCH</a>, 2026 accessed. <span class="lang-zh">使用半径、距离排序和 COUNT ANY 提前停止的限制，不引用厂商吞吐。</span> <span class="lang-en">Radius queries, ASC ordering and the COUNT ANY early-stop limitation; no vendor throughput claim is used.</span></li>
+<li id="ref-3">[3] PostGIS, <a href="https://postgis.net/docs/ST_DWithin.html">ST_DWithin</a>, 2026 accessed. <span class="lang-zh">使用 geography 的米单位、默认椭球距离及索引外接框预筛。</span> <span class="lang-en">Geography distance in metres, spheroidal measurement by default and index-assisted bounding-box filtering.</span></li>
+<li id="ref-4">[4] H3 project / Uber, <a href="https://h3geo.org/docs/core-library/restable/">Tables of Cell Statistics Across Resolutions</a>, H3 4.x, 2026 accessed. <span class="lang-zh">核对每层十二个五边形与同层格子面积随位置变化，不宣称球面邻居精确等距。</span> <span class="lang-en">Exactly 12 pentagons at each resolution and location-dependent cell areas; no claim of exact globally equidistant neighbors.</span></li>
+<li id="ref-5">[5] H3 project / Uber, <a href="https://h3geo.org/docs/api/traversal/">Grid traversal functions</a>, H3 4.x, 2026 accessed. <span class="lang-zh">核对 gridDisk 的网格距离和输出不保证顺序，五边形畸变交由库处理。</span> <span class="lang-en">gridDisk uses grid distance k and does not guarantee output order; pentagonal distortion requires library-aware handling.</span></li>
+<li id="ref-6">[6] Debezium, <a href="https://debezium.io/documentation/reference/stable/transformations/outbox-event-router.html">Outbox Event Router</a>, 3.7 stable documentation, 2026 accessed. <span class="lang-zh">使用事件 id 去重和 aggregateid 分区内顺序，权威行与 outbox 事务为本章方案。</span> <span class="lang-en">Event id for duplicate removal and aggregateid for event keys and partition order. The latest-row/outbox transaction is the chapter’s design.</span></li>
+<li id="ref-7">[7] Redis, <a href="https://redis.io/docs/latest/commands/expire/">EXPIRE</a>, 2026 accessed. <span class="lang-zh">使用 key 级过期，区分缓存驻留与各成员样本年龄。</span> <span class="lang-en">Timeout attaches to a key; cache residence is distinct from each member’s observation age.</span></li>
+<li id="ref-8">[8] W3C, <a href="https://www.w3.org/TR/2026/CR-geolocation-20260326/">Geolocation</a>, Candidate Recommendation Snapshot, 26 March 2026. <span class="lang-zh">§3.2非规范性隐私建议：按目的使用、保护访问、保留和更新删除；距离桶推断为本章分析。</span> <span class="lang-en">§3.2 non-normative privacy advice: purpose-limited use, access protection, retention and update/delete. Bucket width and inference examples are chapter analysis.</span></li></ol><p class="cite"><span class="lang-zh">站内延伸：</span> <span class="lang-en">Course follow-ups:</span> <a class="chip" href="ch03.html">Ch03</a> <a class="chip" href="ch05.html">Ch05</a> <a class="chip" href="ch20.html">Ch20</a> <a class="chip" href="ch37.html">Ch37</a> <a class="chip" href="ch38.html">Ch38</a></p>
+</section>
+
+<section><h2><span class="lang-zh">闪卡</span> <span class="lang-en">Flashcards</span></h2>
+<p class="cite"><span class="lang-zh">点一下翻面，能讲清路径和失败窗口才算会。</span> <span class="lang-en">Click to flip; walk the path and its failure windows.</span></p><div class="cards-grid"><button type="button" class="flip"><span class="q"><span class="lang-zh">一公里为什么不能永远九格？</span> <span class="lang-en">Why not always nine cells for 1 km?</span></span><span class="a"><span class="lang-zh">纬度边约 0.610 km，1.5 倍是 0.915 km，小于一公里，格心圆会触到第二北格；覆盖按位置生成。</span> <span class="lang-en">The 0.610 km height gives 1.5h = 0.915 km, below 1 km. A centered circle reaches the second northern cell. Generate a position-specific cover.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">十一、十五、二十各是什么？</span> <span class="lang-en">What are eleven, fifteen and twenty?</span></span><span class="a"><span class="lang-zh">图示格心圆相交十一格，中心外接盒十五格，任意对齐外接盒最多二十格；十一不是通用常数。</span> <span class="lang-en">Eleven centered intersections, fifteen centered box cells, at most twenty arbitrary-alignment box cells. Eleven is not universal.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">为什么单库仍成立？</span> <span class="lang-en">Why is one database still valid?</span></span><span class="a"><span class="lang-zh">地点约 0.13 编辑/秒、原始索引 128 MB；先量查询计划和热点，不从题目名称推分片。</span> <span class="lang-en">About 0.13 place edits/s and 128 MB raw index. Measure plans and hot cells instead of inferring shards from the prompt name.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">缓存未命中谁回源？</span> <span class="lang-en">Who loads a cache miss?</span></span><span class="a"><span class="lang-zh">Location Service 读 Spatial Index，拿带版本快照，再回填 Cell Cache；缓存不是串联代理。</span> <span class="lang-en">Location Service reads Spatial Index, receives a versioned snapshot and fills Cell Cache. Cache is not an inline proxy.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">移动端确认前同事务存什么？</span> <span class="lang-en">What commits before a mover acknowledgment?</span></span><span class="a"><span class="lang-zh">最新行、额度、版本、outbox与回执同事务；锁内先回放稳定request_id，不再收费或增版本。</span> <span class="lang-en">Latest row, quota, version, outbox and receipt share a transaction. Recover stable request_id under the entity lock before charging quota.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">先加后删仍会漏哪里？</span> <span class="lang-en">What can add-before-remove still miss?</span></span><span class="a"><span class="lang-zh">事件尚未到新格时，新格查询召回不到 id；回权威只能验证已有候选。</span> <span class="lang-en">Before event delivery, new-cell recall lacks the ID. Authority reads can only validate candidates already recalled.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">两秒 TTL 等于两秒可见吗？</span> <span class="lang-en">Does a 2 s TTL mean 2 s visibility?</span></span><span class="a"><span class="lang-zh">不等于。索引两秒目标加缓存最多两秒，常规可接近四秒；故障无硬上界，年龄仍看 observed_at。</span> <span class="lang-en">No. A 2 s projection target plus up to 2 s cached can approach 4 s; failure has no hard bound. Age uses observed_at with clock error and the send deadline.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">二十格拆一个父格后怎样算？</span> <span class="lang-en">What happens when one of twenty cells splits?</span></span><span class="a"><span class="lang-zh">稳态最多 20−1+4=23 次；迁移双读最多 20+4=24 次。四分不保证流量均匀。</span> <span class="lang-en">At most 20−1+4=23 steady reads; dual-read migration at most 20+4=24. Four children do not guarantee balanced load.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">旧餐馆坐标为什么不按三十秒过期？</span> <span class="lang-en">Why does an old restaurant pin not expire in 30 s?</span></span><span class="a"><span class="lang-zh">地点持续有效，二十四小时是目录同步落后上限；移动端三十秒是样本年龄。</span> <span class="lang-en">A place remains valid. Twenty-four hours bounds projection lag; thirty seconds bounds a mover sample’s age.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">一百米桶能匿名吗？</span> <span class="lang-en">Does a 100 m bucket anonymize?</span></span><span class="a"><span class="lang-zh">不能保证，多中心距离环能相交定位。先做受众授权、撤回和限频，再减少精度。</span> <span class="lang-en">Not guaranteed. Multi-center annuli intersect to infer position. Authorize audience, revocation and rate limits before reducing precision.</span></span></button></div>
+</section>
+  <p><button type="button" class="read-toggle"><span class="when-off"><span class="lang-zh">我已学完本章</span> <span class="lang-en">Mark this chapter done</span></span><span class="when-on"><span class="lang-zh">已学完本章</span> <span class="lang-en">Completed</span></span></button></p>
+  <p class="cite"><span class="lang-zh">进度存在这台浏览器里。</span> <span class="lang-en">Saved in this browser only.</span></p>
+</article>
+</main>
+<script src="../assets/js/nav.js"></script>
+<script src="../assets/js/lang.js"></script>
+<script src="../assets/js/slides.js"></script>
+<script src="../assets/js/progress.js"></script>
+</body>
+</html>

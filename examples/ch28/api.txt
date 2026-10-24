@@ -1,0 +1,22 @@
+POST /v1/publications  Idempotency-Key: request-7
+{ namespace, expected_generation: 41, stable: "R17", canary: "R18",
+  percent: 5, salt: "s1", eligible_cluster: "approved", reason, new_content? }
+201 { generation: 42 } // authority commit; not fleet application
+409 stale generation or same key with changed semantic intent
+
+GET /v1/snapshots/{namespace}
+If-None-Match: "namespace:g42:rule42:identity-context:release:checksum"
+200 { generation, rule_revision, identity_context, selected_release, checksum, bundle }
+304 selected representation unchanged // no critical proof
+
+POST /v1/snapshots:batch { namespaces: [...] } // at most 10 namespaces
+200 { views: [...] } // each namespace consistent; no cross-namespace transaction
+
+GET /v1/watch?cursors={namespace:g41,...}&timeout_ms=60000
+200 { changed: [{ namespace, generation }] }; 204 idle
+RESET history gap; 503 local replay index not ready / behind caller
+
+POST /v1/confirmations  Cache-Control: no-store
+{ request_nonce, exact_applied_view, identity_context }
+200 { request_nonce, selected_current_view, authoritative: true }
+503 no authority; a mismatch never qualifies the old applied view

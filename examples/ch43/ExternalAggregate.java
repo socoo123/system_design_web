@@ -1,0 +1,245 @@
+import java.io.*;
+import java.nio.file.*;
+import java.util.*;
+import java.util.function.IntFunction;
+
+/** Java 17, no dependencies. Local external GROUP BY after snapshot filtering/deletes.
+ * Not a Parquet reader, task scheduler, durable table commit or crash-recovery engine.
+ * Each attempt owns a fresh job directory; failed attempts return no candidate.
+ */
+public final class ExternalAggregate {
+    record Row(String key, long cents) {
+        Row {
+            if (key == null || !key.matches("[A-Za-z0-9_-]{1,32}"))
+                throw new IllegalArgumentException("bounded ASCII key required");
+        }
+    }
+    record Head(int reader, Row row) {}
+
+    // BEGIN external
+    static Path aggregate(Iterator<Row> input, int maxRows, int fanIn, Path job)
+            throws IOException {
+        if (maxRows < 1 || fanIn < 2) throw new IllegalArgumentException("budget");
+        Files.createDirectory(job); // unique attempt; never overwrite another job
+        Path stage = Files.createDirectory(job.resolve("stage-0"));
+        long count = 0;
+        while (input.hasNext()) {
+            List<Row> block = new ArrayList<>();
+            while (block.size() < maxRows && input.hasNext()) block.add(input.next());
+            block.sort(Comparator.comparing(Row::key));
+            writeChunk(block, stage.resolve("run-" + count++));
+        }
+        if (count == 0) return Files.createFile(stage.resolve("run-0"));
+        for (int pass = 1; count > 1; pass++) {
+            Path next = Files.createDirectory(job.resolve("stage-" + pass));
+            long outputs = 0;
+            for (long first = 0; first < count;) {
+                List<Path> group = new ArrayList<>();
+                for (int n = 0; n < fanIn && first < count; n++, first++) {
+                    group.add(stage.resolve("run-" + first)); // expected identities
+                }
+                merge(group, next.resolve("run-" + outputs++)); // a missing run fails
+            }
+            removeStage(stage); // only after the entire next wave is complete
+            stage = next;
+            count = outputs;
+        }
+        Path candidate = stage.resolve("run-0");
+        try (InputStream verify = Files.newInputStream(candidate)) { verify.read(); }
+        return candidate; // readable now; publication/retention is the caller's job
+    }
+    // END external
+
+    // BEGIN merge
+    static void merge(List<Path> runs, Path output) throws IOException {
+        PriorityQueue<Head> queue = new PriorityQueue<>(
+                Comparator.comparing((Head h) -> h.row().key())
+                        .thenComparingInt(Head::reader));
+        try (RunReaders readers = new RunReaders(runs);
+             BufferedWriter out = Files.newBufferedWriter(output,
+                     StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)) {
+            for (int i = 0; i < runs.size(); i++) {
+                Row row = readRow(readers.get(i));
+                if (row != null) queue.add(new Head(i, row));
+            }
+            String key = null;
+            long sum = 0;
+            while (!queue.isEmpty()) {
+                Head head = queue.remove();
+                Row row = head.row();
+                if (key != null && !key.equals(row.key())) {
+                    writeRow(out, new Row(key, sum));
+                    sum = 0;
+                }
+                key = row.key();
+                sum = Math.addExact(sum, row.cents());
+                Row next = readRow(readers.get(head.reader()));
+                if (next != null) queue.add(new Head(head.reader(), next));
+            }
+            if (key != null) writeRow(out, new Row(key, sum));
+        }
+    }
+    // END merge
+
+    static void writeChunk(List<Row> sorted, Path output) throws IOException {
+        try (BufferedWriter out = Files.newBufferedWriter(output,
+                StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)) {
+            String key = null;
+            long sum = 0;
+            for (Row row : sorted) {
+                if (key != null && !key.equals(row.key())) {
+                    writeRow(out, new Row(key, sum));
+                    sum = 0;
+                }
+                key = row.key();
+                sum = Math.addExact(sum, row.cents());
+            }
+            if (key != null) writeRow(out, new Row(key, sum));
+        }
+    }
+
+    static Row readRow(BufferedReader in) throws IOException {
+        String line = in.readLine();
+        if (line == null) return null;
+        int tab = line.indexOf('\t');
+        if (tab < 1 || line.indexOf('\t', tab + 1) >= 0)
+            throw new IOException("invalid run record");
+        try { return new Row(line.substring(0, tab), Long.parseLong(line.substring(tab + 1))); }
+        catch (IllegalArgumentException e) { throw new IOException("invalid run record", e); }
+    }
+
+    static void writeRow(BufferedWriter out, Row row) throws IOException {
+        out.write(row.key()); out.write('\t'); out.write(Long.toString(row.cents())); out.newLine();
+    }
+
+    static final class RunReaders implements AutoCloseable {
+        final List<BufferedReader> open = new ArrayList<>();
+        RunReaders(List<Path> paths) throws IOException {
+            try { for (Path path : paths) open.add(Files.newBufferedReader(path)); }
+            catch (IOException e) {
+                try { close(); } catch (IOException suppressed) { e.addSuppressed(suppressed); }
+                throw e;
+            }
+        }
+        BufferedReader get(int i) { return open.get(i); }
+        @Override public void close() throws IOException {
+            IOException failure = null;
+            for (BufferedReader reader : open) {
+                try { reader.close(); }
+                catch (IOException e) { if (failure == null) failure = e; else failure.addSuppressed(e); }
+            }
+            if (failure != null) throw failure;
+        }
+    }
+
+    static void removeStage(Path stage) throws IOException {
+        try (DirectoryStream<Path> files = Files.newDirectoryStream(stage)) {
+            for (Path file : files) Files.delete(file);
+        }
+        Files.delete(stage);
+    }
+
+    static Iterator<Row> generated(int count, IntFunction<Row> row) {
+        return new Iterator<>() {
+            int index;
+            public boolean hasNext() { return index < count; }
+            public Row next() { if (!hasNext()) throw new NoSuchElementException(); return row.apply(index++); }
+        };
+    }
+
+    static Map<String, Long> readResult(Path file) throws IOException {
+        Map<String, Long> result = new LinkedHashMap<>();
+        String previous = null;
+        try (BufferedReader in = Files.newBufferedReader(file)) {
+            for (Row row; (row = readRow(in)) != null;) {
+                check(previous == null || previous.compareTo(row.key()) < 0, "unique sorted output");
+                previous = row.key(); result.put(row.key(), row.cents());
+            }
+        }
+        return result;
+    }
+
+    interface Checked { void run() throws Exception; }
+    static void rejects(Class<? extends Throwable> expected, Checked action, String name) throws Exception {
+        try { action.run(); } catch (Throwable e) {
+            if (!expected.isInstance(e)) throw new AssertionError(name, e);
+            System.out.println("PASS " + name); return;
+        }
+        throw new AssertionError("expected failure: " + name);
+    }
+    static void check(boolean condition, String message) {
+        if (!condition) throw new AssertionError(message);
+    }
+
+    public static void main(String[] args) throws Exception {
+        Path root = Files.createTempDirectory("ch43-external-");
+        try {
+            List<Row> input = List.of(new Row("US", 7), new Row("CN", 3), new Row("US", -2),
+                    new Row("JP", 9), new Row("CN", 4), new Row("US", 5));
+            Map<String, Long> expected = Map.of("CN", 7L, "JP", 9L, "US", 10L);
+            for (int budget : List.of(1, 2, 99)) for (int fan : List.of(2, 3, 10)) {
+                Map<String, Long> actual = readResult(aggregate(input.iterator(), budget, fan,
+                        root.resolve("normal-" + budget + "-" + fan)));
+                check(actual.equals(expected), "normal aggregate");
+            }
+            System.out.println("PASS normal / cross-run keys / negative values / 9 budget-fanIn pairs");
+            check(readResult(aggregate(Collections.emptyIterator(), 1, 2, root.resolve("empty"))).isEmpty(), "empty");
+            System.out.println("PASS empty input");
+            Map<String, Long> many = readResult(aggregate(generated(4097,
+                    i -> new Row("K" + (i % 17), i % 2 == 0 ? 2 : -1)), 7, 3, root.resolve("many")));
+            Map<String, Long> oracle = new HashMap<>();
+            for (int i = 0; i < 4097; i++) oracle.merge("K" + (i % 17), i % 2 == 0 ? 2L : -1L, Math::addExact);
+            check(many.equals(oracle), "multi-wave oracle");
+            System.out.println("PASS 4097 streamed rows / 586 initial runs / 6 merge waves / independent map oracle");
+            rejects(ArithmeticException.class, () -> aggregate(List.of(new Row("US", Long.MAX_VALUE),
+                    new Row("US", 1)).iterator(), 1, 2, root.resolve("overflow")), "merge overflow aborts candidate");
+            rejects(ArithmeticException.class, () -> aggregate(List.of(new Row("US", Long.MAX_VALUE),
+                    new Row("US", 1)).iterator(), 2, 2, root.resolve("chunk-overflow")), "chunk overflow aborts candidate");
+            rejects(IllegalArgumentException.class, () -> aggregate(input.iterator(), 1, 1,
+                    root.resolve("bad-budget")), "fan-in one rejected instead of nonterminating waves");
+            rejects(IllegalArgumentException.class, () -> aggregate(input.iterator(), 0, 2,
+                    root.resolve("zero-budget")), "zero chunk budget rejected");
+            rejects(FileAlreadyExistsException.class, () -> aggregate(input.iterator(), 1, 2,
+                    root.resolve("normal-1-2")), "attempt directory reuse rejected");
+            rejects(IllegalArgumentException.class, () -> new Row("bad\tkey", 1), "unbounded/ambiguous key rejected");
+            Path missingOut = root.resolve("missing-output");
+            rejects(NoSuchFileException.class, () -> merge(List.of(root.resolve("absent")), missingOut),
+                    "missing required run fails instead of a partial sum");
+            check(!Files.exists(missingOut), "missing input must not return output");
+            Path damaged = root.resolve("damaged");
+            Iterator<Row> losingRun = new Iterator<>() {
+                int i;
+                boolean removed;
+                public boolean hasNext() {
+                    if (i == 1 && !removed && Files.exists(damaged.resolve("stage-0/run-0"))) {
+                        try { Files.delete(damaged.resolve("stage-0/run-0")); removed = true; }
+                        catch (IOException e) { throw new UncheckedIOException(e); }
+                    }
+                    return i < 3;
+                }
+                public Row next() { i++; return new Row("US", 1); }
+            };
+            rejects(NoSuchFileException.class, () -> aggregate(losingRun, 1, 2, damaged),
+                    "run lost between spill and merge cannot be silently omitted");
+            Path single = root.resolve("single-missing");
+            Iterator<Row> losingOnlyRun = new Iterator<>() {
+                int i;
+                public boolean hasNext() {
+                    if (i == 3 && Files.exists(single.resolve("stage-0/run-0"))) {
+                        try { Files.delete(single.resolve("stage-0/run-0")); }
+                        catch (IOException e) { throw new UncheckedIOException(e); }
+                    }
+                    return i < 3;
+                }
+                public Row next() { i++; return new Row("US", 1); }
+            };
+            rejects(NoSuchFileException.class, () -> aggregate(losingOnlyRun, 9, 2, single),
+                    "single run lost before handoff fails even without a merge wave");
+            System.out.println("ALL EXTERNAL AGGREGATE CHECKS PASSED");
+        } finally {
+            try (var files = Files.walk(root)) {
+                for (Path file : files.sorted(Comparator.reverseOrder()).toList()) Files.delete(file);
+            }
+        }
+    }
+}

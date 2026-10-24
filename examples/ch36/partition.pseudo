@@ -1,0 +1,26 @@
+# Teaching contract; Consensus is a real external protocol, not a local lock.
+strongWrite(id, payload, deadline):
+    # applyOnce checks id+payload and stores receipt+effect in one state machine.
+    result = Consensus.proposeAndApplyOnce(id, payload, deadline)
+    if result == COMMITTED:
+        return OK(result.receipt)
+    if result == ID_REUSED_WITH_OTHER_PAYLOAD:
+        return CONFLICT
+    # A timeout/no quorum does not prove that an earlier attempt did not commit.
+    return UNKNOWN(id)  # retry/query with the same id and payload
+
+strongRead(key, deadline):
+    # Barrier validates current leadership and obtains a safe commit index.
+    index = Consensus.readBarrier(deadline)
+    if index is unavailable or not waitApplied(index, deadline):
+        return UNAVAILABLE
+    return StateMachine.readAtLeast(key, index)
+
+addOnlyCart(id, item):
+    # One local durable transaction: unique id+payload, add, and retry receipt.
+    # A failed/unknown local commit returns UNKNOWN, never a fabricated OK.
+    return LocalStore.commitOnce(id, ADD(item))
+
+healCart(left, right):
+    merged = left.items UNION right.items  # add-only contract; no removes
+    persistAndRetryBoth(merged)  # delivery may retry; union is idempotent

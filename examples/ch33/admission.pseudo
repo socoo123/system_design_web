@@ -1,0 +1,29 @@
+prepare(authenticatedContext, confirmedIntent, rawArguments):
+  reject bytes > 16 KiB, nesting > 8, duplicate keys or non-JSON numbers
+  args = parse closed schema:
+    ticket_id: ASCII ticket ID; expected_version: positive integer
+    reason: nonempty string <= 160 characters; no extra fields
+  // No coercion: true, 4.0 and "4" are not integer version 4.
+  canonicalArgs = UTF8_JSON(sorted keys, exact validated values)
+  BEGIN IMMEDIATE on ExecutionDB
+    key = (auth.tenant, confirmedIntent)
+    old = SELECT intent WHERE (tenant, intent_id) = key
+    if old exists:
+      require old.actor/agent/tool/revision/args == this request
+      COMMIT; return old.state  // retain original route/grant/deadlines
+    tool = reviewedRegistry["ticket.close", "r7"]  // never model URL
+    require tool.enabled and caller may use this exact revision
+    require resource tenant == auth.tenant
+    require userScope AND agentScope AND toolPolicy allow ticket.close
+    proposal = (auth.tenant, auth.actor, auth.agent, confirmedIntent,
+                tool.name, tool.revision, tool.routeRevision, tool.policy,
+                canonicalArgs, args.ticket_id, args.expected_version)
+    now = trustedClockAfterLock()
+    snapshot = proposal + (newGrantId, now+5min, now+24h)
+    binding = SHA256(versioned stable encoding of snapshot)
+    INSERT intent(snapshot, binding, state=PENDING)
+    INSERT single-use grant(newGrantId, snapshot.key, binding)
+    INSERT audit(event_id, snapshot.key, "pending")
+  COMMIT before returning 202 + authenticated status handle
+  // Store the complete snapshot too; the digest is not the permission.
+  // Approval UI shows the full effective action, not a hash alone.

@@ -1,0 +1,34 @@
+create(owner, key, intent, admission):                 // authenticated input
+  items = normalize_unique_sorted_resources(intent)   // positive integer quantities
+  digest = SHA256(canonical(owner, CREATE_HOLD, intent))
+  if gated: require admission binds (owner, key, digest, scope, items[0].q)
+  BEGIN ISOLATION LEVEL READ COMMITTED
+  fence = SELECT * FROM fences WHERE scope=:scope FOR SHARE
+  require fence.active AND (not gated OR admission.epoch == fence.epoch)
+  INSERT INTO requests(owner, op, key, digest, scope, token) VALUES (...)
+    ON CONFLICT(owner, op, key) DO NOTHING
+  if not inserted:
+    r = SELECT * FROM requests WHERE identity=:identity FOR UPDATE // new statement
+    require r.digest == digest
+    COMMIT; return r.original_receipt                  // current state: GET /holds/id
+  SAVEPOINT allocation                               // identity remains claimed
+  INSERT hold(state=HELD, expected_items=items, owner=owner, order_id=intent.order_id)
+  for item in items:                                 // fixed resource/date order
+    UPDATE stock SET free=free-:q, reserved=reserved+:q
+      WHERE scope=:scope AND resource=:resource AND free>=:q
+    if affected_rows != 1:
+      ROLLBACK TO SAVEPOINT allocation                // undo ALL nights and hold
+      receipt = {http:409, result:REJECTED}
+      UPDATE requests SET outcome=REJECTED, original_receipt=:receipt WHERE ...
+      INSERT outbox(REQUEST_TERMINAL, receipt(REJECTED, version=1, admission))
+      COMMIT; return receipt
+    INSERT hold_items(hold_id, resource, q) VALUES (...) // immutable ownership
+  UPDATE holds SET deadline=clock_timestamp()+interval '15 minutes' WHERE ...
+  receipt = {http:201, hold_id:id, result:HELD, deadline:deadline}
+  UPDATE requests SET outcome=CREATED, hold_id=:id, original_receipt=:receipt WHERE ...
+  INSERT outbox(HOLD_STATE, event_id=(id,1), state=HELD, version=1, current_epoch=fence.epoch)
+  RELEASE SAVEPOINT allocation
+  COMMIT; return receipt
+// Any unexpected error: ROLLBACK the WHOLE transaction, including identity.
+// COMMIT ACK lost: discard connection; query/retry SAME identity, never restock.
+// Direct hotel path has no token. Only trusted API calls Lua; Redis is not public authority.

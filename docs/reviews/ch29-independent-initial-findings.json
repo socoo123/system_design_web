@@ -1,0 +1,12 @@
+{
+  "status": "open",
+  "severity": "P1",
+  "location": "admission.pseudo enqueue overload branch",
+  "sourceSHA256": "39b5796de93ba5c9e7fb664408801db1f46de9d0601d373e3d93314ee8eb74ce",
+  "kind": "independent source trace; not execution of pseudocode",
+  "precondition": "input attempt is durably claimed with quota RESERVED; global queued_total is100",
+  "observedBranch": "  if queued_total == 100 or queued[trusted_tenant].size == 25: return OVERLOADED",
+  "postcondition": "direct OVERLOADED return has no terminal attempt record or quota release/settlement in this function",
+  "expected": "explicit terminal rejection with recoverable idempotent quota settlement, or an equally explicit bounded-retention retry contract",
+  "contrast": "expired queue entries call release_quota_idempotently, proving cleanup is part of this mechanism"
+}

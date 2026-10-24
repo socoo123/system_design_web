@@ -1,0 +1,27 @@
+startSession(authenticatedCourier, trustedClockBound):
+  begin location-store transaction
+    INSERT empty session if absent; on an identified unique race restart transaction
+    s = SELECT session FOR UPDATE
+    UPDATE session SET epoch = s.epoch + 1, connected = true,
+                       seq = -1, point = null, clockBounded = trustedClockBound
+  commit; return serverIssuedEpoch                       // retained beyond point TTL
+
+applyPoint(authenticatedCourier, inputEpoch, inputSeq, inputPoint):
+  begin location-store transaction
+    s = SELECT session FOR UPDATE
+    now = authoritativeTimeAfterLock()
+    require s.epoch == inputEpoch and s.connected else STALE_SESSION
+    require inputSeq >= 0 and LocationGate.fresh(now, inputPoint, s.clockBounded) else INVALID
+    if inputSeq <= s.seq: commit; return s.seq            // no timestamp/TTL refresh
+    UPDATE session SET seq = inputSeq, point = inputPoint, receivedAt = now, expiresAt = now + 60s
+    // Index delivery may be lossy; periodic reconciliation repairs omissions.
+  commit; return inputSeq
+
+disconnect(inputCourier, inputEpoch):
+  UPDATE session SET connected = false, point = null
+    WHERE courier_id = inputCourier AND epoch = inputEpoch
+  // An old disconnect cannot invalidate a newer session. Reconnect gets a new epoch.
+candidate(s, now):
+  return s.connected and now < s.expiresAt
+         and LocationGate.fresh(now, s.point, s.clockBounded)
+  // Recheck current epoch, location cell, business eligibility and capacity too.

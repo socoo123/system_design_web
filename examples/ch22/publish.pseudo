@@ -1,0 +1,24 @@
+publish(actor, upload_id, fence, manifest_hash, durable_receipt):
+  saved = Metadata.authorized_result(actor, upload_id, manifest_hash)
+  if saved is terminal: return saved.result        // includes REJECTED; even after payload GC
+  proof = Data.verify_receipt(durable_receipt)      // trusted issuer, exact immutable blobs
+  // Data error: query that same authorized result again; unresolved stays UNKNOWN.
+  BEGIN                                           // one Metadata name shard; no Data RPC inside
+  name = SELECT namespace FOR UPDATE              // tenant + bucket + exact key bytes
+  u = SELECT upload FOR UPDATE                    // fixed lock order: name -> upload
+  authorize(actor, name, "PUT"); require u.owner == actor
+  require u.manifest_hash == manifest_hash         // exact frozen part identities + order
+  if u.saved_result is terminal:                    // result survives cleanup state transitions
+    COMMIT; return u.saved_result                  // original version, never current again
+  require u.state == FINALIZING and u.fence == fence
+  require proof.binds(name, u.version, upload_id, fence, manifest_hash)
+  require proof.size == u.expected_size and proof.sha256 == u.expected_digest
+  require proof.meets(u.frozen_policy)             // 3 replicas OR all 6 EC fragments
+  if u.expected_generation != ANY and name.generation != u.expected_generation:
+    UPDATE upload SET state=REJECTED, fence=fence+1, saved_result=CONFLICT
+    COMMIT; return CONFLICT                        // durable terminal decision, same retry
+  INSERT version(name, u.version, u.frozen_manifest, state=PUBLISHED)
+  UPDATE namespace SET current=u.version, generation=generation+1
+  UPDATE upload SET state=COMPLETED, saved_result=(CREATED, u.version)
+  COMMIT                                           // version + current + result are all-or-none
+  return saved_result                              // COMMIT timeout => UNKNOWN, query same upload

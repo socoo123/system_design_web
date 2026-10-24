@@ -1,0 +1,23 @@
+relay(delivery):                                     // identity=(event_id,destination)
+  event = load_committed_outbox_row(delivery.event_id)
+  send(delivery.destination,event)                    // network call outside DB transaction
+  if durable_receiver_ack: mark_delivery_sent(event.id,delivery.destination)
+  // ACK lost/crash before mark: send the SAME event again; never mark before send.
+
+// Route HOLD_STATE to orders (+ Redis if gated). REQUEST_TERMINAL has NO hold_id:
+// send only to Redis if gated; its scoped request receipt remains queryable in authority.
+consume_hold_event(event):                             // independent downstream DB
+  require event.kind == HOLD_STATE AND nonempty_string(event.hold_id)
+  require nonempty_string(event.id) AND positive_integer(event.v)
+  require event.state in {HELD, CONFIRMED, RELEASED}     // invalid: no inbox commit, NO ACK
+  event_hash = SHA256(canonical(event))                // full event, not its intent_digest
+  BEGIN
+  INSERT inbox(consumer,event_id,event_hash) ON CONFLICT DO NOTHING
+  if duplicate: require stored_hash == event_hash; COMMIT; ACK; return
+  INSERT projection(hold_id,version,state) VALUES (...)
+    ON CONFLICT(hold_id) DO UPDATE SET version=:v,state=:s
+    WHERE projection.version < :v                     // full-state event, stale = no overwrite
+  COMMIT; ACK                                         // inbox and local effect share commit
+// Redis and Order API have separate delivery rows/ACKs, outside the DB state transaction.
+// Expiry scan: fixed cutoff, continuous (deadline,id) pages, restart oldest next pass;
+// failed rows stay HELD/due. finish() rechecks time and state after acquiring the lock.

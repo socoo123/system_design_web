@@ -1,0 +1,225 @@
+{
+  "checks": [
+    {
+      "label": "whole-site structure/resources/animation preservation",
+      "command": [
+        "node",
+        "tools/check.mjs"
+      ],
+      "exitCode": 0,
+      "output": "STATS 45 chapters; 276 decks; 1411 frames; 113 code blocks (no count quotas)\nWARN 1 migration/review notes; run audit-chapter.mjs for chapter details\nPASS structure, local resources, accessibility, bilingual nesting, chapter entries and animation preservation\n",
+      "resultArtifacts": {}
+    },
+    {
+      "label": "ch24 chapter audit",
+      "command": [
+        "node",
+        "tools/audit-chapter.mjs",
+        "ch24"
+      ],
+      "exitCode": 0,
+      "output": "\nch24 STATS {\"decks\":6,\"frames\":30,\"perDeck\":[5,5,5,5,5,5],\"staticImages\":0,\"code\":8,\"han\":5379,\"zh\":182,\"en\":182}\nPASS structural checks; content/translation/rendering require independent review\n",
+      "resultArtifacts": {}
+    },
+    {
+      "label": "whitespace integrity",
+      "command": [
+        "git",
+        "diff",
+        "--check"
+      ],
+      "exitCode": 0,
+      "output": "",
+      "resultArtifacts": {}
+    },
+    {
+      "label": "ch24 page/source agreement",
+      "command": [
+        "node",
+        "examples/ch24/sync.mjs",
+        "--check"
+      ],
+      "exitCode": 0,
+      "output": "8 page snippets match chapter sources\n",
+      "resultArtifacts": {}
+    },
+    {
+      "label": "ch24 actual SQLite / payment contracts",
+      "command": [
+        "python3",
+        "examples/ch24/check.py"
+      ],
+      "exitCode": 0,
+      "output": "{\n  \"passed\": true,\n  \"checks\": [\n    {\n      \"name\": \"pre-commit crash rolls back acceptance\",\n      \"passed\": true\n    },\n    {\n      \"name\": \"no orphan payment/attempt/command after rollback\",\n      \"passed\": true\n    },\n    {\n      \"name\": \"boolean create amount is not an integer money value\",\n      \"passed\": true\n    },\n    {\n      \"name\": \"overflow create amount rejected\",\n      \"passed\": true\n    },\n    {\n      \"name\": \"create commits intent+attempt+channel command\",\n      \"passed\": true\n    },\n    {\n      \"name\": \"lost acceptance response resolves same key\",\n      \"passed\": true\n    },\n    {\n      \"name\": \"rotated header still resolves same business intent\",\n      \"passed\": true\n    },\n    {\n      \"name\": \"same key changed amount conflicts\",\n      \"passed\": true\n    },\n    {\n      \"name\": \"same business intent changed method conflicts\",\n      \"passed\": true\n    },\n    {\n      \"name\": \"raw request takes amount from authorized quote\",\n      \"passed\": true\n    },\n    {\n      \"name\": \"raw body increment cannot authorize business version 2\",\n      \"passed\": true\n    },\n    {\n      \"name\": \"raw body method cannot override authorized quote\",\n      \"passed\": true\n    },\n    {\n      \"name\": \"raw version bool is rejected despite Python int equality\",\n      \"passed\": true\n    },\n    {\n      \"name\": \"quote cannot be reused by another authenticated merchant\",\n      \"passed\": true\n    },\n    {\n      \"name\": \"raw mutation created no second intent or provider attempt\",\n      \"passed\": true\n    },\n    {\n      \"name\": \"request-key merchant scopes independent\",\n      \"passed\": true\n    },\n    {\n      \"name\": \"two DB clients create one intent/attempt\",\n      \"passed\": true\n    },\n    {\n      \"name\": \"SENT durable before external call\",\n      \"passed\": true\n    },\n    {\n      \"name\": \"lost response keeps UNKNOWN\",\n      \"passed\": true\n    },\n    {\n      \"name\": \"within-window repeated fixture request moves once\",\n      \"passed\": true\n    },\n    {\n      \"name\": \"retry window never slides on replay\",\n      \"passed\": true\n    },\n    {\n      \"name\": \"late timeout cannot downgrade CONFIRMED\",\n      \"passed\": true\n    },\n    {\n      \"name\": \"terminal attempt is not redispatched\",\n      \"passed\": true\n    },\n    {\n      \"name\": \"ambiguous 500 is cached in v1 fixture\",\n      \"passed\": true\n    },\n    {\n      \"name\": \"provider fixture rejects changed payload\",\n      \"passed\": true\n    },\n    {\n      \"name\": \"invalid signature fixture cannot enter inbox\",\n      \"passed\": true\n    },\n    {\n      \"name\": \"no accepted invalid inbox\",\n      \"passed\": true\n    },\n    {\n      \"name\": \"inbox commit precedes returned ACK\",\n      \"passed\": true\n    },\n    {\n      \"name\": \"event duplicate and distinct event same capture separate\",\n      \"passed\": true\n    },\n    {\n      \"name\": \"capture has exactly two entries and one paid outbox\",\n      \"passed\": true\n    },\n    {\n      \"name\": \"balanced but wrong capture amount rejected\",\n      \"passed\": true\n    },\n    {\n      \"name\": \"wrong provider account rejected\",\n      \"passed\": true\n    },\n    {\n      \"name\": \"wrong currency rejected\",\n      \"passed\": true\n    },\n    {\n      \"name\": \"a second capture object does not silently post\",\n      \"passed\": true\n    },\n    {\n      \"name\": \"crash between journal entries rolls back everything\",\n      \"passed\": true\n    },\n    {\n      \"name\": \"partial journal/state/outbox do not survive\",\n      \"passed\": true\n    },\n    {\n      \"name\": \"unbalanced journal rejects whole transaction\",\n      \"passed\": true\n    },\n    {\n      \"name\": \"same external capture cannot bind a second payment\",\n      \"passed\": true\n    },\n    {\n      \"name\": \"boolean refund amount rejected\",\n      \"passed\": true\n    },\n    {\n      \"name\": \"UNKNOWN preserves 2000 reservation and 5000 availability\",\n      \"passed\": true\n    },\n    {\n      \"name\": \"6000 refund exceeds available 5000\",\n      \"passed\": true\n    },\n    {\n      \"name\": \"same refund key does not reserve twice\",\n      \"passed\": true\n    },\n    {\n      \"name\": \"same refund key changed amount conflicts\",\n      \"passed\": true\n    },\n    {\n      \"name\": \"cross-merchant refund rejected\",\n      \"passed\": true\n    },\n    {\n      \"name\": \"refund crash rolls back journal and reservation conversion\",\n      \"passed\": true\n    },\n    {\n      \"name\": \"refund remains reserved after failed commit\",\n      \"passed\": true\n    },\n    {\n      \"name\": \"success/duplicate/late failure never double converts reservation\",\n      \"passed\": true\n    },\n    {\n      \"name\": \"two clients cannot both reserve last 6000 of 10000\",\n      \"passed\": true\n    },\n    {\n      \"name\": \"final no-refund releases once\",\n      \"passed\": true\n    },\n    {\n      \"name\": \"out-of-order receipt invents no capture\",\n      \"passed\": true\n    },\n    {\n      \"name\": \"recon crash after financial commit retains case\",\n      \"passed\": true\n    },\n    {\n      \"name\": \"recon rerun closes case without another posting\",\n      \"passed\": true\n    },\n    {\n      \"name\": \"journal entries cannot be updated\",\n      \"passed\": true\n    },\n    {\n      \"name\": \"journal headers cannot be deleted\",\n      \"passed\": true\n    },\n    {\n      \"name\": \"payment primary identity explicitly NOT NULL\",\n      \"passed\": true\n    },\n    {\n      \"name\": \"payment actual NULL primary identity rejected first\",\n      \"passed\": true\n    },\n    {\n      \"name\": \"attempt primary identity explicitly NOT NULL\",\n      \"passed\": true\n    },\n    {\n      \"name\": \"attempt actual NULL primary identity rejected first\",\n      \"passed\": true\n    },\n    {\n      \"name\": \"posting primary identity explicitly NOT NULL\",\n      \"passed\": true\n    },\n    {\n      \"name\": \"posting actual NULL primary identity rejected first\",\n      \"passed\": true\n    },\n    {\n      \"name\": \"refund primary identity explicitly NOT NULL\",\n      \"passed\": true\n    },\n    {\n      \"name\": \"refund actual NULL primary identity rejected first\",\n      \"passed\": true\n    },\n    {\n      \"name\": \"outbox primary identity explicitly NOT NULL\",\n      \"passed\": true\n    },\n    {\n      \"name\": \"outbox actual NULL primary identity rejected first\",\n      \"passed\": true\n    },\n    {\n      \"name\": \"review primary identity explicitly NOT NULL\",\n      \"passed\": true\n    },\n    {\n      \"name\": \"review actual NULL primary identity rejected first\",\n      \"passed\": true\n    },\n    {\n      \"name\": \"NULL request scope rejected by SQLite\",\n      \"passed\": true\n    },\n    {\n      \"name\": \"NULL TEXT primary key rejected by SQLite\",\n      \"passed\": true\n    },\n    {\n      \"name\": \"all committed journals balance per journal/currency\",\n      \"passed\": true\n    },\n    {\n      \"name\": \"all payment refund bounds hold\",\n      \"passed\": true\n    }\n  ],\n  \"limits\": [\n    \"SQLite local transaction/constraint semantics only; not PostgreSQL failover\",\n    \"Provider fixture assumes its key contract; no real PSP, SDK signature, deadline or network proof\",\n    \"No performance/load/fault-injection-on-live-provider test\"\n  ]\n}\n",
+      "resultArtifacts": {
+        "docs/reviews/ch22-ch23-ch24-actual-ch24-code-results.json": "3c992d905fbb4e6e20763650d3c431a6a99ced503811d9993173c8d0489647be"
+      }
+    },
+    {
+      "label": "ch22 chapter audit",
+      "command": [
+        "node",
+        "tools/audit-chapter.mjs",
+        "ch22"
+      ],
+      "exitCode": 0,
+      "output": "\nch22 STATS {\"decks\":6,\"frames\":30,\"perDeck\":[5,5,5,5,5,5],\"staticImages\":0,\"code\":4,\"han\":9270,\"zh\":244,\"en\":244}\nPASS structural checks; content/translation/rendering require independent review\n"
+    },
+    {
+      "label": "ch23 chapter audit",
+      "command": [
+        "node",
+        "tools/audit-chapter.mjs",
+        "ch23"
+      ],
+      "exitCode": 0,
+      "output": "\nch23 STATS {\"decks\":6,\"frames\":31,\"perDeck\":[5,5,5,5,5,6],\"staticImages\":0,\"code\":6,\"han\":6866,\"zh\":183,\"en\":183}\nPASS structural checks; content/translation/rendering require independent review\n",
+      "resultArtifacts": {}
+    },
+    {
+      "label": "slideshow JavaScript syntax",
+      "command": [
+        "node",
+        "--check",
+        "assets/js/slides.js"
+      ],
+      "exitCode": 0,
+      "output": "",
+      "resultArtifacts": {}
+    },
+    {
+      "label": "ch22 page/source agreement",
+      "command": [
+        "node",
+        "examples/ch22/sync.mjs",
+        "--check"
+      ],
+      "exitCode": 0,
+      "output": "4 source snippets match\n"
+    },
+    {
+      "label": "ch22 SQLite / Data contract paths",
+      "command": [
+        "python3",
+        "examples/ch22/verify.py"
+      ],
+      "exitCode": 0,
+      "output": "62 checks passed\n"
+    },
+    {
+      "label": "ch22 Java17 read validation",
+      "command": [
+        "python3",
+        "examples/ch22/run_java.py"
+      ],
+      "exitCode": 0,
+      "output": "PASS normal correct identity and bytes\nPASS returned array does not expose replica storage\nPASS all corrupt replicas fail instead of emitting bytes\nPASS corrupt then good falls back\nPASS wrong tenant rejects identical payload\nPASS wrong bucket rejects identical payload\nPASS wrong key rejects identical payload\nPASS wrong version rejects identical payload\nPASS wrong layout rejects identical payload\nPASS wrong block rejects identical payload\nPASS truncated block rejects\nPASS long block rejects\nPASS null record rejects\nPASS null payload rejects\nPASS empty replica list fails\nPASS unavailable then healthy fallback\nPASS all unavailable stays failed\nPASS successful verified copy stops extra fetches\nPASS empty block can be verified\nCHECKS 19\n\n"
+    },
+    {
+      "label": "ch23 page/source agreement",
+      "command": [
+        "python3",
+        "examples/ch23/sync.py",
+        "--check"
+      ],
+      "exitCode": 0,
+      "output": "6 page snippets match exact chapter sources\n",
+      "resultArtifacts": {}
+    },
+    {
+      "label": "ch23 actual SQLite / Redis / Java17",
+      "command": [
+        "python3",
+        "examples/ch23/check.py"
+      ],
+      "exitCode": 0,
+      "output": "67 SQLite/Redis checks + 22 Java checks passed\n",
+      "resultArtifacts": {
+        "docs/reviews/ch22-ch23-ch24-actual-ch23-code-results.json": "9ae77b519311341712fc87617df4f45f0932b4ed1d54074c07a5e5f8f8171714"
+      }
+    }
+  ],
+  "files": {
+    "chapters/ch24.html": "813ed6d22b42b442ede14fd1d131809a7496927982b53a33188676d7ee413428",
+    "examples/ch24/refund_result.pseudo": "2a4db0d9b495fba25d25d447c52bc1ebb8f341c7fb11a5fa0514fab50c69996f",
+    "examples/ch24/create.pseudo": "4cfd111c9fda9c5a83ca0ff889d653b4c30cfec68b8305fc6078d7de05b8bdcc",
+    "examples/ch24/sync.mjs": "7a4f99ed64adf76502898c9e6306b131180ceeadf539142a364eb2d27a218365",
+    "examples/ch24/check.py": "fd52c61f9a6114976e795708c096dfa00887efe45902d59b2cccd3440bb5b5a4",
+    "examples/ch24/schema.sql": "d69b874470dfe388f79e8067f5177df6c487fb29170c5de0369d768670d5c384",
+    "examples/ch24/model.py": "555ffb69738ebbbf5cc024c6f8a19bec9563c61020a6e4be07a412f3937c3925",
+    "examples/ch24/dispatch.pseudo": "3c7d4ac9aa129a7c8e5a1742d651b77f33d9738904a38d6051b654e5e520c76e",
+    "examples/ch24/webhook.pseudo": "4789dc9c537d5984ee9ac4d97552893823f79e8b45c0cc9bf2f6779a75dc8dbd",
+    "examples/ch24/README.md": "db815a1d57c39a833a66f25ca54abdd8ffc7b11b3303f4a0488a203bf4cf5f2f",
+    "examples/ch24/reserve_refund.pseudo": "7ec8b74ae4f6818d2ce9006d0a8110d35fd9767f96a12bd971575bc666fbe459",
+    "examples/ch24/keys.sql": "5322c869d08077a947eb09bfe8dde7cadebce71d2eba88c95053dc0a9909ff75",
+    "examples/ch24/capture.pseudo": "1fc34e3766d474536cad70f9dcd30cc26e631fa28ffe5d477df3cb4818b337b0",
+    "examples/ch24/reconcile.pseudo": "870c89b74b42286c3631c0a89fbba9ad60879fa4d7c69ee722610653a0aadff3",
+    "chapters/ch23.html": "a11d47a087fb24fa0dc961055f50e325aadb0653d7e162766140aa576c71dac2",
+    "examples/ch23/sync.py": "1ed164a83fbcdd9040181430050b839eba4883156db8b0d201831e30027b29bf",
+    "examples/ch23/check.py": "8214eb3e1978d5c7e9669f0cda28dc6822c274ec32bb5df266984d06e05a8e05",
+    "examples/ch23/schema.sql": "6de838eaa587f655a81128d6f614d0d1a62e59e15fdbd05387e7d27cb4cb921e",
+    "examples/ch23/Leaderboard.java": "d7fa71234827610a3d69a83a2eab480e61ac22b97ce8885fd2cd28c2ea6fe10c",
+    "examples/ch23/model.py": "3afa1d5c6544b0cea085c5a7aacdb0c6bc48b001269f67a100f4bd63be361f30",
+    "examples/ch23/README.md": "3bee78ce4fa7a4a343cc874adb9b27918f1566dd649f4340efaeedca68a80c0d",
+    "examples/ch23/project.lua": "16a577900ae2e9d57d8cc64987a6c0a2b38b9f5ea598323845a4a7627aa1814f",
+    "examples/ch23/settle.pseudo": "9c058618dcc918c36588d107b942546625d434bf970859e54008d88226519899",
+    "examples/ch23/LeaderboardTest.java": "47f7e177b209b10ef5088b3d4f71cb4bec115c42c4339c0186bee0340b684fd8",
+    "examples/ch23/around.lua": "062497daf0c0928ce0f5a76f681e1c99ef2a9a0fa8337c00d61bb4f04b87c225",
+    "chapters/ch22.html": "be0f18cd3f39d2c41de4cc8f6a8ebf48c243237642ad1d32ac624b7ec32c9eb3",
+    "examples/ch22/sync.mjs": "f6a12b92aea82d2934ad9c9ff9b59248e889af73b1073cfd351bcb3c2e3b06d0",
+    "examples/ch22/schema.sql": "e0c0f7dae06856319be64f845525a6c558d6fee9ddc21284bd626e2f74c153a3",
+    "examples/ch22/model.py": "9e765a0a42572a1502cb69a4cdaf229f5a79bb81abcb50f02f4c9a295923d18e",
+    "examples/ch22/README.md": "16b10a66a1ad1db5e762ad95cc99ab987f4944ae8bc147b44a65811d2e28149c",
+    "examples/ch22/publish.pseudo": "22bae107292a05ee37d555816570fc5448853a6ba07fc93a283df2e57b904848",
+    "examples/ch22/VerifiedReadTest.java": "8458359d994dd53504c39d8826cb95b803f257aa76b6bdcf8669651aa8f6182b",
+    "examples/ch22/run_java.py": "91e486c321ec4f28736bdb0d2d9133e0287ba599dd353cf83593fcd721bc285b",
+    "examples/ch22/VerifiedRead.java": "8fa114b46cb977e392823e9eff8a29c3471809adbba6450ee7069eccc6f7b7ce",
+    "examples/ch22/verify.py": "991a5dc4264735e4bb4a078568a6189fc2a5c406c6958b9182c5729d5b8aa1c1",
+    "examples/ch22/gc.pseudo": "e5d1469128e84a3bbb5734569d7a996d2907cc49cf9da38672ff18929c30acff",
+    "examples/ch22/multipart.pseudo": "2858ff4874312287a6f5873ba85803c29a7e6344f21b212f4f66ea038530dbd5"
+  },
+  "runs": [
+    {
+      "at": "2026-10-23T15:14:25.684905+00:00",
+      "chapters": [
+        "ch24"
+      ],
+      "sourceStable": true
+    },
+    {
+      "at": "2026-10-23T15:16:33.131291+00:00",
+      "chapters": [
+        "ch22",
+        "ch23"
+      ],
+      "sourceStable": true
+    },
+    {
+      "at": "2026-10-23T15:26:02.042997+00:00",
+      "chapters": [
+        "ch23",
+        "ch24"
+      ],
+      "sourceStable": true
+    },
+    {
+      "at": "2026-10-23T15:33:26.388795+00:00",
+      "chapters": [
+        "ch23",
+        "ch24"
+      ],
+      "sourceStable": true,
+      "htmlOnly": true,
+      "commands": [
+        "whole-site structure/resources/animation preservation",
+        "ch23 chapter audit",
+        "ch24 chapter audit",
+        "whitespace integrity",
+        "ch23 page/source agreement",
+        "ch24 page/source agreement"
+      ],
+      "reusedSuitesAfterExactExampleHashMatch": true
+    }
+  ],
+  "passed": true
+}

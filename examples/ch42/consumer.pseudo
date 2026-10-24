@@ -1,0 +1,24 @@
+// One paused batch per partition; Kafka API calls stay on the poll thread.
+on poll(records):
+    for each assigned partition p with a nonempty batch:
+        pause(p)
+        save ordered fetched records and records.nextOffsets()[p]
+        dispatch bounded work tagged with current assignment generation
+
+on worker completion(p, generation, index, receipt):
+    if generation != currentGeneration[p]: ignore local completion
+    else if receipt is durable DB result or durable DLQ ACK:
+        require durable entity block before skipping a strict-order failure
+        mark this fetched record complete
+        safeNext = first unfinished fetched offset, or saved batch next
+        if at least the first fetched record completed:
+            commitSync({p: safeNext with its leader epoch})
+        if the entire batch completed: resume(p)
+    else:
+        keep p paused; schedule bounded retry or alert
+
+on revoke(p):
+    invalidate generation and stop dispatch for p
+    discard uncommitted progress; the next owner may replay it
+// Keep polling while paused. Failed/unknown commits are not success.
+// Existing DB effects remain protected by effect.pseudo across owners.

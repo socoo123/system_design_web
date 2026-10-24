@@ -1,0 +1,103 @@
+{
+  "passed": true,
+  "openFindings": [],
+  "closedFindings": [
+    {
+      "id": "R44-01",
+      "severity": "P1",
+      "description": "Quota adapter exception outside worker cleanup leaked slot/ticket",
+      "status": "closed after original author repair and independent actual Java resource-bracket inputs",
+      "before": "docs/reviews/ch44-independent-quota-before.json",
+      "after": "docs/reviews/ch44-independent-quota-after.json",
+      "reachabilityClarification": "docs/reviews/ch44-independent-quota-reachability.json"
+    }
+  ],
+  "reviewer": "Ch43 author; GPT-6.1-Sol / max",
+  "sourceHashes": {
+    "chapters/ch44.html": "fbfcc49ad8d5cba4ca65daf60e0077bfc98b3e1ee54926ba721e775d12e7d5fa",
+    "examples/ch44/README.md": "196ae19d018e8dea58adc4ebb030ad4f2f540f6fe39b9cc95dc3493416ca5dd6",
+    "examples/ch44/ServiceGovernance.java": "aa28bf3c42b2e891052cd0dc839198445d743d7aaeb04c93c4cd8cb9922c15ca",
+    "examples/ch44/accept.pseudo": "135fa9e41309e38d20ce38aeba5ec6d840e7dcfa4d777e15d76648b51ef36bf1",
+    "examples/ch44/check_sources.py": "5d308d332c13969bcf377b163fbd1aff9e18d7a36b30a0f0e2fe6b515c85793a",
+    "examples/ch44/check_transactions.py": "27b56781771c8cd8ef5a5bdc193ff741b8ced4dac99efeaade07f3e6fdd01210",
+    "examples/ch44/consume.pseudo": "9d1e0ecc0c7b4875d6860ffed05747ca0a74bd93cb888730ef7a29f0e56e84a0",
+    "examples/ch44/retry.pseudo": "797833a5708b033bf82544d587252a0cd1b1533a2a40816079174c95b0f9f618",
+    "examples/ch44/schema.sql": "51ee511c868ccd93d4210647bcd32476478e1fdafe5929447f4cadbae1ee3067"
+  },
+  "sourceHashesRecheckedAt": "2026-10-24T08:57:22.401294+00:00",
+  "actualTests": {
+    "java": {
+      "independentOriginalAssertions": 64,
+      "repairAssertions": 36,
+      "authorMainUsedAsIndependentConclusion": false,
+      "actualClass": "ServiceGovernance.Breaker / remainingAttempt / guardedBody",
+      "evidence": "docs/reviews/ch44-independent-quota-after.json"
+    },
+    "sqlite": {
+      "independentCaseGroups": 9,
+      "sourceSQLStatements": 8,
+      "concurrency": "16 equal requests, 2 conflicting payloads, 16 repeated events, separate connections",
+      "directInvalidIdentityInjections": 18,
+      "finalTableCounts": [
+        5,
+        5,
+        5,
+        5
+      ],
+      "expectedBalances": [
+        905,
+        523,
+        1000
+      ],
+      "evidence": "docs/reviews/ch44-independent-transactions-results.json"
+    },
+    "arithmetic": "docs/reviews/ch44-independent-calculations.json",
+    "structure": "docs/reviews/ch44-independent-structure-results.json"
+  },
+  "actualBrowser": {
+    "baseLayouts": 18,
+    "widths": [
+      320,
+      390,
+      1440
+    ],
+    "themes": [
+      "parchment",
+      "dracula"
+    ],
+    "locales": [
+      "zh",
+      "en",
+      "both"
+    ],
+    "frameVisits": 144,
+    "copiedBlocks": 4,
+    "keyboardPlaybackFlashcardsProgressSettings": true,
+    "additionalMobileLayouts": 8,
+    "mobileScreenshots": 24,
+    "browserEvidence": "docs/reviews/ch44-independent-browser-results.json",
+    "mobileEvidence": "docs/reviews/ch44-independent-mobile-results.json"
+  },
+  "actualVisual": {
+    "decks": 7,
+    "frames": "docs/reviews/ch44-independent-after-frames.json",
+    "themeFrameImages": 72,
+    "initialContactSheetsActuallyOpened": 14,
+    "repairFinalAdditionalSheetsActuallyOpened": 2,
+    "D5AllFramesBothThemes": 10,
+    "finalPixelIdenticalToViewedSheets": 62,
+    "rasterDifferentManuallyRecheckedD6": 10,
+    "evidence": "docs/reviews/ch44-independent-visual-consistency.json"
+  },
+  "references": "docs/reviews/ch44-independent-sources.md",
+  "report": "docs/reviews/ch44-independent-review.md",
+  "limitations": [
+    "No production load test, PostgreSQL18 execution, real RPC/quota service, Broker fault or distributed database failover",
+    "Original quota-failure reproduction is a marked control-flow model using actual Breaker; repaired checks call actual local Java bracket",
+    "HALF_OPEN fixture verifies general cleanup, not a complete 800ms request with 1s cooldown",
+    "Fixed-window shared retry authority is a declared external contract, not an implemented rate limiter",
+    "Known shared 320both navigation F04 remains nonblocking and belongs to Q"
+  ],
+  "noTargetEdits": true,
+  "noCommitPushDeploy": true
+}

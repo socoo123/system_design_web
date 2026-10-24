@@ -1,0 +1,17 @@
+recoverZone(inputZone, boundedBatch):
+  // Queue is an index. Scan durable rows even when no queue event survived.
+  for o in SELECT pending_match WHERE zone = inputZone ORDER BY matchDeadline, createdAt LIMIT boundedBatch:
+    if authoritativeNow() >= o.matchDeadline or o.attemptCount >= 3:
+      begin transaction
+        locked = SELECT order FOR UPDATE
+        now = SELECT clock_timestamp()
+        if stillPendingSameGeneration(locked, o) and exhausted(locked, now):
+          UPDATE order SET state = failed, generation = generation + 1
+          INSERT outbox(fixedFailureKey(locked), notificationAndCompensationIntent)
+      commit
+    else enqueue(orderId = o.id, generation = o.generation) // duplicates allowed
+  for a in SELECT offered WHERE deadline <= authoritativeNow() LIMIT boundedBatch:
+    decideOffer(EXPIRE, a.orderId, a.id, a.generation, SERVER)
+  // Outbox relay retries fixed event keys. Courier fetches a current snapshot.
+  // Old matching workers still call reserve(expectedGeneration); their lease is not authority.
+  // Unknown creation: retry/query fixed upstream identity; compensate only after fencing dispatch.

@@ -1,0 +1,25 @@
+apply(event): // Immutable event; route before/after points to old/new cell for this generation.
+  if event.new_cell exists:
+    put_if_newer(event.new_cell, event.entity, event.version, LIVE, event.sample)
+  if event.old_cell exists and event.old_cell != event.new_cell:
+    put_if_newer(event.old_cell, event.entity, event.version, TOMBSTONE, null)
+  // A delete has no new_cell; a same-cell move updates coordinates without self-deletion.
+  ACK source offset only after every required write is durably acknowledged
+  // A crash between writes retries both; no distributed transaction across cells.
+
+put_if_newer(cell, entity, version, state, sample):
+  BEGIN on this CELL's database shard
+  guard = INSERT CellGuard(cell) IF ABSENT
+  SELECT guard FOR UPDATE // Serializes revision and all membership changes for this cell.
+  old = SELECT Membership WHERE (cell, entity) = (...)
+  if old exists and old.version > version: COMMIT; return STALE
+  if old exists and old.version == version:
+    require identical state and immutable payload, otherwise corruption alarm
+    COMMIT; return DUPLICATE
+  UPSERT Membership(cell, entity, version, state, sample)
+  UPDATE CellGuard SET revision = revision + 1
+  COMMIT // Row/state/revision are one local transaction, including tombstones.
+// Read revision + members in one MVCC snapshot; cache fills inherit its absolute expiry.
+// Retain tombstones while older events/snapshots may replay. GC needs a durable replay fence.
+// Migration invokes apply for both generations; unknown-child tombstones copy to all four.
+// Queue order helps efficiency; versions and durable retries handle duplicates and re-entry.

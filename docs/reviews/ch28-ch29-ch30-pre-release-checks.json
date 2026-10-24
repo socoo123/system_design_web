@@ -1,0 +1,224 @@
+{
+  "checks": [
+    {
+      "label": "whole-site structure/resources/animation preservation",
+      "command": [
+        "node",
+        "tools/check.mjs"
+      ],
+      "exitCode": 0,
+      "output": "STATS 45 chapters; 276 decks; 1411 frames; 151 code blocks (no count quotas)\nPASS structure, local resources, accessibility, bilingual nesting, chapter entries and animation preservation\n"
+    },
+    {
+      "label": "ch28 chapter audit",
+      "command": [
+        "node",
+        "tools/audit-chapter.mjs",
+        "ch28"
+      ],
+      "exitCode": 0,
+      "output": "\nch28 STATS {\"decks\":6,\"frames\":31,\"perDeck\":[5,6,5,5,5,5],\"staticImages\":0,\"code\":7,\"han\":5690,\"zh\":164,\"en\":164}\nPASS structural checks; content/translation/rendering require independent review\n"
+    },
+    {
+      "label": "ch29 chapter audit",
+      "command": [
+        "node",
+        "tools/audit-chapter.mjs",
+        "ch29"
+      ],
+      "exitCode": 0,
+      "output": "\nch29 STATS {\"decks\":6,\"frames\":31,\"perDeck\":[6,5,5,5,5,5],\"staticImages\":0,\"code\":7,\"han\":5933,\"zh\":177,\"en\":177}\nPASS structural checks; content/translation/rendering require independent review\n"
+    },
+    {
+      "label": "ch30 chapter audit",
+      "command": [
+        "node",
+        "tools/audit-chapter.mjs",
+        "ch30"
+      ],
+      "exitCode": 0,
+      "output": "\nch30 STATS {\"decks\":6,\"frames\":32,\"perDeck\":[5,6,5,5,5,6],\"staticImages\":0,\"code\":6,\"han\":6351,\"zh\":177,\"en\":177}\nPASS structural checks; content/translation/rendering require independent review\n"
+    },
+    {
+      "label": "slideshow JavaScript syntax",
+      "command": [
+        "node",
+        "--check",
+        "assets/js/slides.js"
+      ],
+      "exitCode": 0,
+      "output": ""
+    },
+    {
+      "label": "whitespace integrity",
+      "command": [
+        "git",
+        "diff",
+        "--check"
+      ],
+      "exitCode": 0,
+      "output": ""
+    },
+    {
+      "label": "ch28 page/source agreement",
+      "command": [
+        "node",
+        "examples/ch28/sync.mjs",
+        "--check"
+      ],
+      "exitCode": 0,
+      "output": "7 page blocks match their chapter sources\n"
+    },
+    {
+      "label": "ch28 actual teaching checks",
+      "command": [
+        "python3",
+        "examples/ch28/check.py",
+        "docs/reviews/ch28-ch29-ch30-actual-ch28-code-results.json"
+      ],
+      "exitCode": 0,
+      "output": "{\"passed\": true, \"checks\": 54, \"javaAssertions\": 20167, \"failure\": null}\n",
+      "resultArtifacts": {
+        "docs/reviews/ch28-ch29-ch30-actual-ch28-code-results.json": "fbe739992a0a9bd80ce5af30e2a03faae4337d33c80bd01b2a6aa1c142b662f7"
+      }
+    },
+    {
+      "label": "ch29 page/source agreement",
+      "command": [
+        "node",
+        "examples/ch29/sync.mjs",
+        "--check"
+      ],
+      "exitCode": 0,
+      "output": "7 snippets match chapter sources\n"
+    },
+    {
+      "label": "ch29 actual teaching checks",
+      "command": [
+        "python3",
+        "examples/ch29/check.py",
+        "docs/reviews/ch28-ch29-ch30-actual-ch29-code-results.json"
+      ],
+      "exitCode": 0,
+      "output": "{\"passed\": true, \"model\": {\"passed\": true, \"assertions\": 577, \"scenarios\": [\"normal iteration, EOS, credits and rounded lengths\", \"cancel before GPU retirement cannot sell credit or reuse page; duplicate completion\", \"shared full prefix, independently in-flight readers, cache eviction\", \"generation fencing and a new worker pool reject old callbacks\", \"100 real CPU cancel/EOS races, all references returned once\"]}}\n",
+      "resultArtifacts": {
+        "docs/reviews/ch28-ch29-ch30-actual-ch29-code-results.json": "1274b457c9ce52b86c86d0c1cdf916ba79ee938efff9aded1de1c166dd4fa6b4"
+      }
+    },
+    {
+      "label": "ch30 page/source agreement",
+      "command": [
+        "node",
+        "examples/ch30/sync.mjs",
+        "--check"
+      ],
+      "exitCode": 0,
+      "output": "6 snippets match examples/ch30 sources\n"
+    },
+    {
+      "label": "ch30 actual teaching checks",
+      "command": [
+        "python3",
+        "examples/ch30/check.py",
+        "docs/reviews/ch28-ch29-ch30-actual-ch30-code-results.json"
+      ],
+      "exitCode": 0,
+      "output": "{\"passed\": true, \"sqlite_assertions\": 51, \"numeric_assertions\": 21, \"java_stdout\": \"RagCore: 20 assertions passed (fixture tokenizer, no model calls)\", \"limits\": [\"SQLite BEGIN IMMEDIATE is coarser than PostgreSQL row locks\", \"Index receipts, encoder, source snapshot/change stream, authn, tokenizer and support verdicts are trusted fixtures\", \"No actual ANN/BM25/embedding/LLM/PG vendor semantics, physical erase, cluster failover, throughput or production reliability verified\"]}\n",
+      "resultArtifacts": {
+        "docs/reviews/ch28-ch29-ch30-actual-ch30-code-results.json": "3c5ae187f7721b8cd9179e348aeea0662fd5f8c0a4960f831745f7d3ebc268cc"
+      }
+    },
+    {
+      "label": "root new-input Java contracts",
+      "command": [
+        "python3",
+        "docs/reviews/ch28-ch29-ch30-root-java.py"
+      ],
+      "exitCode": 0,
+      "output": "{\"passed\": true, \"model\": {\"passed\": true, \"checks\": 123, \"ch28\": 95, \"ch29\": 21, \"ch30\": 7}, \"output\": null}\n"
+    },
+    {
+      "label": "root new-input SQLite contracts",
+      "command": [
+        "python3",
+        "docs/reviews/ch28-ch29-ch30-root-sql.py"
+      ],
+      "exitCode": 0,
+      "output": "{\"passed\": true, \"checks\": 27, \"failure\": null}\n"
+    },
+    {
+      "label": "root independent arithmetic",
+      "command": [
+        "python3",
+        "docs/reviews/ch28-ch29-ch30-numeric.py"
+      ],
+      "exitCode": 0,
+      "output": "{\"passed\": true, \"checks\": 75}\n"
+    }
+  ],
+  "files": {
+    "chapters/ch28.html": "d6ae3dd76e33ba7fef42b862a5b808e56722f622c755cb8905a1610954bbab20",
+    "examples/ch28/Chapter28Checks.java": "9a6760cb0fee8ce3e8207066305e1dff81bdca8c8eefdb65e0d091bbe02c877d",
+    "examples/ch28/sync.mjs": "564d6ac98f8fe693a01482596758d2508b75bae2ce17784bc22ef8e69fd51c2c",
+    "examples/ch28/check.py": "ea56bc09ebf3e0ff07305a99243bc24c05fde9037ce3539aa786f0825f0a606f",
+    "examples/ch28/WatchHub.java": "d85968674adeaae9edcf5656574de1a4c2d9df296b2d6581591687c7ddae6c12",
+    "examples/ch28/schema.sql": "8a56d73105acaad4cbaeb08826f0c441331ee40a7502ee6efb2bd7ce577674a9",
+    "examples/ch28/model.py": "43d610dc9e23172d923efea9c09c26fe87b2911e874b7d490329055139ed4928",
+    "examples/ch28/README.md": "5ffd62f216770d16a1f91c1c0fe9eea49d6c155f3a5b11b71a726094b61b4e26",
+    "examples/ch28/api.txt": "b3810cbb3d314aab1e591b50e4bd935c35f02728b726cd74b2aa18549f75188c",
+    "examples/ch28/publish.pseudo": "c5688758bf9c70aaec5013b3455e6625d13352a9561d6d9f167ac96712e84d5c",
+    "examples/ch28/Cohort.java": "1ab3722f33eb5c0807fd293f025fd9a77772bf2061dcbaf38182436892e33b36",
+    "examples/ch28/ConfigClient.java": "d00d42a1fc3509174da330bc577e43e6bbab44e9b109033282c65d9130dfc7a5",
+    "chapters/ch29.html": "a53b7cc84d7a33443fd5795793acd36085ce807a2a3e72e6299add3324fc4f5f",
+    "examples/ch29/KvLedgerCheck.java": "91c23bd747b406476dec7603e91afae690a8722c51888480d2abd3bf12a7ec38",
+    "examples/ch29/sync.mjs": "4dbbe43da190871795d6b332034d8f6e60ed5f4a16a1e17e6d678905aa150a96",
+    "examples/ch29/check.py": "bdf6dee6aa76ca1b64f0d2ea4077b66fdef7c3fab0bc6dd8d79913f014eae627",
+    "examples/ch29/quota_check.py": "aa7d15adfb45c7a8903bb99576a72a07e864a44078439a247a6f7d9943e58fd6",
+    "examples/ch29/README.md": "c36b8ce472f813333e5c3631ca3ad13fd779bdcc1d71ef78bba869ff1af020c8",
+    "examples/ch29/iteration.pseudo": "c6f2b5e97778f01281e9d01193f4128954bbd4df7709e2492b3a451fb713b9ba",
+    "examples/ch29/admission.pseudo": "3477752c6387558b6b5791ddcacc02b87bf04cc13b38a70e67a68b094e8928bd",
+    "examples/ch29/reject.pseudo": "2e299b84711b9068cd82266011571b1053e1c40ee7915b33cf10a2acc6235f5e",
+    "examples/ch29/attempt.pseudo": "d982b8fa1018d8dfb69859d50883e8d9f7560241ccc4bcae1cfb0f5a4ef474c6",
+    "examples/ch29/KvLedger.java": "175883201b15a01b982f7456fb2fd4b27faa132e24d6b3035cddccc1bdbd6fca",
+    "examples/ch29/quota_model.py": "87cf924b313d7ff637553aaea7865ec0b38d134fd85a68670703d0c88307e4a9",
+    "chapters/ch30.html": "5205cf760407050ce58aa561eaa91d688dac0e4ddc3e46b2444a348707a054bd",
+    "examples/ch30/RagCore.java": "d314c83192b1e61dfcd08066b7e630651ecf5eae0eca7e6ca17478f3925c5b80",
+    "examples/ch30/ingest.pseudo": "dd01690ef66af95b1a2e42989e5ce7b705a142b0c51448542be12ad99fa1a397",
+    "examples/ch30/sync.mjs": "a585f622b0453be9f6e02607caba3e420dbd9ff2611a024b95ed8a6f18c3e17b",
+    "examples/ch30/check.py": "bdf72320427d2b2a224620e936d48e73fdf7f101a0eff2259f88e31dcb7819d3",
+    "examples/ch30/release.pseudo": "5400d2ba5531d118a3bd2c7a328cc42e04103c6a830d96f50bf119b907dfcf76",
+    "examples/ch30/model.py": "7a067ef291fdc15204a489320d63e33be6e7e585aa0c97ecc00e7cb71e3cf733",
+    "examples/ch30/README.md": "538d5af52f54a72fee5fd63c0d3f658ecd9d8d69f417a01786ecaf48e615f8b0",
+    "examples/ch30/query.pseudo": "d3c863b36ffe30a33f5b5432faa76ea512ebb8003b0336eca130faad7185d95c",
+    "examples/ch30/migration.pseudo": "0a7463e94c9e06e1cd0b27d825289a598c047d6fec86b453a51bb44e0e7b9163"
+  },
+  "runs": [
+    {
+      "at": "2026-10-23T18:44:49.364885+00:00",
+      "chapters": [
+        "ch28",
+        "ch29",
+        "ch30"
+      ],
+      "sourceStable": true,
+      "commands": [
+        "whole-site structure/resources/animation preservation",
+        "ch28 chapter audit",
+        "ch29 chapter audit",
+        "ch30 chapter audit",
+        "slideshow JavaScript syntax",
+        "whitespace integrity",
+        "ch28 page/source agreement",
+        "ch28 actual teaching checks",
+        "ch29 page/source agreement",
+        "ch29 actual teaching checks",
+        "ch30 page/source agreement",
+        "ch30 actual teaching checks",
+        "root new-input Java contracts",
+        "root new-input SQLite contracts",
+        "root independent arithmetic"
+      ]
+    }
+  ],
+  "passed": true
+}

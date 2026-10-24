@@ -1,0 +1,26 @@
+freeze(actor, upload_id, fence, ordered_parts):
+  BEGIN; lock namespace, then upload              // same shard and lock order as publish
+  authorize(actor, namespace, "PUT"); require upload.owner == actor
+  digest = hash_canonical(ordered_parts)            // number + part generation + blob + size + hash
+  if upload.state in {FINALIZING, COMPLETED}:
+    require digest == upload.manifest_hash
+    COMMIT; return upload.frozen_manifest           // retry keeps the original selected parts
+  require upload.state == OPEN and upload.fence == fence
+  require authority_now() < upload.lease_until
+  require parts_are_unique_and_ordered(ordered_parts)
+  require ordered_parts == registered_parts        // same versions, no missing or extra parts
+  require sum(parts.size) == upload.expected_size
+  UPDATE upload SET state=FINALIZING, manifest_hash=digest, frozen_manifest=ordered_parts
+  COMMIT                                           // blocks part registration, abort, and ordinary GC
+  // Outside TX: Data verifies checksums/redundancy for this immutable frozen manifest.
+  // Call publish(); crashed FINALIZING is recovered using the same manifest, never reselected.
+
+abort(actor, upload_id):
+  BEGIN; lock namespace, then upload
+  authorize(actor, namespace, "PUT"); require upload.owner == actor
+  if upload.state == FINALIZING: ROLLBACK; return CONFLICT
+  if upload.state in {COMPLETED, ABORTED, REJECTED}: COMMIT; return saved_state
+  require upload.state == OPEN
+  UPDATE upload SET state=ABORTED, fence=fence+1
+  COMMIT                                           // durable sweep scanner will rediscover this row
+  return ABORTED                                   // not a claim that physical bytes are already gone

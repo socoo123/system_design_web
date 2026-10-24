@@ -31,53 +31,26 @@
     <p class="ch-meta-line"><span class="lang-zh">约 40 分钟 · 前置：Ch04、Ch17、Ch29 · 6 组 / 32 帧渐进白板图</span><span class="lang-en">~40 min · after Ch04, Ch17, Ch29 · 6 decks / 32 progressive frames</span></p>
   </header>
 
-<section class="goal"><h2><span class="lang-zh">这一章结束你能做什么</span> <span class="lang-en">What you can do after this chapter</span></h2>
-<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>画出统一 LLM 入口的完整调用与回程，把租户权限、模型能力、token 预算和流式交付放到各自真正生效的节点。</p>
-<p>分别推导实际 token、预留量和并发流；走通预扣、usage 结算、未知执行与幂等核账，避免把取消当退款。</p>
-<p>指出 fallback、exact 与语义复用的适用边界，在一张图上讲清首包前换池、流中断、缓冲封顶与缓存拒绝。</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>Draw the complete gateway call/return path and place tenant authorization, model capability, token budgets and streaming delivery where each is enforced.</p>
-<p>Derive actual tokens, reserved tokens and concurrent streams; explain holds, usage settlement, unknown execution and idempotent reconciliation.</p>
-<p>State fallback and reuse boundaries, including precommit switching, midstream failure, bounded buffers and rejected cache candidates.</p>
-</div></div></section>
+<section class="goal"><h2><span class="lang-zh">本章核心：先获准，再生成；提交后不换流</span><span class="lang-en">Core: authorize, reserve, then generate; never splice a committed stream</span></h2><div class="bilingual"><div class="lang-zh"><ul><li><strong>路由是准入：</strong>权限、地域、能力与上下文先过滤，成本排序靠后。</li><li><strong>预算按 attempt：</strong>持久预占先于网络；UNKNOWN 保留预算，第二次调用另预占。</li><li><strong>交付有屏障：</strong>公共头、角色、心跳之前记录 COMMITTED，绑定选中的 attempt/owner；后续失败终止原流。</li></ul></div><div class="lang-en"><ul><li><strong>Routing is admission:</strong> filter access, residency, capabilities and context before ranking cost.</li><li><strong>Budget per attempt:</strong> durable holds precede I/O; UNKNOWN retains its hold and a second attempt needs another.</li><li><strong>Delivery has a barrier:</strong> bind COMMITTED to the selected attempt/owner before public headers, roles or heartbeats. Later failure ends that stream.</li></ul></div></div></section>
 
-  <section>
-<h2><span class="lang-zh">30 秒开场：统一入口，保留不同后端的约束</span> <span class="lang-en">Opening: one entry, explicit backend constraints</span></h2>
-<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>我设计给聊天后端与内部 Agent 使用的 LLM API 网关。先用租户身份和模型别名固定候选能力，再同时检查入口请求速率、租户累计预算、deployment 的 token 速率与并发。默认对可复用任务做 exact 答案缓存，miss 才经 Adapter 调上游；流事件逐跳返回，usage 按真实 attempt 结算。首响应提交前可按允许名单试一个备用池，提交后故障就终止这条流。语义缓存只对经验证的 FAQ 开启，不默认拿相近问题的旧答案替代新请求。</p>
-<p>先问七件事：只调用外部 API 还是混合本地、调用方指定真实模型还是别名、需要文本还是工具/结构化输出、数据允许哪些地域与供应商、是否允许降级、超额是立即拒绝还是独立批处理、是否愿意复用旧答案。回答改变路由和预算，不能把所有客户端都降成同一种便宜模型。教学入口选 <code>POST /v1/chat/completions</code> 与 SSE，这是本题契约，不是“所有 2026 API 都只能用它”。新增其他接口要重新定义事件与 usage。</p>
-<p><a class="chip" href="ch17.html">Ch17</a> 的鉴权、连接治理仍适用；这里增加按 token 的准入和模型契约。<a class="chip" href="ch29.html">Ch29</a> 负责 GPU/KV，<a class="chip" href="ch30.html">Ch30</a> 与 <a class="chip" href="ch31.html">Ch31</a> 负责知识检索。网关转交工具片段但不执行工具动作；一次模型重试也不等于工具副作用安全重试。把职责限制在入口治理，才能用每条故障路径回答何时还允许继续。</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>This gateway serves chat backends and internal agents. Identity and model aliases determine eligible capabilities; admission checks entry rate, tenant budget, deployment token rate and concurrency. Exact answer reuse is opt-in for reusable tasks; misses invoke an adapter and usage settles by attempt. One allowed fallback is possible before response commitment; later failure terminates the stream. Semantic reuse is limited to validated FAQ routes.</p>
-<p>Clarify external/local inference, model selection, text/tools/schema, residency/providers, downgrade permission, rejection versus a separate batch lane, and answer reuse. Our teaching contract uses POST /v1/chat/completions with SSE; it is not a universal requirement for current APIs. Other endpoints require their own event and usage contracts.</p>
-<p><a class="chip" href="ch17.html">Ch17</a> supplies entry controls, <a class="chip" href="ch29.html">Ch29</a> inference, and <a class="chip" href="ch30.html">Ch30</a>/<a class="chip" href="ch31.html">Ch31</a> retrieval. Forwarding tool fragments does not execute or authorize retried tool side effects.</p>
-</div></div></section>
+  <section><h2><span class="lang-zh">30 秒开场与职责</span><span class="lang-en">The opening and service boundary</span></h2><div class="bilingual"><div class="lang-zh"><p class="say">我设计给聊天后端与内部 Agent 使用的统一 LLM 入口。Edge 做身份和入口速率；LLM GW 固定模型契约、校验缓存、持久预占预算；Adapter 转换供应商请求与事件。每个物理调用单独记 usage。只允许一次经授权、重新准入的备用调用；公共响应提交后不再更换模型。</p><p>先确认模型/地域/工具与结构化输出要求、是否允许额外调用成本、哪些任务可复用旧答案。本题接口假设为 <code>POST /v1/chat/completions</code> + SSE；不是所有供应商都只有这一接口。网关不执行工具动作；<a class="chip" href="ch29.html">Ch29</a> 管推理资源，<a class="chip" href="ch30.html">Ch30</a>/<a class="chip" href="ch31.html">Ch31</a> 管检索，工具授权见 <a class="chip" href="ch33.html">Ch33</a>。</p></div><div class="lang-en"><p class="say">This gateway serves chat backends and internal agents. Edge authenticates and limits entry rate; LLM GW pins a model contract, validates cached answers and reserves durable budget; Adapter translates provider requests and events. Record usage separately for every physical attempt. Permit one authorized, readmitted fallback; no model replacement after public response commitment.</p><p>Clarify model, residency, tool/schema requirements, extra-attempt cost permission and reusable tasks. Our teaching interface is POST /v1/chat/completions + SSE, not every provider’s only interface. The gateway does not execute tool actions. <a class="chip" href="ch29.html">Ch29</a> handles inference, <a class="chip" href="ch30.html">Ch30</a>/<a class="chip" href="ch31.html">Ch31</a> retrieval and <a class="chip" href="ch33.html">Ch33</a> tool authorization.</p></div></div></section>
 
-  <section>
-<h2><span class="lang-zh">把全部教学数字写成 assumption</span> <span class="lang-en">State every teaching number as an assumption</span></h2>
-<table><thead><tr><th><span class="lang-zh">编号与约束</span> <span class="lang-en">ID and constraint</span></th><th><span class="lang-zh">本章 assumption</span> <span class="lang-en">Assumption</span></th><th><span class="lang-zh">它改变的决定</span> <span class="lang-en">Design consequence</span></th></tr>
+  <section><h2><span class="lang-zh">先分清三种容量</span><span class="lang-en">Separate three capacity measures</span></h2><div class="bilingual"><div class="lang-zh"><p><strong>教学全 miss、无重试：</strong>20×60=1,200 RPM，实际均值 (2,000+400)×1,200=<strong>2.88M TPM</strong>；按 1,000 输出上限预留 <strong>3.6M token/分钟</strong>。token 量、未决预算和活跃连接不能共用一个计数器。</p></div><div class="lang-en"><p><strong>Teaching all-miss, no-retry load:</strong> 20×60=1,200 RPM, mean actual usage (2,000+400)×1,200=<strong>2.88M TPM</strong>, versus <strong>3.6M reserved tokens/minute</strong> with a 1,000-output cap. Token volume, outstanding budget and live connections need separate counters.</p></div></div><details><summary><span class="lang-zh">展开 A1–A12 假设与推导前提</span><span class="lang-en">Expand A1–A12 assumptions and derivation conditions</span></summary><table><thead><tr><th><span class="lang-zh">编号与约束</span> <span class="lang-en">ID and constraint</span></th><th><span class="lang-zh">本章 assumption</span> <span class="lang-en">Assumption</span></th><th><span class="lang-zh">它改变的决定</span> <span class="lang-en">Design consequence</span></th></tr>
 </thead><tbody><tr><td><span class="lang-zh">A1 · 峰值</span> <span class="lang-en">A1 · peak</span></td><td><span class="lang-zh">20 请求/秒；估算取全 miss、无重试，持续一分钟</span> <span class="lang-en">20 requests/s; one-minute estimate assumes all misses and no retries</span></td><td><span class="lang-zh">1,200 RPM；不能把缓存收益先当保障</span> <span class="lang-en">1,200 RPM; no guaranteed cache savings</span></td></tr>
 <tr><td><span class="lang-zh">A2 · 实际 usage</span> <span class="lang-en">A2 · actual usage</span></td><td><span class="lang-zh">每请求均值 2,000 input、400 output，含计费输出类别</span> <span class="lang-en">Mean 2,000 input, 400 output including billable output categories</span></td><td><span class="lang-zh">2.4M input TPM、0.48M output TPM，合计2.88M</span> <span class="lang-en">2.4M input TPM, 0.48M output TPM, 2.88M total</span></td></tr>
 <tr><td><span class="lang-zh">A3 · 预留</span> <span class="lang-en">A3 · reservation</span></td><td><span class="lang-zh">演算输入精确2,000，输出硬上限1,000；quota按总token示例</span> <span class="lang-en">Example input exactly 2,000; enforced output cap 1,000; quota measured in total tokens</span></td><td><span class="lang-zh">每次hold3,000；一分钟预留3.6M</span> <span class="lang-en">3,000 held/request, 3.6M reserved/minute</span></td></tr>
 <tr><td><span class="lang-zh">A4 · 两池</span> <span class="lang-en">A4 · pools</span></td><td><span class="lang-zh">Backend A revision r7、B r3；路由计划p12，每请求固定</span> <span class="lang-en">A revision r7, B r3; route plan p12 pinned/request</span></td><td><span class="lang-zh">served model与降级授权可审计，不能只记别名</span> <span class="lang-en">Audit served model/downgrade rather than alias only</span></td></tr>
 <tr><td><span class="lang-zh">A5 · 上下文</span> <span class="lang-en">A5 · context</span></td><td><span class="lang-zh">长例8k输入+1k输出；A窗口10k；反例小模型4k</span> <span class="lang-en">Long example: 8k input+1k output, A context 10k; counterexample small context 4k</span></td><td><span class="lang-zh">需要9k，4k候选排除；其他能力另验</span> <span class="lang-en">Needs 9k; exclude 4k candidates, check other capabilities</span></td></tr>
-<tr><td><span class="lang-zh">A6 · fallback</span> <span class="lang-en">A6 · fallback</span></td><td><span class="lang-zh">单次原调用加一个允许的备用；含SDK合计≤2 attempts</span> <span class="lang-en">Original plus one permitted fallback; ≤2 attempts including SDK retries</span></td><td><span class="lang-zh">最坏物理调用40/s；未知执行保留账</span> <span class="lang-en">Worst dispatch 40/s; preserve unknown attempts</span></td></tr>
+<tr><td><span class="lang-zh">A6 · fallback</span> <span class="lang-en">A6 · fallback</span></td><td><span class="lang-zh">单次原调用加一个允许的备用；含SDK合计≤2 attempts</span> <span class="lang-en">Original plus one permitted fallback; ≤2 attempts including SDK retries</span></td><td><span class="lang-zh">同窗稳态估40次调用/s；不是瞬时速率上界</span> <span class="lang-en">Same-window steady estimate: 40 calls/s, not a peak-rate bound</span></td></tr>
 <tr><td><span class="lang-zh">A7 · 首响应</span> <span class="lang-en">A7 · first response</span></td><td><span class="lang-zh">总预算2s：准入0.2、主池0.8、切换0.2、备用0.7</span> <span class="lang-en">Two seconds: admission 0.2, primary wait 0.8, switch 0.2, fallback wait 0.7</span></td><td><span class="lang-zh">合计1.9s、余0.1s；截止时间必须传下去</span> <span class="lang-en">1.9s total, 0.1s headroom; propagate deadline</span></td></tr>
-<tr><td><span class="lang-zh">A8 · 稳态流</span> <span class="lang-en">A8 · steady streams</span></td><td><span class="lang-zh">TTFT均值0.5s、输出均速50 token/s；用于容量近似</span> <span class="lang-en">Mean TTFT 0.5s, mean output rate 50 tokens/s; capacity approximation</span></td><td><span class="lang-zh">每流8.48≈8.5s；均值169.6≈170并发，不证明尾部够用</span> <span class="lang-en">8.48≈8.5s/stream, 169.6≈170 mean concurrent; tails require measurement</span></td></tr>
+<tr><td><span class="lang-zh">A8 · 稳态流</span> <span class="lang-en">A8 · steady streams</span></td><td><span class="lang-zh">被接纳完成率20/s；TTFT均值0.5s、可见输出均速50 token/s</span> <span class="lang-en">20 admitted completions/s; mean TTFT 0.5s and visible output rate 50 tokens/s</span></td><td><span class="lang-zh">每流8.48≈8.5s；均值169.6≈170并发，不证明尾部够用</span> <span class="lang-en">8.48≈8.5s/stream, 169.6≈170 mean concurrent; tails require measurement</span></td></tr>
 <tr><td><span class="lang-zh">A9 · 流治理</span> <span class="lang-en">A9 · stream controls</span></td><td><span class="lang-zh">最多200条活跃流，每流64 KiB缓冲；写堵塞10s中止</span> <span class="lang-en">At most 200 active streams, 64 KiB buffer each; abort after 10s stalled writes</span></td><td><span class="lang-zh">缓冲≤12.5 MiB；进程其他内存另计</span> <span class="lang-en">Buffers ≤12.5 MiB, other memory extra</span></td></tr>
 <tr><td><span class="lang-zh">A10 · exact</span> <span class="lang-en">A10 · exact</span></td><td><span class="lang-zh">答案TTL试60s，仅完整且允许复用的结果；无保底命中率</span> <span class="lang-en">Trial 60s TTL; complete, reuse-authorized answers only; no guaranteed hit rate</span></td><td><span class="lang-zh">权限/模型/数据revision变化要拒绝旧条目</span> <span class="lang-en">Reject old access/model/data revisions</span></td></tr>
 <tr><td><span class="lang-zh">A11 · 语义玩具分数</span> <span class="lang-en">A11 · semantic toy score</span></td><td><span class="lang-zh">固定embedding下cosine0.96；取消与否定的反例</span> <span class="lang-en">Illustrative cosine 0.96 under fixed embedding; opposing cancellation intents</span></td><td><span class="lang-zh">分数不是正确率；生产阈值要独立校准</span> <span class="lang-en">Score is not correctness; calibrate production threshold</span></td></tr>
 <tr><td><span class="lang-zh">A12 · 复用验证</span> <span class="lang-en">A12 · reuse evaluation</span></td><td><span class="lang-zh">冻结500条查询，玩具40次命中、1次错答</span> <span class="lang-en">500 frozen queries; illustrative 40 hits, one wrong</span></td><td><span class="lang-zh">复用8%；命中内错答2.5%，不能被总体0.2%稀释</span> <span class="lang-en">8% reuse, 2.5% wrong hits, not diluted by 0.2% overall</span></td></tr>
-</tbody></table><div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>这些数都是本章设计假设和玩具例子，不是公开生产指标。token 不是字节，也不是汉字；容量要按最终发送的 messages、模板、工具定义和模型 tokenizer 计算。真实供应商对 cached input、推理输出、共享限额的计数规则由适配器声明；不能把一份统一 schema 当成一份统一的速率公式。</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>All numbers are teaching assumptions or toy examples. Tokens are not bytes or characters: count final messages, templates and tool definitions with the relevant tokenizer. Adapters declare supplier-specific cached-input, reasoning-output and shared-limit accounting.</p>
-</div></div></section>
+</tbody></table><div class="bilingual"><div class="lang-zh"><p>所有数字都是教学假设，未做 API 压测。输入按最终 messages、模板、工具定义和目标 tokenizer 上界计数，输出上限包括该后端所有计量类别。A8 专用于可见输出速率与计量口径一致的稳态路由；不把隐藏推理 token 除以可见输出速率。硬预算做不到安全上界就声明软预算，不能靠事后补记恢复过去的硬保证。</p></div><div class="lang-en"><p>All numbers are teaching assumptions, not API benchmarks. Bound final messages, templates and tools with the target tokenizer; cap every metered output category. A8 applies only to steady routes whose visible-output rate matches the count. Do not divide hidden reasoning by a visible-output rate. Without a safe usage bound, declare a soft budget; later correction cannot restore a past hard guarantee.</p></div></div></details></section>
 
-  <section>
-<h2><span class="lang-zh">入口闭环：状态留在 Ledger，答案走旁路</span> <span class="lang-en">Entry loop: durable state and side answer reuse</span></h2>
-<figure class="deck">
+  <section><h2><span class="lang-zh">全局路径：Ledger 是权威，答案缓存走旁路</span><span class="lang-en">Global path: authoritative Ledger, side answer cache</span></h2><div class="bilingual"><div class="lang-zh"><p><strong>用末帧作总图：</strong>Client → Edge → LLM GW → Adapter → Backend；回复逐跳返回。Answer cache 只供查询，Ledger 保存请求、attempt 和预算。先验证身份与同 rid 状态，命中也重新授权；miss 获得预算及 deployment 速率/并发许可后才 dispatch。</p></div><div class="lang-en"><p><strong>Use the final frame as the overview:</strong> Client → Edge → LLM GW → Adapter → Backend; replies return hop by hop. Answer cache supplies candidates; Ledger owns requests, attempts and budget. Check identity and existing rid state first; hits reauthorize, and misses require budget plus deployment rate/concurrency permits before dispatch.</p></div></div><figure class="deck">
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d1s1t d1s1d">
           <title id="d1s1t">Define one authenticated public entry</title>
@@ -170,7 +143,7 @@
           <path d="M365 165 L365 125" class="wire"/><polygon points="365,115 370,125 360,125" class="head"/><text x="350" y="145" text-anchor="end" class="tiny">GET</text>
           <path d="M435 115 L435 155" class="wire reply"/><polygon points="435,165 430,155 440,155" class="head reply"/><text x="445" y="145" class="tiny">hit / miss</text>
           <g class="is-new">
-            <path d="M315 275 V335 A85 12 0 0 0 485 335 V275" class="store"/><ellipse cx="400" cy="275" rx="85" ry="12" class="store"/><text x="400" y="315" text-anchor="middle" class="label">Ledger</text><text x="400" y="333" text-anchor="middle" class="sub">quota + execution</text>
+            <path d="M315 275 V335 A85 12 0 0 0 485 335 V275" class="store"/><ellipse cx="400" cy="275" rx="85" ry="12" class="store"/><text x="400" y="309" text-anchor="middle" class="label">Ledger</text><text x="400" y="334" text-anchor="middle" class="sub">quota + execution</text>
             <path d="M365 235 L365 247 Q365 255 357 255 L283 255 Q275 255 275 263 L275 292 Q275 300 283 300 L305 300" class="wire"/><polygon points="315,300 305,305 305,295" class="head"/><text x="255" y="293" text-anchor="end" class="tiny">reserve</text>
             <path d="M485 320 L517 320 Q525 320 525 312 L525 263 Q525 255 517 255 L440 255 Q435 255 435 250 L435 245" class="wire reply"/><polygon points="435,235 440,245 430,245" class="head reply"/><text x="535" y="292" class="tiny">atomic result</text>
           </g>
@@ -199,44 +172,21 @@
           <rect x="332" y="67" width="150" height="55" rx="8" class="cache"/><rect x="325" y="60" width="150" height="55" rx="8" class="cache"/><text x="400" y="84.5" text-anchor="middle" class="label">Answer cache</text><text x="400" y="103.5" text-anchor="middle" class="sub">exact scope key</text>
           <path d="M365 165 L365 125" class="wire"/><polygon points="365,115 370,125 360,125" class="head"/><text x="350" y="145" text-anchor="end" class="tiny">GET</text>
           <path d="M435 115 L435 155" class="wire reply"/><polygon points="435,165 430,155 440,155" class="head reply"/><text x="445" y="145" class="tiny">hit / miss</text>
-          <path d="M315 275 V335 A85 12 0 0 0 485 335 V275" class="store"/><ellipse cx="400" cy="275" rx="85" ry="12" class="store"/><text x="400" y="315" text-anchor="middle" class="label">Ledger</text><text x="400" y="333" text-anchor="middle" class="sub">quota + execution</text>
+          <path d="M315 275 V335 A85 12 0 0 0 485 335 V275" class="store"/><ellipse cx="400" cy="275" rx="85" ry="12" class="store"/><text x="400" y="309" text-anchor="middle" class="label">Ledger</text><text x="400" y="334" text-anchor="middle" class="sub">quota + execution</text>
           <path d="M365 235 L365 247 Q365 255 357 255 L283 255 Q275 255 275 263 L275 292 Q275 300 283 300 L305 300" class="wire"/><polygon points="315,300 305,305 305,295" class="head"/><text x="255" y="293" text-anchor="end" class="tiny">reserve</text>
           <path d="M485 320 L517 320 Q525 320 525 312 L525 263 Q525 255 517 255 L440 255 Q435 255 435 250 L435 245" class="wire reply"/><polygon points="435,235 440,245 430,245" class="head reply"/><text x="535" y="292" class="tiny">atomic result</text>
           <g class="is-new">
             <text x="580" y="75" class="clock">assumption: 20/s × 60 = 1,200 RPM</text>
             <text x="580" y="99" class="tiny">(2,000 + 400) × 1,200 = 2.88M TPM</text>
             <text x="580" y="123" class="tiny">(2,000 + 1,000) × 1,200 = 3.6M reserved</text>
-            <text x="136" y="368" class="tiny">Gate order: auth → entry RPM → reuse check → quota hold → upstream admission</text>
+            <text x="136" y="368" class="tiny">Gate order: auth → entry RPM → reuse check → upstream admission → quota hold</text>
           </g>
         </svg>
         <figcaption><span class="lang-zh">20×60=1,200 RPM；实际均值为 2,000+400，得到 2.88M TPM；输出上限为 1,000 时预留是 3.6M。两笔账分开，才看得出平均成本够而突发准入仍可能拒绝。</span><span class="lang-en">20×60=1,200 RPM. Actual mean 2,000+400 yields 2.88M TPM; reserving a 1,000 output cap yields 3.6M. Cost and conservative admission are distinct budgets.</span></figcaption>
       </div>
-    </figure><h3><span class="lang-zh">正常路径与先后顺序</span> <span class="lang-en">Normal path and ordering</span></h3>
-<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>Client 的 POST 先到 Edge，校验凭证、正文大小和入口 RPM；LLM GW 从可信身份取 tenant，再固定请求摘要与路由计划。客户端的 tenant header 和任意 base URL 都不能直接决定权限或上游。网关先判断任务是否允许复用并构造完整键，缓存命中也必须重新授权与记服务用量。miss 再取得租户预算 hold、选具体 deployment 的速率和并发额度，经 Adapter dispatch。输出沿 Backend A → Adapter → LLM GW → Edge → Client 走，每跳都有 deadline、取消和流事件解析。</p>
-<p>高层图把同进程的策略藏在 LLM GW 里，把跨进程的依赖画成来回调用。Answer cache 是旁路派生答案，Ledger 是共享权威执行与预算，二者不能合并成一个 Redis key 然后靠过期恢复。可以用同一持久库做 quota 和 execution 的事务，入口短窗口 limiter 则按 <a class="chip" href="ch04.html">Ch04</a> 的算法另做。Ledger 不可用时，对受硬预算约束的新 miss 拒绝准入，不能每个网关进程临时发明一份余额。</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>Edge validates credentials, body limits and entry RPM. LLM GW derives trusted tenant identity, pins a digest/route plan and checks reuse. Hits reauthorize and record service; misses reserve budget and acquire deployment rate/concurrency admission before Adapter dispatch. Output returns Backend A → Adapter → LLM GW → Edge → Client with deadlines, cancellation and parsing at each hop.</p>
-<p>The diagram separates in-process policy from remote dependencies. Answer cache is derived data; Ledger is authoritative shared execution/budget state. Use one durable transactional store for quota/execution and separate short-window rate limiting from <a class="chip" href="ch04.html">Ch04</a>. If hard-budget Ledger admission is unavailable, reject new misses.</p>
-</div></div><h3><span class="lang-zh">容量推导：20 QPS 也可能是百万 token</span> <span class="lang-en">Sizing: small QPS, large token volume</span></h3>
-<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>按 A1–A3 全 miss 计算：20×60=1,200 次/分钟。输入是1,200×2,000=2,400,000 token/分钟，输出是1,200×400=480,000，合计2,880,000，即2.88M。预算预留则是1,200×(2,000+1,000)=3,600,000，足足比实际均值多720,000。这说明“本月均值花得起”不能证明“本分钟的保守准入放得进”；输出上限瞎设得很大，会在生成之前就挤占别人额度。</p>
-<p>输入和输出分开保存，再按版本化单价算费用 I×p_in+O×p_out；缓存输入、隐藏推理、embedding 和失败 attempt 另保留类别。这里不用某天的报价，避免让设计随价目失效。OpenAI 的速率说明同时列请求和 token 限额，失败请求也会消耗窗口；它给出的估算规则并不是本章 quota 的 input+cap 公式。[2] Claude 文档还分 RPM、ITPM 与 OTPM。[4] 统一入口能统一治理，不能把这几种计量强行改成同一个桶。</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>Assuming all misses: 20×60=1,200 RPM, giving 2.4M input and 0.48M output TPM, 2.88M total. Conservative input+cap reservations are 3.6M, 720,000 above actual mean. Affordable average spend does not prove conservative admission capacity; oversized caps reserve capacity before generation.</p>
-<p>Store input/output and priced categories separately; cost is I×p_in+O×p_out under a price revision. Supplier limits differ from our quota formula: OpenAI documents request/token limits and unsuccessful-request consumption [2], while Claude separates RPM/ITPM/OTPM [4].</p>
-</div></div><h3><span class="lang-zh">替代方案与网关故障域</span> <span class="lang-en">Alternatives and gateway failure domains</span></h3>
-<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>单一模型的小产品可以先在业务服务里做一个薄适配器，但只要多个团队共享 key，分散的预算、fallback 和缓存规则就容易漂移。抽成网关的代价是又加了一层关键依赖：配置错误、凭证撤销和 Ledger 故障可能同时影响所有模型。部署多份无状态 LLM GW 可以分摊连接，不能把共享配额复制几份。健康检查既看网络是否可达，也看 deployment 的能力、错误类型和剩余容量；探针成功不代表长 prompt 还能准入。</p>
-<p>公网入口只列完成设计需要的接口：文本 completion、单独计费的 embedding、授权后可见的 model 别名列表。OpenAI-compatible 不是完整能力证明；vLLM 的公开文档同样列出支持条件和参数差异。[12] Adapter 维护能力矩阵并拒绝不支持的字段，比悄悄丢掉 schema、工具或身份参数更可审计。版本升级先用固定回归请求比对事件和 usage，再改路由计划。</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>A thin business-side adapter can suffice for one model; shared keys across teams favor centralized policy. The gateway adds shared failures: bad configuration, revoked credentials and Ledger loss can affect every model. Replicate stateless gateways without duplicating shared quota. Reachable probes do not prove workload capacity.</p>
-<p>Expose only necessary completion, independently accounted embedding and authorized alias listing. Compatibility is not proof of all capabilities: vLLM documents support conditions and differences [12]. Maintain a capability matrix, reject unsupported fields, and regression-test event/usage changes before route upgrades.</p>
-</div></div></section>
+    </figure><div class="bilingual"><div class="lang-zh"><p>tenant 来自可信身份，不来自客户端自报 header；别名映射到受控计划，不接受任意 base URL。多份无状态网关共享同一预算权威，Ledger 故障时拒绝受硬预算约束的新 miss。入口 RPM、供应商速率、租户累计 quota 分开：缓存 hit 仍耗入口额度；返还本地 hold 不代表供应商窗口返还。速率服务与 Ledger 跨库时允许保守浪费许可，不承诺跨库原子扣款。</p></div><div class="lang-en"><p>Derive tenant from verified identity and resolve aliases through controlled plans, never arbitrary base URLs. Gateway replicas share one budget authority; reject hard-budget misses when Ledger is unavailable. Entry RPM, provider rate and cumulative quota differ: hits still consume entry admission, and releasing a hold does not refund a provider window. Separate rate/Ledger stores may conservatively waste permits; do not promise an atomic cross-store debit.</p></div></div></section>
 
-  <section>
-<h2><span class="lang-zh">路由与降级：先过滤，再问能不能换</span> <span class="lang-en">Routing and fallback: eligibility before replacement</span></h2>
-<figure class="deck">
+  <section><h2><span class="lang-zh">路由：硬条件先过滤，备用调用重新准入</span><span class="lang-en">Routing: filter hard constraints and readmit fallback</span></h2><div class="bilingual"><div class="lang-zh"><p><strong>便宜不能补偿不合格。</strong>固定 plan p12 后，先过滤权限、地域、tools/schema、质量与上下文，再排健康/延迟/成本。8,000 输入+1,000 输出需要 9,000 窗口，不能放到 4,000 的小模型；摘要压缩与质量降级都要显式授权。</p></div><div class="lang-en"><p><strong>Low cost cannot make an ineligible backend valid.</strong> Pin plan p12; filter access, residency, tools/schema, quality and context before health/latency/cost. An 8,000-input plus 1,000-output budget needs 9,000 context, not 4,000. Summarization and quality downgrades require explicit permission.</p></div></div><figure class="deck">
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d2s1t d2s1d">
           <title id="d2s1t">Pin a capability and access route plan</title>
@@ -283,7 +233,7 @@
             <rect x="805" y="80" width="120" height="60" rx="12" class="box"/><text x="865" y="107" text-anchor="middle" class="label">Backend A</text><text x="865" y="126" text-anchor="middle" class="sub">deployment r7</text>
             <path d="M475 191 L565 191" class="wire"/><polygon points="575,191 565,196 565,186" class="head"/><text x="525" y="183" text-anchor="middle" class="tiny">eligible</text>
             <path d="M575 209 L485 209" class="wire reply"/><polygon points="475,209 485,204 485,214" class="head reply"/>
-            <path d="M710 180 L732 180 Q740 180 740 172 L740 108 Q740 100 748 100 L795 100" class="wire"/><polygon points="805,100 795,105 795,95" class="head"/><text x="730" y="76" class="tiny">primary</text>
+            <path d="M710 180 L732 180 Q740 180 740 172 L740 108 Q740 100 748 100 L795 100" class="wire"/><polygon points="805,100 795,105 795,95" class="head"/><text x="865" y="64" text-anchor="middle" class="tiny">primary</text>
             <path d="M805 120 L778 120 Q770 120 770 128 L770 202 Q770 210 762 210 L720 210" class="wire reply"/><polygon points="710,210 720,205 720,215" class="head reply"/>
           </g>
         </svg>
@@ -311,7 +261,7 @@
           <rect x="805" y="80" width="120" height="60" rx="12" class="box"/><text x="865" y="107" text-anchor="middle" class="label">Backend A</text><text x="865" y="126" text-anchor="middle" class="sub">deployment r7</text>
           <path d="M475 191 L565 191" class="wire"/><polygon points="575,191 565,196 565,186" class="head"/><text x="525" y="183" text-anchor="middle" class="tiny">eligible</text>
           <path d="M575 209 L485 209" class="wire reply"/><polygon points="475,209 485,204 485,214" class="head reply"/>
-          <path d="M710 180 L732 180 Q740 180 740 172 L740 108 Q740 100 748 100 L795 100" class="wire"/><polygon points="805,100 795,105 795,95" class="head"/><text x="730" y="76" class="tiny">primary</text>
+          <path d="M710 180 L732 180 Q740 180 740 172 L740 108 Q740 100 748 100 L795 100" class="wire"/><polygon points="805,100 795,105 795,95" class="head"/><text x="865" y="64" text-anchor="middle" class="tiny">primary</text>
           <path d="M805 120 L778 120 Q770 120 770 128 L770 202 Q770 210 762 210 L720 210" class="wire reply"/><polygon points="710,210 720,205 720,215" class="head reply"/>
           <g class="is-new">
             <path d="M865 140 L865 242 Q865 250 857 250 L667.5 250 Q665 250 665 247.5 L665 245" class="wire fail"/><polygon points="665,235 670,245 660,245" class="head fail"/><text x="875" y="196" class="tiny">429 / 5xx</text>
@@ -342,7 +292,7 @@
           <rect x="805" y="80" width="120" height="60" rx="12" class="box"/><text x="865" y="107" text-anchor="middle" class="label">Backend A</text><text x="865" y="126" text-anchor="middle" class="sub">deployment r7</text>
           <path d="M475 191 L565 191" class="wire"/><polygon points="575,191 565,196 565,186" class="head"/><text x="525" y="183" text-anchor="middle" class="tiny">eligible</text>
           <path d="M575 209 L485 209" class="wire reply"/><polygon points="475,209 485,204 485,214" class="head reply"/>
-          <path d="M710 180 L732 180 Q740 180 740 172 L740 108 Q740 100 748 100 L795 100" class="wire"/><polygon points="805,100 795,105 795,95" class="head"/><text x="730" y="76" class="tiny">primary</text>
+          <path d="M710 180 L732 180 Q740 180 740 172 L740 108 Q740 100 748 100 L795 100" class="wire"/><polygon points="805,100 795,105 795,95" class="head"/><text x="865" y="64" text-anchor="middle" class="tiny">primary</text>
           <path d="M805 120 L778 120 Q770 120 770 128 L770 202 Q770 210 762 210 L720 210" class="wire reply"/><polygon points="710,210 720,205 720,215" class="head reply"/>
           <path d="M865 140 L865 242 Q865 250 857 250 L667.5 250 Q665 250 665 247.5 L665 245" class="wire fail"/><polygon points="665,235 670,245 660,245" class="head fail"/><text x="875" y="196" class="tiny">429 / 5xx</text>
           <text x="136" y="344" class="tiny">Only BEFORE public headers: eligible error + remaining deadline</text>
@@ -376,7 +326,7 @@
           <rect x="805" y="80" width="120" height="60" rx="12" class="box"/><text x="865" y="107" text-anchor="middle" class="label">Backend A</text><text x="865" y="126" text-anchor="middle" class="sub">deployment r7</text>
           <path d="M475 191 L565 191" class="wire"/><polygon points="575,191 565,196 565,186" class="head"/><text x="525" y="183" text-anchor="middle" class="tiny">eligible</text>
           <path d="M575 209 L485 209" class="wire reply"/><polygon points="475,209 485,204 485,214" class="head reply"/>
-          <path d="M710 180 L732 180 Q740 180 740 172 L740 108 Q740 100 748 100 L795 100" class="wire"/><polygon points="805,100 795,105 795,95" class="head"/><text x="730" y="76" class="tiny">primary</text>
+          <path d="M710 180 L732 180 Q740 180 740 172 L740 108 Q740 100 748 100 L795 100" class="wire"/><polygon points="805,100 795,105 795,95" class="head"/><text x="865" y="64" text-anchor="middle" class="tiny">primary</text>
           <path d="M805 120 L778 120 Q770 120 770 128 L770 202 Q770 210 762 210 L720 210" class="wire reply"/><polygon points="710,210 720,205 720,215" class="head reply"/>
           <path d="M865 140 L865 242 Q865 250 857 250 L667.5 250 Q665 250 665 247.5 L665 245" class="wire fail"/><polygon points="665,235 670,245 660,245" class="head fail"/><text x="875" y="196" class="tiny">429 / 5xx</text>
           <text x="136" y="344" class="tiny">Only BEFORE public headers: eligible error + remaining deadline</text>
@@ -390,32 +340,35 @@
         </svg>
         <figcaption><span class="lang-zh">首响应预算 0.2+0.8+0.2+0.7=1.9 秒，只留 0.1 秒余量；这是设计切分，需要压测。二池共同失效时回 503；不能把缺配额的备用池当高可用承诺。</span><span class="lang-en">The proposed first-response budget sums to 1.9 s with 0.1 s headroom; validate it under load. Shared pool failure returns 503 rather than promise failover without spare capacity.</span></figcaption>
       </div>
-    </figure><h3><span class="lang-zh">为什么 model 不是一条任意 URL</span> <span class="lang-en">Why a model alias is not an arbitrary URL</span></h3>
-<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>模型别名映射到固定版本的 route plan；候选每个都带真实模型 revision、地域、能力、窗口和限额共享组。先过滤用户是否获准、数据能否出域、tools/JSON/图片等能力是否满足、输入加输出预算能否放进窗口，再在剩下的候选里按健康、延迟与成本排序。A5 的8,000+1,000=9,000，能放入 A 的10,000窗口，却不能落到4,000窗口。不能为了保住200悄悄截前半段历史；调用方若允许摘要压缩，那是另一个显式任务。</p>
-<p>计划 p12 固定一次请求的判断条件，部署滚动升级后新请求可用 p13，旧请求仍记录 p12 和实际 served model。降级授权要涵盖具体质量/能力，不能只写“支持 fallback”。要求严格结构化输出的路由可以接受同能力的另一个 deployment，却拒绝小模型；地域限制也不会因为主池超时就自动解除。缓存查到 Backend B 的旧答案时，仍须按同一契约判断是否可复用。</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>Aliases pin a route plan with model revision, residency, capability, context and shared-limit groups. Filter those constraints before health/latency/cost ranking. An 8,000+1,000 budget fits A’s 10,000 context but not a 4,000 candidate; truncation or summarization requires explicit authorization.</p>
-<p>Pin p12 for the request and record the actual served model. Downgrade permission must cover capabilities and quality; structured-output or residency constraints remain during failure. Cached B answers face the same eligibility gate.</p>
-</div></div><h3><span class="lang-zh">失败分类与两次调用的成本</span> <span class="lang-en">Failure classes and a two-attempt budget</span></h3>
-<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>没有公开响应头时，上游暂时限流或可恢复故障才进入可重试分支；坏参数、无权限和安全拒绝沿原契约返回，不能用备用模型规避拒绝。请求发出去后的超时是未知执行：原上游可能已生成并收费，只是本地没收到。严格只付一次的任务宁可报 UNKNOWN；允许额外成本的只读生成可记录原 attempt 未决，再预留第二 attempt。所谓“没出首 token 就能换”仍不够，SDK 可能已经向客户端发了200响应头或角色事件。边界必须是公共响应是否提交。</p>
-<p>本章最多两次物理调用，原调用加一个 fallback，不再叠一次短重试。所有 SDK/代理重试都计入上限，能关闭则关闭。全请求都走第二次时，20×2=40 dispatch/s；两次都计满预留的短时需求最多7.2M token/分钟，但要按实际分池与共享组核算，不把两个不同限额当成一只大桶。LiteLLM 的 Router 原文确有模型组路由、fallback 和重试设置；我们的两次上限与未知状态是本题约束，不能说成该产品天然提供端到端 exactly-once。[5]</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>Before public headers, eligible transient limits/errors can branch. Bad requests, authorization failures and refusals retain the original contract. Post-dispatch timeout is unknown remote execution: one-charge tasks report UNKNOWN; cost-tolerant read-only generation may reserve a second attempt while retaining the unresolved first. The boundary is public response commitment, not merely first text token.</p>
-<p>Cap total physical calls at two, including SDK/proxy retries. Worst-case dispatch is 40/s and two full reservations are up to 7.2M token/min, still accounted per deployment/shared group. LiteLLM documents routing, fallbacks and retries [5]; our bounds do not imply product-wide exactly-once.</p>
-</div></div><h3><span class="lang-zh">deadline、备用余量与拒绝码</span> <span class="lang-en">Deadlines, spare capacity and rejection</span></h3>
-<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>A7 把首响应2秒分成准入0.2、主池等待0.8、切换0.2、备用等待0.7，合计1.9秒、只留0.1秒。这是预算，网络抖动和排队都消耗它；fallback 再套一份2秒就破坏了总 deadline。可恢复429若带 Retry-After，要看剩余时间是否容得下，容不下便拒绝；故障时随机退避、短熔断冷却和探测恢复防止所有客户端同时重打。两个 provider key 若实际共用组织级限额，换 key 不增加容量。</p>
-<p>入口租户速率不足用明确的429；累计额度耗尽用稳定的 quota_exhausted 错误分类，状态码由本服务契约固定，不能把所有厂商都说成402。没有合格后端才在提交前503；Retry-After 只在有合理等待建议时给，不保证该时刻就有模型。离线批处理可以独立做有界持久队列和到期取消，交互聊天不为过载排无界队列。备用池必须预留正常流量加故障转入的幸存容量，本地引擎也需要同样的能力与压测证据。</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>The two-second first-response proposal sums to 1.9 s with 0.1 s headroom. Queueing and network jitter spend it; fallback cannot reset the deadline. Honor Retry-After only within the remaining budget, use jitter/cooldowns, and do not treat keys sharing an organization limit as new capacity.</p>
-<p>Classify entry rate rejection as 429, cumulative exhaustion as a stable quota_exhausted contract, and no eligible backend as precommit 503. Retry-After is a wait suggestion, not a capacity guarantee. Separate bounded persistent batch queues from chat and benchmark standby survivor capacity.</p>
-</div></div></section>
+    </figure><pre data-language="Pseudocode · routing" data-kind="pseudocode" data-source="route.pseudo"><code># Pseudocode. Trusted policy data; no provider SDK is invoked here.
+principal = authenticate(credentials)                 # never trust tenant header
+tenant = principal.tenant
+digest = H(canonical_full_request)                    # includes accepted policy revision
+if Ledger.lookup(principal.tenant, rid) exists:
+    require same digest and current access
+    return recorded status/result                     # no new model dispatch
+plan = pin_route_revision(alias)
+eligible = [d for d in plan.deployments
+    if principal.may_use(d) and data.may_leave_to(d)
+    and required_capabilities &lt;= d.capabilities
+    and final_input_bound(d) + enforced_output_cap(d) &lt;= d.context
+    and caller.accepts(d.quality)]
+require eligible is not empty
+candidate = AnswerCache.lookup(H(principal.access_scope, digest, plan, data_rev))
+if reusable_task and candidate is COMPLETE and current_access(candidate.dependencies):
+    if unexpired(candidate) and candidate.served_model in {d.model_revision for d in eligible}
+            and candidate.route_revision == plan.revision and candidate.data_revision == data_rev:
+        deliver_cache_only_if_unique_record_created(tenant, rid, digest, candidate)
+        return recorded status                        # loser never starts another response
+pool = rank_by_health_latency_cost(eligible).first
+require shared_rate_and_concurrency.admit(pool.limit_group)
+created = Ledger.reserve_first(tenant, rid, digest, plan, bound(pool))
+if not created: return recorded status                  # concurrent winner owns I/O
+Adapter.dispatch_once(created.attempt, pool)             # disable hidden retries
+# Cache record uses the same unique (tenant,rid)+digest; service price is separate.
+# Rate permits and Ledger are separate stores: lost permits may be wasted.</code></pre><div class="bilingual"><div class="lang-zh"><p>这是策略伪代码：候选能力来自可信配置；<code>deliver_cache_only_if_unique_record_created</code> 的语义是同一 Ledger 中以 (tenant,rid) 唯一、正文摘要一致的服务记录，竞争者只取已有状态。后面的 SQLite 展示 miss 如何真正建唯一请求与 attempt。缓存返回也必须先取得唯一交付资格并遵守提交屏障；缓存不能重放另一用户的结果。</p><p>坏参数、无权限、安全拒绝不进入备用分支。发出请求后超时可能已经生成收费：不允许额外费用就返回 UNKNOWN；允许的只读任务才能保留 a1 未决 hold，再为 a2 预占。所有 SDK/代理隐藏重试关闭或并入合计 ≤2 次。每次 dispatch 都重过所属共享限流组；换 key 不一定换配额。</p><p>≤2 只约束同一请求集合：1,200 条最多 2,400 次调用、预留工作量最多 7.2M token。只有 attempt 也落在同一分钟/稳态条件下，才写成约 40/s、7.2M/min；跨窗积压不能推出瞬时上界。首响应预算 0.2+0.8+0.2+0.7=1.9s，只余0.1s，备用不重置总 deadline。429 的有效 Retry-After 容不进剩余时间就停止；quota_exhausted 和提交前无容量 503 使用稳定分类。<a href="#ref-2">[2]</a><a href="#ref-7">[7]</a></p></div><div class="lang-en"><p>This is policy pseudocode using trusted capability configuration. The cache-record operation means one service record in the same Ledger under unique (tenant,rid) and a matching body digest; competitors read existing state. SQLite below shows actual miss-side request/attempt creation. Cache delivery also needs unique ownership and the commitment barrier; it cannot replay another user’s result.</p><p>Bad parameters, access failures and safety refusals do not authorize fallback. A post-dispatch timeout may have generated billable output: strict one-attempt policy returns UNKNOWN; cost-tolerant read-only work can retain a1’s hold and reserve a2 separately. Disable hidden SDK/proxy retries or count them in the total of at most two. Readmit every dispatch against its shared limit group; another key may share the same quota.</p><p>The cap bounds one request cohort: 1,200 logical requests permit at most 2,400 calls and 7.2M reserved token-work. About 40/s and 7.2M/min require matching dispatch windows or steady conditions; cross-window backlog has no such peak bound. The first-response budget 0.2+0.8+0.2+0.7=1.9s leaves 0.1s; fallback never resets the total deadline. Stop when a valid Retry-After exceeds the remaining budget. Use stable quota_exhausted and precommit no-capacity 503 classifications. <a href="#ref-2">[2]</a><a href="#ref-7">[7]</a></p></div></div></section>
 
-  <section>
-<h2><span class="lang-zh">记账闭环：预留、结算与不知道</span> <span class="lang-en">Accounting loop: held, settled and unknown</span></h2>
-<figure class="deck">
+  <section><h2><span class="lang-zh">预算：一条请求，多笔 attempt，分别保留证据</span><span class="lang-en">Budget: one request, separate attempt holds and evidence</span></h2><div class="bilingual"><div class="lang-zh"><p><strong>先把责任落盘，再接触网络。</strong>(tenant,rid) 绑定原正文摘要与路由计划；重放读取原状态，改正文冲突。每个 attempt 有独立 bound、pool、价格版本和 owner。UNKNOWN 不是免费，也不因租约或 TTL 到期退款。</p></div><div class="lang-en"><p><strong>Persist responsibility before network I/O.</strong> Bind (tenant,rid) to the original body digest and route plan. Replays read that state; changed bodies conflict. Each attempt owns a bound, pool, price revision and owner. UNKNOWN is neither free nor automatically refunded by a lease or TTL.</p></div></div><figure class="deck">
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d3s1t d3s1d">
           <title id="d3s1t">Reserve once under a request identity</title>
@@ -430,7 +383,7 @@
             <path d="M235 121 L315 121" class="wire"/><polygon points="325,121 315,126 315,116" class="head"/><text x="280" y="113" text-anchor="middle" class="tiny">model alias</text>
             <path d="M325 139 L245 139" class="wire reply"/><polygon points="235,139 245,134 245,144" class="head reply"/>
             <path d="M135 139 L80 139" class="wire reply"/><polygon points="70,139 80,134 80,144" class="head reply"/>
-            <path d="M545 70 V145 A95 12 0 0 0 735 145 V70" class="store"/><ellipse cx="640" cy="70" rx="95" ry="12" class="store"/><text x="640" y="117.5" text-anchor="middle" class="label">Ledger</text><text x="640" y="135.5" text-anchor="middle" class="sub">holds + attempts</text>
+            <path d="M545 70 V145 A95 12 0 0 0 735 145 V70" class="store"/><ellipse cx="640" cy="70" rx="95" ry="12" class="store"/><text x="640" y="113" text-anchor="middle" class="label">Ledger</text><text x="640" y="138" text-anchor="middle" class="sub">holds + attempts</text>
             <path d="M475 111 L535 111" class="wire"/><polygon points="545,111 535,116 535,106" class="head"/><text x="510" y="101" text-anchor="middle" class="tiny">tx</text>
             <path d="M545 139 L485 139" class="wire reply"/><polygon points="475,139 485,134 485,144" class="head reply"/>
             <text x="136" y="215" class="tiny">(tenant, rid) + digest</text>
@@ -452,7 +405,7 @@
           <path d="M235 121 L315 121" class="wire"/><polygon points="325,121 315,126 315,116" class="head"/><text x="280" y="113" text-anchor="middle" class="tiny">model alias</text>
           <path d="M325 139 L245 139" class="wire reply"/><polygon points="235,139 245,134 245,144" class="head reply"/>
           <path d="M135 139 L80 139" class="wire reply"/><polygon points="70,139 80,134 80,144" class="head reply"/>
-          <path d="M545 70 V145 A95 12 0 0 0 735 145 V70" class="store"/><ellipse cx="640" cy="70" rx="95" ry="12" class="store"/><text x="640" y="117.5" text-anchor="middle" class="label">Ledger</text><text x="640" y="135.5" text-anchor="middle" class="sub">holds + attempts</text>
+          <path d="M545 70 V145 A95 12 0 0 0 735 145 V70" class="store"/><ellipse cx="640" cy="70" rx="95" ry="12" class="store"/><text x="640" y="113" text-anchor="middle" class="label">Ledger</text><text x="640" y="138" text-anchor="middle" class="sub">holds + attempts</text>
           <path d="M475 111 L535 111" class="wire"/><polygon points="545,111 535,116 535,106" class="head"/><text x="510" y="101" text-anchor="middle" class="tiny">tx</text>
           <path d="M545 139 L485 139" class="wire reply"/><polygon points="475,139 485,134 485,144" class="head reply"/>
           <text x="136" y="215" class="tiny">(tenant, rid) + digest</text>
@@ -481,7 +434,7 @@
           <path d="M235 121 L315 121" class="wire"/><polygon points="325,121 315,126 315,116" class="head"/><text x="280" y="113" text-anchor="middle" class="tiny">model alias</text>
           <path d="M325 139 L245 139" class="wire reply"/><polygon points="235,139 245,134 245,144" class="head reply"/>
           <path d="M135 139 L80 139" class="wire reply"/><polygon points="70,139 80,134 80,144" class="head reply"/>
-          <path d="M545 70 V145 A95 12 0 0 0 735 145 V70" class="store"/><ellipse cx="640" cy="70" rx="95" ry="12" class="store"/><text x="640" y="117.5" text-anchor="middle" class="label">Ledger</text><text x="640" y="135.5" text-anchor="middle" class="sub">holds + attempts</text>
+          <path d="M545 70 V145 A95 12 0 0 0 735 145 V70" class="store"/><ellipse cx="640" cy="70" rx="95" ry="12" class="store"/><text x="640" y="113" text-anchor="middle" class="label">Ledger</text><text x="640" y="138" text-anchor="middle" class="sub">holds + attempts</text>
           <path d="M475 111 L535 111" class="wire"/><polygon points="545,111 535,116 535,106" class="head"/><text x="510" y="101" text-anchor="middle" class="tiny">tx</text>
           <path d="M545 139 L485 139" class="wire reply"/><polygon points="475,139 485,134 485,144" class="head reply"/>
           <text x="136" y="215" class="tiny">(tenant, rid) + digest</text>
@@ -494,7 +447,7 @@
           <text x="520" y="204" class="tiny">Crash after intent: UNKNOWN, no blind replay</text>
           <g class="is-new">
             <path d="M780 312 L485 312" class="wire reply"/><polygon points="475,312 485,307 485,317" class="head reply"/><text x="620" y="330" text-anchor="middle" class="tiny">authoritative usage</text>
-            <path d="M435 270 L435 175" class="wire reply"/><polygon points="435,165 440,175 430,175" class="head reply"/><text x="445" y="229" class="tiny">usage / status</text>
+            <path d="M435 270 L435 175" class="wire reply"/><polygon points="435,165 440,175 430,175" class="head reply"/><text x="445" y="224" class="tiny">usage</text>
           </g>
         </svg>
         <figcaption><span class="lang-zh">加完整 usage 回程：Backend A → Adapter → LLM GW。按 attempt 保存 input/output 与价格版本；SSE chunk 个数不是 token 个数，已显示的字数也不覆盖隐藏推理等计量。</span><span class="lang-en">Return complete usage Backend A → Adapter → LLM GW, keyed by attempt and price revision. Chunk counts and visible text are not authoritative token usage.</span></figcaption>
@@ -512,7 +465,7 @@
           <path d="M235 121 L315 121" class="wire"/><polygon points="325,121 315,126 315,116" class="head"/><text x="280" y="113" text-anchor="middle" class="tiny">model alias</text>
           <path d="M325 139 L245 139" class="wire reply"/><polygon points="235,139 245,134 245,144" class="head reply"/>
           <path d="M135 139 L80 139" class="wire reply"/><polygon points="70,139 80,134 80,144" class="head reply"/>
-          <path d="M545 70 V145 A95 12 0 0 0 735 145 V70" class="store"/><ellipse cx="640" cy="70" rx="95" ry="12" class="store"/><text x="640" y="117.5" text-anchor="middle" class="label">Ledger</text><text x="640" y="135.5" text-anchor="middle" class="sub">holds + attempts</text>
+          <path d="M545 70 V145 A95 12 0 0 0 735 145 V70" class="store"/><ellipse cx="640" cy="70" rx="95" ry="12" class="store"/><text x="640" y="113" text-anchor="middle" class="label">Ledger</text><text x="640" y="138" text-anchor="middle" class="sub">holds + attempts</text>
           <path d="M475 111 L535 111" class="wire"/><polygon points="545,111 535,116 535,106" class="head"/><text x="510" y="101" text-anchor="middle" class="tiny">tx</text>
           <path d="M545 139 L485 139" class="wire reply"/><polygon points="475,139 485,134 485,144" class="head reply"/>
           <text x="136" y="215" class="tiny">(tenant, rid) + digest</text>
@@ -524,10 +477,10 @@
           <text x="520" y="181" class="tiny">DISPATCH_INTENT before network I/O</text>
           <text x="520" y="204" class="tiny">Crash after intent: UNKNOWN, no blind replay</text>
           <path d="M780 312 L485 312" class="wire reply"/><polygon points="475,312 485,307 485,317" class="head reply"/><text x="620" y="330" text-anchor="middle" class="tiny">authoritative usage</text>
-          <path d="M435 270 L435 175" class="wire reply"/><polygon points="435,165 440,175 430,175" class="head reply"/><text x="445" y="229" class="tiny">usage / status</text>
+          <path d="M435 270 L435 175" class="wire reply"/><polygon points="435,165 440,175 430,175" class="head reply"/><text x="445" y="224" class="tiny">usage</text>
           <g class="is-new">
             <text x="520" y="242" class="clock">3,000 → 2,400; release 600</text>
-            <text x="136" y="327" class="tiny">unique settle key</text>
+            <text x="136" y="327" class="tiny">unique attempt key</text>
             <text x="136" y="350" class="tiny">rate ≠ quota ≠ invoice</text>
           </g>
         </svg>
@@ -546,7 +499,7 @@
           <path d="M235 121 L315 121" class="wire"/><polygon points="325,121 315,126 315,116" class="head"/><text x="280" y="113" text-anchor="middle" class="tiny">model alias</text>
           <path d="M325 139 L245 139" class="wire reply"/><polygon points="235,139 245,134 245,144" class="head reply"/>
           <path d="M135 139 L80 139" class="wire reply"/><polygon points="70,139 80,134 80,144" class="head reply"/>
-          <path d="M545 70 V145 A95 12 0 0 0 735 145 V70" class="store"/><ellipse cx="640" cy="70" rx="95" ry="12" class="store"/><text x="640" y="117.5" text-anchor="middle" class="label">Ledger</text><text x="640" y="135.5" text-anchor="middle" class="sub">holds + attempts</text>
+          <path d="M545 70 V145 A95 12 0 0 0 735 145 V70" class="store"/><ellipse cx="640" cy="70" rx="95" ry="12" class="store"/><text x="640" y="113" text-anchor="middle" class="label">Ledger</text><text x="640" y="138" text-anchor="middle" class="sub">holds + attempts</text>
           <path d="M475 111 L535 111" class="wire"/><polygon points="545,111 535,116 535,106" class="head"/><text x="510" y="101" text-anchor="middle" class="tiny">tx</text>
           <path d="M545 139 L485 139" class="wire reply"/><polygon points="475,139 485,134 485,144" class="head reply"/>
           <text x="136" y="215" class="tiny">(tenant, rid) + digest</text>
@@ -557,10 +510,10 @@
           <path d="M475 290 L770 290" class="wire"/><polygon points="780,290 770,295 770,285" class="head"/><text x="620" y="282" text-anchor="middle" class="tiny">a1 dispatch</text>
           <text x="520" y="181" class="tiny">DISPATCH_INTENT before network I/O</text>
           <text x="520" y="204" class="tiny">Crash after intent: UNKNOWN, no blind replay</text>
-          <path d="M780 312 L485 312" class="wire reply"/><polygon points="475,312 485,307 485,317" class="head reply"/><text x="620" y="330" text-anchor="middle" class="tiny">authoritative usage</text>
-          <path d="M435 270 L435 175" class="wire reply"/><polygon points="435,165 440,175 430,175" class="head reply"/><text x="445" y="229" class="tiny">usage / status</text>
-          <text x="520" y="242" class="clock">3,000 → 2,400; release 600</text>
-          <text x="136" y="327" class="tiny">unique settle key</text>
+          <path d="M780 312 L485 312" class="wire muted"/><polygon points="475,312 485,307 485,317" class="head muted"/><text x="620" y="330" text-anchor="middle" class="tiny">final usage missing</text>
+          <path d="M435 270 L435 175" class="wire muted"/><polygon points="435,165 440,175 430,175" class="head muted"/><text x="445" y="224" class="tiny">pending</text>
+          <text x="520" y="242" class="clock">held 3,000; pending evidence</text>
+          <text x="136" y="327" class="tiny">unique attempt key</text>
           <text x="136" y="350" class="tiny">rate ≠ quota ≠ invoice</text>
           <g class="is-new">
             <path d="M850 335 L850 357 Q850 365 842 365 L443 365 Q435 365 435 357 L435 345" class="wire fail"/><polygon points="435,335 440,345 430,345" class="head fail"/><text x="650" y="356" text-anchor="middle" class="tiny">EOF without final usage</text>
@@ -582,7 +535,7 @@
           <path d="M235 121 L315 121" class="wire"/><polygon points="325,121 315,126 315,116" class="head"/><text x="280" y="113" text-anchor="middle" class="tiny">model alias</text>
           <path d="M325 139 L245 139" class="wire reply"/><polygon points="235,139 245,134 245,144" class="head reply"/>
           <path d="M135 139 L80 139" class="wire reply"/><polygon points="70,139 80,134 80,144" class="head reply"/>
-          <path d="M545 70 V145 A95 12 0 0 0 735 145 V70" class="store"/><ellipse cx="640" cy="70" rx="95" ry="12" class="store"/><text x="640" y="117.5" text-anchor="middle" class="label">Ledger</text><text x="640" y="135.5" text-anchor="middle" class="sub">holds + attempts</text>
+          <path d="M545 70 V145 A95 12 0 0 0 735 145 V70" class="store"/><ellipse cx="640" cy="70" rx="95" ry="12" class="store"/><text x="640" y="113" text-anchor="middle" class="label">Ledger</text><text x="640" y="138" text-anchor="middle" class="sub">holds + attempts</text>
           <path d="M475 111 L535 111" class="wire"/><polygon points="545,111 535,116 535,106" class="head"/><text x="510" y="101" text-anchor="middle" class="tiny">tx</text>
           <path d="M545 139 L485 139" class="wire reply"/><polygon points="475,139 485,134 485,144" class="head reply"/>
           <text x="136" y="215" class="tiny">(tenant, rid) + digest</text>
@@ -593,10 +546,10 @@
           <path d="M475 290 L770 290" class="wire"/><polygon points="780,290 770,295 770,285" class="head"/><text x="620" y="282" text-anchor="middle" class="tiny">a1 dispatch</text>
           <text x="520" y="181" class="tiny">DISPATCH_INTENT before network I/O</text>
           <text x="520" y="204" class="tiny">Crash after intent: UNKNOWN, no blind replay</text>
-          <path d="M780 312 L485 312" class="wire reply"/><polygon points="475,312 485,307 485,317" class="head reply"/><text x="620" y="330" text-anchor="middle" class="tiny">authoritative usage</text>
-          <path d="M435 270 L435 175" class="wire reply"/><polygon points="435,165 440,175 430,175" class="head reply"/><text x="445" y="229" class="tiny">usage / status</text>
-          <text x="520" y="242" class="clock">3,000 → 2,400; release 600</text>
-          <text x="136" y="327" class="tiny">unique settle key</text>
+          <path d="M780 312 L485 312" class="wire muted"/><polygon points="475,312 485,307 485,317" class="head muted"/><text x="620" y="330" text-anchor="middle" class="tiny">final usage missing</text>
+          <path d="M435 270 L435 175" class="wire muted"/><polygon points="435,165 440,175 430,175" class="head muted"/><text x="445" y="224" class="tiny">pending</text>
+          <text x="520" y="242" class="clock">held 3,000; pending evidence</text>
+          <text x="136" y="327" class="tiny">unique attempt key</text>
           <text x="136" y="350" class="tiny">rate ≠ quota ≠ invoice</text>
           <path d="M850 335 L850 357 Q850 365 842 365 L443 365 Q435 365 435 357 L435 345" class="wire fail"/><polygon points="435,335 440,345 430,345" class="head fail"/><text x="650" y="356" text-anchor="middle" class="tiny">EOF without final usage</text>
           <rect x="136" y="59" width="190" height="20" rx="10" class="badge"/><text x="231" y="73" text-anchor="middle" class="badge-text">UNKNOWN ≠ zero cost</text>
@@ -605,37 +558,71 @@
             <path d="M780 70 L745 70" class="wire"/><polygon points="735,70 745,65 745,75" class="head"/>
             <path d="M735 90 L770 90" class="wire reply"/><polygon points="780,90 770,95 770,85" class="head reply"/>
             <path d="M825 110 L825 260" class="wire"/><polygon points="825,270 820,260 830,260" class="head"/><text x="816" y="185" text-anchor="end" class="tiny">report?</text>
-            <path d="M890 270 L890 120" class="wire reply"/><polygon points="890,110 895,120 885,120" class="head reply"/><text x="902" y="203" class="tiny">usage</text>
+            <path d="M890 270 L890 120" class="wire reply"/><polygon points="890,110 895,120 885,120" class="head reply"/><text x="898" y="190" class="tiny">if</text><text x="898" y="209" class="tiny">verified</text>
           </g>
         </svg>
-        <figcaption><span class="lang-zh">最后加 Reconciler。它查未决记录，用可获得的上游报告补齐同一 attempt，再幂等结算；没有报告能力则按明确的估算/核账规则保持 provisional，绝不靠 TTL 自动退款或重新生成。</span><span class="lang-en">Reconciler uses available upstream evidence to settle the same attempt idempotently. Without reporting support, apply explicit provisional/review rules; no automatic TTL refund or regeneration.</span></figcaption>
+        <figcaption><span class="lang-zh">最后加 Reconciler。它查未决记录，图上 hold 仍为3,000；仅当上游支持报告且证据验证通过，才补齐同一 attempt 并幂等结算；没有报告能力则按明确的估算/核账规则保持 provisional，绝不靠 TTL 自动退款或重新生成。</span><span class="lang-en">The hold remains 3,000. Only supported, verified upstream evidence permits idempotent settlement of the same attempt. Without reporting support, apply explicit provisional/review rules; no automatic TTL refund or regeneration.</span></figcaption>
       </div>
-    </figure><h3><span class="lang-zh">一次预留不等于一次外部执行</span> <span class="lang-en">One reservation is not one remote execution</span></h3>
-<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>Ledger 的主键是 tenant+rid，请求正文摘要不一致就冲突；同一个 rid 正在进行时返回明确的 in_progress，不再调用模型。预算行在事务中检查 limit−settled−held 是否够本次 hold，把 hold、请求状态和幂等结果一起写入。唯一约束阻止两台网关各建一张预留，行锁或条件更新序列化同一租户的余额判断。[9] 单纯先 SELECT 余额再 INSERT 两行，会让并发都看见旧余额。高吞吐时可按租户分区或下发有持久回收规则的份额；当前20/s先保留一个可解释的事务边界。</p>
-<p>attempt a1 先落 DISPATCH_INTENT，再交 Adapter 发上游；收到有效 usage 才把该 attempt 结算。网关租约/代次可以阻止旧进程改 Ledger，不能让外部供应商忘掉已执行的请求。崩溃在 intent 和网络之间，恢复者无法仅靠本库区分“未发”和“已生成”。本题禁止盲目重 dispatch；如果供应商明示支持幂等/查结果才使用该能力，否则保留 UNKNOWN。HTTP POST 本身没有可自由自动重试的幂等保证。[8]</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>Use tenant+rid with a body digest; existing work returns in_progress rather than another call. Atomically check available budget and write hold/execution/idempotent result. Unique constraints [9] plus row locking or conditional updates serialize admission; select-then-insert alone races. At 20/s keep a clear transactional boundary before distributing credits.</p>
-<p>Persist DISPATCH_INTENT before Adapter dispatch and settle only evidence for that attempt. Owner epochs fence local Ledger changes, not remote execution. Crashes between intent and sending remain UNKNOWN; redispatch requires explicit supplier idempotency/result support. POST alone is not retry-safe [8].</p>
-</div></div><h3><span class="lang-zh">三份账如何结算</span> <span class="lang-en">How three accounts remain distinct</span></h3>
-<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>租户累计 quota 是 settled+held：A3 中先hold3,000，最终input2,000、output400，转settled2,400并释放600。结算事件唯一键(rid,attempt,settlement)与余额变更同事务；尾帧重复到达或者回调重投，只返回已经结算的结果。若输入只是估计，就按最终模板/tokenizer给安全裕量并强制请求大小和输出上限；估少了可以补记费用，却不能补救曾越过的硬预算。不能严格上界时就把quota声明为软预算，或者对最坏输入预留。</p>
-<p>短时速率账按入口请求和实际上游 attempt 分开。缓存命中仍消耗入口 RPM，但不 dispatch inference，就不消耗那一次模型调用的供应商额度；语义 embedding 另记。供应商可能按估计值或不同 token 类别限流，本地拿最终usage退租户hold，不意味着供应商窗口也退回来。不要把 Redis 速率预约、DB quota 和供应商账单做成跨库“恰好一次扣款”的承诺；速率预约失败或落盘失败时保守浪费一点瞬时容量，比放出未获准的请求更容易解释。</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>Quota equals settled+held: hold 3,000, settle actual 2,400, release 600. Unique settlement and balance mutation share one transaction. Repeated events reuse the settlement result. Conservative final-input counting and enforced caps are needed for hard budget bounds; later correction cannot undo past overspend.</p>
-<p>Entry rate and upstream attempt rate are separate. Hits consume entry RPM but no inference dispatch; embedding has separate accounting. Releasing local quota does not refund supplier rate windows. Conservative loss of temporary admission credit is preferable to claiming a cross-store exactly-once debit.</p>
-</div></div><h3><span class="lang-zh">流尾丢失，恢复谁来负责</span> <span class="lang-en">Who owns missing stream-tail evidence</span></h3>
-<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>OpenAI 的 Chat Completions 流可以请求 include_usage，最后 usage 包可能在中断/取消时收不到。[1] Adapter 不能把空字段转成0，也不能用收到的chunk数量补一个“精确”usage。Claude 的 message_delta 用量是累计值，直接把每次累计output_tokens求和会重复计费。[3] 适配层保存来源、上游请求id、模型revision和计量类别；客户端服务费与供应商实际支出分开，尤其缓存回放和fallback的失败尝试不能假装是同一条免费调用。</p>
-<p>客户端取消或网关崩溃后，Reconciler 读取未决 attempt，用支持的请求查询/账单导出核对；图上的报告路径是条件能力，并非所有 API 都能按id查usage。没有精确证据则保留provisional估计和争议状态，按已公布的结算规则处理，而不是定时器到点就把hold退干净。恢复租约允许其他进程接手核账，不允许接手重生成；已活跃的流不迁移到另一网关继续拼接。最终usage晚到仍按同一唯一结算键修正，保留估算到权威结果的审计链。</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>OpenAI Chat Completions can request include_usage, but interruption/cancellation can lose the final usage chunk [1]. Missing is not zero, and chunk count is not exact tokens. Claude message_delta usage is cumulative [3], so summing cumulative counts double-charges. Preserve source, upstream request ID, revision and categories; service billing and supplier spend remain separate.</p>
-<p>Reconciler uses supported request/report evidence; not every API offers per-ID usage retrieval. Without evidence retain provisional/disputed accounting under declared rules rather than TTL-refund all holds. Recovery ownership permits reconciliation, not regeneration or live-stream migration. Late authoritative usage amends the same idempotent accounting chain.</p>
-</div></div></section>
+    </figure><h3><span class="lang-zh">预占与 intent 同事务</span><span class="lang-en">Hold and intent share one transaction</span></h3><div class="bilingual"><div class="lang-zh"><p>下面是可运行 Python/SQLite 文件库示例摘录。<code>write_tx</code> 实际执行 BEGIN IMMEDIATE，再 COMMIT/ROLLBACK；条件更新预算、唯一请求、attempt intent 在同一事务。只有 <code>created=True</code> 的原调用者允许发一次网络请求；丢 ACK 后不能凭查询到 intent 再发。SQLite 的写锁跨连接/进程，由数据库实现，粒度比 PG 行锁粗。<a href="#ref-8">[8]</a><a href="#ref-9">[9]</a></p></div><div class="lang-en"><p>This runnable Python/SQLite file-database excerpt uses actual BEGIN IMMEDIATE and COMMIT/ROLLBACK in write_tx. Conditional budget mutation, unique request creation and attempt intent share a transaction. Only the original created=True caller may send once; finding an intent after a lost ACK does not authorize redispatch. SQLite serializes writers across connections/processes at coarser granularity than PG row locks. <a href="#ref-8">[8]</a><a href="#ref-9">[9]</a></p></div></div><pre data-language="Python · SQLite" data-kind="runnable" data-source="ledger.py#reserve"><code>def _hold(db, q, n, pool, bound, owner, price, model):
+    changed = db.execute(&quot;&quot;&quot;UPDATE budgets SET held=held+?
+        WHERE tenant=? AND period=? AND blocked=0
+          AND cap-settled-held&gt;=?&quot;&quot;&quot;,
+        (bound, q[&quot;tenant&quot;], q[&quot;period&quot;], bound)).rowcount
+    if changed != 1:
+        raise Denied(&quot;quota_exhausted&quot;)
+    db.execute(&quot;&quot;&quot;INSERT INTO attempts
+        (tenant,rid,n,pool,price,owner,bound,state,expected_model)
+        VALUES(?,?,?,?,?,?,?,&#x27;INTENT&#x27;,?)&quot;&quot;&quot;,
+        (q[&quot;tenant&quot;], q[&quot;rid&quot;], n, pool, price, owner, bound, model))
+    db.execute(&quot;UPDATE requests SET selected=? WHERE tenant=? AND rid=?&quot;,
+               (n, q[&quot;tenant&quot;], q[&quot;rid&quot;]))
 
-  <section>
-<h2><span class="lang-zh">exact 答案缓存：条件相等，仍要验证</span> <span class="lang-en">Exact answers: matching conditions still require validation</span></h2>
-<figure class="deck">
+
+def reserve_first(db, tenant, rid, digest, period, route, pool,
+                  bound, owner, allow_extra=False, price=&quot;price-v1&quot;, model=None):
+    valid_bound(bound)
+    with write_tx(db):  # BEGIN IMMEDIATE / COMMIT or ROLLBACK
+        q = request(db, tenant, rid)
+        if q:
+            if q[&quot;digest&quot;] != digest:
+                raise Conflict(&quot;rid_body_mismatch&quot;)
+            return {&quot;created&quot;: False, &quot;request&quot;: dict(q)}
+        db.execute(&quot;&quot;&quot;INSERT INTO requests
+            (tenant,rid,digest,period,route,allow_extra)
+            VALUES(?,?,?,?,?,?)&quot;&quot;&quot;,
+            (tenant, rid, digest, period, route, int(allow_extra)))
+        q = request(db, tenant, rid)
+        _hold(db, q, 1, pool, bound, owner, price, model or pool)
+        return {&quot;created&quot;: True, &quot;attempt&quot;: 1, &quot;owner&quot;: owner}</code></pre><div class="bilingual"><div class="lang-zh"><p>并发只剩一份额度时，一个事务赢、另一个连同请求插入一起回滚。a2 的 <code>reserve_fallback</code> 在同一请求行上检查：允许额外费用、a1 已失败、尚未 committed/closed、owner 匹配、selected=1；再独立加 hold、插入 a2、切 selected=2。旧 a1 仍可结算 usage，但不能再交付或关闭 a2。生产移植到 PG 要为请求/attempt/预算选一致的锁顺序，处理唯一冲突、死锁与提交未知；本章未执行 PG。</p></div><div class="lang-en"><p>With one hold left, one transaction wins and the loser rolls back request creation too. reserve_fallback checks extra-cost permission, failed a1, no commitment/closure, matching owner and selected=1 in the same transaction. It adds another hold, inserts a2 and changes selected to 2. Late a1 may settle usage but cannot deliver or close a2. A PG port needs consistent request/attempt/budget lock order plus unique-conflict, deadlock and unknown-commit handling; PG was not executed here.</p></div></div><h3><span class="lang-zh">结算按 attempt 唯一，不按任意事件编号</span><span class="lang-en">Settle once per attempt, not once per arbitrary event ID</span></h3><pre data-language="Python · SQLite" data-kind="runnable" data-source="ledger.py#settle"><code>def settle(db, tenant, rid, n, input_tokens, output_tokens, evidence,
+           *, upstream_id, served_model):
+    # Evidence is final and authenticated by the trusted adapter/reconciler.
+    if any(type(x) is not int or not 0 &lt;= x &lt;= 10**12
+           for x in (input_tokens, output_tokens)) or not evidence:
+        raise ValueError(&quot;final nonnegative usage and evidence required&quot;)
+    with write_tx(db):
+        q, a = request(db, tenant, rid), attempt(db, tenant, rid, n)
+        if not q or not a:
+            raise Denied(&quot;unknown_attempt&quot;)
+        if not a[&quot;upstream_id&quot;] or (upstream_id, served_model) != (
+                a[&quot;upstream_id&quot;], a[&quot;expected_model&quot;]):
+            raise Conflict(&quot;wrong_usage_source&quot;)
+        payload = (input_tokens, output_tokens, evidence)
+        if a[&quot;state&quot;] == &quot;SETTLED&quot;:
+            if payload != (a[&quot;input_tokens&quot;], a[&quot;output_tokens&quot;], a[&quot;evidence&quot;]):
+                raise Conflict(&quot;conflicting_final_usage&quot;)
+            return False
+        actual = input_tokens + output_tokens
+        db.execute(&quot;&quot;&quot;UPDATE budgets SET held=held-?, settled=settled+?,
+            blocked=CASE WHEN ?&gt;? OR settled+?+held-?&gt;cap THEN 1 ELSE blocked END
+            WHERE tenant=? AND period=?&quot;&quot;&quot;,
+            (a[&quot;bound&quot;], actual, actual, a[&quot;bound&quot;], actual, a[&quot;bound&quot;], tenant, q[&quot;period&quot;]))
+        db.execute(&quot;&quot;&quot;UPDATE attempts SET state=&#x27;SETTLED&#x27;,
+            input_tokens=?,output_tokens=?,evidence=?
+            WHERE tenant=? AND rid=? AND n=?&quot;&quot;&quot;,
+            (*payload, tenant, rid, n))
+        return True</code></pre><div class="bilingual"><div class="lang-zh"><p>结算以 (tenant,rid,attempt) 为唯一身份；相同最终证据只返回原结果，冲突 usage 转人工核账，不能换 event id 再扣一次。预留3,000、实际2,400：held 减3,000、settled 加2,400，净可用多600。两次均发生则分别结算，总成本可能4,800。所有晚到记录仍属于原预算周期；不能把月末未决 hold 自动清零。</p><p>本例只接受可信 Adapter/Reconciler 验证的最终 input/output 证据；先将 upstream request id 与 expected served model 绑定到原 attempt，结算再核对，不能把 a1 的 usage 给 a2。价格版本和来源保存在 attempt，费用按类别另算。输入/输出上界若被违反，仍记录真实债务并阻止新工作，不以回滚证据掩盖超额；这暴露前提失效，不能声称硬预算仍成立。provisional 只作未决估算、不冒充最终 settled；需要估算入账的产品要另建可幂等修正的审计链。</p><p>OpenAI Chat Completions 的 include_usage 尾包可能因中断/取消缺失；Claude message_delta 的 usage 是累计值，必须取最终累计值，不能逐条相加。两家速率规则也不同，Claude 分 RPM/ITPM/OTPM。缺 usage 保留 UNKNOWN hold，报告能力存在才按原 attempt 核账；本库 intent 与外部生成无法原子提交，恢复者不盲目重生成。<a href="#ref-1">[1]</a><a href="#ref-3">[3]</a><a href="#ref-4">[4]</a><a href="#ref-7">[7]</a></p></div><div class="lang-en"><p>The unique accounting identity is (tenant,rid,attempt). Identical final evidence returns the prior result; conflicting usage requires review, not another debit under a new event ID. Holding 3,000 then consuming 2,400 subtracts the entire 3,000 hold and adds 2,400 settled, releasing 600 net. Two executed attempts can cost 4,800. Late evidence stays in its original budget period; month boundaries cannot erase pending holds.</p><p>The model accepts only final input/output evidence authenticated by the trusted Adapter/Reconciler. Bind the upstream request ID and expected served model to the original attempt and check them at settlement; a1 usage cannot settle a2. Attempts retain source and price revision; compute currency charges by category separately. If a supposed upper bound is violated, record actual debt and block new work rather than roll back evidence. That invalidates the hard-bound premise. Provisional values remain estimates, not final settled charges; provisional debits need their own idempotent adjustment audit chain.</p><p>Interrupted/cancelled OpenAI Chat Completions may lose the include_usage tail; Claude message_delta usage is cumulative, so take the final cumulative value rather than sum events. Claude separately limits RPM/ITPM/OTPM. Missing usage retains UNKNOWN holds; use supported reports to reconcile the original attempt. Local intent and external generation cannot commit atomically, so recovery never blindly regenerates. <a href="#ref-1">[1]</a><a href="#ref-3">[3]</a><a href="#ref-4">[4]</a><a href="#ref-7">[7]</a></p></div></div></section>
+
+  <section><h2><span class="lang-zh">exact 缓存：键相同，当前授权仍要成立</span><span class="lang-en">Exact cache: matching keys still require current authorization</span></h2><div class="bilingual"><div class="lang-zh"><p><strong>缓存是旧答案的复用许可，不是权限凭证。</strong>键覆盖完整请求、tenant/权限指纹、路由/模型/数据 revision；命中后再验当前访问权、条目完成状态、原过期时间和 served model 资格。若只是别名重指向新版本，旧答案不能混进新契约。</p></div><div class="lang-en"><p><strong>A cache entry is permission to reuse an old answer, not an access credential.</strong> Key the full request, tenant/access scope and route/model/data revisions. Recheck current access, complete state, original expiry and served-model eligibility. Repointing an alias must not mix old answers into a new contract.</p></div></div><figure class="deck">
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d4s1t d4s1d">
           <title id="d4s1t">Build a scoped canonical request key</title>
@@ -740,7 +727,7 @@
           <text x="136" y="330" class="tiny">MISS → independent upstream admission</text>
           <g class="is-new">
             <rect x="550" y="37" width="190" height="20" rx="10" class="badge"/><text x="645" y="51" text-anchor="middle" class="badge-text">publish after COMPLETE</text>
-            <text x="136" y="354" class="tiny">GET / SET share the side path; no partial answer becomes a HIT</text>
+            <text x="136" y="354" class="tiny">GET / SET use the side path; incomplete answers are not reusable</text>
             <text x="770" y="88" class="tiny">TTL: 60 s</text>
             <text x="770" y="110" class="tiny">freshness gate</text>
           </g>
@@ -774,41 +761,20 @@
           <path d="M795 300 L735 300" class="wire reply"/><polygon points="725,300 735,295 735,305" class="head reply"/>
           <text x="136" y="330" class="tiny">MISS → independent upstream admission</text>
           <rect x="550" y="37" width="190" height="20" rx="10" class="badge"/><text x="645" y="51" text-anchor="middle" class="badge-text">publish after COMPLETE</text>
-          <text x="136" y="354" class="tiny">GET / SET share the side path; no partial answer becomes a HIT</text>
+          <text x="136" y="354" class="tiny">GET / SET use the side path; incomplete answers are not reusable</text>
           <text x="770" y="88" class="tiny">TTL: 60 s</text>
           <text x="770" y="110" class="tiny">freshness gate</text>
           <g class="is-new">
             <path d="M550 120 L538 120 Q530 120 530 128 L530 207 Q530 215 522 215 L485 215" class="wire fail"/><polygon points="475,215 485,210 485,220" class="head fail"/>
             <text x="755" y="134" class="tiny">invalid candidate → MISS</text>
-            <text x="136" y="368" class="tiny">HIT preserves an earlier answer; temperature=0 is not byte determinism</text>
+            <text x="136" y="377" class="tiny">HIT reuses an old answer; temperature=0 does not prove identical regeneration</text>
           </g>
         </svg>
         <figcaption><span class="lang-zh">最后把失效画出来：过期、权限变化或版本不合的候选在 LLM GW 被拒绝，再走 miss 路径。exact 表示请求条件相等，不保证模型每次重新生成都逐字相同，也不保证外部知识永远新鲜。</span><span class="lang-en">Reject expired, unauthorized or revision-mismatched candidates at LLM GW and follow the miss path. Exact request equality guarantees neither fresh external knowledge nor byte-identical regeneration.</span></figcaption>
       </div>
-    </figure><h3><span class="lang-zh">完整键与授权的因果关系</span> <span class="lang-en">Why complete keys and authorization matter</span></h3>
-<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>exact 缓存键由canonical全请求、模型/route revision、数据revision、tenant和权限指纹组成。全请求包含system/developer消息、所有历史角色和顺序、tools、tool_choice、response schema、temperature/top_p、输出上限及影响答案的其他字段；不要为了命中率合并字符串空格或删除看似重复的历史。权限指纹可按已批准的共享组构造，个性化路径直接按用户隔离。每次hit仍验证当前权利，权限撤销或策略版本更新使旧条目失去资格；缓存id不可成为绕过授权的凭证。</p>
-<p>别名重指向另一模型却只hash别名，会把旧模型答案复用到新契约。固定revision可收住变化；上游若只提供漂移别名而无法固定实际版本，这条路由就保守禁缓存或通过显式generation切断旧命中。fallback生成的答案写明Backend B，只有后续同样允许B质量的请求才能用。temperature=0也不是逐字确定的证明；调用方允许复用某次历史输出，是独立于“模型再次生成必然相同”的产品选择。</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>Canonicalize the full request without erasing meaningful whitespace/history; include model/route/data revisions and tenant/access scope. Request fields cover messages, tools, schema, sampling and caps. Reauthorize every hit; revoked access invalidates eligibility. Personalized paths isolate users, and cache IDs are not permissions.</p>
-<p>An alias alone can collide across model changes. Pin revisions or disable reuse for drifting aliases. Cached B outputs require B-eligible quality. Reusing an earlier output is an explicit product choice, independent of deterministic regeneration.</p>
-</div></div><h3><span class="lang-zh">写入条件、流式回放与新鲜度</span> <span class="lang-en">Publication, streaming replay and freshness</span></h3>
-<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>命中前要拿到完整entry状态、served model、创建时间与有效版本，验证成功才交付。stream=true仍返回一致的SSE事件形状：新的交付id、按契约重放delta、正确结束与本次usage元数据。原生成prompt/completion计量留在entry审计字段，本次upstream_usage为零不能冒充客户端也免费；客户端收费规则与cache_hit公开。miss结束后，只有完整终止且通过输出格式/任务验证的答案才SET；错误EOF、取消、半个tool JSON和拒绝片段都不能标COMPLETE。</p>
-<p>TTL试60秒是陈旧上界的一部分，不能证明FAQ或外部事实在这分钟不变。数据修订号、提示词revision和授权变化用新键或明确拒绝，已经在传的一条流仍有检查与发送竞争，需要按本产品撤销策略终止，不能宣称瞬时收回已发字节。动态工具结果、实时余额和用户私人内容先bypass；对静态且允许复用的结果才讨论命中率。供应商的prompt caching复用输入前缀计算，[10] 仍然会生成新的输出；它与本节整份答案复用是两层收益。</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>Validate complete state, served model, age and revisions before replay. Stream hits use a new delivery ID, declared delta/terminal/usage semantics and public cache_hit metadata; supplier spend and client pricing differ. Publish only complete, validated results, never error EOF, cancellation or incomplete tool JSON.</p>
-<p>A 60-s trial TTL does not prove facts remain fresh. Data/prompt/access revisions invalidate eligibility; revocation still races already-sent bytes. Bypass dynamic/private actions. Supplier prompt caching reuses input-prefix computation [10], rather than this section’s complete answer.</p>
-</div></div><h3><span class="lang-zh">缓存故障不扩大上游授权</span> <span class="lang-en">Cache failure does not widen origin admission</span></h3>
-<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>缓存lookup有独立短超时，失败当miss；生成仍受Ledger和deployment准入。我们估算故意取全miss，20/s都已经有容量去处，就不把不存在的命中收益花两遍。将来业务拿到实测hit率后可以比较正常成本，但备用配额和故障时的拒绝策略仍按cache全失效验收。热门同键可合并生成，但每个观看者独立鉴权，取消一个等待者不能取消其他人仍要的生成；合并复杂性不应在还没证明热键之前进入第一版。</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>Bound cache lookup separately; misses still require Ledger/deployment admission. All-miss sizing avoids spending hypothetical savings twice. Later measured hit rates reduce normal cost but do not replace cache-loss testing. Hot-key coalescing needs per-watcher authorization and independent cancellation, so defer it until measured demand justifies complexity.</p>
-</div></div></section>
+    </figure><div class="bilingual"><div class="lang-zh"><p>canonical request 保留消息角色/顺序/有意义的空白，含系统提示、历史、tools/tool_choice、schema、采样参数与输出上限。个性化请求按用户隔离，批准的共享组才可共用；权限不可验证就拒绝该候选。60秒 TTL 是陈旧界限的一部分，不保证知识一分钟内不变。撤销与发送有竞争，已发字节无法收回，活跃流按产品策略终止。</p><p>只发布完整终止且通过格式/任务验证的结果，取消、错误 EOF、半段 tool JSON 不标 COMPLETE。stream hit 使用新的交付 id、公开 cache_hit、按契约返回事件；原始生成 usage 与本次 upstream_usage=0 分开，服务收费也另列。缓存服务故障降为 miss，仍受预算/上游准入；实时余额、动态工具动作优先 bypass。供应商 prompt caching 复用输入前缀计算，仍生成新输出，不等于整份答案缓存。<a href="#ref-10">[10]</a></p></div><div class="lang-en"><p>Canonicalization preserves roles, order and meaningful whitespace, including system/history, tools/tool_choice, schema, sampling and caps. Isolate personalized users; share only approved scopes. Unverifiable access rejects a candidate. A 60-second TTL bounds only part of staleness, not knowledge updates. Revocation races sending: already-delivered bytes cannot be recalled, and active streams follow product termination policy.</p><p>Publish only complete, format/task-validated output; cancellation, error EOF and partial tool JSON never become COMPLETE. Hits use a new delivery ID, explicit cache_hit and declared events. Preserve original generation usage separately from this replay’s zero upstream usage and service price. Cache failure becomes a miss under normal budget/provider admission. Bypass live balances and dynamic tool actions. Provider prompt caching reuses input-prefix computation while generating new output; it is a different layer. <a href="#ref-10">[10]</a></p></div></div></section>
 
-  <section>
-<h2><span class="lang-zh">语义复用：相似候选通过哪道门</span> <span class="lang-en">Semantic reuse: the candidate acceptance gate</span></h2>
-<figure class="deck">
+  <section><h2><span class="lang-zh">语义缓存：相似只召回候选</span><span class="lang-en">Semantic cache: similarity recalls candidates</span></h2><div class="bilingual"><div class="lang-zh"><p><strong>默认关闭，只对验收过的 FAQ opt-in。</strong>权限、系统提示/历史、参数、模型/数据/embedding revision 固定为精确 namespace，只对最后一句近似检索。Embedding 本身也要出域授权、配额、费用和 deadline；失败走正常生成。</p></div><div class="lang-en"><p><strong>Default off; opt in only validated FAQ routes.</strong> Freeze access, system/history, parameters and model/data/embedding revisions in an exact namespace. Approximate only final-user text. Embedding also needs residency authorization, quota, cost and deadlines; failure takes normal generation.</p></div></div><figure class="deck">
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s1t d5s1d">
           <title id="d5s1t">Authorize semantic reuse in an exact namespace</title>
@@ -952,32 +918,9 @@
         </svg>
         <figcaption><span class="lang-zh">假设 500 条验证查询有 40 次复用、1 次错答，复用率是 8%，命中内错答率却是 2.5%。按任务风险验收后才能开，不把全请求中 0.2% 的错答稀释成“很安全”。</span><span class="lang-en">In a 500-query toy set, 40 hits give 8% reuse; one wrong hit means 2.5% conditional error. Gate deployment by task risk, not the diluted 0.2% overall error.</span></figcaption>
       </div>
-    </figure><h3><span class="lang-zh">先冻结硬条件，再只放松一处</span> <span class="lang-en">Freeze hard fields before approximating one field</span></h3>
-<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>语义模式必须显式opt-in，第一版只给固定FAQ。沿用exact的权限、模型、系统、历史、参数和数据namespace，把最后一句用户文本换成向量查询；历史不同就不能跨namespace复用。Embedding服务也收到原始文本，受同样出域许可、输入长度、deadline与预算治理。模型revision变化后旧向量不能继续比较，切换namespace并重建；embedding失败直接走正常生成，不能把失败当作“距离无限小”。</p>
-<p>候选entry仍需完整状态、当前授权与新鲜度检查，然后比较任务要求的实体、日期、金额和否定。通用自由文本没有一个规则就能证明两题等价，所以无法验证的路由保持关闭；固定FAQ可绑定同一个已批准问题id与答案revision，再判断改写是否还表达同一意图。工具动作、医疗交易等高风险路径不能把“分数够高”当授权。缓存检索只复用旧答案，没有像RAG那样检索新证据并重新生成，不能借用检索Recall替它证明答对。</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>Opt in fixed FAQ only. Freeze access, model, system/history, parameters and data namespace; vectorize only final-user text. Embedding obeys residency, length, deadline and budget. Embedding changes require a new namespace; dependency failure bypasses reuse.</p>
-<p>Check complete state, authorization, freshness and task-specific entities/dates/amounts/negation. General free text lacks a universal equivalence proof, so keep unvalidated routes off. Approved FAQ IDs/revisions can constrain paraphrase reuse; similarity does not authorize actions, and RAG recall does not prove cached-answer correctness.</p>
-</div></div><h3><span class="lang-zh">删除魔法阈值，画出错答</span> <span class="lang-en">Replace magic thresholds with a wrong-answer example</span></h3>
-<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>图中cosine0.96是假设A11的玩具数。“允许取消订单”和“不允许取消订单”可能很接近，用户意图却相反；金额100与1,000、今天与下个月同样如此。阈值提高可以减少近似命中，却不保证漏网反例为零。不要背0.9当行业正确默认：不同embedding、归一化和score语义不共用这个值。Azure的语义缓存策略甚至规定更低的score-threshold代表更高相似要求，并提供vary-by隔离用户/组；它的参数不是本图cosine的大小方向。[11]</p>
-<p>验收集应包含真实任务、改写、否定、实体变化、权限不同和知识更新，用相同固定版本先生成或标注可接受答案。参数在调参集上选，冻结验证集单独测；不要一边看错答一边把阈值调到刚好过这一批。观察到零错答只说明有限样本里没发现问题，不能报零风险保证。任何scope泄漏都必须计独立的授权失败，不能和语义错答平均成一个漂亮百分比。</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>Toy cosine 0.96 can join opposing cancellation intent; amounts and dates produce similar hazards. Higher thresholds are not zero-error proofs and score meanings differ. Azure’s score-threshold has the opposite direction from cosine and supports user/group vary-by partitioning [11].</p>
-<p>Include paraphrases, negation, entities, access changes and updates under fixed versions. Tune separately from held-out validation; zero observed errors is not a zero-risk guarantee. Report authorization leaks independently rather than dilute them into semantic error averages.</p>
-</div></div><h3><span class="lang-zh">收益必须扣掉 embedding 与错误成本</span> <span class="lang-en">Savings subtract embedding and error cost</span></h3>
-<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>A12的500条查询命中40次，40/500=8%；其中1次错误，1/40=2.5%是命中内错答率。1/500=0.2%是总体错答，两者分母不同。如果任务不接受2.5%的错误复用，这个门就关掉，不能因为92%的请求正常生成把它稀释。每秒20条全部做embedding，而仅8%复用，理想情况下只省1.6次生成/秒，仍有18.4次生成；收益是1.6×单次生成成本减20×embedding成本，再减查cache开销与错误修复代价。这个命中率只是玩具样本，不能代入全站月账单。</p>
-<p>上线先按路由小流量与影子对比，分别记合法命中、拒绝原因、错答与依赖时延。影子生成本身也烧token，必须预算。停止开关应能回到exact或全miss路径；新鲜度和授权gate保持一样。相似度带来的收益需要数据证明，图上最关键的一笔是“拒绝后正常生成”，因为这条路径决定错误候选有没有真的伤到用户。</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>The toy set gives 40/500=8% reuse and 1/40=2.5% wrong hits, versus 1/500=0.2% overall. Reject unacceptable conditional error rather than dilute it. At 20/s, 8% ideally saves 1.6 generations/s while requiring 20 embeddings and 18.4 live generations: subtract embedding, lookup and remediation cost. Do not extrapolate the toy rate to monthly billing.</p>
-<p>Roll out per route with budgeted shadow generation, separate acceptance/rejection/error metrics and a switch back to exact/all-miss. Preserve freshness/access gates. The rejection-to-generation route determines whether a bad candidate reaches users.</p>
-</div></div></section>
+    </figure><div class="bilingual"><div class="lang-zh"><p>cosine=0.96 是玩具分数，不是正确率。“允许取消”与“不允许取消”、100与1,000、今天与下月都可能接近。候选仍验权限、新鲜度、实体/日期/金额/否定，无法验证等价的自由文本保持关闭；固定 FAQ 可绑定同一批准问题 id 与答案 revision。不同 embedding、metric 和 score 方向不共用魔法阈值。</p><p>固定验证集500条、40次复用、1次错答：复用8%，命中内错答1/40=2.5%，总体1/500=0.2%不能替代前者。20/s全做 embedding 时，理想仅省1.6次生成/s，仍有18.4次生成/s；净收益=1.6×生成成本−20×embedding成本−查询与修错成本。授权泄漏独立计数；调参与验证分离，影子生成也预算，开关退回 exact/all miss。</p></div><div class="lang-en"><p>Toy cosine 0.96 is not correctness. Opposing cancellation intent, 100 versus 1,000 and today versus next month may be close. Recheck authorization, freshness, entities, dates, amounts and negation. Keep unvalidated free-text equivalence off; fixed FAQs can bind an approved question ID and answer revision. Different embeddings, metrics and score directions share no magic threshold.</p><p>In 500 frozen validation queries with 40 reuses and one error, reuse is 8% and conditional wrong-hit rate is 1/40=2.5%; overall 1/500=0.2% cannot replace it. At 20/s with embeddings for all, ideal savings are only 1.6 generations/s while 18.4/s still generate. Net value subtracts twenty embeddings/s, lookup and remediation cost. Track access leaks separately; separate tuning from validation, budget shadow generation and retain an exact/all-miss switch.</p></div></div></section>
 
-  <section>
-<h2><span class="lang-zh">SSE 与恢复：已提交的流如何结束</span> <span class="lang-en">SSE and recovery: ending a committed stream</span></h2>
-<figure class="deck">
+  <section><h2><span class="lang-zh">SSE：提交屏障、有界转发与终止</span><span class="lang-en">SSE: commitment barrier, bounded forwarding and termination</span></h2><div class="bilingual"><div class="lang-zh"><p><strong>首文字 token 不是边界，公共响应提交才是。</strong>Ledger 中的 selected attempt/owner 与 COMMITTED 必须一起判断；fallback 用同一行事务切 selected。先持久提交、后发头，崩溃会保守拒绝本来还没发出的重试；反过来先发头再记账，会让恢复者误以为还能重生成。</p></div><div class="lang-en"><p><strong>First text is not the boundary; public response commitment is.</strong> Check selected attempt/owner with COMMITTED in Ledger; fallback changes selected through the same row transaction. Persist before headers: a crash may conservatively reject an unsent retry. Headers-before-record can falsely authorize regeneration after partial delivery.</p></div></div><figure class="deck">
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d6s1t d6s1d">
           <title id="d6s1t">POST with an event stream is the public transport</title>
@@ -1026,7 +969,7 @@
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d6s3t d6s3d">
           <title id="d6s3t">Persist a conservative barrier before sending headers</title>
-          <desc id="d6s3d">LLM GW CASes the committed flag in Ledger before sending public headers or events, and receives the Ledger acknowledgment. After this durable barrier, the execution cannot be automatically replaced; a crash between flag and actual send remains conservatively committed.</desc>
+          <desc id="d6s3d">LLM GW conditionally commits the selected attempt and owner in Ledger before public headers or events, and receives the Ledger acknowledgment; fallback changes the same request row. After this durable barrier, the execution cannot be automatically replaced; a crash between flag and actual send remains conservatively committed.</desc>
           <path d="M128 400 L144 400" class="wire"/><polygon points="154,400 144,405 144,395" class="head"/><text x="160" y="404" class="tiny">request</text><path d="M228.8 400 L244.8 400" class="wire reply"/><polygon points="254.8,400 244.8,405 244.8,395" class="head reply"/><text x="260.8" y="404" class="tiny">reply</text><path d="M316.8 400 L332.8 400" class="wire async"/><polygon points="342.8,400 332.8,405 332.8,395" class="head async"/><text x="348.8" y="404" class="tiny">async</text><path d="M404.8 400 L420.8 400" class="wire fail"/><polygon points="430.8,400 420.8,405 420.8,395" class="head fail"/><text x="436.8" y="404" class="tiny">failure / fallback</text>
           <rect x="120" y="24" width="824" height="360" rx="18" class="boundary"/><text x="136" y="46" class="tiny">SSE · bounded forwarding / commit barrier / abort</text>
           <circle cx="44" cy="151" r="12" class="box"/><path d="M24 197 Q44 165 64 197" class="wire"/><text x="44" y="219" text-anchor="middle" class="label">Client</text>
@@ -1045,14 +988,14 @@
           <path d="M795 184 L735 184" class="wire reply"/><polygon points="725,184 735,179 735,189" class="head reply"/>
           <text x="136" y="105" class="tiny">chunks ≠ tokens; parser carries incomplete events across network reads</text>
           <g class="is-new">
-            <path d="M315 275 V335 A85 12 0 0 0 485 335 V275" class="store"/><ellipse cx="400" cy="275" rx="85" ry="12" class="store"/><text x="400" y="315" text-anchor="middle" class="label">Ledger</text><text x="400" y="333" text-anchor="middle" class="sub">committed flag</text>
+            <path d="M315 275 V335 A85 12 0 0 0 485 335 V275" class="store"/><ellipse cx="400" cy="275" rx="85" ry="12" class="store"/><text x="400" y="309" text-anchor="middle" class="label">Ledger</text><text x="400" y="334" text-anchor="middle" class="sub">selected + commit</text>
             <path d="M365 210 L365 227 Q365 235 357 235 L288 235 Q280 235 280 243 L280 287 Q280 295 288 295 L305 295" class="wire"/><polygon points="315,295 305,300 305,290" class="head"/><text x="270" y="277" text-anchor="end" class="tiny">CAS</text>
             <path d="M485 315 L507 315 Q515 315 515 307 L515 243 Q515 235 507 235 L442.5 235 Q435 235 435 227.5 L435 220" class="wire reply"/><polygon points="435,210 440,220 430,220" class="head reply"/>
-            <text x="550" y="277" class="tiny">COMMITTED → no model replacement</text>
+            <text x="550" y="277" class="tiny">selected owner + COMMITTED → no replacement</text>
             <text x="550" y="300" class="tiny">Crash before actual flush still prohibits replay</text>
           </g>
         </svg>
-        <figcaption><span class="lang-zh">发公共响应头之前先持久标记 COMMITTED。记录和网络不能原子提交，先记可产生“记录已提交、字节还没发”的保守窗口；宁可显式失败，也不在恢复后拼上另一模型的流。</span><span class="lang-en">Persist COMMITTED before public headers. The flag and network send are not atomic: a crash can conservatively mark unsent bytes committed. Recovery reports failure rather than splice another model stream.</span></figcaption>
+        <figcaption><span class="lang-zh">发公共响应头之前按 selected attempt/owner 条件持久标记 COMMITTED，与 fallback 的同一请求行事务互斥。记录和网络不能原子提交，先记可产生“记录已提交、字节还没发”的保守窗口；宁可显式失败，也不在恢复后拼上另一模型的流。</span><span class="lang-en">Persist COMMITTED for the selected attempt/owner before public headers, mutually exclusive with fallback on the same request row. The flag and network send are not atomic: a crash can conservatively mark unsent bytes committed. Recovery reports failure rather than splice another model stream.</span></figcaption>
       </div>
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d6s4t d6s4d">
@@ -1075,10 +1018,10 @@
           <path d="M725 166 L785 166" class="wire"/><polygon points="795,166 785,171 785,161" class="head"/><text x="760" y="158" text-anchor="middle" class="tiny">invoke</text>
           <path d="M795 184 L735 184" class="wire reply muted"/><polygon points="725,184 735,179 735,189" class="head reply muted"/>
           <text x="136" y="105" class="tiny">chunks ≠ tokens; parser carries incomplete events across network reads</text>
-          <path d="M315 275 V335 A85 12 0 0 0 485 335 V275" class="store"/><ellipse cx="400" cy="275" rx="85" ry="12" class="store"/><text x="400" y="315" text-anchor="middle" class="label">Ledger</text><text x="400" y="333" text-anchor="middle" class="sub">committed flag</text>
+          <path d="M315 275 V335 A85 12 0 0 0 485 335 V275" class="store"/><ellipse cx="400" cy="275" rx="85" ry="12" class="store"/><text x="400" y="309" text-anchor="middle" class="label">Ledger</text><text x="400" y="334" text-anchor="middle" class="sub">selected + commit</text>
           <path d="M365 210 L365 227 Q365 235 357 235 L288 235 Q280 235 280 243 L280 287 Q280 295 288 295 L305 295" class="wire"/><polygon points="315,295 305,300 305,290" class="head"/><text x="270" y="277" text-anchor="end" class="tiny">CAS</text>
           <path d="M485 315 L507 315 Q515 315 515 307 L515 243 Q515 235 507 235 L442.5 235 Q435 235 435 227.5 L435 220" class="wire reply"/><polygon points="435,210 440,220 430,220" class="head reply"/>
-          <text x="550" y="277" class="tiny">COMMITTED → no model replacement</text>
+          <text x="550" y="277" class="tiny">selected owner + COMMITTED → no replacement</text>
           <text x="550" y="300" class="tiny">Crash before actual flush still prohibits replay</text>
           <g class="is-new">
             <path d="M795 184 L735 184" class="wire fail"/><polygon points="725,184 735,179 735,189" class="head fail"/>
@@ -1111,10 +1054,10 @@
           <path d="M725 166 L785 166" class="wire muted"/><polygon points="795,166 785,171 785,161" class="head muted"/><text x="760" y="158" text-anchor="middle" class="tiny">invoke</text>
           <path d="M795 184 L735 184" class="wire reply muted"/><polygon points="725,184 735,179 735,189" class="head reply muted"/>
           <text x="136" y="105" class="tiny">chunks ≠ tokens; parser carries incomplete events across network reads</text>
-          <path d="M315 275 V335 A85 12 0 0 0 485 335 V275" class="store"/><ellipse cx="400" cy="275" rx="85" ry="12" class="store"/><text x="400" y="315" text-anchor="middle" class="label">Ledger</text><text x="400" y="333" text-anchor="middle" class="sub">committed flag</text>
+          <path d="M315 275 V335 A85 12 0 0 0 485 335 V275" class="store"/><ellipse cx="400" cy="275" rx="85" ry="12" class="store"/><text x="400" y="309" text-anchor="middle" class="label">Ledger</text><text x="400" y="334" text-anchor="middle" class="sub">selected + commit</text>
           <path d="M365 210 L365 227 Q365 235 357 235 L288 235 Q280 235 280 243 L280 287 Q280 295 288 295 L305 295" class="wire"/><polygon points="315,295 305,300 305,290" class="head"/><text x="270" y="277" text-anchor="end" class="tiny">CAS</text>
           <path d="M485 315 L507 315 Q515 315 515 307 L515 243 Q515 235 507 235 L442.5 235 Q435 235 435 227.5 L435 220" class="wire reply"/><polygon points="435,210 440,220 430,220" class="head reply"/>
-          <text x="550" y="277" class="tiny">COMMITTED → no model replacement</text>
+          <text x="550" y="277" class="tiny">selected owner + COMMITTED → no replacement</text>
           <text x="550" y="300" class="tiny">Crash before actual flush still prohibits replay</text>
           <path d="M795 184 L735 184" class="wire fail"/><polygon points="725,184 735,179 735,189" class="head fail"/>
           <path d="M600 184 L485 184" class="wire fail"/><polygon points="475,184 485,179 485,189" class="head fail"/>
@@ -1122,11 +1065,11 @@
           <path d="M135 184 L80 184" class="wire fail"/><polygon points="70,184 80,179 80,189" class="head fail"/>
           <text x="550" y="325" class="tiny">after headers: stream error / EOF, never 503 or success DONE</text>
           <g class="is-new">
-            <path d="M70 166 L125 166" class="wire fail"/><polygon points="135,166 125,171 125,161" class="head fail"/><text x="89" y="158" text-anchor="middle" class="tiny">POST</text>
-            <path d="M235 166 L315 166" class="wire fail"/><polygon points="325,166 315,171 315,161" class="head fail"/><text x="280" y="158" text-anchor="middle" class="tiny">model alias</text>
-            <path d="M475 166 L590 166" class="wire fail"/><polygon points="600,166 590,171 590,161" class="head fail"/><text x="537.5" y="158" text-anchor="middle" class="tiny">one attempt</text>
-            <path d="M725 166 L785 166" class="wire fail"/><polygon points="795,166 785,171 785,161" class="head fail"/><text x="760" y="158" text-anchor="middle" class="tiny">invoke</text>
-            <text x="550" y="252" class="tiny">Cancel → abort upstream; unresolved holds remain</text>
+            <path d="M70 166 L125 166" class="wire fail"/><polygon points="135,166 125,171 125,161" class="head fail"/>
+            <path d="M235 166 L315 166" class="wire fail"/><polygon points="325,166 315,171 315,161" class="head fail"/>
+            <path d="M475 166 L590 166" class="wire fail"/><polygon points="600,166 590,171 590,161" class="head fail"/>
+            <path d="M725 166 L785 166" class="wire fail"/><polygon points="795,166 785,171 785,161" class="head fail"/>
+            <text x="550" y="252" class="tiny">Cancel → best-effort abort; UNKNOWN stays held</text>
           </g>
         </svg>
         <figcaption><span class="lang-zh">再画反向的取消意图：Client → Edge → LLM GW → Adapter → Backend A。它和上一帧上游故障是两种事故；abort 尽力停止继续烧 token，未决 usage 仍走上一组核账。</span><span class="lang-en">Cancellation travels Client → Edge → LLM GW → Adapter → Backend A, an alternative to backend failure. Best-effort abort stops future work where possible; unresolved usage still requires reconciliation.</span></figcaption>
@@ -1152,21 +1095,21 @@
           <path d="M725 166 L785 166" class="wire muted"/><polygon points="795,166 785,171 785,161" class="head muted"/><text x="760" y="158" text-anchor="middle" class="tiny">invoke</text>
           <path d="M795 184 L735 184" class="wire reply muted"/><polygon points="725,184 735,179 735,189" class="head reply muted"/>
           <text x="136" y="105" class="tiny">chunks ≠ tokens; parser carries incomplete events across network reads</text>
-          <path d="M315 275 V335 A85 12 0 0 0 485 335 V275" class="store"/><ellipse cx="400" cy="275" rx="85" ry="12" class="store"/><text x="400" y="315" text-anchor="middle" class="label">Ledger</text><text x="400" y="333" text-anchor="middle" class="sub">committed flag</text>
+          <path d="M315 275 V335 A85 12 0 0 0 485 335 V275" class="store"/><ellipse cx="400" cy="275" rx="85" ry="12" class="store"/><text x="400" y="309" text-anchor="middle" class="label">Ledger</text><text x="400" y="334" text-anchor="middle" class="sub">selected + commit</text>
           <path d="M365 210 L365 227 Q365 235 357 235 L288 235 Q280 235 280 243 L280 287 Q280 295 288 295 L305 295" class="wire"/><polygon points="315,295 305,300 305,290" class="head"/><text x="270" y="277" text-anchor="end" class="tiny">CAS</text>
           <path d="M485 315 L507 315 Q515 315 515 307 L515 243 Q515 235 507 235 L442.5 235 Q435 235 435 227.5 L435 220" class="wire reply"/><polygon points="435,210 440,220 430,220" class="head reply"/>
-          <text x="550" y="277" class="tiny">COMMITTED → no model replacement</text>
+          <text x="550" y="277" class="tiny">selected owner + COMMITTED → no replacement</text>
           <text x="550" y="300" class="tiny">Crash before actual flush still prohibits replay</text>
           <path d="M795 184 L735 184" class="wire fail"/><polygon points="725,184 735,179 735,189" class="head fail"/>
           <path d="M600 184 L485 184" class="wire fail"/><polygon points="475,184 485,179 485,189" class="head fail"/>
           <path d="M325 184 L245 184" class="wire fail"/><polygon points="235,184 245,179 245,189" class="head fail"/>
           <path d="M135 184 L80 184" class="wire fail"/><polygon points="70,184 80,179 80,189" class="head fail"/>
           <text x="550" y="325" class="tiny">after headers: stream error / EOF, never 503 or success DONE</text>
-          <path d="M70 166 L125 166" class="wire fail"/><polygon points="135,166 125,171 125,161" class="head fail"/><text x="89" y="158" text-anchor="middle" class="tiny">POST</text>
-          <path d="M235 166 L315 166" class="wire fail"/><polygon points="325,166 315,171 315,161" class="head fail"/><text x="280" y="158" text-anchor="middle" class="tiny">model alias</text>
-          <path d="M475 166 L590 166" class="wire fail"/><polygon points="600,166 590,171 590,161" class="head fail"/><text x="537.5" y="158" text-anchor="middle" class="tiny">one attempt</text>
-          <path d="M725 166 L785 166" class="wire fail"/><polygon points="795,166 785,171 785,161" class="head fail"/><text x="760" y="158" text-anchor="middle" class="tiny">invoke</text>
-          <text x="550" y="252" class="tiny">Cancel → abort upstream; unresolved holds remain</text>
+          <path d="M70 166 L125 166" class="wire fail"/><polygon points="135,166 125,171 125,161" class="head fail"/>
+          <path d="M235 166 L315 166" class="wire fail"/><polygon points="325,166 315,171 315,161" class="head fail"/>
+          <path d="M475 166 L590 166" class="wire fail"/><polygon points="600,166 590,171 590,161" class="head fail"/>
+          <path d="M725 166 L785 166" class="wire fail"/><polygon points="795,166 785,171 785,161" class="head fail"/>
+          <text x="550" y="252" class="tiny">Cancel → best-effort abort; UNKNOWN stays held</text>
           <g class="is-new">
             <text x="550" y="347" class="tiny">assumption: 8.48 s ≈ 8.5; 20×8.48 ≈ 170 streams</text>
             <text x="550" y="368" class="tiny">200×64 KiB = 12.5 MiB; stalled client abort after 10 s</text>
@@ -1174,62 +1117,51 @@
         </svg>
         <figcaption><span class="lang-zh">首 token 后 399 个间隔：399/50+0.5=8.48 秒≈8.5 秒，20×8.48=169.6≈170 条并发只是稳定均值。准入上限设 200、每流缓冲封顶 64 KiB，缓冲合计≤12.5 MiB；写堵塞 10 秒 abort，尾延迟与故障幸存容量仍须另测。</span><span class="lang-en">After the first token, 399/50+0.5=8.48 s≈8.5 s implies 169.6≈170 mean streams. A 200-stream cap and 64-KiB buffers bound buffering to 12.5 MiB; abort after 10 s stalled writes. Measure tails and survivor capacity separately.</span></figcaption>
       </div>
-    </figure><h3><span class="lang-zh">事件转换、首响应与不可拼流</span> <span class="lang-en">Events, first response and no stream splicing</span></h3>
-<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>POST的客户端用fetch或SDK读取text/event-stream；原生EventSource的接口不能承载这份POST正文。[7] 网络chunk可能切开UTF-8字符和一个JSON事件，Adapter先做增量解码/事件拼接再转换，不能按一次read当一个token。相同schema透传也要保留完整事件界限；跨协议翻译要映射角色、文本、工具片段、错误、usage与终止。Claude有命名事件和流内error，[3] OpenAI的delta与usage形状不同，缺失的能力要显式拒绝而不是抹成空字符串。</p>
-<p>LLM GW在发公共响应头之前先CAS持久COMMITTED标记。CAS到flush之间可能崩溃，这会保守地禁止本来还没发到客户端的请求重试；反过来先发再记，会给恢复者留下“看似未提交、实际已发半条”的危险窗口。任何公开头、角色事件或心跳都算提交，客户端还没看见文字也不能换模型。一旦提交，上游故障只能沿Adapter→LLM GW→Edge→Client回错误事件或异常EOF，不能改成HTTP503、补成功[DONE]或将两家答案连成一句。</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>Use fetch/SDK for POST event-stream responses; native EventSource does not carry this POST body [7]. Incrementally decode UTF-8 and assemble events across network reads. Translate roles, text/tools, errors, usage and termination; Claude named/error events [3] differ from OpenAI chunks.</p>
-<p>CAS durable COMMITTED before public headers. A crash before flush conservatively prohibits retry; send-before-record risks reexecution after partial delivery. Headers, roles and heartbeats all commit. Later failure returns a declared error/EOF through every hop, never HTTP 503, successful DONE or spliced model output.</p>
-</div></div><h3><span class="lang-zh">取消、缓冲与连接容量</span> <span class="lang-en">Cancellation, buffers and connection capacity</span></h3>
-<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>Client断开后Edge取消网关请求，网关取消Adapter，再取消Backend A。取消尽力而为：在途计算可能继续一会，已经产生的usage仍要记账。写下游慢时把每流可积压字节封顶64 KiB，读上游受背压约束；如果HTTP库偷偷把后续流全部读进内存，外层buffer上限没有意义。10秒写堵塞就abort，断开客户端并记明确终止原因，不能无限缓存几分钟的输出。心跳只维持连接活性，不证明模型有进度；首响应、总生成、空闲读和写堵塞使用不同deadline。</p>
-<p>按A8，首token已在0.5秒出现，后面399个间隔是399/50=7.98秒；总时长0.5+7.98=8.48秒，粗估约8.5秒，每秒20次得到20×8.48=169.6，约170条平均并发。这个除法假设输出类别与速率口径一致，不适用于隐藏推理很多的路由；尾部与故障时实际占用要压测。设200条准入上限时，200×64×1,024=13,107,200 B=12.5 MiB，仅是缓冲，不含TLS、socket、SDK对象和缓存答案。增加网关副本能分摊连接，上游共享并发总额度不能跟着复制；满了在提交前拒绝，慢流结束才释放物理连接额度，UNKNOWN quota另由核账释放。</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>Disconnect cancellation propagates Edge → LLM GW → Adapter → Backend A best effort; in-flight work may still cost tokens. Bound each stream to 64 KiB across libraries, propagate backpressure and abort after ten seconds stalled writes. Heartbeats prove connection liveness, not model progress; distinguish first-response, total, idle-read and blocked-write deadlines.</p>
-<p>The first token arrives at 0.5 s; 399 subsequent intervals take 399/50=7.98 s, giving 8.48 s≈8.5 s and 20×8.48=169.6≈170 mean streams. Hidden reasoning and tail/failure occupancy need measurement. 200×64×1,024=13,107,200 B=12.5 MiB bounds buffers only. Gateway replicas share upstream admission; connection release is separate from unresolved quota.</p>
-</div></div><h3><span class="lang-zh">验收与口述收尾</span> <span class="lang-en">Acceptance and interview close</span></h3>
-<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>故障演练至少覆盖：两台网关同rid、余额刚够一个请求时的竞争、intent后崩溃、上游成功回包丢失、尾usage缺失、重复结算、已发头后429、慢客户端、缓存权限撤销、模型revision切换和共享配额同时耗尽。每种都看客户端实际收到什么、attempt是否又dispatch、hold是否仍可追踪、实际费用是否重复。指标分入口请求与上游attempt，记录requested alias、served model、route revision、cache类型、排队/首事件/结束时延和UNKNOWN年龄；默认日志不存完整prompt及凭证，调试采样按任务权限治理。</p>
-<p>收尾沿六个末帧说：统一入口后先按能力与权限选池，2.88M实际TPM和3.6M预留分开；Ledger先意图后dispatch，usage落账只结一次，UNKNOWN有恢复者。exact验证完整条件，语义相似只拿候选，拒绝走正常生成；首响应提交前可试允许的备用，提交后只能终止原流。最后170并发是均值、12.5 MiB是buffer边界，备用质量与幸存吞吐都须验证。这些路径讲清之后，再决定是否加入更多后端、队列和复用复杂度。</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>Exercise duplicate rid, concurrent last-budget admission, post-intent crashes, lost successful replies, missing/repeated usage, post-header errors, slow clients, revocation, revisions and shared-capacity failure. Observe actual delivery, dispatch count, traceable holds and charges. Separate entry/attempt metrics and record route/model/reuse/timing/UNKNOWN age without default prompt or credential logging.</p>
-<p>Close on the six final frames: capability/access routing; separate 2.88M actual and 3.6M reserved TPM; intent-before-dispatch, one settlement and owned UNKNOWN recovery; validated exact reuse and gated semantic candidates; permitted precommit fallback and terminal postcommit errors. Mean 170 concurrency and a 12.5-MiB buffer bound do not prove quality or survivor throughput.</p>
-</div></div></section>
+    </figure><div class="bilingual"><div class="lang-zh"><p>可运行示例的 <code>claim_commit</code> 实际条件更新为：selected=n、owner匹配、未提交/关闭、attempt未失败。它与 fallback 竞争最多一方获准，晚到 a1 只能补 usage。查询到 COMMITTED 或提交 ACK 未知不等于允许重新 flush；示例没有流迁移、owner接管或持久 token 日志。Edge 必须在屏障前禁止提前200/心跳。</p></div><div class="lang-en"><p>The runnable model’s claim_commit condition requires selected=n, matching owner, no commitment/closure and a nonfailed attempt. It competes with fallback so at most one path wins. Late a1 can only report usage. Observing COMMITTED or an unknown commit ACK does not authorize another flush. There is no stream migration, owner takeover or durable token log in the model. Edge must suppress early 200/heartbeats until the barrier.</p></div></div><pre data-language="Pseudocode · SSE" data-kind="pseudocode" data-source="stream.pseudo"><code># Pseudocode. Awaited writes propagate backpressure; no SDK prefetch.
+# Bounded parser/read/encoded-event payloads each &lt;=16 KiB; total budget &lt;=64 KiB.
+for event in bounded_utf8_sse(upstream, read_cap=16KiB, event_cap=16KiB):
+    require absolute_deadline_not_expired and idle_read_deadline_not_expired
+    normalized = Adapter.translate(event, encoded_cap=16KiB)
+    if normalized.final_usage:
+        require usage_source_matches(attempt, upstream_request_id, served_model)
+        Ledger.settle(attempt, authenticated_usage)     # survives old-attempt arrival
+    if normalized.error: raise trusted_Adapter_classification(normalized)
+    if normalized.success_terminal:
+        require validated_complete_output
+    if normalized.public_output:
+        if not locally_committed:
+            won = Ledger.claim_commit(rid, attempt.number, attempt.owner)
+            if not won: abort_upstream(); stop         # stale/unknown ACK: never send
+            locally_committed = true
+            Edge.begin_headers()                      # Edge sends no earlier heartbeat
+        await Edge.write_all(normalized, blocked_write_limit=10s)
+require valid_protocol_terminal and validated_complete_output
+Ledger.close_if_selected(rid, attempt.number, attempt.owner)
+AnswerCache.publish_if_reuse_authorized(complete_answer)
 
-  <section>
-<h2><span class="lang-zh">八个翻车点</span> <span class="lang-en">Eight failure claims</span></h2>
-<table><thead><tr><th><span class="lang-zh">翻车说法</span> <span class="lang-en">Failure claim</span></th><th><span class="lang-zh">改成可以验收的边界</span> <span class="lang-en">Testable boundary</span></th></tr>
-</thead><tbody><tr><td><span class="lang-zh">“只按20 QPS买容量”</span> <span class="lang-en">“Size by 20 QPS only”</span></td><td><span class="lang-zh">全miss实际2.88M TPM；预留3.6M；170均值并发另计</span> <span class="lang-en">2.88M actual TPM, 3.6M reserved, and 170 mean streams</span></td></tr>
-<tr><td><span class="lang-zh">“input+max输出就是所有上游TPM”</span> <span class="lang-en">“Input+cap is every supplier TPM rule”</span></td><td><span class="lang-zh">它是本章quota预留；上游适配RPM/TPM/ITPM/OTPM</span> <span class="lang-en">Our quota reservation; adapt supplier rate semantics</span></td></tr>
-<tr><td><span class="lang-zh">“备用更便宜就可兜底”</span> <span class="lang-en">“Cheaper means eligible fallback”</span></td><td><span class="lang-zh">先验权限、地域、能力、上下文与余量；记served model</span> <span class="lang-en">Validate scope, region, capabilities, context and capacity; record served model</span></td></tr>
-<tr><td><span class="lang-zh">“首token前换池总安全”</span> <span class="lang-en">“Before first text token is always safe”</span></td><td><span class="lang-zh">公共头/角色/心跳也算提交；未知执行可能收费</span> <span class="lang-en">Headers/role/heartbeat commit; unknown execution may cost</span></td></tr>
-<tr><td><span class="lang-zh">“取消或hold TTL到期就退款”</span> <span class="lang-en">“Cancel or hold TTL means refund”</span></td><td><span class="lang-zh">取消不证明usage；UNKNOWN持久保留并核账</span> <span class="lang-en">Cancellation does not prove usage; preserve and reconcile UNKNOWN</span></td></tr>
-<tr><td><span class="lang-zh">“exact保证正确又新鲜”</span> <span class="lang-en">“Exact guarantees correct fresh answers”</span></td><td><span class="lang-zh">完整请求、权限/revision和任务复用许可；COMPLETE才回填</span> <span class="lang-en">Full request/access/revisions and reuse permission; publish COMPLETE only</span></td></tr>
-<tr><td><span class="lang-zh">“相似0.9以上天然安全”</span> <span class="lang-en">“Similarity above 0.9 is inherently safe”</span></td><td><span class="lang-zh">metric方向和样本要校准；40命中1错是2.5%</span> <span class="lang-en">Calibrate metric and data; one wrong in forty hits is 2.5%</span></td></tr>
-<tr><td><span class="lang-zh">“SSE断了回503或拼备用”</span> <span class="lang-en">“503 or fallback splicing fixes broken SSE”</span></td><td><span class="lang-zh">已发头后错误事件/异常EOF；不伪造成功或缓存半答</span> <span class="lang-en">After headers use error/EOF; never false success or partial cache</span></td></tr>
-</tbody></table></section>
+on timeout, disconnect, oversized_event, parse_error, classified_upstream_failure:
+    abort_upstream_best_effort()
+    Ledger.mark_failure(attempt, UNKNOWN_unless_proven_otherwise)
+    if locally_committed:
+        send_declared_error_if_writable_or_close_EOF()   # no success DONE, no fallback
+        Ledger.close_if_selected(rid, attempt.number, attempt.owner)
+    else if failure_class in {RATE_TRANSIENT, SERVER_TRANSIENT, DISPATCH_TIMEOUT}
+            and policy_allows_extra_cost and deadline_remains:
+        acquire_backup_rate_and_concurrency_permit()
+        created = Ledger.reserve_fallback(rid, failed_owner, backup, new_bound, new_owner)
+        # Same request-row transaction excludes commitment; UNKNOWN a1 stays held.
+        if created: dispatch_a2_once()                # &lt;=2 total; no deadline reset
+        else: stop_and_recover_status()                # denial/unknown ACK never dispatches
+    else:
+        Ledger.close_if_selected(rid, attempt.number, attempt.owner)
+        return_precommit_error()
+# Local socket closure does not prove remote work stopped: retain UNKNOWN usage/slot.
+# Cost uncertainty is separate from failure_class. Never fallback on disconnect,
+# blocked write, parser/oversize/schema failure, access denial or safety refusal.</code></pre><div class="bilingual"><div class="lang-zh"><p>这是协议伪代码，未运行网络流。每次写完才读下一事件，16 KiB 的读块/单事件/编码输出限制与无预取合起来约束 ≤64 KiB 的应用载荷缓冲；超大事件拒绝，不能先分配整段再检查。TLS/socket、对象和整份缓存答案另计，真实 HTTP 库必须验证不会偷偷攒流。UTF-8 与 SSE 事件可跨网络 read，不能把 chunk 当 token。POST 用 fetch/SDK，原生 EventSource 不承载该正文；Claude 命名/流内 error 与 OpenAI 形状分别适配。<a href="#ref-1">[1]</a><a href="#ref-3">[3]</a><a href="#ref-6">[6]</a></p><p>公共头、role、heartbeat 或成功终止事件都先过同一屏障。提交后失败只能错误事件/异常 EOF，不改503、不补成功 DONE、不缓存半答。可否备用由可信 Adapter 的错误分类决定，与成本 UNKNOWN 分开；仅暂时限流/服务器故障/发送后超时入白名单，取消、写堵塞、解析/超大事件、schema、权限与安全拒绝都不换池。读空闲、首响应、总时长和写堵塞分别设 deadline；写堵塞10s或客户端断开向上游尽力取消。取消不证明远端停止，也不退 UNKNOWN hold；本地连接资源关闭后可释放，本地复制的远端并发额度要等终态证据或保守隔离，不能立即当空槽复用。</p><p>A8 在同一稳态边界取被接纳完成率20/s：首token0.5s，后399个间隔/50=7.98s，总8.48s，L=20×8.48=169.6≈170条平均流。200×64KiB=13,107,200B=12.5MiB只是缓冲上限，不证明尾延迟或故障幸存容量。输出 usage 可包括不可见 token，不能用客户端字数结算。<a href="#ref-5">[5]</a></p></div><div class="lang-en"><p>This protocol pseudocode did not run a network stream. Await each write before reading the next event. A 16-KiB read/event/encoded-output cap plus no prefetch bounds application payload buffers to at most 64 KiB. Reject oversized events before allocation. TLS/socket buffers, objects and complete cached answers are extra; verify the actual HTTP library does not accumulate output. Incrementally decode UTF-8 and SSE across reads; chunks are not tokens. Use fetch/SDK for POST; native EventSource cannot carry that body. Adapt Claude named/in-stream error events separately from OpenAI shapes. <a href="#ref-1">[1]</a><a href="#ref-3">[3]</a><a href="#ref-6">[6]</a></p><p>Headers, roles, heartbeats and successful terminal events all pass the same barrier. Postcommit failure uses error/EOF, never 503, false success DONE or partial cache publication. Trusted Adapter failure classification is separate from cost uncertainty: only transient limits/server errors or dispatch timeout permit fallback. Disconnects, blocked writes, parsing/oversize/schema failures, access denials and safety refusals do not. Separate idle-read, first-response, total and blocked-write deadlines. Ten-second blocked writes or disconnection trigger best-effort cancellation. Cancellation proves neither remote completion nor a quota refund. Closed local connections release local resources; remote concurrency credit waits for terminal evidence or conservative quarantine.</p><p>A8 uses twenty admitted completions/s at the same steady boundary: first token at 0.5s plus 399/50=7.98s gives 8.48s; L=20×8.48=169.6≈170 mean streams. 200×64KiB=13,107,200B=12.5MiB bounds buffering, not tails or survivor capacity. Output usage may include invisible tokens, so visible character counts cannot settle it. <a href="#ref-5">[5]</a></p></div></div></section>
 
-  <section>
-<h2><span class="lang-zh">引用与延伸</span> <span class="lang-en">References and follow-ups</span></h2>
-<div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p>
-<p>Adapter把本章的输出硬上限映射到供应商支持的字段；例如OpenAI的max_completion_tokens包含可见输出和推理token，旧max_tokens不能当作所有模型通用参数。[6] 文内数字均来自A1–A12的演算，原文只支持接口/机制事实；最后核对日期不代表供应商SLO承诺。</p>
-</div><div class="lang-en"><p class="col-kicker">English</p>
-<p>Adapter maps the enforced output cap to supported fields; OpenAI max_completion_tokens includes visible and reasoning tokens, while legacy max_tokens is not universal [6]. A1–A12 supply our numbers; sources establish interface/mechanism facts, not supplier SLOs.</p>
-</div></div><ol class="references"><li id="ref-1">[1] OpenAI, <a href="https://developers.openai.com/api/reference/resources/chat/subresources/completions/streaming-events"><em>Chat Completions streaming events</em></a>, API reference, checked 2026-10-07. <span class="lang-zh">核对include_usage、尾包丢失与reasoning输出分类；本章没有API压测。</span> <span class="lang-en">Checked include_usage, missing tails and output categories; no API benchmark.</span></li>
-<li id="ref-2">[2] OpenAI, <a href="https://developers.openai.com/api/docs/guides/rate-limits"><em>Rate limits</em></a>, guide, checked 2026-10-07. <span class="lang-zh">核对RPM/TPM、失败请求和估算速率；2.88M与3.6M由假设推导。</span> <span class="lang-en">RPM/TPM, failed requests and admission estimates; our volumes are derived.</span></li>
-<li id="ref-3">[3] Anthropic, <a href="https://platform.claude.com/docs/en/build-with-claude/streaming"><em>Streaming messages</em></a>, guide, checked 2026-10-07. <span class="lang-zh">命名事件、流内error与累计usage；不引其示例性能。</span> <span class="lang-en">Named/error events and cumulative usage, without performance claims.</span></li>
-<li id="ref-4">[4] Anthropic, <a href="https://platform.claude.com/docs/en/api/rate-limits"><em>Rate limits</em></a>, guide, checked 2026-10-07. <span class="lang-zh">RPM/ITPM/OTPM口径；配额值随账户变化，本章不使用。</span> <span class="lang-en">RPM/ITPM/OTPM semantics; no account-limit values used.</span></li>
-<li id="ref-5">[5] LiteLLM project, <a href="https://docs.litellm.ai/docs/routing"><em>Router — Load Balancing</em></a>, documentation, checked 2026-10-07. <span class="lang-zh">模型组、fallback、重试和并发设置；两次上限是本章设计。</span> <span class="lang-en">Model groups, fallbacks, retries and concurrency; two attempts is our design.</span></li>
-<li id="ref-6">[6] OpenAI, <a href="https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create"><em>Create chat completion</em></a>, API reference, checked 2026-10-07. <span class="lang-zh">输出上限包含可见和推理token；max_tokens并非所有模型通用字段。</span> <span class="lang-en">Output caps include visible/reasoning tokens; max_tokens is not universal.</span></li>
-<li id="ref-7">[7] WHATWG, <a href="https://html.spec.whatwg.org/multipage/server-sent-events.html"><em>HTML Living Standard §9.2 Server-sent events</em></a>, updated 2026-10-06. <span class="lang-zh">text/event-stream、UTF-8、事件解析与EventSource接口；缓冲参数为假设。</span> <span class="lang-en">Event-stream parsing, UTF-8 and EventSource; buffer settings are assumptions.</span></li>
-<li id="ref-8">[8] IETF · Fielding, Nottingham, Reschke, <a href="https://www.rfc-editor.org/rfc/rfc9110.html"><em>RFC 9110 — HTTP Semantics §§9.2.2, 10.2.3</em></a>, 2022. <span class="lang-zh">非幂等请求重试与Retry-After语义；网关rid协议是本题设计。</span> <span class="lang-en">Non-idempotent retries and Retry-After; rid is our gateway protocol.</span></li>
-<li id="ref-9">[9] PostgreSQL project, <a href="https://www.postgresql.org/docs/18/ddl-constraints.html"><em>Constraints §5.5.3 Unique Constraints</em></a>, PostgreSQL 18 documentation. <span class="lang-zh">唯一键约束；预算并发正确性另靠本章事务和条件更新。</span> <span class="lang-en">Unique constraints; admission correctness also requires our transactions.</span></li>
-<li id="ref-10">[10] OpenAI, <a href="https://developers.openai.com/api/docs/guides/prompt-caching"><em>Prompt caching</em></a>, guide, checked 2026-10-07. <span class="lang-zh">输入前缀计算复用；区别于本章整份答案缓存。</span> <span class="lang-en">Input-prefix computation reuse, distinct from answer caching.</span></li>
-<li id="ref-11">[11] Microsoft, <a href="https://learn.microsoft.com/en-us/azure/api-management/llm-semantic-cache-lookup-policy"><em>API Management — llm-semantic-cache-lookup</em></a>, documentation, checked 2026-10-07. <span class="lang-zh">vary-by与score-threshold方向；不把其数值移植到cosine。</span> <span class="lang-en">vary-by and score-threshold direction, without transferring its values to cosine.</span></li>
-<li id="ref-12">[12] vLLM project, <a href="https://docs.vllm.ai/en/latest/serving/online_serving/"><em>Online Serving — OpenAI-Compatible Server</em></a>, documentation, checked 2026-10-07. <span class="lang-zh">兼容端点的支持条件与参数差异；不使用吞吐数值。</span> <span class="lang-en">Endpoint support conditions and parameter differences; no throughput values.</span></li>
-</ol><p class="cite"><span class="lang-zh">站内延伸：</span> <span class="lang-en">Course follow-ups:</span> <a class="chip" href="ch04.html">Ch04</a> <a class="chip" href="ch17.html">Ch17</a> <a class="chip" href="ch29.html">Ch29</a> <a class="chip" href="ch30.html">Ch30</a> <a class="chip" href="ch31.html">Ch31</a> <a class="chip" href="ch33.html"><span class="lang-zh">Ch33</span><span class="lang-en">Ch33</span></a> <a class="chip" href="ch38.html">Ch38</a> <a class="chip" href="ch40.html"><span class="lang-zh">Ch40</span><span class="lang-en">Ch40</span></a></p>
-</section>
+  <section><h2><span class="lang-zh">复盘：用反例检验承诺</span><span class="lang-en">Review: test claims with counterexamples</span></h2><div class="bilingual"><div class="lang-zh"><ul><li><strong>并发最后一份预算：</strong>只能一个 hold 成功；重复 rid 不重复 dispatch。</li><li><strong>intent 后崩溃：</strong>不能区分未发/已执行，保留 UNKNOWN；a2 需要额外预算与授权。</li><li><strong>fallback 与首事件竞争：</strong>同一请求行选定 attempt；旧 owner 不能再写流。</li><li><strong>重复或冲突 usage：</strong>同 attempt 只结一次，冲突转核账，不按新 event id 重扣。</li><li><strong>撤销与慢客户端：</strong>cache hit 仍授权，写堵塞中止，取消不当退款。</li></ul><p>可复现命令与完整源码见 <a href="../examples/ch32/README.md">examples/ch32</a>。实际验证范围是 SQLite 本地事务/多连接/进程退出与协议手推；未执行 PG、真实 provider、网络 SSE、生产 tokenizer 或压测。指标分入口与 attempt，记录请求别名/served model/route revision、cache类型、首事件/结束时延和 UNKNOWN 年龄；默认不记录完整 prompt/凭证。</p></div><div class="lang-en"><ul><li><strong>Last-budget contention:</strong> exactly one hold succeeds; duplicate rid never dispatches again.</li><li><strong>Post-intent crash:</strong> unsent versus executed is ambiguous; retain UNKNOWN, and require separate budget/permission for a2.</li><li><strong>Fallback versus first event:</strong> one request row selects the attempt; the old owner cannot write another stream.</li><li><strong>Repeated/conflicting usage:</strong> settle an attempt once; conflicting evidence requires review, not a new-event debit.</li><li><strong>Revocation and slow clients:</strong> authorize cache hits, abort stalled writes and never equate cancellation with refund.</li></ul><p>See <a href="../examples/ch32/README.md">examples/ch32</a> for reproducible commands and full source. Execution covers local SQLite transactions, multiple connections, process exit and manual protocol traces, not PG, real providers, network SSE, production tokenizers or load testing. Separate entry/attempt metrics, record requested alias/served model/route revision, cache type, first/last-event latency and UNKNOWN age. Do not log full prompts or credentials by default.</p></div></div></section>
+
+  <section><h2><span class="lang-zh">引用与适用范围</span><span class="lang-en">References and applicability</span></h2><div class="bilingual"><div class="lang-zh"><p>一手文档核对于2026-10-24；可变 API 页以核对日内容为准，不代表所有供应商/模型都同样支持。所有容量、TTL和时限来自本章 A1–A12 假设；没有引用当前定价或厂商性能。OpenAI 事实按 OpenAI Docs 技能检索官方页。</p></div><div class="lang-en"><p>Primary documentation checked on 2026-10-24. Mutable API pages describe the checked surface, not universal support across models/providers. Capacity, TTLs and deadlines come from A1–A12, not current prices or vendor performance. OpenAI facts were checked through official OpenAI documentation.</p></div></div><ol class="references"><li id="ref-1">[1] <a href="https://developers.openai.com/api/reference/resources/chat/subresources/completions/streaming-events">OpenAI · Chat Completions streaming events</a> — <span class="lang-zh">include_usage 与中断尾包；不推导 chunk=token。</span><span class="lang-en">include_usage and missing interrupted tails; chunks are not token counts.</span></li><li id="ref-2">[2] <a href="https://developers.openai.com/api/docs/guides/rate-limits">OpenAI · Rate limits</a> — <span class="lang-zh">RPM/TPM、失败请求和 SDK 重试；不使用账户额度。</span><span class="lang-en">RPM/TPM, failed requests and SDK retry configuration; no account limits used.</span></li><li id="ref-3">[3] <a href="https://platform.claude.com/docs/en/build-with-claude/streaming">Anthropic · Streaming messages</a> — <span class="lang-zh">命名事件、流内 error、message_delta 累计 usage。</span><span class="lang-en">Named events, in-stream errors and cumulative message_delta usage.</span></li><li id="ref-4">[4] <a href="https://platform.claude.com/docs/en/api/rate-limits">Anthropic · Rate limits</a> — <span class="lang-zh">Messages API 的 RPM/ITPM/OTPM 与共享组；无具体配额值。</span><span class="lang-en">Messages API RPM/ITPM/OTPM and shared groups; no numerical account quota.</span></li><li id="ref-5">[5] <a href="https://developers.openai.com/api/docs/guides/token-counting">OpenAI · Counting tokens</a> — <span class="lang-zh">max_completion_tokens / max_output_tokens 限制不可见输出类别。</span><span class="lang-en">Output limits and reported usage include nonvisible generated tokens.</span></li><li id="ref-6">[6] <a href="https://html.spec.whatwg.org/multipage/server-sent-events.html">WHATWG · HTML §9.2 Server-sent events</a> — <span class="lang-zh">Living Standard；UTF-8、事件解析与 EventSource 接口。</span><span class="lang-en">Living Standard; UTF-8, event parsing and EventSource interface.</span></li><li id="ref-7">[7] <a href="https://www.rfc-editor.org/rfc/rfc9110.html">IETF · RFC 9110 §§9.2.2 / 10.2.3</a> — <span class="lang-zh">2022；非幂等重试与 Retry-After；rid 是本题协议。</span><span class="lang-en">2022; non-idempotent retries and Retry-After; rid is our protocol.</span></li><li id="ref-8">[8] <a href="https://www.postgresql.org/docs/18/explicit-locking.html">PostgreSQL 18 · Explicit Locking</a> — <span class="lang-zh">行锁事务语义；代码未在 PG 执行。</span><span class="lang-en">Row-lock transaction semantics; the code was not run in PG.</span></li><li id="ref-9">[9] <a href="https://www.sqlite.org/lang_transaction.html">SQLite · Transaction</a> — <span class="lang-zh">BEGIN IMMEDIATE 与单写事务；本例实际运行版本另见结果。</span><span class="lang-en">BEGIN IMMEDIATE and serialized writers; actual runtime version is recorded in results.</span></li><li id="ref-10">[10] <a href="https://developers.openai.com/api/docs/guides/prompt-caching">OpenAI · Prompt caching</a> — <span class="lang-zh">输入前缀状态复用仍生成新响应；区别于整份答案缓存。</span><span class="lang-en">Prefix-state reuse still generates new output, distinct from complete-answer reuse.</span></li></ol></section>
 
   <section>
 <h2><span class="lang-zh">闪卡</span> <span class="lang-en">Flashcards</span></h2>
@@ -1237,10 +1169,10 @@
 <div class="cards-grid"><button type="button" class="flip"><span class="q"><span class="lang-zh">20/s、2k输入+400输出是多少TPM？</span> <span class="lang-en">TPM at 20/s and 2k input+400 output?</span></span><span class="a"><span class="lang-zh">1,200 RPM；输入2.4M、输出0.48M，合计2.88M。</span> <span class="lang-en">1,200 RPM; 2.4M input+0.48M output=2.88M.</span></span></button>
 <button type="button" class="flip"><span class="q"><span class="lang-zh">输出上限1,000时怎么预留？</span> <span class="lang-en">Reservation with a 1,000 output cap?</span></span><span class="a"><span class="lang-zh">每条hold3,000；1,200×3,000=3.6M，与实际均值分开。</span> <span class="lang-en">3,000/request; 1,200×3,000=3.6M, separate from actual mean.</span></span></button>
 <button type="button" class="flip"><span class="q"><span class="lang-zh">什么先于成本排序？</span> <span class="lang-en">What precedes cost ranking?</span></span><span class="a"><span class="lang-zh">权限、地域、能力和上下文；8k+1k不能落4k窗口。</span> <span class="lang-en">Access, residency, capabilities and context; 8k+1k cannot fit 4k.</span></span></button>
-<button type="button" class="flip"><span class="q"><span class="lang-zh">fallback可以调用几次？</span> <span class="lang-en">How many fallback attempts?</span></span><span class="a"><span class="lang-zh">原调用+一个允许备用，所有SDK重试合计≤2。</span> <span class="lang-en">Original plus one allowed fallback; SDK retries included, ≤2.</span></span></button>
-<button type="button" class="flip"><span class="q"><span class="lang-zh">首文字token前一定能换池吗？</span> <span class="lang-en">Can we switch before first text token?</span></span><span class="a"><span class="lang-zh">公共响应头、角色、心跳也算COMMITTED；未知执行可能收费。</span> <span class="lang-en">Headers, role and heartbeat also commit; unknown execution may cost.</span></span></button>
-<button type="button" class="flip"><span class="q"><span class="lang-zh">3000预留、2400usage如何结算？</span> <span class="lang-en">How to settle 3,000 held and 2,400 usage?</span></span><span class="a"><span class="lang-zh">同事务释放600、记settled2400和唯一结算；重复只返回原结果。</span> <span class="lang-en">Atomically release 600, debit 2,400 and persist unique settlement.</span></span></button>
-<button type="button" class="flip"><span class="q"><span class="lang-zh">取消后没usage，退多少？</span> <span class="lang-en">Refund after cancellation with missing usage?</span></span><span class="a"><span class="lang-zh">不能假定零；保留UNKNOWN hold，按证据核账。</span> <span class="lang-en">Do not assume zero; retain UNKNOWN hold and reconcile evidence.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">fallback可以调用几次？</span> <span class="lang-en">How many fallback attempts?</span></span><span class="a"><span class="lang-zh">原调用+一个允许备用，SDK合计≤2；只约束同请求集合总调用数，不封瞬时峰率。</span> <span class="lang-en">Original plus one allowed fallback, SDK retries included, ≤2; a cohort total, not a peak-rate bound.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">首文字token前一定能换池吗？</span> <span class="lang-en">Can we switch before first text token?</span></span><span class="a"><span class="lang-zh">头/角色/心跳都算提交；持久屏障绑定selected attempt/owner，旧a1不能拼流。</span> <span class="lang-en">Headers, role and heartbeat commit; the barrier binds selected attempt/owner and rejects stale a1.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">3000预留、2400usage如何结算？</span> <span class="lang-en">How to settle 3,000 held and 2,400 usage?</span></span><span class="a"><span class="lang-zh">同事务held减3000、settled加2400，净释放600；attempt唯一结算，冲突核账。</span> <span class="lang-en">Subtract the 3,000 hold, add 2,400 settled and free 600 net; settle once per attempt, review conflicts.</span></span></button>
+<button type="button" class="flip"><span class="q"><span class="lang-zh">取消后没usage，退多少？</span> <span class="lang-en">Refund after cancellation with missing usage?</span></span><span class="a"><span class="lang-zh">不能假定零；保留UNKNOWN hold与远端槽位，证据核账；备用另预占。</span> <span class="lang-en">Retain UNKNOWN hold/remote slot; reconcile evidence and reserve fallback separately.</span></span></button>
 <button type="button" class="flip"><span class="q"><span class="lang-zh">rid保证供应商只生成一次吗？</span> <span class="lang-en">Does rid guarantee one supplier execution?</span></span><span class="a"><span class="lang-zh">只去重本网关记录；intent后的未知窗口需供应商能力或保守失败。</span> <span class="lang-en">Deduplicates local records; unknown dispatch needs supplier support or conservative failure.</span></span></button>
 <button type="button" class="flip"><span class="q"><span class="lang-zh">exact键要包含什么？</span> <span class="lang-en">What belongs in an exact key?</span></span><span class="a"><span class="lang-zh">全请求、权限scope、模型/路由和数据revision，hit仍授权。</span> <span class="lang-en">Full request, access scope, model/route and data revisions; reauthorize hits.</span></span></button>
 <button type="button" class="flip"><span class="q"><span class="lang-zh">40命中1错是多少错答率？</span> <span class="lang-en">Wrong-hit rate with one error in forty hits?</span></span><span class="a"><span class="lang-zh">1/40=2.5%；不是总体1/500=0.2%的同一指标。</span> <span class="lang-en">1/40=2.5%, distinct from overall 1/500=0.2%.</span></span></button>

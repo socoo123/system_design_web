@@ -1,0 +1,27 @@
+approve(authenticatedApprover, intentKey, reviewedBinding):
+  BEGIN IMMEDIATE on ExecutionDB
+    i, g = SELECT intent and grant by intentKey
+    require approver may approve i.tenant; require binding matches i and g
+    if i.state != PENDING: COMMIT; return existing state
+    now = trustedClockAfterLock()
+    require now < i.expiresAt and current user/agent/tool permission
+    UPDATE grant SET consumed=1 WHERE grant_id=g.id AND consumed=0
+    require exactly one row; UPDATE intent SET state=APPROVED
+    INSERT audit(event_id, intentKey, "approved", approver.id)
+  COMMIT
+
+claimForDispatch(authenticatedContext, intentKey):
+  BEGIN IMMEDIATE on ExecutionDB
+    i = SELECT intent by intentKey
+    require exact caller identity matches i; if state != APPROVED: stop
+    now = trustedClockAfterLock()
+    if expired, cancelled, revoked, or current tool/route/policy != i:
+      UPDATE intent SET state=DENIED, reason=actualReason
+      INSERT audit(event_id, intentKey, "denied"); COMMIT; stop
+    UPDATE intent SET state=DISPATCH_INTENT, epoch=epoch+1
+      WHERE key=intentKey AND state=APPROVED
+    require exactly one row; INSERT audit(event_id, intentKey, "dispatch")
+  COMMIT  // no network request before this commit is confirmed/read back
+  send persisted snapshot and SAME business key through its pinned Adapter
+  // Crash here: recovery queries evidence; never assume no send.
+  // Epoch fences ExecutionDB writes, not a running remote request.

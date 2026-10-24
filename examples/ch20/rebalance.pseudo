@@ -1,0 +1,41 @@
+# Teaching adapter: ALL KafkaConsumer calls/tracker changes run on the poll thread.
+# Workers post confirmed durable results; UNKNOWN never completes a ticket.
+onEveryPoll(records):                                # includes an EMPTY poll
+  apply success mailbox to each message's tracker/ticket; closed old trackers ignore it
+  for p in records.nextOffsets().keys:
+    tasks = tracker[p].register(records[p].offsets, records.nextOffsets()[p].offset)
+    terminal[p] = records.nextOffsets()[p]            # save THIS poll's metadata
+    consumer.pause({p}); dispatch tasks to bounded per-key-serial workers
+  eligible = ALL current-owned ACTIVE trackers         # not only this poll's partitions
+  for p,t in eligible: if t.idle(): consumer.resume({p})
+  map = safeMap(eligible)
+  if map is not empty:
+    try: consumer.commitSync(map, bounded_timeout)
+    catch TimeoutException: record UNKNOWN; retain work state; do not invent a rollback
+    catch ownership_or_rebalance_rejection: discard map; process handoff before rebuilding
+  # Never retry a saved map across reassignment; a later commit rebuilds current eligibility.
+
+safeMap(eligible):
+  map = {}
+  for p,t in eligible:
+    safe = t.checkpoint()                              # first unfinished offset or terminal
+    if t.idle() and terminal[p] exists and terminal[p].offset == safe:
+      map[p] = terminal[p]                            # whole batch: original epoch metadata
+    else: map[p] = new OffsetAndMetadata(safe)         # partial/no poll: omit unknown epoch
+  return map                                          # includes completions on empty polls
+
+onPartitionsRevoked(partitions):
+  stop admitting work for these partitions; tracker.beginRevocation()
+  until short drain deadline: apply queued successful completions
+  try: consumer.commitSync(safeMap(THESE still-eligible trackers), bounded_timeout)
+  catch TimeoutException: record UNKNOWN
+  catch ownership_or_rebalance_rejection: replay from the stored checkpoint
+  finally: close trackers; cancel remaining work; forget ownership and terminal metadata
+
+onPartitionsLost(partitions):
+  close trackers; cancel work; forget ownership and terminal metadata  # NO commit
+
+onPartitionsAssigned(partitions):
+  create NEW trackers for newly acquired partitions at recovered next offsets
+  retain trackers for partitions whose ownership did not move
+# Never use no-argument commitSync(): poll position may exceed completed work.

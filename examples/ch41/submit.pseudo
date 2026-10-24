@@ -1,0 +1,32 @@
+# One authoritative SQLite database; trusted tenant/caller, one-item draft.
+submit(tenant, caller, key, orderId, expectedVersion):
+    request = canonical(tenant, orderId, expectedVersion)
+    BEGIN IMMEDIATE  # acquire this DB's writer before the result lookup
+    saved = SELECT result WHERE (tenant, caller, key)
+    if saved exists:
+        require saved.request == request  # otherwise KEY_CONFLICT
+        COMMIT
+        return saved.response
+    order = conditionalSubmit(orderId, tenant, expectedVersion)  # SQL below
+    if no order: ROLLBACK; return STATE_CONFLICT
+    if conditionalTakeStock(order.sku, order.qty) changed != 1:
+        ROLLBACK; return SOLD_OUT
+    INSERT outbox(stableEventId(tenant, orderId, order.version), payload)
+    INSERT result(tenant, caller, key, request, responseSnapshot(order))
+    COMMIT
+    return responseSnapshot(order)
+
+# Caller policy; the SQLite adapter above implements one transaction attempt.
+withRetry(sameRequest):
+    for attempt in 1..3:
+        try: return submit(sameRequest)
+        catch definitelyAbortedTransient:  # e.g. PostgreSQL 40001 / 40P01
+            rollbackAttempt()
+            if attempt == 3: return RETRY_LATER
+            boundedJitterBeforeDeadline()  # redo all reads and writes
+        catch resultKeyUniqueConflict:
+            rollbackAttempt()
+            return loadOriginalAndCompareRequest(sameRequest)
+        catch connectionLostDuringCommit:
+            return resolveSameKeyOrUNKNOWN(sameRequest)
+# Other constraint errors are not duplicate success. No external RPC here.

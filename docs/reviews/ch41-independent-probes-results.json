@@ -1,0 +1,175 @@
+{
+  "passed": true,
+  "checks": [
+    "all four excerpts match actual original files",
+    "all 8 decks / 40 frames / 80 animation IDs retained",
+    "multi-unit versioned order commits exact quantity and new version",
+    "lost-reply replay returns original response snapshot after later business state changes",
+    "original adapter rejects KEY_CONFLICT",
+    "original adapter rejects STATE_CONFLICT",
+    "same caller/key/order text is independent in another authenticated tenant",
+    "result insert constraint propagates as error, not duplicate success",
+    "last-statement result failure rolls back order, stock AND already inserted outbox",
+    "same successful identity can commit after a known complete rollback",
+    "independent same-key competitor exited cleanly",
+    "independent same-key competitor exited cleanly",
+    "same request key racing different requests binds exactly one request",
+    "same-key race leaves only the winning stock/effect/event/result",
+    "original adapter rejects STALE_ROUTE",
+    "fence cannot finish while an old writer still owns the same SQLite arbitration domain",
+    "fence can complete after old transaction rolls back",
+    "original fence exited cleanly",
+    "original adapter rejects STALE_ROUTE",
+    "aborted old write is not imported into the final fenced state",
+    "durable frozen guard rejects current and stale old routes",
+    "Shipping authority cancel winner rejects late old-version dispatch",
+    "Shipping authority ship winner prevents pretending later cancel was successful",
+    "primary quantities independently recomputed; pre-fence and post-fence rates distinguished"
+  ],
+  "observations": {
+    "versionedReceipt": {
+      "original": {
+        "tenant": "t1",
+        "order_id": "order-α",
+        "sku": "sku1",
+        "qty": 3,
+        "state": "SUBMITTED",
+        "version": 9
+      },
+      "replay": {
+        "order_id": "order-α",
+        "qty": 3,
+        "sku": "sku1",
+        "state": "SUBMITTED",
+        "tenant": "t1",
+        "version": 9
+      },
+      "currentOrder": [
+        "t1",
+        "order-α",
+        "sku1",
+        3,
+        "CANCELLED",
+        10
+      ]
+    },
+    "sameKeyRace": {
+      "outcomes": [
+        [
+          "SUCCESS",
+          "left",
+          {
+            "tenant": "t1",
+            "order_id": "left",
+            "sku": "sku1",
+            "qty": 2,
+            "state": "SUBMITTED",
+            "version": 1
+          }
+        ],
+        [
+          "KEY_CONFLICT",
+          "right",
+          null
+        ]
+      ],
+      "state": {
+        "stock": [
+          [
+            "t1",
+            "sku1",
+            18
+          ]
+        ],
+        "orders": [
+          [
+            "t1",
+            "left",
+            "sku1",
+            2,
+            "SUBMITTED",
+            1
+          ],
+          [
+            "t1",
+            "right",
+            "sku1",
+            4,
+            "DRAFT",
+            0
+          ]
+        ],
+        "outbox": [
+          [
+            "[\"t1\", \"left\", 1, \"submitted\"]",
+            "t1",
+            "left",
+            1,
+            "{\"order_id\":\"left\",\"qty\":2,\"sku\":\"sku1\",\"state\":\"SUBMITTED\",\"tenant\":\"t1\",\"version\":1}"
+          ]
+        ],
+        "request_result": [
+          [
+            "t1",
+            "parallel-buyer",
+            "request-Ω",
+            "[\"t1\",\"left\",0]",
+            "{\"order_id\":\"left\",\"qty\":2,\"sku\":\"sku1\",\"state\":\"SUBMITTED\",\"tenant\":\"t1\",\"version\":1}"
+          ]
+        ]
+      }
+    },
+    "java": "Independent ReadGate: 10 new fixture assertions passed",
+    "shippingContractWitness": [
+      {
+        "first": "cancel",
+        "authoritativeState": [
+          "CANCELLED",
+          6
+        ],
+        "refundEligible": true
+      },
+      {
+        "first": "ship",
+        "authoritativeState": [
+          "SHIPPED",
+          6
+        ],
+        "refundEligible": false
+      }
+    ]
+  },
+  "numeric": {
+    "localSyncMs": "12",
+    "remoteSyncMs": "86",
+    "riskWrites": "2000",
+    "balancedPerShard": "1000",
+    "capacity": "9600",
+    "hotShard": "3200.0",
+    "hotOverBudget": "2000",
+    "hotBucket": "400",
+    "fullCopySeconds": "4000",
+    "catchupSecondsBeforeFence": "3000",
+    "sameBacklogSecondsAfterFence": "2000",
+    "rawOutboxGB": "3.6",
+    "retransmissionMBps": "1.1"
+  },
+  "sourceHashes": {
+    "chapters/ch41.html": "a9553dbd8f4bccd6310f62d9d0db263dc1809fcda88da09a2490bc91a99dd753",
+    "examples/ch41/README.md": "1144340fbdee3b31a4d329c948f4d4300a102db5481506015c05f20cdbd5f32b",
+    "examples/ch41/ReadGate.java": "acbb4538508482e94ba675f5c4aa0b76f1bb4c3db2719727039a8376a06065b3",
+    "examples/ch41/ReadGateProbe.java": "5cdfa00f105aaa65aa8d07ce97990ccc816fd3f3f50674347d692c0b9fa79350",
+    "examples/ch41/migration.pseudo": "c7ce9ef08cb4c96edfecbcb914ddabbd3e3686c5963957c3f6f8402b4cce7f36",
+    "examples/ch41/schema.sql": "6c119d8d5d6b932fec3b3bd763622d43bc7412d5783d4ccca1ea5d505624dbb9",
+    "examples/ch41/storage.py": "08e935b9e7f97d678ee028a98656c9fb72b265100c49636680fd739df45ce6dd",
+    "examples/ch41/submit.pseudo": "8e508a8a29b6d39a0d105a87f3aa09015f7d43f25d8ea2de91fa6dc22353e494",
+    "examples/ch41/submit.sql": "cf9e2ec159f5d8cf9b412d9e7915dfab36251d484d85038ec8206660548635ee",
+    "examples/ch41/verify.py": "adf60e6ae0fd66a50dc98da793d1cd3d603be08fe3ce1ce55204dc6c2ef27339"
+  },
+  "openFindings": [],
+  "limits": [
+    "FreshView is a trusted engine/connection/snapshot proof; no real replica or failover was run.",
+    "Migration/PREPARED/whole-PostgreSQL-retry/Outbox/PSP/Shipping integrations are reviewed contracts, not exercised production systems.",
+    "Shipping SQL is a reviewer-created witness for the text, not a chapter implementation."
+  ]
+}

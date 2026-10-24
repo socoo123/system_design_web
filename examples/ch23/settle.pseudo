@@ -1,0 +1,33 @@
+# PostgreSQL 18-shaped pseudocode; READ COMMITTED, all rows in one database.
+# Trusted prefix snapshot includes score AND achieved_second for (game,season,player).
+authenticate_game_server_and_scoring_authority(command)
+id = (game, season, player, match_id, kind, revision)
+intent = canonical(authority_seq, absolute_score, achieved_second, comparator)
+membership = validate_bounds_and_immutable_season_membership(command)
+BEGIN
+gate = SELECT * FROM seasons WHERE (game,season)=scope FOR SHARE
+claimed = INSERT INTO receipts(id,intent) VALUES (:id,:intent)
+          ON CONFLICT DO NOTHING RETURNING id
+if not claimed:
+    old = SELECT * FROM receipts WHERE id=:id  # next statement sees winner
+    require old.intent == intent else ROLLBACK and CONFLICT
+    COMMIT; return old.original_receipt
+if gate.state != OPEN:
+    save_receipt(id, REJECTED_CLOSED); COMMIT; return REJECTED_CLOSED
+INSERT INTO scores(scope,player,version,score,achieved_second)
+    VALUES (:scope,:player,0,0,0)
+    ON CONFLICT DO NOTHING
+row = SELECT version FROM scores WHERE (scope,player)=key FOR UPDATE
+if authority_seq <= row.version:
+    save_receipt(id, REJECTED_STALE); COMMIT; return REJECTED_STALE
+t = achieved_second  # authoritative snapshot field; never infer from receiver history
+C = absolute_score * 3000001 + (3000000 - t)
+UPDATE scores SET score=:absolute_score, achieved_second=:t,
+                  version=:authority_seq WHERE (scope,player)=key
+for board in [global_board(scope), fixed_region_board(membership)]:
+    INSERT INTO outbox(id,board,player,version,C) VALUES (...)
+    # UNIQUE(id,board); each destination has its own delivery acknowledgement.
+save_receipt(id, COMMITTED(authority_seq, absolute_score, t))
+COMMIT  # acknowledge only after configured local + synchronous-standby flush
+return original_receipt
+# SQL error: whole transaction rolls back. COMMIT timeout: unknown, same id/intent.

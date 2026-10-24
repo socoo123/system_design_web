@@ -1,0 +1,26 @@
+applyRefundResult(verifiedEvidence):
+  e = verifiedEvidence
+  begin transaction
+    p = lockPayment(e.boundPayment)
+    r = lockRefund(e.boundLocalRefund)
+    require e.account/object/amount/currency matches r and its capture
+    if r.state in {SUCCEEDED, FAILED}:
+      compareOrRetainContradictoryEvidence(r, e)
+      commit; return  // never release or post twice
+    if e.provesRefundSuccess:
+      j = insertPostingUnique(e.scope, e.refundObjectId, REFUND)
+      appendEntry(j, MERCHANT_PAYABLE, DR, r.amount, r.currency)
+      appendEntry(j, PSP_RECEIVABLE, CR, r.amount, r.currency)
+      require completeValidatedTemplateAndBalanced(j)
+      p.reserved -= r.amount; p.refunded += r.amount
+      r.state = SUCCEEDED
+      insertOutbox("refunded:" + r.id, refundSucceeded(r, j))
+    else if e.provesFinalNoRefundAndNoFutureExecution:
+      p.reserved -= r.amount
+      r.state = FAILED
+    else:
+      r.state = UNKNOWN  // pending/timeout retains its reservation
+    saveEvidence(e)
+  commit
+// Refund entries assume unsettled PSP receivable, no merchant payout,
+// platform-borne fees, and no returned processing fee.

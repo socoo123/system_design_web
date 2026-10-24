@@ -1,0 +1,1202 @@
+{
+  "chapter": "ch39",
+  "sha256": "e8aca1697482c5415f4abd000a9a755baed764473e500bb4a04048fafdc84ae2",
+  "decks": [
+    {
+      "deck": 1,
+      "frames": [
+        {
+          "frame": 1,
+          "ids": [
+            "d1s1t",
+            "d1s1d"
+          ],
+          "title": "A packet enters an L4 load balancer",
+          "description": "Client sends encrypted bytes to L4 LB; it selects using a flow key.",
+          "labels": [
+            "request",
+            "reply",
+            "async",
+            "failure / fallback",
+            "L4 · packet forwarding example · TLS ends at each App",
+            "Client",
+            "L4 LB",
+            "5-tuple only",
+            "TLS bytes"
+          ],
+          "sha256": "cefa974048eabe09cbc67ebafb7aaa9cb5bd2a92950cd28333d0f332e42e7114"
+        },
+        {
+          "frame": 2,
+          "ids": [
+            "d1s2t",
+            "d1s2d"
+          ],
+          "title": "One flow reaches one backend",
+          "description": "Client to L4 LB to App 1 carries flow c1; TLS terminates at App 1.",
+          "labels": [
+            "request",
+            "reply",
+            "async",
+            "failure / fallback",
+            "L4 · packet forwarding example · TLS ends at each App",
+            "Client",
+            "L4 LB",
+            "5-tuple only",
+            "TLS bytes",
+            "App 1",
+            "TLS + HTTP/2",
+            "flow c1"
+          ],
+          "sha256": "1eeec36a9d5d6d41567ba8a5cf85e8a2cd4d99ee81b538021652c64623bc13d3"
+        },
+        {
+          "frame": 3,
+          "ids": [
+            "d1s3t",
+            "d1s3d"
+          ],
+          "title": "The symmetric return is explicit",
+          "description": "App 1 replies to L4 LB, which forwards encrypted reply bytes to Client.",
+          "labels": [
+            "request",
+            "reply",
+            "async",
+            "failure / fallback",
+            "L4 · packet forwarding example · TLS ends at each App",
+            "Client",
+            "L4 LB",
+            "5-tuple only",
+            "TLS bytes",
+            "App 1",
+            "TLS + HTTP/2",
+            "flow c1",
+            "c1 reply",
+            "TLS bytes"
+          ],
+          "sha256": "a3389fcb7ab548e0d552f8a8948a104e48587f96c4813bc57938944dee6270ce"
+        },
+        {
+          "frame": 4,
+          "ids": [
+            "d1s4t",
+            "d1s4d"
+          ],
+          "title": "A second flow may choose App 2",
+          "description": "Flow c2 goes Client to L4 LB to App 2, and replies through L4 LB to Client; c1 remains on App 1.",
+          "labels": [
+            "request",
+            "reply",
+            "async",
+            "failure / fallback",
+            "L4 · packet forwarding example · TLS ends at each App",
+            "Client",
+            "L4 LB",
+            "5-tuple only",
+            "TLS bytes",
+            "App 1",
+            "TLS + HTTP/2",
+            "flow c1",
+            "c1 reply",
+            "TLS bytes",
+            "App 2",
+            "TLS + HTTP/2",
+            "flow c2",
+            "c2 reply"
+          ],
+          "sha256": "816e8faeae80157608502898db337fc378e9006e33d9c9ac81a3ceff081d0e5f"
+        },
+        {
+          "frame": 5,
+          "ids": [
+            "d1s5t",
+            "d1s5d"
+          ],
+          "title": "HTTP/2 multiplexing does not create more L4 choices",
+          "description": "The same c1 streams stay on App 1; separate c2 may use App 2. Both replies pass through L4 LB.",
+          "labels": [
+            "request",
+            "reply",
+            "async",
+            "failure / fallback",
+            "L4 · packet forwarding example · TLS ends at each App",
+            "Client",
+            "L4 LB",
+            "5-tuple only",
+            "TLS bytes",
+            "App 1",
+            "TLS + HTTP/2",
+            "flow c1",
+            "c1 reply",
+            "TLS bytes",
+            "App 2",
+            "TLS + HTTP/2",
+            "flow c2",
+            "c2 reply",
+            "c1 streams 1 / 3 / 5 stay here",
+            "One busy connection is one placement decision; adding App 2 cannot split c1."
+          ],
+          "sha256": "573a984cafdab0cbbcba917513f37b83875d9360635dc54ab6b805b7bae89502"
+        }
+      ]
+    },
+    {
+      "deck": 2,
+      "frames": [
+        {
+          "frame": 1,
+          "ids": [
+            "d2s1t",
+            "d2s1d"
+          ],
+          "title": "Terminate and parse at L7",
+          "description": "Client sends HTTP/2 streams inside TLS to L7 LB, which terminates TLS and parses HTTP/2.",
+          "labels": [
+            "request",
+            "reply",
+            "async",
+            "failure / fallback",
+            "L7 · one downstream HTTP/2 connection · separate upstream connections",
+            "Client",
+            "L7 LB",
+            "TLS + HTTP/2",
+            "streams 1 / 3"
+          ],
+          "sha256": "b9a024f69348f6e998b62260ae5a21604ae2d173e4481083d6e73d51fc4474be"
+        },
+        {
+          "frame": 2,
+          "ids": [
+            "d2s2t",
+            "d2s2d"
+          ],
+          "title": "Forward stream 1 to App 1",
+          "description": "L7 LB forwards stream 1 over a separate upstream connection to App 1; App 1 returns headers and body to L7 LB.",
+          "labels": [
+            "request",
+            "reply",
+            "async",
+            "failure / fallback",
+            "L7 · one downstream HTTP/2 connection · separate upstream connections",
+            "Client",
+            "L7 LB",
+            "TLS + HTTP/2",
+            "streams 1 / 3",
+            "App 1",
+            "upstream TLS",
+            "RPC / stream 1",
+            "headers + body"
+          ],
+          "sha256": "fa4c367cbc93c14b117d7fe41f64437c9286cbd57e4142c21f9aaffb829bcc03"
+        },
+        {
+          "frame": 3,
+          "ids": [
+            "d2s3t",
+            "d2s3d"
+          ],
+          "title": "Stream 3 can choose another backend",
+          "description": "L7 LB sends stream 3 to App 2 and receives tokens and status; stream 1 still uses App 1.",
+          "labels": [
+            "request",
+            "reply",
+            "async",
+            "failure / fallback",
+            "L7 · one downstream HTTP/2 connection · separate upstream connections",
+            "Client",
+            "L7 LB",
+            "TLS + HTTP/2",
+            "streams 1 / 3",
+            "App 1",
+            "upstream TLS",
+            "RPC / stream 1",
+            "headers + body",
+            "App 2",
+            "upstream TLS",
+            "RPC / stream 3",
+            "tokens + status"
+          ],
+          "sha256": "66770f8dc3459be7076baf1f84983730cdcdb7862ed91deb9a8dc37a77b6f3b5"
+        },
+        {
+          "frame": 4,
+          "ids": [
+            "d2s4t",
+            "d2s4d"
+          ],
+          "title": "Map both responses back to the correct streams",
+          "description": "App 1 and App 2 return through L7 LB; L7 LB maps responses to Client streams 1 and 3.",
+          "labels": [
+            "request",
+            "reply",
+            "async",
+            "failure / fallback",
+            "L7 · one downstream HTTP/2 connection · separate upstream connections",
+            "Client",
+            "L7 LB",
+            "TLS + HTTP/2",
+            "streams 1 / 3",
+            "App 1",
+            "upstream TLS",
+            "RPC / stream 1",
+            "headers + body",
+            "App 2",
+            "upstream TLS",
+            "RPC / stream 3",
+            "tokens + status",
+            "stream replies"
+          ],
+          "sha256": "1113b9ffffa9c6b30085c6bd54191d62fb74030bc937645d3e456ec9aabb7b5b"
+        },
+        {
+          "frame": 5,
+          "ids": [
+            "d2s5t",
+            "d2s5d"
+          ],
+          "title": "Keep an active stream pinned",
+          "description": "Both complete paths stay fixed. Stream 3 stays on App 2 until completion or failure; client-side balancing is a distinct alternative.",
+          "labels": [
+            "request",
+            "reply",
+            "async",
+            "failure / fallback",
+            "L7 · one downstream HTTP/2 connection · separate upstream connections",
+            "Client",
+            "L7 LB",
+            "TLS + HTTP/2",
+            "streams 1 / 3",
+            "App 1",
+            "upstream TLS",
+            "RPC / stream 1",
+            "headers + body",
+            "App 2",
+            "upstream TLS",
+            "RPC / stream 3",
+            "tokens + status",
+            "stream replies",
+            "stream 3 stays on App 2",
+            "until completion / failure",
+            "Client-side per-RPC balancing is an alternative; an active stream cannot migrate."
+          ],
+          "sha256": "2e2e1756ff6c6be1648ff13c7879a3f9b81885e234906f350805bd3b387e5ffc"
+        }
+      ]
+    },
+    {
+      "deck": 3,
+      "frames": [
+        {
+          "frame": 1,
+          "ids": [
+            "d3s1t",
+            "d3s1d"
+          ],
+          "title": "Affinity reaches process-local session state",
+          "description": "Client sends sid s9 through L7 LB to App 1 using sticky affinity; App 1 replies through L7 LB to Client.",
+          "labels": [
+            "request",
+            "reply",
+            "async",
+            "failure / fallback",
+            "SESSION · affinity is routing, shared authority is state",
+            "Client",
+            "L7 LB",
+            "sid = s9",
+            "cookie",
+            "App 1",
+            "temporary RAM",
+            "sticky",
+            "response"
+          ],
+          "sha256": "91e1ba44d500ddd56d7fd70e66732914f8d1bcd0a0c04fd97ddbc22e548c4fd8"
+        },
+        {
+          "frame": 2,
+          "ids": [
+            "d3s2t",
+            "d3s2d"
+          ],
+          "title": "Publish shared session authority",
+          "description": "App 1 reads sid from Session Store and receives validated session data; the old sticky route still works during migration.",
+          "labels": [
+            "request",
+            "reply",
+            "async",
+            "failure / fallback",
+            "SESSION · affinity is routing, shared authority is state",
+            "Client",
+            "L7 LB",
+            "sid = s9",
+            "cookie",
+            "App 1",
+            "temporary RAM",
+            "sticky",
+            "response",
+            "Session Store",
+            "sid / exp / epoch",
+            "GET sid · current authority"
+          ],
+          "sha256": "6c94e7db843e4ae05d543e3d5e8a188d3c891b2511bad51c80955f1ae59c13bf"
+        },
+        {
+          "frame": 3,
+          "ids": [
+            "d3s3t",
+            "d3s3d"
+          ],
+          "title": "A replacement instance uses the same authority",
+          "description": "Client to L7 LB to App 2 to Session Store; session data returns to App 2 to L7 LB to Client.",
+          "labels": [
+            "request",
+            "reply",
+            "async",
+            "failure / fallback",
+            "SESSION · affinity is routing, shared authority is state",
+            "Client",
+            "L7 LB",
+            "sid = s9",
+            "cookie",
+            "App 1",
+            "temporary RAM",
+            "sticky",
+            "response",
+            "Session Store",
+            "sid / exp / epoch",
+            "GET sid · current authority",
+            "App 2",
+            "replaceable",
+            "any App",
+            "same lookup contract"
+          ],
+          "sha256": "37f0dfd397e3b6a397785034e476d73930bf29d3d95d9b4f532a03ff13cf9601"
+        },
+        {
+          "frame": 4,
+          "ids": [
+            "d3s4t",
+            "d3s4d"
+          ],
+          "title": "Remove reliance on affinity",
+          "description": "Both Apps use Session Store as authority. The old sticky request lane is muted and a load-based App 1 lane replaces it.",
+          "labels": [
+            "request",
+            "reply",
+            "async",
+            "failure / fallback",
+            "SESSION · affinity is routing, shared authority is state",
+            "Client",
+            "L7 LB",
+            "sid = s9",
+            "cookie",
+            "App 1",
+            "temporary RAM",
+            "sticky",
+            "response",
+            "Session Store",
+            "sid / exp / epoch",
+            "GET sid · current authority",
+            "App 2",
+            "replaceable",
+            "any App",
+            "same lookup contract",
+            "load-based",
+            "migration: persist authority first",
+            "App restart no longer destroys authority; store failure still blocks protected work."
+          ],
+          "sha256": "40d09696bad764c36a86780897e398c9a842e865dba9bf80d7f396342ceb5073"
+        },
+        {
+          "frame": 5,
+          "ids": [
+            "d3s5t",
+            "d3s5d"
+          ],
+          "title": "Revocation has a storage contract",
+          "description": "The same topology reads current shared authority. Session mutation must use atomic version checks and a durability policy.",
+          "labels": [
+            "request",
+            "reply",
+            "async",
+            "failure / fallback",
+            "SESSION · affinity is routing, shared authority is state",
+            "Client",
+            "L7 LB",
+            "sid = s9",
+            "cookie",
+            "App 1",
+            "temporary RAM",
+            "sticky",
+            "response",
+            "Session Store",
+            "sid / exp / epoch",
+            "GET sid · current authority",
+            "App 2",
+            "replaceable",
+            "any App",
+            "same lookup contract",
+            "load-based",
+            "migration: persist authority first",
+            "App restart no longer destroys authority; store failure still blocks protected work.",
+            "revoke: atomic epoch check",
+            "durability policy required"
+          ],
+          "sha256": "d8b233db4300982a955a903b0c8087f16801a25fb7704e778f89598bdc6ecb52"
+        },
+        {
+          "frame": 6,
+          "ids": [
+            "d3s6t",
+            "d3s6d"
+          ],
+          "title": "Reject protected work when authority is unavailable",
+          "description": "Session Store failure returns to App 1, then to L7 LB, then to Client as an unavailable response; normal success lanes remain muted for this failure branch.",
+          "labels": [
+            "request",
+            "reply",
+            "async",
+            "failure / fallback",
+            "SESSION · affinity is routing, shared authority is state",
+            "Client",
+            "L7 LB",
+            "sid = s9",
+            "cookie",
+            "App 1",
+            "temporary RAM",
+            "sticky",
+            "response",
+            "Session Store",
+            "sid / exp / epoch",
+            "GET sid · current authority",
+            "App 2",
+            "replaceable",
+            "any App",
+            "same lookup contract",
+            "load-based",
+            "migration: persist authority first",
+            "App restart no longer destroys authority; store failure still blocks protected work.",
+            "revoke: atomic epoch check",
+            "durability policy required",
+            "timeout ≠ anonymous access",
+            "FAIL CLOSED"
+          ],
+          "sha256": "3cb1fcfa28b460bffba6ea447150cf3a950c1a106de1c68e1b3a867e42611054"
+        }
+      ]
+    },
+    {
+      "deck": 4,
+      "frames": [
+        {
+          "frame": 1,
+          "ids": [
+            "d4s1t",
+            "d4s1d"
+          ],
+          "title": "Begin with offered work",
+          "description": "Client sends 6000 requests per second to L7 LB; server capacity is not yet asserted.",
+          "labels": [
+            "request",
+            "reply",
+            "async",
+            "failure / fallback",
+            "CAPACITY · per-request selection + bounded admission (assumptions A1–A5)",
+            "Client",
+            "L7 LB",
+            "active RPCs",
+            "6,000/s"
+          ],
+          "sha256": "2986aef0cf18f0f6e6872594a5885e07b90a221842ab701534b548f34f434704"
+        },
+        {
+          "frame": 2,
+          "ids": [
+            "d4s2t",
+            "d4s2d"
+          ],
+          "title": "Round robin needs a capacity budget",
+          "description": "L7 LB sends requests to App pool and receives results; results return through L7 LB to Client.",
+          "labels": [
+            "request",
+            "reply",
+            "async",
+            "failure / fallback",
+            "CAPACITY · per-request selection + bounded admission (assumptions A1–A5)",
+            "Client",
+            "L7 LB",
+            "active RPCs",
+            "6,000/s",
+            "App pool",
+            "12 deployed × 600/s",
+            "RR / weights",
+            "result"
+          ],
+          "sha256": "9f6fee4d5c06f699a0310ae8da60ead4d91f2deb0b71d1da8b7ea58ed2a8898e"
+        },
+        {
+          "frame": 3,
+          "ids": [
+            "d4s3t",
+            "d4s3d"
+          ],
+          "title": "Compare active requests rather than connections",
+          "description": "L7 LB can choose via Admission by sampling active-request counts 8 and 2; an admitted request reaches App pool.",
+          "labels": [
+            "request",
+            "reply",
+            "async",
+            "failure / fallback",
+            "CAPACITY · per-request selection + bounded admission (assumptions A1–A5)",
+            "Client",
+            "L7 LB",
+            "active RPCs",
+            "6,000/s",
+            "App pool",
+            "12 deployed × 600/s",
+            "RR / weights",
+            "result",
+            "Admission",
+            "atomic per-App limit",
+            "P2C: 8 vs 2",
+            "permit then send"
+          ],
+          "sha256": "d67a22e7987a8c66af279fd1b2aee9d50c77729f60b945b454eba7203164dfce"
+        },
+        {
+          "frame": 4,
+          "ids": [
+            "d4s4t",
+            "d4s4d"
+          ],
+          "title": "Count surviving capacity",
+          "description": "The same request paths remain. Twelve deployed Apps leave eleven READY when one is unavailable, giving 6600 requests per second planned capacity.",
+          "labels": [
+            "request",
+            "reply",
+            "async",
+            "failure / fallback",
+            "CAPACITY · per-request selection + bounded admission (assumptions A1–A5)",
+            "Client",
+            "L7 LB",
+            "active RPCs",
+            "6,000/s",
+            "App pool",
+            "12 deployed × 600/s",
+            "RR / weights",
+            "result",
+            "Admission",
+            "atomic per-App limit",
+            "P2C: 8 vs 2",
+            "permit then send",
+            "12 deployed; 1 excluded",
+            "11 × 600 = 6,600/s",
+            "2 excluded: 6,000/s"
+          ],
+          "sha256": "3f50ef116ca2a5f7187252d507000cc40f0cbd65dbb1d1c0466721463739cb83"
+        },
+        {
+          "frame": 5,
+          "ids": [
+            "d4s5t",
+            "d4s5d"
+          ],
+          "title": "Reject overload instead of expanding a hidden queue",
+          "description": "Admission failure returns to L7 LB and then Client; admitted work follows Admission to App pool to L7 LB to Client.",
+          "labels": [
+            "request",
+            "reply",
+            "async",
+            "failure / fallback",
+            "CAPACITY · per-request selection + bounded admission (assumptions A1–A5)",
+            "Client",
+            "L7 LB",
+            "active RPCs",
+            "6,000/s",
+            "App pool",
+            "12 deployed × 600/s",
+            "RR / weights",
+            "result",
+            "Admission",
+            "atomic per-App limit",
+            "P2C: 8 vs 2",
+            "permit then send",
+            "12 deployed; 1 excluded",
+            "11 × 600 = 6,600/s",
+            "2 excluded: 6,000/s",
+            "at capacity: reject / bounded queue"
+          ],
+          "sha256": "109e00ebd9140859062c55d281faef105e7ee2e8f1d6a4220603be6e52ddb004"
+        }
+      ]
+    },
+    {
+      "deck": 5,
+      "frames": [
+        {
+          "frame": 1,
+          "ids": [
+            "d5s1t",
+            "d5s1d"
+          ],
+          "title": "A ready endpoint accepts new work",
+          "description": "READY is the state in which new work may be selected.",
+          "labels": [
+            "request",
+            "reply",
+            "async",
+            "failure / fallback",
+            "LIFECYCLE · stop selection before terminating a healthy process",
+            "READY",
+            "new work allowed"
+          ],
+          "sha256": "84ec5a82a266eed17168a6fb60d482a9a4e8b466b668357850d198c26a805441"
+        },
+        {
+          "frame": 2,
+          "ids": [
+            "d5s2t",
+            "d5s2d"
+          ],
+          "title": "Planned removal enters draining",
+          "description": "READY transitions to DRAINING after selection removal and acknowledgment; new work stops but the process remains alive.",
+          "labels": [
+            "request",
+            "reply",
+            "async",
+            "failure / fallback",
+            "LIFECYCLE · stop selection before terminating a healthy process",
+            "READY",
+            "new work allowed",
+            "DRAINING",
+            "no new work",
+            "remove + ACK"
+          ],
+          "sha256": "1d2f02ef4740454cb846c2f46405250b3aadd02c28cfb28a9e120c5a563d9902"
+        },
+        {
+          "frame": 3,
+          "ids": [
+            "d5s3t",
+            "d5s3d"
+          ],
+          "title": "Keep already admitted work alive",
+          "description": "DRAINING allows existing In-flight RPC to finish; completion releases its active count back to DRAINING.",
+          "labels": [
+            "request",
+            "reply",
+            "async",
+            "failure / fallback",
+            "LIFECYCLE · stop selection before terminating a healthy process",
+            "READY",
+            "new work allowed",
+            "DRAINING",
+            "no new work",
+            "remove + ACK",
+            "In-flight RPC",
+            "pinned to old App",
+            "finish",
+            "release"
+          ],
+          "sha256": "1bd00d1f4edf90b8721ac03977c949a9e6419688a70d02458c3266f90962b01c"
+        },
+        {
+          "frame": 4,
+          "ids": [
+            "d5s4t",
+            "d5s4d"
+          ],
+          "title": "Exit after a zero count or an explicit deadline",
+          "description": "DRAINING reaches STOPPED once active work reaches zero. A deadline may cancel remaining work rather than silently declare success.",
+          "labels": [
+            "request",
+            "reply",
+            "async",
+            "failure / fallback",
+            "LIFECYCLE · stop selection before terminating a healthy process",
+            "READY",
+            "new work allowed",
+            "DRAINING",
+            "no new work",
+            "remove + ACK",
+            "In-flight RPC",
+            "pinned to old App",
+            "finish",
+            "release",
+            "STOPPED",
+            "physical exit",
+            "active = 0",
+            "deadline: cancel / close",
+            "abort does not undo a write"
+          ],
+          "sha256": "25d7e41313f43f4b745825731da03d6b91b7040d5a99f1adfa32d01ee744a383"
+        },
+        {
+          "frame": 5,
+          "ids": [
+            "d5s5t",
+            "d5s5d"
+          ],
+          "title": "A crash follows the failure branch",
+          "description": "READY can become UNHEALTHY after failed probes; this branch may lose already admitted work and differs from DRAINING.",
+          "labels": [
+            "request",
+            "reply",
+            "async",
+            "failure / fallback",
+            "LIFECYCLE · stop selection before terminating a healthy process",
+            "READY",
+            "new work allowed",
+            "DRAINING",
+            "no new work",
+            "remove + ACK",
+            "In-flight RPC",
+            "pinned to old App",
+            "finish",
+            "release",
+            "STOPPED",
+            "physical exit",
+            "active = 0",
+            "deadline: cancel / close",
+            "abort does not undo a write",
+            "UNHEALTHY",
+            "existing work may fail",
+            "probe failed",
+            "crash: no completion promise"
+          ],
+          "sha256": "6cc6f546c8b1d517563c4f56c71c261d1b25a9caff530057dad3a461b47ede5b"
+        },
+        {
+          "frame": 6,
+          "ids": [
+            "d5s6t",
+            "d5s6d"
+          ],
+          "title": "Warm a recovered endpoint before rejoining",
+          "description": "UNHEALTHY moves after repair to WARMING; recovery checks and warmup return it to READY. The planned drain-to-stop path remains separate.",
+          "labels": [
+            "request",
+            "reply",
+            "async",
+            "failure / fallback",
+            "LIFECYCLE · stop selection before terminating a healthy process",
+            "READY",
+            "new work allowed",
+            "DRAINING",
+            "no new work",
+            "remove + ACK",
+            "In-flight RPC",
+            "pinned to old App",
+            "finish",
+            "release",
+            "STOPPED",
+            "physical exit",
+            "active = 0",
+            "deadline: cancel / close",
+            "abort does not undo a write",
+            "UNHEALTHY",
+            "existing work may fail",
+            "probe failed",
+            "crash: no completion promise",
+            "WARMING",
+            "prove readiness",
+            "repair / restart",
+            "warmup + recovery checks"
+          ],
+          "sha256": "a35897ae840a47ac4eeaff8c53d682554cdf1b5140bb4a3baa8ab144695d01f1"
+        }
+      ]
+    },
+    {
+      "deck": 6,
+      "frames": [
+        {
+          "frame": 1,
+          "ids": [
+            "d6s1t",
+            "d6s1d"
+          ],
+          "title": "Look for a local connection binding",
+          "description": "A VIP packet with a 5-tuple enters local ConnTrack lookup.",
+          "labels": [
+            "request",
+            "reply",
+            "async",
+            "failure / fallback",
+            "MAGLEV · local connection tracking before fixed-table lookup",
+            "Packet",
+            "VIP + 5-tuple",
+            "ConnTrack",
+            "local flow binding",
+            "lookup"
+          ],
+          "sha256": "59d58a04a200d469b66ac879836d0daa325626907f62a57c856667e91a5dc4c9"
+        },
+        {
+          "frame": 2,
+          "ids": [
+            "d6s2t",
+            "d6s2d"
+          ],
+          "title": "Reuse a healthy backend binding",
+          "description": "ConnTrack hit with a healthy backend yields Backend pick App 1; this is a selection decision, not a reply packet path.",
+          "labels": [
+            "request",
+            "reply",
+            "async",
+            "failure / fallback",
+            "MAGLEV · local connection tracking before fixed-table lookup",
+            "Packet",
+            "VIP + 5-tuple",
+            "ConnTrack",
+            "local flow binding",
+            "lookup",
+            "Backend pick",
+            "healthy App 1",
+            "hit + healthy"
+          ],
+          "sha256": "e2b3f00dd9f969f8c2e4d913dd51014e3e8db1ed67fec51ce1a203ce9c7d11d0"
+        },
+        {
+          "frame": 3,
+          "ids": [
+            "d6s3t",
+            "d6s3d"
+          ],
+          "title": "A miss reads the precomputed table",
+          "description": "A ConnTrack miss consults Lookup table. The selected backend id goes to Backend pick and records a ConnTrack binding.",
+          "labels": [
+            "request",
+            "reply",
+            "async",
+            "failure / fallback",
+            "MAGLEV · local connection tracking before fixed-table lookup",
+            "Packet",
+            "VIP + 5-tuple",
+            "ConnTrack",
+            "local flow binding",
+            "lookup",
+            "Backend pick",
+            "healthy App 1",
+            "hit + healthy",
+            "Lookup table",
+            "entry[h % M]",
+            "miss",
+            "backend id",
+            "record"
+          ],
+          "sha256": "23400c9eab6ca472dc814f7212d1859c0eaaa7bce41dd48be87b80ff37c3e369"
+        },
+        {
+          "frame": 4,
+          "ids": [
+            "d6s4t",
+            "d6s4d"
+          ],
+          "title": "Publish a complete table snapshot",
+          "description": "Config r7 builds a complete Lookup table and swaps it as a whole. ConnTrack remains local and may preserve old healthy bindings.",
+          "labels": [
+            "request",
+            "reply",
+            "async",
+            "failure / fallback",
+            "MAGLEV · local connection tracking before fixed-table lookup",
+            "Packet",
+            "VIP + 5-tuple",
+            "ConnTrack",
+            "local flow binding",
+            "lookup",
+            "Backend pick",
+            "healthy App 1",
+            "hit + healthy",
+            "Lookup table",
+            "entry[h % M]",
+            "miss",
+            "backend id",
+            "record",
+            "Config r7",
+            "ids / M / hash",
+            "build + swap",
+            "new flow: table lookup; later packets: valid ConnTrack first",
+            "M = 65,537; toy slots are illustrations, not the real population algorithm."
+          ],
+          "sha256": "018d9946c3194ce3c9bbebfc422a7aede5ceee57fb85a6e7e27708ed5469bf7c"
+        },
+        {
+          "frame": 5,
+          "ids": [
+            "d6s5t",
+            "d6s5d"
+          ],
+          "title": "Balance slots, then measure real work",
+          "description": "The complete selection path remains. Toy table entries illustrate ownership; table balance does not imply balanced bytes or work.",
+          "labels": [
+            "request",
+            "reply",
+            "async",
+            "failure / fallback",
+            "MAGLEV · local connection tracking before fixed-table lookup",
+            "Packet",
+            "VIP + 5-tuple",
+            "ConnTrack",
+            "local flow binding",
+            "lookup",
+            "Backend pick",
+            "healthy App 1",
+            "hit + healthy",
+            "Lookup table",
+            "entry[h % M]",
+            "miss",
+            "backend id",
+            "record",
+            "Config r7",
+            "ids / M / hash",
+            "build + swap",
+            "new flow: table lookup; later packets: valid ConnTrack first",
+            "M = 65,537; toy slots are illustrations, not the real population algorithm.",
+            "toy entries: [A1, A2, A1, A2, A1]",
+            "slot balance ≠ byte / CPU balance"
+          ],
+          "sha256": "0967da44c455a1c7c633d59f6437e874e439be853f82008f4ff88a24113a8f56"
+        }
+      ]
+    },
+    {
+      "deck": 7,
+      "frames": [
+        {
+          "frame": 1,
+          "ids": [
+            "d7s1t",
+            "d7s1d"
+          ],
+          "title": "A router selects an L4 data plane",
+          "description": "Client sends a VIP packet to Router; Router ECMP sends flow c1 to L4 LB 1.",
+          "labels": [
+            "request",
+            "reply",
+            "async",
+            "failure / fallback",
+            "L4 DSR · return bypasses LB data plane, but still traverses Router",
+            "Client",
+            "Router",
+            "VIP / ECMP",
+            "VIP",
+            "L4 LB 1",
+            "r7 / local CT",
+            "flow c1"
+          ],
+          "sha256": "3279e9340889a360c354fdd43e944ea5f302a775aa704ffcaad0062df1f3b523"
+        },
+        {
+          "frame": 2,
+          "ids": [
+            "d7s2t",
+            "d7s2d"
+          ],
+          "title": "Encapsulate to the TCP owner",
+          "description": "L4 LB 1 selects App 1 and encapsulates flow c1 in GRE to App 1, which owns the TCP connection.",
+          "labels": [
+            "request",
+            "reply",
+            "async",
+            "failure / fallback",
+            "L4 DSR · return bypasses LB data plane, but still traverses Router",
+            "Client",
+            "Router",
+            "VIP / ECMP",
+            "VIP",
+            "L4 LB 1",
+            "r7 / local CT",
+            "flow c1",
+            "App 1",
+            "TCP owner",
+            "GRE: c1"
+          ],
+          "sha256": "7106e07924fc5b8aa06ea942a2589d70246c44f262748fe1af4f27f9c75c00bc"
+        },
+        {
+          "frame": 3,
+          "ids": [
+            "d7s3t",
+            "d7s3d"
+          ],
+          "title": "Draw direct server return honestly",
+          "description": "App 1 replies directly to Router, then Router replies to Client with VIP source; response packets bypass both LB data planes.",
+          "labels": [
+            "request",
+            "reply",
+            "async",
+            "failure / fallback",
+            "L4 DSR · return bypasses LB data plane, but still traverses Router",
+            "Client",
+            "Router",
+            "VIP / ECMP",
+            "VIP",
+            "L4 LB 1",
+            "r7 / local CT",
+            "flow c1",
+            "App 1",
+            "TCP owner",
+            "GRE: c1",
+            "DSR: backend → Router → Client; no LB on reply",
+            "reply"
+          ],
+          "sha256": "4f079d8f0d6fbe4621f76185a09cf0fe49d496c15fcef86408c45762aca1fb6e"
+        },
+        {
+          "frame": 4,
+          "ids": [
+            "d7s4t",
+            "d7s4d"
+          ],
+          "title": "A moved flow can recover the same pick",
+          "description": "After LB 1 loss, Router sends c1 to LB 2. With identical r7 inputs and a ConnTrack miss, LB 2 picks healthy App 1. The DSR return stays unchanged.",
+          "labels": [
+            "request",
+            "reply",
+            "async",
+            "failure / fallback",
+            "L4 DSR · return bypasses LB data plane, but still traverses Router",
+            "Client",
+            "Router",
+            "VIP / ECMP",
+            "VIP",
+            "L4 LB 1",
+            "r7 / local CT",
+            "flow c1",
+            "App 1",
+            "TCP owner",
+            "GRE: c1",
+            "DSR: backend → Router → Client; no LB on reply",
+            "reply",
+            "L4 LB 2",
+            "table + local CT",
+            "ECMP moves",
+            "r7 same owner",
+            "same IDs / weights / M",
+            "same hash + algorithm",
+            "same table inputs"
+          ],
+          "sha256": "f8c308cb0fcdb72311267cab171696a7c0107d10a7034ecb3f5366453238e690"
+        },
+        {
+          "frame": 5,
+          "ids": [
+            "d7s5t",
+            "d7s5d"
+          ],
+          "title": "Changed placement does not migrate an established connection",
+          "description": "The old LB 1 lane is muted. LB 2 may choose App 2 under changed r8; App 2 lacks c1 TCP state and returns RESET via Router to Client. The prior matching-r7 path is muted for this changed-placement branch.",
+          "labels": [
+            "request",
+            "reply",
+            "async",
+            "failure / fallback",
+            "L4 DSR · return bypasses LB data plane, but still traverses Router",
+            "Client",
+            "Router",
+            "VIP / ECMP",
+            "VIP",
+            "L4 LB 1",
+            "r7 / local CT",
+            "flow c1",
+            "App 1",
+            "TCP owner",
+            "GRE: c1",
+            "DSR: backend → Router → Client; no LB on reply",
+            "reply",
+            "L4 LB 2",
+            "table + local CT",
+            "ECMP moves",
+            "r7 same owner",
+            "same IDs / weights / M",
+            "same hash + algorithm",
+            "same table inputs",
+            "App 2",
+            "no c1 TCP state",
+            "r8 pick",
+            "r8 remap: TCP RESET",
+            "LB 1 lost; LB 2 misses c1"
+          ],
+          "sha256": "e9616458cfead44456a5552cb1310c9a07eb500e3ab371fd43e5b53191811ce1"
+        }
+      ]
+    }
+  ],
+  "animationIds": [
+    "d1s1t",
+    "d1s1d",
+    "d1s2t",
+    "d1s2d",
+    "d1s3t",
+    "d1s3d",
+    "d1s4t",
+    "d1s4d",
+    "d1s5t",
+    "d1s5d",
+    "d2s1t",
+    "d2s1d",
+    "d2s2t",
+    "d2s2d",
+    "d2s3t",
+    "d2s3d",
+    "d2s4t",
+    "d2s4d",
+    "d2s5t",
+    "d2s5d",
+    "d3s1t",
+    "d3s1d",
+    "d3s2t",
+    "d3s2d",
+    "d3s3t",
+    "d3s3d",
+    "d3s4t",
+    "d3s4d",
+    "d3s5t",
+    "d3s5d",
+    "d3s6t",
+    "d3s6d",
+    "d4s1t",
+    "d4s1d",
+    "d4s2t",
+    "d4s2d",
+    "d4s3t",
+    "d4s3d",
+    "d4s4t",
+    "d4s4d",
+    "d4s5t",
+    "d4s5d",
+    "d5s1t",
+    "d5s1d",
+    "d5s2t",
+    "d5s2d",
+    "d5s3t",
+    "d5s3d",
+    "d5s4t",
+    "d5s4d",
+    "d5s5t",
+    "d5s5d",
+    "d5s6t",
+    "d5s6d",
+    "d6s1t",
+    "d6s1d",
+    "d6s2t",
+    "d6s2d",
+    "d6s3t",
+    "d6s3d",
+    "d6s4t",
+    "d6s4d",
+    "d6s5t",
+    "d6s5d",
+    "d7s1t",
+    "d7s1d",
+    "d7s2t",
+    "d7s2d",
+    "d7s3t",
+    "d7s3d",
+    "d7s4t",
+    "d7s4d",
+    "d7s5t",
+    "d7s5d"
+  ]
+}
