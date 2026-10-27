@@ -5,9 +5,10 @@ plan(d, outcome, now):
   if outcome == SUPPRESSED: return suppressed
   if now >= d.not_after: return expired
   if outcome in {PERMANENT_REJECT, INVALID_TOKEN, REGISTRATION_RECHECK}: return failed
+  if outcome == UNKNOWN_STOP or (d.uncertain and not d.allow_unknown_retry):
+    return failed(unknown=true, reason=UNKNOWN_STOP)
   if outcome == DEFERRED: due = outcome.allowed_at  # no external call counted
   else:
-    if d.uncertain and not d.allow_unknown_retry: return failed(unknown=true)
     if d.send_count >= d.max_sends: return failed(reason=EXHAUSTED)
     provider_floor = outcome.provider_not_before  # defaults to now for ordinary SMS
     if outcome.provider == FCM and outcome.retryable_failure:

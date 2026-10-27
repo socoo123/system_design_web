@@ -10,6 +10,8 @@ deliver(wake):
     if current.lease_epoch != d.lease_epoch or current.status != leased
        or current.lease_until <= DB_NOW(): ROLLBACK; return
     if DB_NOW() >= current.not_after: decision = EXPIRED
+    else if current.uncertain and not current.allow_unknown_retry:
+      decision = UNKNOWN_STOP  # no Attempt or count; result transaction stops scheduling
     else if current.send_count >= current.max_sends:
       decision = EXHAUSTED
     else:

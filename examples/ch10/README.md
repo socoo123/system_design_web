@@ -29,8 +29,20 @@ Contracts omitted from the fragments are explicit:
   registration time. It checks durable accepted Attempt evidence before a send;
   then expiry, consent, quiet hours, atomic frequency reservation and quota.
   DEFERRED carries a future `allowed_at`. Dependency errors defer, never allow.
+- ALLOW still requires a new-attempt reservation transaction. Under the Delivery
+  row lock, check the current epoch, state, lease and business deadline, then
+  `uncertain && !allow_unknown_retry` before reserving an Attempt or incrementing
+  `send_count`. A match returns the local tagged decision UNKNOWN_STOP without a
+  provider call. The result transaction records failed if its decision is before
+  the business deadline, otherwise expired. Both retain uncertainty. Only a
+  confirmed result commit permits ACK. `plan` also checks this policy
+  before DEFERRED, so an early quiet-hour/quota/dependency deferral cannot keep
+  unknown work scheduled. ACCEPTED, SUPPRESSED and already-expired work retain
+  their existing precedence.
 - Decisions are tagged records. Comparisons in pseudocode compare their tags;
-  `message_id` defaults to NULL; ordinary SMS without extra bounds defaults
+  `message_id` defaults to NULL, including for local UNKNOWN_STOP, which has no
+  provider result; its failed plan carries reason UNKNOWN_STOP. Ordinary SMS
+  without extra bounds defaults
   `provider_not_before` to current DB time. FCM retryable failures always wait
   at least 10 seconds, including 500 without Retry-After. plan explicitly takes
   that floor from result-transaction time (later than observed failure), then
@@ -72,9 +84,14 @@ Contracts omitted from the fragments are explicit:
 small serialized contract model. It tests normal flow, rollback, both callers
 observing a miss, response/ACK loss, durable delayed work, first repair after an
 owner crash, stale epochs, partial endpoint outcomes, and unknown external
-acceptance. It explicitly demonstrates an allowed retry producing two external
-acceptances. It also checks source equality and independently recomputes the
-chapter's numbers using rational arithmetic.
+acceptance. A provider stub is called only after a real model reservation; its
+first accepted call can crash before result persistence. With unknown retries
+disabled before that first call, reclaim and dispatch reserve no new Attempt,
+increment no count and make no second provider call. The stop must commit before
+ACK, and late accepted evidence remains visible. The same dispatch path also
+demonstrates an allowed retry producing two injected external acceptances. It
+checks early DEFERRED, accepted-evidence precedence, admission boundaries, source
+equality and independently recomputes the chapter's numbers using rational arithmetic.
 
 The model does not execute `claim.sql` against PostgreSQL, prove PostgreSQL
 concurrency, implement provider/broker clients, test failover or clocks, or

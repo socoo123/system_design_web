@@ -100,24 +100,50 @@ class Store:
         self.db.execute('BEGIN IMMEDIATE')
         d = self.row(claim['id'])
         if (d['epoch'] != claim['epoch'] or d['status'] != 'leased'
-                or d['lease_until'] <= now or d['expires'] <= now or d['sends'] >= d['max_sends']):
+                or d['lease_until'] <= now):
             self.db.execute('ROLLBACK')
             return None
-        aid = f"{d['id']}:{d['epoch']}:{d['sends'] + 1}"
-        self.db.execute('UPDATE delivery SET sends=sends+1 WHERE id=?', (d['id'],))
-        self.db.execute('INSERT INTO attempt VALUES(?,?,?,?)',
-                        (aid, d['id'], d['epoch'], 'started'))
+        aid, decision = None, 'allow'
+        if d['expires'] <= now:
+            decision = 'expired'
+        elif d['uncertain'] and not d['unknown_retry']:
+            decision = 'unknown_stop'
+        elif d['sends'] >= d['max_sends']:
+            decision = 'exhausted'
+        else:
+            aid = f"{d['id']}:{d['epoch']}:{d['sends'] + 1}"
+            self.db.execute('UPDATE delivery SET sends=sends+1 WHERE id=?', (d['id'],))
+            self.db.execute('INSERT INTO attempt VALUES(?,?,?,?)',
+                            (aid, d['id'], d['epoch'], 'started'))
         self.db.execute('COMMIT')
-        return aid
+        return aid, decision
 
-    def finish(self, claim, aid, outcome, now, provider_min=0, fail=False):
+    def dispatch(self, claim, now, provider, gate='allow', allowed_at=None,
+                 crash_after_send=False, fail_result=False):
+        # Model the shared deliver fragment after claim; other gates are injected.
+        decision = 'accepted' if 'accepted' in self.observations(claim['id']) else gate
+        aid = None
+        if decision == 'allow':
+            prepared = self.prepare(claim, now)
+            if prepared is None:  # lost ownership: neither a call nor an ACK
+                return {'attempt': None, 'acked': False}
+            aid, decision = prepared
+            if aid is not None:
+                decision = provider.send(aid)
+                if crash_after_send:
+                    return {'attempt': aid, 'acked': False}
+        committed = self.finish(claim, aid, decision, now + 1,
+                                allowed_at=allowed_at, fail=fail_result)
+        return {'attempt': aid, 'acked': committed}
+
+    def finish(self, claim, aid, outcome, now, provider_min=0, fail=False, allowed_at=None):
         self.db.execute('BEGIN IMMEDIATE')
         d = self.row(claim['id'])
         if aid:
             self.db.execute('UPDATE attempt SET outcome=? WHERE id=?', (outcome, aid))
         if d['epoch'] == claim['epoch'] and d['status'] == 'leased':
             d['uncertain'] |= outcome == 'timeout_unknown'
-            state, due, reason = plan(d, outcome, now, provider_min)
+            state, due, reason = plan(d, outcome, now, provider_min, allowed_at=allowed_at)
             self.db.execute('UPDATE delivery SET status=?,due=?,uncertain=? WHERE id=?',
                             (state, due, d['uncertain'], d['id']))
             if state == 'retry_wait':
@@ -151,7 +177,7 @@ class Store:
 
 
 def plan(d, outcome, now, provider_min=0, jitter=0.5, provider=None, status=None,
-         retry_after=None, quota_kind=None):
+         retry_after=None, quota_kind=None, allowed_at=None):
     if outcome == 'accepted':
         return 'provider_accepted', 0, None
     if outcome == 'suppressed':
@@ -160,19 +186,33 @@ def plan(d, outcome, now, provider_min=0, jitter=0.5, provider=None, status=None
         return 'expired', 0, None
     if outcome in ('permanent_reject', 'invalid_token', 'registration_recheck'):
         return 'failed', 0, None
-    if d['uncertain'] and not d['unknown_retry']:
+    if outcome == 'unknown_stop' or (d['uncertain'] and not d['unknown_retry']):
         return 'failed', 0, 'UNKNOWN_STOP'
-    if d['sends'] >= d['max_sends']:
-        return 'failed', 0, 'EXHAUSTED'
-    if provider == 'FCM' and outcome in ('temporary_reject', 'timeout_unknown'):
-        provider_min = max(provider_min, now + 10)
-        if status == 429:
-            provider_min = max(provider_min, retry_after if retry_after is not None else now + 60)
-            if quota_kind in ('overall', 'topic'):
-                provider_min = max(provider_min, now + 60)
-    cap = min(60, 2 ** max(0, d['sends'] - 1))
-    due = max(now + jitter * cap, provider_min, d['due'])
+    if outcome == 'deferred':
+        assert allowed_at is not None and allowed_at > now
+        due = allowed_at
+    else:
+        if d['sends'] >= d['max_sends']:
+            return 'failed', 0, 'EXHAUSTED'
+        if provider == 'FCM' and outcome in ('temporary_reject', 'timeout_unknown'):
+            provider_min = max(provider_min, now + 10)
+            if status == 429:
+                provider_min = max(provider_min, retry_after if retry_after is not None else now + 60)
+                if quota_kind in ('overall', 'topic'):
+                    provider_min = max(provider_min, now + 60)
+        cap = min(60, 2 ** max(0, d['sends'] - 1))
+        due = max(now + jitter * cap, provider_min, d['due'])
     return ('expired', 0, None) if due >= d['expires'] else ('retry_wait', due, None)
+
+
+class Provider:
+    """Injected acceptance, counted only after a committed attempt reservation."""
+    def __init__(self):
+        self.calls = []
+
+    def send(self, attempt):
+        self.calls.append(attempt)
+        return 'accepted'
 
 
 subprocess.run(['python3', str(Path(__file__).with_name('sync.py')), '--check'], check=True)
@@ -225,41 +265,112 @@ check('two observed misses still create one intent through UNIQUE', misses == [N
 
 c = s.claim('n1:a', 0)
 check('concurrent duplicate wake cannot claim a live lease', c['epoch'] == 1 and s.claim('n1:a', 1) is None)
-aid = s.prepare(c, 1)
+aid, _ = s.prepare(c, 1)
 check('normal send persists accepted before ACK', s.finish(c, aid, 'accepted', 2)
       and s.row('n1:a')['status'] == 'provider_accepted')
 check('lost ACK replays terminal endpoint without another send', s.claim('n1:a', 3) is None
       and s.row('n1:a')['sends'] == 1)
 
-v = Store(); v.accept()
-c1 = v.claim('n1:a', 0); a1 = v.prepare(c1, 1)
-external_sends = ['provider accepted first call']  # crash before recording result
+v = Store(); v.accept(); vp = Provider()
+c1 = v.claim('n1:a', 0)
+first = v.dispatch(c1, 1, vp, crash_after_send=True)
+a1 = first['attempt']
 c2 = v.claim('n1:a', 31)
 check('expired started attempt recovers as unknown, not failed delivery',
       c2['epoch'] == 2 and c2['uncertain'] == 1
+      and not first['acked'] and vp.calls == [a1]
       and v.observations('n1:a') == ['timeout_unknown'])
-a2 = v.prepare(c2, 32); external_sends.append('provider accepted retry')
-v.finish(c2, a2, 'accepted', 33)
+second = v.dispatch(c2, 32, vp)
 check('direct counterexample: allowed unknown retry can duplicate externally',
-      len(external_sends) == 2 and v.row('n1:a')['status'] == 'provider_accepted')
+      len(vp.calls) == 2 and v.count('attempt') == 2 and second['acked']
+      and v.row('n1:a')['sends'] == 2 and v.row('n1:a')['status'] == 'provider_accepted',
+      {'delivery': v.row('n1:a'), 'attempts': v.count('attempt'), 'provider_calls': vp.calls})
 before = v.row('n1:a')
 v.finish(c1, a1, 'permanent_reject', 34)
 check('old epoch records evidence without overwriting successor acceptance',
       v.row('n1:a') == before and 'permanent_reject' in v.observations('n1:a'))
 
-w = Store(); w.accept()
-c1 = w.claim('n1:a', 0); a1 = w.prepare(c1, 1)
-c2 = w.claim('n1:a', 31)
+w = Store(); w.accept(); wp = Provider()
+# The policy is already disabled before the first external acceptance.
 w.db.execute('UPDATE delivery SET unknown_retry=0 WHERE id=?', ('n1:a',))
-w.finish(c2, None, 'not_sent', 32)
-check('product can stop unknown retries while retaining uncertainty',
-      w.row('n1:a')['status'] == 'failed' and w.row('n1:a')['uncertain'] == 1)
-w.finish(c1, a1, 'accepted', 33)
+c1 = w.claim('n1:a', 0)
+first = w.dispatch(c1, 1, wp, crash_after_send=True)
+a1 = first['attempt']
+c2 = w.claim('n1:a', 31)
+check('forbidden retry recovery retains the first unrecorded acceptance as unknown',
+      first['acked'] is False and c2['uncertain'] == 1
+      and wp.calls == [a1] and w.observations('n1:a') == ['timeout_unknown'])
+before = w.row('n1:a')
+stale = w.dispatch(c1, 32, wp)
+check('stale epoch cannot reserve or stop its successor under the unknown policy',
+      stale == {'attempt': None, 'acked': False} and w.row('n1:a') == before
+      and w.count('attempt') == 1 and wp.calls == [a1])
+failed_stop = w.dispatch(c2, 33, wp, fail_result=True)
+check('unknown-stop result rollback leaves wake unacknowledged without a new call',
+      failed_stop == {'attempt': None, 'acked': False} and w.row('n1:a') == before
+      and w.count('attempt') == 1 and wp.calls == [a1] and w.count('outbox') == 1)
+stopped = w.dispatch(c2, 34, wp)
+check('forbidden unknown retry reserves no attempt/count/call and durably stops',
+      stopped == {'attempt': None, 'acked': True}
+      and w.row('n1:a')['status'] == 'failed' and w.row('n1:a')['uncertain'] == 1
+      and w.row('n1:a')['sends'] == 1 and w.count('attempt') == 1
+      and wp.calls == [a1] and w.count('outbox') == 1,
+      {'before': before, 'after': w.row('n1:a'), 'attempts': w.count('attempt'),
+       'provider_calls': wp.calls, 'dispatch': stopped})
+w.finish(c1, a1, 'accepted', 36)
 check('late accepted evidence remains visible after scheduling stopped',
-      w.row('n1:a')['status'] == 'failed' and 'accepted' in w.observations('n1:a'))
-check('terminal scheduling does not reopen from a late receipt', w.claim('n1:a', 34) is None)
+      w.row('n1:a')['status'] == 'failed' and w.row('n1:a')['uncertain'] == 1
+      and 'accepted' in w.observations('n1:a'))
+w.repair(100)
+check('late acceptance and repair do not reopen stopped unknown work',
+      w.claim('n1:a', 100) is None and w.count('outbox') == 1)
 
-x = Store(); x.accept(); c = x.claim('n1:a', 0); a = x.prepare(c, 1)
+deferred = Store(); deferred.accept(); dp = Provider()
+dc = deferred.claim('n1:a', 0)
+dr = deferred.dispatch(dc, 1, dp, gate='deferred', allowed_at=90)
+check('ordinary gate deferral still commits a future wake without reserving a send',
+      dr == {'attempt': None, 'acked': True} and deferred.row('n1:a')['status'] == 'retry_wait'
+      and deferred.row('n1:a')['due'] == 90 and deferred.row('n1:a')['sends'] == 0
+      and deferred.count('attempt') == 0 and not dp.calls and deferred.count('outbox') == 2)
+
+# Exercise the non-ALLOW gate and evidence-priority paths after the same crash.
+for gate in ('deferred', 'accepted', 'suppressed'):
+    g = Store(); g.accept(); gp = Provider()
+    g.db.execute('UPDATE delivery SET unknown_retry=0 WHERE id=?', ('n1:a',))
+    gc1 = g.claim('n1:a', 0)
+    ga1 = g.dispatch(gc1, 1, gp, crash_after_send=True)['attempt']
+    gc2 = g.claim('n1:a', 31)
+    if gate == 'accepted':
+        g.finish(gc1, ga1, 'accepted', 32)  # stale evidence arrives before gates
+    result = g.dispatch(gc2, 33, gp, gate='allow' if gate == 'accepted' else gate,
+                        allowed_at=90)
+    expected = {'deferred': 'failed', 'accepted': 'provider_accepted',
+                'suppressed': 'suppressed'}[gate]
+    check(f'{gate} gate preserves unknown-stop/evidence priority without sending',
+          result == {'attempt': None, 'acked': True}
+          and g.row('n1:a')['status'] == expected and g.row('n1:a')['uncertain'] == 1
+          and g.row('n1:a')['sends'] == 1 and g.count('attempt') == 1
+          and gp.calls == [ga1] and g.count('outbox') == 1)
+
+for boundary in ('lease', 'expiry', 'max_sends'):
+    b = Store(); b.accept(); bp = Provider()
+    b.db.execute('UPDATE delivery SET uncertain=1,unknown_retry=? WHERE id=?',
+                 (int(boundary == 'max_sends'), 'n1:a'))
+    bc = b.claim('n1:a', 0)
+    now = 30 if boundary == 'lease' else 1
+    if boundary == 'expiry':
+        b.db.execute('UPDATE delivery SET expires=1 WHERE id=?', ('n1:a',))
+    if boundary == 'max_sends':
+        b.db.execute('UPDATE delivery SET max_sends=0 WHERE id=?', ('n1:a',))
+    result = b.dispatch(bc, now, bp)
+    expected = {'lease': 'leased', 'expiry': 'expired', 'max_sends': 'failed'}[boundary]
+    check(f'{boundary} still blocks reservation before any provider call',
+          result == {'attempt': None, 'acked': boundary != 'lease'}
+          and b.row('n1:a')['status'] == expected and b.row('n1:a')['uncertain'] == 1
+          and b.row('n1:a')['sends'] == 0 and b.count('attempt') == 0 and not bp.calls
+          and b.count('outbox') == (2 if boundary == 'max_sends' else 1))
+
+x = Store(); x.accept(); c = x.claim('n1:a', 0); a, _ = x.prepare(c, 1)
 outbox_before = x.count('outbox')
 check('retry result transaction failure prevents ACK and rolls back state/outbox',
       not x.finish(c, a, 'timeout_unknown', 2, fail=True)
@@ -298,7 +409,7 @@ check('lost published wake can be reconstructed from durable queued work',
 y.repair(32)
 check('repair throttles repeated wakes without altering task state', y.count('outbox') == 2
       and y.row('n1:a')['status'] == 'queued')
-c = y.claim('n1:a', 33); a = y.prepare(c, 34); y.finish(c, a, 'accepted', 35)
+c = y.claim('n1:a', 33); a, _ = y.prepare(c, 34); y.finish(c, a, 'accepted', 35)
 y.repair(100)
 check('repair never resets a terminal endpoint', y.row('n1:a')['status'] == 'provider_accepted'
       and y.count('outbox') == 2)
@@ -313,8 +424,8 @@ check('first expired-lease repair works from acceptance-initialized last_woken',
       and first_repair.row('n1:a')['wake_no'] == 1)
 
 z = Store(); z.accept(endpoints=('a', 'b'))
-ca = z.claim('n1:a', 0); aa = z.prepare(ca, 1); z.finish(ca, aa, 'accepted', 2)
-cb = z.claim('n1:b', 0); ab = z.prepare(cb, 1); z.finish(cb, ab, 'timeout_unknown', 2, 60)
+ca = z.claim('n1:a', 0); aa, _ = z.prepare(ca, 1); z.finish(ca, aa, 'accepted', 2)
+cb = z.claim('n1:b', 0); ab, _ = z.prepare(cb, 1); z.finish(cb, ab, 'timeout_unknown', 2, 60)
 check('partial endpoint acceptance retries only the unfinished endpoint',
       z.claim('n1:a', 61) is None and z.claim('n1:b', 61) is not None)
 
