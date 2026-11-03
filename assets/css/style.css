@@ -9,6 +9,10 @@
   --drac-red: 173 66 62; --drac-purple: 111 83 155; --drac-yellow: 134 104 28;
   --chip-bg: 230 240 225; --chip-fg: 40 91 55;
   --section-tint: 234 243 231; --section-mark: 46 107 75;
+  --code-bg: #f7faf5; --code-bar: #eaf0e7; --code-fg: #24292e;
+  --code-keyword: #7c22c9; --code-string: #c0262d; --code-comment: #527044;
+  --code-type: #006e82; --code-function: #a34b00; --code-number: #007a45;
+  --code-literal: #164de3; --code-property: #005fc7; --code-meta: #a0268f;
   --shadow: 0 4px 18px rgba(35, 70, 43, .045);
   --topbar-height: 65px;
 }
@@ -22,6 +26,10 @@
   --drac-red: 255 85 85; --drac-purple: 189 147 249; --drac-yellow: 241 250 140;
   --chip-bg: 45 39 61; --chip-fg: 207 183 244;
   --section-tint: 40 33 49; --section-mark: 189 147 249;
+  --code-bg: #1e1e1e; --code-bar: #252526; --code-fg: #d4d4d4;
+  --code-keyword: #ff79c6; --code-string: #ff927b; --code-comment: #8a9d7a;
+  --code-type: #5de0d3; --code-function: #ffe66d; --code-number: #90e6a2;
+  --code-literal: #ae9bff; --code-property: #6cbcff; --code-meta: #ffa1e0;
   --shadow: 0 4px 18px rgba(0, 0, 0, .2);
 }
 * { box-sizing: border-box; }
@@ -127,11 +135,22 @@ tbody tr:nth-child(even) { background: rgba(var(--bg-base), .55); }
 .has-overflow > .scroll-hint { display: block; }
 .say { margin: 1rem 0; padding: 14px 18px; border-left: 3px solid rgb(var(--accent)); background: rgb(var(--bg-base)); border-radius: 0 7px 7px 0; }
 /* A wrapper owns scrolling, so inline legacy pre styles cannot expand the page. */
-.code-block { min-width: 0; max-width: 100%; margin: 22px 0; border: 1px solid rgb(var(--border-subtle)); border-radius: 9px; overflow: hidden; background: rgb(var(--bg-base)); }
-.code-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 14px; border-bottom: 1px solid rgb(var(--border-subtle)); background: rgb(var(--bg-elev)); font-size: 11px; color: rgb(var(--fg-muted)); }
+.code-block { min-width: 0; max-width: 100%; margin: 22px 0; border: 1px solid rgb(var(--border-subtle)); border-radius: 9px; overflow: hidden; background: var(--code-bg); }
+.code-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 14px; border-bottom: 1px solid rgb(var(--border-subtle)); background: var(--code-bar); font-size: 11px; color: rgb(var(--fg-muted)); }
 .code-copy { padding: 3px 8px; color: rgb(var(--accent)); background: rgb(var(--bg-card)); border: 1px solid rgb(var(--border-subtle)); border-radius: 5px; font-size: 11px; }
-.code-block pre { display: block !important; max-width: 100% !important; margin: 0 !important; padding: 20px !important; border: 0 !important; border-radius: 0 !important; background: transparent !important; color: rgb(var(--fg)) !important; font: 12px/1.9 ui-monospace, "SF Mono", Menlo, Consolas, monospace !important; white-space: pre !important; overflow: auto !important; overflow-wrap: normal !important; word-break: normal !important; overscroll-behavior-x: contain; }
+.code-block pre { display: block !important; max-width: 100% !important; margin: 0 !important; padding: 20px !important; border: 0 !important; border-radius: 0 !important; background: transparent !important; color: var(--code-fg) !important; font: 12px/1.9 ui-monospace, "SF Mono", Menlo, Consolas, monospace !important; white-space: pre !important; overflow: auto !important; overflow-wrap: normal !important; word-break: normal !important; overscroll-behavior-x: contain; }
 .code-block pre code { font: inherit; background: none; padding: 0; color: inherit; white-space: inherit; overflow-wrap: normal; }
+/* Editor-style tokens only affect block examples, never inline code or diagrams. */
+.code-block .hljs-keyword { color: var(--code-keyword); }
+.code-block .hljs-string, .code-block .hljs-regexp { color: var(--code-string); }
+.code-block .hljs-comment, .code-block .hljs-doctag { color: var(--code-comment); }
+.code-block .hljs-type, .code-block .hljs-built_in, .code-block .hljs-title.class_ { color: var(--code-type); }
+.code-block .hljs-title.function_ { color: var(--code-function); }
+.code-block .hljs-number { color: var(--code-number); }
+.code-block .hljs-literal, .code-block .hljs-literal .hljs-keyword, .code-block .hljs-symbol { color: var(--code-literal); }
+.code-block .hljs-attr, .code-block .hljs-attribute, .code-block .hljs-property { color: var(--code-property); }
+.code-block .hljs-meta { color: var(--code-meta); }
+.code-block .hljs-subst { color: var(--code-fg); }
 .copy-status:empty { display: none; }
 .copy-status { margin: 0; padding: 7px 14px; font-size: 12px; color: rgb(var(--accent)); border-top: 1px solid rgb(var(--border-subtle)); }
 /* Existing SVG geometry and semantic classes are preserved. */

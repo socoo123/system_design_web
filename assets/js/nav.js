@@ -1,6 +1,7 @@
 /* Shared reading UI. Chapter text and slide controllers remain independent. */
 (function () {
   "use strict";
+  var codeHighlightSrc = new URL("code-highlight.js", document.currentScript.src).href;
   var toc, tocLinks = [], headings = [], desktop;
   function english() { return document.documentElement.getAttribute("data-locale") === "en"; }
   function bilingual(zh, en) { return '<span class="lang-zh">' + zh + '</span><span class="lang-en">' + en + '</span>'; }
@@ -150,6 +151,12 @@
       else checkOverflow();
       pre.tabIndex = 0;
     });
+    // Progressive enhancement: navigation, copying and scrolling do not wait for coloring.
+    if (art.querySelector("pre code")) {
+      var syntax = document.createElement("script");
+      syntax.src = codeHighlightSrc;
+      document.head.appendChild(syntax);
+    }
   }
   document.addEventListener("DOMContentLoaded", function () {
     applyTheme(document.documentElement.getAttribute("data-theme") || "parchment");
