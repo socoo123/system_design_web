@@ -19,7 +19,7 @@
 | 任务锁 | **全部释放**；无作者写锁、活动只读复核或共享记录维护锁，四原子会话及临时恢复主均succeeded/idle |
 | 授权 | 用户明确执行最后第11批Ch42–Ch45，允许嵌套四linked child，全员Sol/max；不提交、推送、部署，验收交接清锁后停止 |
 | 工作区基线 | 执行前已有Ch01–Ch41、入口与历史记录改动全部保留；Ch42–45原无改动，基线已备份，见下文 |
-| 提交状态 | 本轮尚未提交、推送或部署 |
+| 提交状态 | 用户于2026-11-03授权推送；排版提交`ea4ec71`及此前本地提交`fd61a12`已推送至GitHub `main`，远端hash已核实；Pages自动构建配置见§6，未验收上线 |
 
 样板基线：`/private/var/folders/5k/y6qh6sfd2g30js0v0qrv4mfr0000gn/T/opencode/code-format-ch39-5tvy1tej`。执行前 HEAD 为 `fd61a122399c786edc8b169e8f62d5c8ec829de4`；`baseline.json` 保存 HEAD、工作区状态和 2,543 个已有文件的 SHA-256，另备份原计划、入口、Ch39 页面及四个示例目录文件。临时基线失效时，先根据记录、Git 和当前工作区恢复证据，不能直接还原用户改动。
 
@@ -225,6 +225,12 @@
 逐章更新状态和计数；一批全部完成后，清锁、写明下一批，给用户简短报告并结束本次任务。中途阻塞则记录精确恢复动作，不伪造整批完成。
 
 提交、推送与部署按用户另行明确授权执行。既有仓库为 <https://github.com/socoo123/system_design_web>，Pages 自动构建配置需在发布时核实；不能把推送成功当作上线已验证。
+
+### 2026-11-03 GitHub推送记录
+
+- 用户明确要求将代码push到GitHub；提交`ea4ec7189e47dd9536a442a8faa1ce729449cade`收录已验收的45章排版及计划/验收记录，共324文件，同时推送此前未发布的`fd61a12`。
+- `git fetch origin`后确认无远端独有提交；`git diff --check`与`node tools/check.mjs`通过。`git push origin main`成功，`git ls-remote origin refs/heads/main`确认远端为上述排版提交。
+- GitHub Pages配置为`legacy`、来源`main:/`，推送会触发自动构建；本次仅确认GitHub推送，未手动部署或将上线状态计为已验收。排版仍45/45完成，全部任务锁释放。
 
 ## 7. 清空上下文后重复使用的提示词
 
