@@ -142,24 +142,29 @@
 -- DeviceSession is pre-created per authorized device; its epoch never expires.
 BEGIN;
 SELECT epoch FROM device_session
-  WHERE user_id = :user AND device_id = :device FOR UPDATE;
+    WHERE user_id = :user AND device_id = :device FOR UPDATE;
 UPDATE device_session
-  SET epoch = epoch + 1, connection_id = :connection, gateway_id = :gateway,
-      lease_until = :server_now + INTERVAL &#x27;90 seconds&#x27;
-  WHERE user_id = :user AND device_id = :device
-    AND epoch &lt; 9223372036854775807
-  RETURNING epoch;
+    SET epoch = epoch + 1,
+        connection_id = :connection,
+        gateway_id = :gateway,
+        lease_until = :server_now + INTERVAL &#x27;90 seconds&#x27;
+    WHERE user_id = :user AND device_id = :device
+        AND epoch &lt; 9223372036854775807
+    RETURNING epoch;
 COMMIT; -- Install the returned epoch only after confirmed commit.
 -- Zero rows: reject. Unknown commit: discard this attempt and register anew.
 
 -- Heartbeat and disconnect are independent conditional atomic statements.
 UPDATE device_session SET lease_until = :server_now + INTERVAL &#x27;90 seconds&#x27;
-  WHERE user_id = :user AND device_id = :device AND epoch = :epoch
-    AND connection_id = :connection AND lease_until &gt; :server_now;
-UPDATE device_session SET connection_id = NULL, gateway_id = NULL,
-  lease_until = :server_now
-  WHERE user_id = :user AND device_id = :device AND epoch = :epoch
-    AND connection_id = :connection;</code></pre><div class="bilingual"><div class="lang-zh"><p>续约只接受尚未过期的当前连接代次，断线通知也只能清除自己那一代的路由。网关必须等登记事务的 COMMIT 确认后，才能启用返回的代次；若提交结果未知，就废弃本次尝试并重新登记。这些条件可以阻止迟到的删除和续约，却无法强制暂停旧进程。路由缓存过时仍可能导致重复推送，接收端要按 seq 合并；设备被撤销授权后，认证层还须拒绝旧凭据。</p><p>发布网关新版本时，先停止接收新连接，再分批排空旧连接。把单台最多 6 万条连接分散到 15 秒内恢复，需要每秒 4,000 次新握手；整层每秒 5,000 次的接入限额，还能为正常登录留下每秒 1,000 次。但这只核算了网关层，Edge、认证和消息补齐也需要各自的准入控制。网关能容纳这些连接，不代表整个系统能足够快地恢复。</p></div><div class="lang-en"><p>Renew only an unexpired current epoch; disconnect clears only its own route. Activate an incarnation after confirmed registration COMMIT; discard an unknown attempt and register afresh. These predicates prevent delayed deletes/renewals, without physically fencing a paused old process. Stale routes may duplicate pushes, absorbed by seq dedup. Device revocation must also invalidate old credentials at authentication.</p><p>For releases, stop new connections before draining in batches. Spreading at most 60k failed sockets over 15 s requires 4,000 handshakes/s, leaving 1,000/s of the fleet’s 5,000/s admission cap for ordinary logins. This sizes gateways only; Edge, authentication and sync require separate admission.</p></div></div>
+    WHERE user_id = :user AND device_id = :device AND epoch = :epoch
+        AND connection_id = :connection AND lease_until &gt; :server_now;
+
+UPDATE device_session
+    SET connection_id = NULL,
+        gateway_id = NULL,
+        lease_until = :server_now
+    WHERE user_id = :user AND device_id = :device AND epoch = :epoch
+        AND connection_id = :connection;</code></pre><div class="bilingual"><div class="lang-zh"><p>续约只接受尚未过期的当前连接代次，断线通知也只能清除自己那一代的路由。网关必须等登记事务的 COMMIT 确认后，才能启用返回的代次；若提交结果未知，就废弃本次尝试并重新登记。这些条件可以阻止迟到的删除和续约，却无法强制暂停旧进程。路由缓存过时仍可能导致重复推送，接收端要按 seq 合并；设备被撤销授权后，认证层还须拒绝旧凭据。</p><p>发布网关新版本时，先停止接收新连接，再分批排空旧连接。把单台最多 6 万条连接分散到 15 秒内恢复，需要每秒 4,000 次新握手；整层每秒 5,000 次的接入限额，还能为正常登录留下每秒 1,000 次。但这只核算了网关层，Edge、认证和消息补齐也需要各自的准入控制。网关能容纳这些连接，不代表整个系统能足够快地恢复。</p></div><div class="lang-en"><p>Renew only an unexpired current epoch; disconnect clears only its own route. Activate an incarnation after confirmed registration COMMIT; discard an unknown attempt and register afresh. These predicates prevent delayed deletes/renewals, without physically fencing a paused old process. Stale routes may duplicate pushes, absorbed by seq dedup. Device revocation must also invalidate old credentials at authentication.</p><p>For releases, stop new connections before draining in batches. Spreading at most 60k failed sockets over 15 s requires 4,000 handshakes/s, leaving 1,000/s of the fleet’s 5,000/s admission cap for ordinary logins. This sizes gateways only; Edge, authentication and sync require separate admission.</p></div></div>
 </section>
 
 <section><h2><span class="lang-zh">先提交再投递：消息、序号和去重结果一起保存</span> <span class="lang-en">Commit before delivery: message, seq and dedup in one transaction</span></h2>
@@ -268,55 +273,81 @@ UPDATE device_session SET connection_id = NULL, gateway_id = NULL,
       </div>
     </figure><h3><span class="lang-zh">用行锁和唯一约束落实提交契约</span> <span class="lang-en">Turn commit promises into locks and constraints</span></h3><div class="bilingual"><div class="lang-zh"><p><strong>对应第 2–3 帧：</strong>客户端先把正文和随机消息标识 <code>client_msg_id</code> 持久保存在本地 outbox 中，每次重试都复用原键。服务端按 <code>(conv,sender,key)</code> 去重，并为规范化后的正文、类型和附件引用计算摘要；若同键请求表达了不同意图，就拒绝。下面的 SQL 展示需要的表和约束，<strong>仅靠这些 DDL 并不能获得 A5 要求的共识复制</strong>。</p></div><div class="lang-en"><p><strong>Frames 2–3:</strong> persist the body and random <code>client_msg_id</code> in the client outbox before sending, reusing the key for every retry. Server dedup uses <code>(conv,sender,key)</code>; hash the canonical body, type and attachment references. Reject changed intent under the same key. This SQL expresses constraints; <strong>DDL alone does not provide A5 consensus replication</strong>.</p></div></div><pre data-language="SQL teaching · commit constraints" data-kind="teaching" data-source="schema.sql"><code>-- Teaching schema: PostgreSQL 18 syntax; replication is an extra A5 contract.
 CREATE TABLE conversation (
-  conv_id TEXT PRIMARY KEY, head BIGINT NOT NULL CHECK (head &gt;= 0),
-  membership_version BIGINT NOT NULL CHECK (membership_version &gt; 0),
-  policy_version BIGINT NOT NULL CHECK (policy_version &gt; 0)
+    conv_id TEXT PRIMARY KEY,
+    head BIGINT NOT NULL CHECK (head &gt;= 0),
+    membership_version BIGINT NOT NULL CHECK (membership_version &gt; 0),
+    policy_version BIGINT NOT NULL CHECK (policy_version &gt; 0)
 );
+
 CREATE TABLE member (
-  conv_id TEXT NOT NULL REFERENCES conversation, user_id TEXT NOT NULL,
-  view_epoch BIGINT NOT NULL CHECK (view_epoch &gt; 0),
-  first_seq BIGINT NOT NULL CHECK (first_seq &gt; 0), active BOOLEAN NOT NULL,
-  PRIMARY KEY (conv_id, user_id)
+    conv_id TEXT NOT NULL REFERENCES conversation,
+    user_id TEXT NOT NULL,
+    view_epoch BIGINT NOT NULL CHECK (view_epoch &gt; 0),
+    first_seq BIGINT NOT NULL CHECK (first_seq &gt; 0),
+    active BOOLEAN NOT NULL,
+    PRIMARY KEY (conv_id, user_id)
 );
+
 CREATE TABLE message (
-  conv_id TEXT NOT NULL REFERENCES conversation, seq BIGINT CHECK (seq &gt; 0),
-  sender_id TEXT NOT NULL, body BYTEA NOT NULL,
-  PRIMARY KEY (conv_id, seq)
+    conv_id TEXT NOT NULL REFERENCES conversation,
+    seq BIGINT CHECK (seq &gt; 0),
+    sender_id TEXT NOT NULL,
+    body BYTEA NOT NULL,
+    PRIMARY KEY (conv_id, seq)
 );
+
 CREATE TABLE send_receipt (
-  conv_id TEXT NOT NULL, sender_id TEXT NOT NULL, client_msg_id TEXT NOT NULL,
-  request_hash BYTEA NOT NULL, seq BIGINT NOT NULL CHECK (seq &gt; 0),
-  PRIMARY KEY (conv_id, sender_id, client_msg_id)
+    conv_id TEXT NOT NULL,
+    sender_id TEXT NOT NULL,
+    client_msg_id TEXT NOT NULL,
+    request_hash BYTEA NOT NULL,
+    seq BIGINT NOT NULL CHECK (seq &gt; 0),
+    PRIMARY KEY (conv_id, sender_id, client_msg_id)
 );
+
 CREATE TABLE outbox (
-  conv_id TEXT NOT NULL, seq BIGINT NOT NULL CHECK (seq &gt; 0),
-  policy_version BIGINT NOT NULL, envelope BYTEA NOT NULL,
-  published BOOLEAN NOT NULL DEFAULT FALSE,
-  PRIMARY KEY (conv_id, seq)
+    conv_id TEXT NOT NULL,
+    seq BIGINT NOT NULL CHECK (seq &gt; 0),
+    policy_version BIGINT NOT NULL,
+    envelope BYTEA NOT NULL,
+    published BOOLEAN NOT NULL DEFAULT FALSE,
+    PRIMARY KEY (conv_id, seq)
 );</code></pre><div class="bilingual"><div class="lang-zh"><p>下面的事务由 Message Store 实现，覆盖上述五张表中的相关行，不在事务内调用队列。这里用 PostgreSQL 的 <code>READ COMMITTED + FOR UPDATE</code> 表达会话内互斥：发送、入群、退群，以及权限或扇出模式的变更，都先锁住同一条 conversation 记录，直到事务结束才释放；每条消息还会更新普通计数器 head。若底层采用可串行化事务，发生冲突时必须整体重试。<a href="#ref-8">[8]</a> 当前成员资格也在持锁期间检查。若已有幂等回执，可以先向原发送者返回自己的最小提交状态，即使他后来被移除也一样，但不能借此返回历史正文。</p></div><div class="lang-en"><p>Message Store implements this transaction over the relevant rows in those five tables; it contains no Queue network call. PostgreSQL <code>READ COMMITTED + FOR UPDATE</code> expresses conversation exclusion: sends, joins/leaves, permission changes and fan-out policy changes first lock the same conversation row until transaction end. Each send also updates the ordinary head row. A serializable substrate retries conflicting transactions in full. <a href="#ref-8">[8]</a> Check current membership inside the lock. A prior retry receipt may return the sender’s own minimal commit status after removal, without returning history bodies.</p></div></div><pre data-language="Pseudocode · durable send" data-kind="pseudocode" data-source="submit.pseudo"><code>submit(auth, conv, key, request):
-  require authenticated sender; validate bounded key and canonical request
-  digest = SHA256(canonical request including type and attachment references)
-  BEGIN transaction on the current conversation authority
-  c = SELECT conversation WHERE conv_id = conv FOR UPDATE
-  if c missing: ROLLBACK; return NOT_FOUND
-  old = SELECT send_receipt WHERE (conv, auth.user, key)
-  if old exists:
-    ROLLBACK
-    return old.request_hash == digest ? Sent(old.seq) : KEY_REUSED
-  m = SELECT member WHERE (conv, auth.user)
-  if m missing or not m.active: ROLLBACK; return FORBIDDEN
-  s = checked_add(c.head, 1)
-  UPDATE conversation SET head = s WHERE conv_id = conv
-  INSERT message(conv, s, auth.user, canonical_message_bytes(request))
-  INSERT send_receipt(conv, auth.user, key, digest, s)
-  INSERT outbox(conv, s, c.policy_version, committed_envelope(request, s))
-  COMMIT and wait for A5 durable commit confirmation
-  return Sent(s)
+    require authenticated sender;
+    validate bounded key and canonical request
+    digest = SHA256(canonical request including type and attachment references)
+
+    BEGIN transaction on the current conversation authority
+    c = SELECT conversation WHERE conv_id = conv FOR UPDATE
+    if c missing:
+        ROLLBACK;
+        return NOT_FOUND
+
+    old = SELECT send_receipt WHERE (conv, auth.user, key)
+    if old exists:
+        ROLLBACK
+        return old.request_hash == digest ? Sent(old.seq) : KEY_REUSED
+
+    m = SELECT member WHERE (conv, auth.user)
+    if m missing or not m.active:
+        ROLLBACK;
+        return FORBIDDEN
+
+    s = checked_add(c.head, 1)
+    UPDATE conversation SET head = s WHERE conv_id = conv
+    INSERT message(conv, s, auth.user, canonical_message_bytes(request))
+    INSERT send_receipt(conv, auth.user, key, digest, s)
+    INSERT outbox(conv, s, c.policy_version, committed_envelope(request, s))
+
+    COMMIT and wait for A5 durable commit confirmation
+    return Sent(s)
 on definite_abort_or_deadlock:
-  ROLLBACK; bounded retry with the same key, or return RETRY_LATER
+    ROLLBACK;
+    bounded retry with the same key, or return RETRY_LATER
 on commit_timeout_or_connection_loss:
-  discard connection; return UNKNOWN
-  // Retry the same key against the authority, never invent a new key.</code></pre><div class="bilingual"><div class="lang-zh"><p><strong>为什么不会先提交 109，再补上 108？</strong>同一会话的下一笔事务，要等前一笔结束后才能读取并更新 head。前一笔若回滚，计数器、消息、回执和 outbox 会一起回滚。不能把它改成事务外的 <code>nextval()</code>：数据库序列不会在事务中止时收回已分配的值，因此可能留下空号。不过，确认响应到达客户端的顺序，仍可能与提交顺序不同。<a href="#ref-8">[8]</a> 不同会话可以并行处理；若采用预留号段的方案，还必须另行证明哪些区间已关闭、哪些位置确定为空。</p><p>A5 还要求，消息写入及其事务提交决定，由跨故障域的三个副本按共识规则耐久记录；恢复或提升副本为主节点时，不能丢失已确认的日志尾部。失去多数派后，不再确认新的 Sent。Raft 的日志提交和领导者安全规则解释了这层前提，不能简化为“任意两个节点收到就算成功”。<a href="#ref-3">[3]</a> 可以选择同时提供事务层和 Raft 复制层的数据库，例如 CockroachDB；事务提交检查与副本共识仍是两个实现层次。<a href="#ref-9">[9]</a> 单机 PostgreSQL 事务加异步副本不满足 A5，若这样部署，就必须降低 Sent 的耐久承诺。本例没有实现或实测这套分布式存储。</p></div><div class="lang-en"><p><strong>Why can’t 109 commit while 108 remains pending?</strong> The next transaction reads and updates head only after its predecessor finishes; abort rolls back the counter, message, receipt and outbox together. An external <code>nextval()</code> is unsuitable: database sequences do not reclaim aborted values and can leave holes. Client ACK arrival order can still differ from commit order. <a href="#ref-8">[8]</a> Conversations run independently; reserved ranges require separate closed-range/gap proofs.</p><p>A5 additionally requires durable consensus replication of the writes and transaction decision across three failure-domain-separated replicas, with no confirmed-suffix rollback on recovery/promotion. Without a majority, do not acknowledge new Sent. Raft’s commitment and leader-safety rules explain this premise; arbitrary two-node receipt is insufficient. <a href="#ref-3">[3]</a> A transactional, Raft-replicated store such as CockroachDB is one option; transaction commit checks and replica consensus are distinct layers. <a href="#ref-9">[9]</a> Local PostgreSQL transactions plus asynchronous standbys do not meet A5 and require a weaker Sent promise. This example neither implements nor experimentally verifies that distributed store.</p></div></div><h3><span class="lang-zh">四个故障窗口：如何恢复发送和投递</span> <span class="lang-en">Four failure windows and durable retries</span></h3><div class="bilingual"><div class="lang-zh"><p>如果在提交前崩溃，客户端没有拿到 Sent，就用原键重试。如果已经提交但确认响应丢失，结果是未知，仍用原键找回同一个 seq。如果在返回 Sent 后、投递前崩溃，Relay 会重新扫描已提交的 outbox。如果发布成功后、标记完成前崩溃，队列就可能收到两次。Relay 只有拿到队列的耐久接受确认，才标记 published；在标记前失败，宁可重发也不能丢任务。因此，Worker 和设备都必须幂等，不能把发布到队列与数据库 COMMIT 当作一个原子操作。辅助函数 <code>committed_envelope</code> 只把已校验的正文或引用、发送者 sender、会话 conv 和序号 seq 编码为字节，不调用外部系统；outbox 事件的唯一键是 (conv,seq)。<a href="#ref-2">[2]</a><a href="#ref-4">[4]</a></p><p>图中的投递载荷 envelope 已经包含正文，Worker 无须再次读取。若载荷只保存引用，就要补上历史读取和权限检查，并把这部分开销计入读取预算。离线设备先通过成员索引或 inbox 发现会话，再补齐日志；唤醒通知本身不算 Delivered。outbox 积压也要设置容量阈值，不能在队列故障时无限接收写入，直到磁盘耗尽。</p><p>A10 只约定客户端自动重试 24 小时，本例<strong>不删除 send_receipt</strong>。消息正文一年后过期，最小发送回执仍可保留。若要回收回执，须先按服务端可验证的发送代次或绝对受理期限，关闭旧请求的受理窗口，再排空有界的在途事务。仅靠客户端停止重试，或按 TTL 删除记录，都无法阻止无限迟到的请求再次插入。超过重试窗口后，若状态仍未知，也不能自动换一个新键。服务端对同键只保存一条逻辑记录，接收端按 <code>(conv,seq)</code> 合并重复消息，这与网络采用至少一次投递并不矛盾。</p></div><div class="lang-en"><p>Crash before commit: no Sent, retry the key. Commit with lost ACK: outcome unknown, recover the original seq using that key. Crash after Sent but before delivery: Relay rescans committed outbox. Publish followed by a crash before marking: Queue can receive duplicates. Relay marks published only after durable Queue acceptance; failure before marking favors duplicates over loss. Workers/devices must be idempotent; publish is not atomic with database COMMIT. <code>committed_envelope</code> only serializes validated body/references, sender, conv and seq, with no external call; (conv,seq) is the unique event key. <a href="#ref-2">[2]</a><a href="#ref-4">[4]</a></p><p>The diagram’s envelope includes the body; reference-only events add history reads and authorization checks to the read budget. Offline devices discover conversations through membership/inbox indexes and sync history. Wakeup notification is not Delivered. Bound outbox backlog instead of accepting writes until Queue outages fill disks.</p><p>A10 sets a 24 h client automatic retry window; this example <strong>does not delete send_receipt</strong>. Minimal receipts may outlive one-year message bodies. GC requires closing a server-verifiable sending epoch/absolute admission deadline and draining bounded in-flight transactions first. Client retry discipline or TTL deletion alone cannot reject arbitrarily late duplicates. Unknown expired-window status must not automatically get a new key. One server logical record per key and client merge by <code>(conv,seq)</code> coexist with at-least-once transport.</p></div></div>
+    discard connection;
+    return UNKNOWN
+    // Retry the same key against the authority, never invent a new key.</code></pre><div class="bilingual"><div class="lang-zh"><p><strong>为什么不会先提交 109，再补上 108？</strong>同一会话的下一笔事务，要等前一笔结束后才能读取并更新 head。前一笔若回滚，计数器、消息、回执和 outbox 会一起回滚。不能把它改成事务外的 <code>nextval()</code>：数据库序列不会在事务中止时收回已分配的值，因此可能留下空号。不过，确认响应到达客户端的顺序，仍可能与提交顺序不同。<a href="#ref-8">[8]</a> 不同会话可以并行处理；若采用预留号段的方案，还必须另行证明哪些区间已关闭、哪些位置确定为空。</p><p>A5 还要求，消息写入及其事务提交决定，由跨故障域的三个副本按共识规则耐久记录；恢复或提升副本为主节点时，不能丢失已确认的日志尾部。失去多数派后，不再确认新的 Sent。Raft 的日志提交和领导者安全规则解释了这层前提，不能简化为“任意两个节点收到就算成功”。<a href="#ref-3">[3]</a> 可以选择同时提供事务层和 Raft 复制层的数据库，例如 CockroachDB；事务提交检查与副本共识仍是两个实现层次。<a href="#ref-9">[9]</a> 单机 PostgreSQL 事务加异步副本不满足 A5，若这样部署，就必须降低 Sent 的耐久承诺。本例没有实现或实测这套分布式存储。</p></div><div class="lang-en"><p><strong>Why can’t 109 commit while 108 remains pending?</strong> The next transaction reads and updates head only after its predecessor finishes; abort rolls back the counter, message, receipt and outbox together. An external <code>nextval()</code> is unsuitable: database sequences do not reclaim aborted values and can leave holes. Client ACK arrival order can still differ from commit order. <a href="#ref-8">[8]</a> Conversations run independently; reserved ranges require separate closed-range/gap proofs.</p><p>A5 additionally requires durable consensus replication of the writes and transaction decision across three failure-domain-separated replicas, with no confirmed-suffix rollback on recovery/promotion. Without a majority, do not acknowledge new Sent. Raft’s commitment and leader-safety rules explain this premise; arbitrary two-node receipt is insufficient. <a href="#ref-3">[3]</a> A transactional, Raft-replicated store such as CockroachDB is one option; transaction commit checks and replica consensus are distinct layers. <a href="#ref-9">[9]</a> Local PostgreSQL transactions plus asynchronous standbys do not meet A5 and require a weaker Sent promise. This example neither implements nor experimentally verifies that distributed store.</p></div></div><h3><span class="lang-zh">四个故障窗口：如何恢复发送和投递</span> <span class="lang-en">Four failure windows and durable retries</span></h3><div class="bilingual"><div class="lang-zh"><p>如果在提交前崩溃，客户端没有拿到 Sent，就用原键重试。如果已经提交但确认响应丢失，结果是未知，仍用原键找回同一个 seq。如果在返回 Sent 后、投递前崩溃，Relay 会重新扫描已提交的 outbox。如果发布成功后、标记完成前崩溃，队列就可能收到两次。Relay 只有拿到队列的耐久接受确认，才标记 published；在标记前失败，宁可重发也不能丢任务。因此，Worker 和设备都必须幂等，不能把发布到队列与数据库 COMMIT 当作一个原子操作。辅助函数 <code>committed_envelope</code> 只把已校验的正文或引用、发送者 sender、会话 conv 和序号 seq 编码为字节，不调用外部系统；outbox 事件的唯一键是 (conv,seq)。<a href="#ref-2">[2]</a><a href="#ref-4">[4]</a></p><p>图中的投递载荷 envelope 已经包含正文，Worker 无须再次读取。若载荷只保存引用，就要补上历史读取和权限检查，并把这部分开销计入读取预算。离线设备先通过成员索引或 inbox 发现会话，再补齐日志；唤醒通知本身不算 Delivered。outbox 积压也要设置容量阈值，不能在队列故障时无限接收写入，直到磁盘耗尽。</p><p>A10 只约定客户端自动重试 24 小时，本例<strong>不删除 send_receipt</strong>。消息正文一年后过期，最小发送回执仍可保留。若要回收回执，须先按服务端可验证的发送代次或绝对受理期限，关闭旧请求的受理窗口，再排空有界的在途事务。仅靠客户端停止重试，或按 TTL 删除记录，都无法阻止无限迟到的请求再次插入。超过重试窗口后，若状态仍未知，也不能自动换一个新键。服务端对同键只保存一条逻辑记录，接收端按 <code>(conv,seq)</code> 合并重复消息，这与网络采用至少一次投递并不矛盾。</p></div><div class="lang-en"><p>Crash before commit: no Sent, retry the key. Commit with lost ACK: outcome unknown, recover the original seq using that key. Crash after Sent but before delivery: Relay rescans committed outbox. Publish followed by a crash before marking: Queue can receive duplicates. Relay marks published only after durable Queue acceptance; failure before marking favors duplicates over loss. Workers/devices must be idempotent; publish is not atomic with database COMMIT. <code>committed_envelope</code> only serializes validated body/references, sender, conv and seq, with no external call; (conv,seq) is the unique event key. <a href="#ref-2">[2]</a><a href="#ref-4">[4]</a></p><p>The diagram’s envelope includes the body; reference-only events add history reads and authorization checks to the read budget. Offline devices discover conversations through membership/inbox indexes and sync history. Wakeup notification is not Delivered. Bound outbox backlog instead of accepting writes until Queue outages fill disks.</p><p>A10 sets a 24 h client automatic retry window; this example <strong>does not delete send_receipt</strong>. Minimal receipts may outlive one-year message bodies. GC requires closing a server-verifiable sending epoch/absolute admission deadline and draining bounded in-flight transactions first. Client retry discipline or TTL deletion alone cannot reject arbitrarily late duplicates. Unknown expired-window status must not automatically get a new key. One server logical record per key and client merge by <code>(conv,seq)</code> coexist with at-least-once transport.</p></div></div>
 </section>
 
 <section><h2><span class="lang-zh">断线与乱序：补齐消息后才能推进连续游标</span> <span class="lang-en">Disconnects and reordering: a contiguous cursor proves sync</span></h2>
@@ -414,23 +445,29 @@ on commit_timeout_or_connection_loss:
         <figcaption><span class="lang-zh">设备把补回的 106、107 与缓冲的 108 合并并持久保存后，游标才能从 105 推进到 108。重复的 108 只合并一次；若缺口一直存在，就重新同步，不能把见过的最大序号当作已收齐的水位。</span> <span class="lang-en">One device moves from 105 to filling 106 and 107, then to 108. Merge repeated 108 once, and resync a persistent gap; maximum observed seq is not a contiguous cursor.</span></figcaption>
       </div>
     </figure><div class="bilingual"><div class="lang-zh"><p><strong>即使 108 先到，游标也仍是 105。</strong>设备的接收游标 receive_cursor，表示它已经连续、持久保存到哪个位置。因此，要先缓冲 108，补回 106、107，持久保存后再推进到 108。若直接记录见过的最大序号，下次查询 <code>seq&gt;108</code> 就会永久跳过这两条。设备也必须确认本地事务已提交后，才能发出 Delivered，不能先发回执再落盘。</p><p>设备重连后，先认证并登记新的连接代次，再为当前会话建立订阅、缓冲实时事件，然后从提交消息的权威存储取得水位 H，按 <code>(cursor,H]</code> 分页读取，每页 100 条。读取源必须至少追到 H；不能因为旧副本暂时没有更多记录，就认定没有新消息。历史追到 H 后，再合并 H 以上的缓冲事件。若订阅失效或缓冲溢出，应重新取得水位并再做一轮，不能宣布同步完成。Matrix v1.11 对有限时间线和缺口的处理体现了这个区别，但其中的 next_batch 并不是本章的整数序号 seq。<a href="#ref-5">[5]</a></p></div><div class="lang-en"><p><strong>Seeing 108 leaves the cursor at 105.</strong> receive_cursor proves the prefix durably stored on this device. Buffer 108, fill 106–107, then advance to 108. Recording the maximum seq makes a later <code>seq&gt;108</code> query permanently skip them. Send Delivered only after confirmed local commit.</p><p>On reconnect, authenticate and register a new epoch, establish a buffered subscription, then obtain committed H and page through <code>(cursor,H]</code> at 100 rows/page. Reads must reach H; a lagging replica tail is not evidence of no new messages. After history reaches H, merge buffered data above H. Subscription loss/overflow requires a new watermark and retry. Matrix v1.11’s limited timelines and gap handling illustrate the distinction; next_batch is not our integer seq. <a href="#ref-5">[5]</a></p></div></div><h3><span class="lang-zh">本地事务：消息记录与连续游标一起落盘</span> <span class="lang-en">Local transaction: persist entries and the contiguous cursor together</span></h3><div class="bilingual"><div class="lang-zh"><p>下面是设备端伪代码。本地消息记录的主键为 <code>(conv,view_epoch,seq)</code>，接收游标按设备和授权历史视图 view 分别保存。视图由服务端授权，包含根据入群和历史权限确定的起点 first_seq；新视图的初始游标为 first_seq−1。设备在同一事务内按修订号 revision 有条件地插入或更新记录，检查下一个序号 <code>c+1</code> 是否已有记录，再把正文或标记与游标一起耐久提交。客户端不能自行制造 OMITTED 标记，声称缺口已经覆盖。</p></div><div class="lang-en"><p>This device pseudocode uses local entries keyed by <code>(conv,view_epoch,seq)</code> and a cursor per device/view. The server authorizes view and its first_seq; a fresh view starts at first_seq−1. Inside one transaction, revision-conditional UPSERT entries, check for <code>c+1</code>, then durably commit entries/markers and cursor together. A client cannot invent OMITTED markers to cover gaps.</p></div></div><pre data-language="Pseudocode · contiguous receive" data-kind="pseudocode" data-source="receive.pseudo"><code>persist_batch(device, view, entries):
-  require authenticated server stream and matching conv + view_epoch
-  BEGIN local database write transaction
-  c = SELECT receive_cursor WHERE (device, view) FOR UPDATE
-  for entry in entries:
-    require entry.seq &gt;= view.first_seq
-    require entry is MESSAGE, TOMBSTONE, or server-certified OMITTED
-    UPSERT LocalEntry(view, entry.seq, entry.revision, entry.content)
-      only if revision increases; reject conflicting equal revisions
-  while c &lt; MAX_SEQ and LocalEntry(view, c + 1) exists:
-    c = checked_add(c, 1)
-  if gap_storage_exceeds_budget():
-    ROLLBACK; request a bounded fresh sync; return NO_ACK
-  UPDATE receive_cursor SET upto = c WHERE (device, view)
-  COMMIT using the local database&#x27;s durable write option
-  send Delivered(view, c)  // A lost receipt ACK is safe to retry.
+    require authenticated server stream and matching conv + view_epoch
+
+    BEGIN local database write transaction
+    c = SELECT receive_cursor WHERE (device, view) FOR UPDATE
+    for entry in entries:
+        require entry.seq &gt;= view.first_seq
+        require entry is MESSAGE, TOMBSTONE, or server-certified OMITTED
+        UPSERT LocalEntry(view, entry.seq, entry.revision, entry.content)
+            only if revision increases; reject conflicting equal revisions
+
+    while c &lt; MAX_SEQ and LocalEntry(view, c + 1) exists:
+        c = checked_add(c, 1)
+    if gap_storage_exceeds_budget():
+        ROLLBACK;
+        request a bounded fresh sync;
+        return NO_ACK
+
+    UPDATE receive_cursor SET upto = c WHERE (device, view)
+    COMMIT using the local database&#x27;s durable write option
+    send Delivered(view, c)  // A lost receipt ACK is safe to retry.
 on local_io_or_quota_failure:
-  ROLLBACK if still active; do not acknowledge unconfirmed storage</code></pre><p class="cite"><span class="lang-zh">完整源码与验证：<a href="../examples/ch12/README.md">运行说明</a> · <a href="../examples/ch12/ChatContracts.java">Java 17 连续前缀契约模型</a>。该模型只验证契约，不实现网络、共识或真实设备的持久化。</span> <span class="lang-en">Source and verification: <a href="../examples/ch12/README.md">run instructions</a> · <a href="../examples/ch12/ChatContracts.java">Java 17 contiguous-prefix contract model</a>. The model implements no network, consensus or real device persistence.</span></p><div class="bilingual"><div class="lang-zh"><p><strong>消息被过滤或过期，也要说明缺失序号的去向。</strong>在保留期内，撤回或不可见的位置应返回删除标记 tombstone，或经过服务端认证的省略标记，继续覆盖原来的序号。不能过滤掉记录后，只返回一个更大的游标。若游标已经早于保留起点 floor，应返回 <code>RESET_REQUIRED</code>，并给出新授权的起点或有限快照，明确说明旧历史已无法补齐。重新入群时创建新的视图代次 view_epoch，旧页和旧回执不能混入新视图。</p><p><strong>能合并修订，不代表能发现修订。</strong>修订号 revision 只决定如何合并同一位置上<strong>已经收到</strong>的修订。假设设备保存到 108 后离线，服务端随后把 106 改为 rev2，仅查询 <code>seq&gt;108</code> 就发现不了这次变化。本章没有实现对游标之前的编辑或撤回进行传播。完整的离线同步还需要在新的日志位置追加控制事件，或维护独立的变更游标 change cursor，不能仅凭支持更高修订号合并，就宣称可以发现全部变更。</p><p>手机只保存到 105、桌面端已保存到 108，是合理的多端状态。用户级已读水位 read_upto=108 不能替代手机自己的 receive_cursor。新设备先查成员索引发现会话，再读取获得授权的历史窗口。每一页读取和每次实时投递，都要检查当前权限；离群后旧视图失效，尚未完成的同步也不能再宣布成功。实时推送用于尽快展示，日志始终负责修复缺失消息。</p><p>每条连接的待发缓冲上限为 1 MB，按每条约 1 KB 算，大约能放 1,000 条，对象开销另计。超限后标记 sync_required，停止堆积正文，并关闭连接或降低速度。若 180 万条连接都占满缓冲，仅载荷就需要 1.8 TB，因此还要设置网关总预算和公平调度。正在输入提示（Typing）和绿点可以丢弃，权威日志则不能为了降级而删除。恢复时若每秒重连 4,000 次、每次补齐 100 行，最坏会产生每秒 400,000 行的读取。因此，握手和历史扫描需要分别准入，界面可以先显示本地历史，再分批追齐。</p></div><div class="lang-en"><p><strong>Filtering and retention must close ranges too.</strong> Within retention, retracted/hidden slots return tombstones or authenticated server omission markers that still cover the original seq. Filtering out rows and returning a larger cursor is unsafe. A cursor before the retention floor gets <code>RESET_REQUIRED</code> with a newly authorized baseline/bounded snapshot, explicitly losing expired history rather than pretending completeness. Rejoining creates a new view_epoch; old pages/receipts cannot enter it.</p><p><strong>Applying a revision is separate from discovering a change.</strong> Revision merging only applies updates <strong>already received</strong> for a position. If a device goes offline at cursor 108 and the server revises 106 to rev2, a <code>seq&gt;108</code> query cannot discover it. This chapter does not implement propagation of edits/retractions behind the cursor. Complete offline synchronization needs control events at new log positions or a separate change cursor; accepting a higher revision does not provide change discovery.</p><p>Phone 105 and desktop 108 are valid simultaneously. User read_upto=108 cannot replace phone receive_cursor. New devices discover conversations through membership indexes before fetching authorized windows. Every page and live dispatch checks current permission; leaving invalidates the old view and prevents unfinished sync from claiming success. Push is a fast path; the log repairs it.</p><p>A 1 MB/socket pending-send cap holds about 1,000 messages at 1 KB each, excluding object overhead. On overflow, mark sync_required, stop buffering bodies and close or slow the socket. All 1.8M sockets at that cap consume 1.8 TB payload, requiring fleet-local budgets and fair scheduling. Typing/presence can drop; authoritative history cannot. At 4,000 reconnects/s and 100 missing rows each, worst-case catch-up reaches 400,000 rows/s. Admit handshakes and history scans separately, displaying local history before paced catch-up.</p></div></div>
+    ROLLBACK if still active;
+    do not acknowledge unconfirmed storage</code></pre><p class="cite"><span class="lang-zh">完整源码与验证：<a href="../examples/ch12/README.md">运行说明</a> · <a href="../examples/ch12/ChatContracts.java">Java 17 连续前缀契约模型</a>。该模型只验证契约，不实现网络、共识或真实设备的持久化。</span> <span class="lang-en">Source and verification: <a href="../examples/ch12/README.md">run instructions</a> · <a href="../examples/ch12/ChatContracts.java">Java 17 contiguous-prefix contract model</a>. The model implements no network, consensus or real device persistence.</span></p><div class="bilingual"><div class="lang-zh"><p><strong>消息被过滤或过期，也要说明缺失序号的去向。</strong>在保留期内，撤回或不可见的位置应返回删除标记 tombstone，或经过服务端认证的省略标记，继续覆盖原来的序号。不能过滤掉记录后，只返回一个更大的游标。若游标已经早于保留起点 floor，应返回 <code>RESET_REQUIRED</code>，并给出新授权的起点或有限快照，明确说明旧历史已无法补齐。重新入群时创建新的视图代次 view_epoch，旧页和旧回执不能混入新视图。</p><p><strong>能合并修订，不代表能发现修订。</strong>修订号 revision 只决定如何合并同一位置上<strong>已经收到</strong>的修订。假设设备保存到 108 后离线，服务端随后把 106 改为 rev2，仅查询 <code>seq&gt;108</code> 就发现不了这次变化。本章没有实现对游标之前的编辑或撤回进行传播。完整的离线同步还需要在新的日志位置追加控制事件，或维护独立的变更游标 change cursor，不能仅凭支持更高修订号合并，就宣称可以发现全部变更。</p><p>手机只保存到 105、桌面端已保存到 108，是合理的多端状态。用户级已读水位 read_upto=108 不能替代手机自己的 receive_cursor。新设备先查成员索引发现会话，再读取获得授权的历史窗口。每一页读取和每次实时投递，都要检查当前权限；离群后旧视图失效，尚未完成的同步也不能再宣布成功。实时推送用于尽快展示，日志始终负责修复缺失消息。</p><p>每条连接的待发缓冲上限为 1 MB，按每条约 1 KB 算，大约能放 1,000 条，对象开销另计。超限后标记 sync_required，停止堆积正文，并关闭连接或降低速度。若 180 万条连接都占满缓冲，仅载荷就需要 1.8 TB，因此还要设置网关总预算和公平调度。正在输入提示（Typing）和绿点可以丢弃，权威日志则不能为了降级而删除。恢复时若每秒重连 4,000 次、每次补齐 100 行，最坏会产生每秒 400,000 行的读取。因此，握手和历史扫描需要分别准入，界面可以先显示本地历史，再分批追齐。</p></div><div class="lang-en"><p><strong>Filtering and retention must close ranges too.</strong> Within retention, retracted/hidden slots return tombstones or authenticated server omission markers that still cover the original seq. Filtering out rows and returning a larger cursor is unsafe. A cursor before the retention floor gets <code>RESET_REQUIRED</code> with a newly authorized baseline/bounded snapshot, explicitly losing expired history rather than pretending completeness. Rejoining creates a new view_epoch; old pages/receipts cannot enter it.</p><p><strong>Applying a revision is separate from discovering a change.</strong> Revision merging only applies updates <strong>already received</strong> for a position. If a device goes offline at cursor 108 and the server revises 106 to rev2, a <code>seq&gt;108</code> query cannot discover it. This chapter does not implement propagation of edits/retractions behind the cursor. Complete offline synchronization needs control events at new log positions or a separate change cursor; accepting a higher revision does not provide change discovery.</p><p>Phone 105 and desktop 108 are valid simultaneously. User read_upto=108 cannot replace phone receive_cursor. New devices discover conversations through membership indexes before fetching authorized windows. Every page and live dispatch checks current permission; leaving invalidates the old view and prevents unfinished sync from claiming success. Push is a fast path; the log repairs it.</p><p>A 1 MB/socket pending-send cap holds about 1,000 messages at 1 KB each, excluding object overhead. On overflow, mark sync_required, stop buffering bodies and close or slow the socket. All 1.8M sockets at that cap consume 1.8 TB payload, requiring fleet-local budgets and fair scheduling. Typing/presence can drop; authoritative history cannot. At 4,000 reconnects/s and 100 missing rows each, worst-case catch-up reaches 400,000 rows/s. Admit handshakes and history scans separately, displaying local history before paced catch-up.</p></div></div>
 </section>
 
 <section><h2><span class="lang-zh">对勾与多端：由谁确认已发送、已送达和已读</span> <span class="lang-en">Receipts and devices: who proves each state</span></h2>
@@ -534,26 +571,32 @@ on local_io_or_quota_failure:
     </figure><table><thead><tr><th><div class="lang-zh">状态</div> <div class="lang-en">State</div></th><th><div class="lang-zh">成立条件</div> <div class="lang-en">Condition</div></th><th><div class="lang-zh">存在哪里</div> <div class="lang-en">Where it lives</div></th></tr></thead><tbody><tr><td>Sent</td><td><div class="lang-zh">消息事务已按 A5 提交，发送端获得原来的会话序号</div> <div class="lang-en">A5 message transaction committed; sender obtains original seq</div></td><td><div class="lang-zh">消息存储（Message Store）与发送端本地 outbox</div> <div class="lang-en">Message Store + sender local outbox</div></td></tr>
 <tr><td>Delivered</td><td><div class="lang-zh">指定对端设备已连续保存并发回确认；单聊展示只需任一授权设备满足</div> <div class="lang-en">Specified recipient device persisted contiguously and ACKed; DM display uses any device</div></td><td><div class="lang-zh">回执存储（Receipt Store）按用户、设备和会话记录 delivered_upto</div> <div class="lang-en">Receipt Store delivered_upto by user + device + conv</div></td></tr>
 <tr><td>Read</td><td><div class="lang-zh">对端界面上报连续读到哪里，再按本章的产品语义合并多端状态</div> <div class="lang-en">Recipient UI reports a read prefix; merge devices under this product’s semantics</div></td><td><div class="lang-zh">回执存储按用户和会话记录 read_upto</div> <div class="lang-en">Receipt Store read_upto by user + conv</div></td></tr></tbody></table><div class="bilingual"><div class="lang-zh"><p><strong>同一设备的已读水位不能跨过自己的缺口。</strong>遵守协议的客户端，要先连续保存并按产品规则显示到 108，才能上报 D=108、R=108，两者可以放在同一批次。网关写入连接成功，或推送平台接受通知，都不能证明 Delivered。Read 只是客户端界面的声明；服务端可以把它限制在授权范围内，且不高于本设备已报告的 D，却无法证明设备真的落盘，或用户真的注意到了消息。被攻破的客户端仍可能谎报。</p><p>图中的 Receipt Store 是一组逻辑表，与 conversation/member 位于同一个权威分区、同一个数据库。Receipt svc 虽是独立服务，却不使用独立的事务数据库。设备回执 DeviceReceipt 的主键包含 <code>(user,device,conv,view_epoch)</code>，私有和公开 Read 的主键各为 <code>(user,conv,view_epoch)</code>。下面的每次插入或更新，都通过数据库单语句 <code>ON CONFLICT DO UPDATE … GREATEST(old,new)</code>，或持有行锁时的更新来取最大值，不能由应用先读旧值，再无条件覆盖。事务还要锁住成员记录并校验当前视图；移除成员或重新入群时更新的也是这条记录。本例中，回执记录的初始化与水位更新也在同一事务内完成。</p></div><div class="lang-en"><p><strong>Read cannot jump a device’s own gaps.</strong> An honest client reports D=108 and R=108 only after contiguously persisting and displaying through 108 under product rules; both may share a batch. Socket-write success or a push provider accepting a notification does not prove Delivered. The server bounds UI claims to authorized ranges and that device’s reported D; it cannot prove disk state or human attention. A compromised client can lie.</p><p>Receipt Store in the diagram is a logical table group in the same authority partition/database as conversation/member. Receipt svc is a separate service, not a separate transactional database. DeviceReceipt is keyed by <code>(user,device,conv,view_epoch)</code>; private/public Read each use <code>(user,conv,view_epoch)</code>. Each max UPSERT is one database <code>ON CONFLICT DO UPDATE … GREATEST(old,new)</code> statement or a locked-row update, never an unlocked read followed by overwrite. This transaction locks current membership and validates view; removal/rejoin update that same membership record. Receipt-row initialization and watermark updates share the transaction.</p></div></div><pre data-language="Pseudocode · receipt merge" data-kind="pseudocode" data-source="receipt.pseudo"><code>record_receipt(auth, view, delivered_candidate, read_candidate):
-  require current authorized device identity; validate integer bounds
-  BEGIN serializable transaction on the shared conversation/receipt authority
-  m = SELECT current membership WHERE (auth.user, view.conv) FOR SHARE
-  require m.active and m.view_epoch == view.epoch
-  base = m.first_seq - 1
-  tail = read current committed conversation head
-  require base &lt;= delivered_candidate &lt;= tail
-  ensure DeviceReceipt(user, device, conv, view_epoch) row via INSERT
-    ON CONFLICT DO NOTHING, initialized to base
-  d = SELECT DeviceReceipt WHERE (auth.user, auth.device, view) FOR UPDATE
-  next_d = max(d.delivered_upto, delivered_candidate)
-  require base &lt;= read_candidate &lt;= next_d
-  UPDATE DeviceReceipt SET delivered_upto = next_d
-  UPSERT PrivateRead(user, conv, view_epoch) using max(old, read_candidate)
-  if current user preference permits public read receipts:
-    UPSERT PublicRead(user, conv, view_epoch) using max(old, read_candidate)
-  COMMIT and wait for durable confirmation
-  return ACK(next_d)  // The sender can fetch authoritative state later.
+    require current authorized device identity;
+    validate integer bounds
+
+    BEGIN serializable transaction on the shared conversation/receipt authority
+    m = SELECT current membership WHERE (auth.user, view.conv) FOR SHARE
+    require m.active and m.view_epoch == view.epoch
+    base = m.first_seq - 1
+    tail = read current committed conversation head
+    require base &lt;= delivered_candidate &lt;= tail
+
+    ensure DeviceReceipt(user, device, conv, view_epoch) row via INSERT
+        ON CONFLICT DO NOTHING, initialized to base
+    d = SELECT DeviceReceipt WHERE (auth.user, auth.device, view) FOR UPDATE
+    next_d = max(d.delivered_upto, delivered_candidate)
+    require base &lt;= read_candidate &lt;= next_d
+
+    UPDATE DeviceReceipt SET delivered_upto = next_d
+    UPSERT PrivateRead(user, conv, view_epoch) using max(old, read_candidate)
+    if current user preference permits public read receipts:
+        UPSERT PublicRead(user, conv, view_epoch) using max(old, read_candidate)
+
+    COMMIT and wait for durable confirmation
+    return ACK(next_d)  // The sender can fetch authoritative state later.
 on abort_or_unknown:
-  retry the same watermarks; never regress a stored column</code></pre><div class="bilingual"><div class="lang-zh"><p>迟到的 D=107 不会降低已保存的 D=108。用户级 Read 可以合并多端状态，却不能修改另一台设备的接收游标。用户关闭公开已读后，仍可保留私有水位，用于计算自己的未读消息。回执确认只说明 Receipt Store 已按其耐久契约保存状态，A 可以随后补读；实时提示丢失时，也能从最新状态恢复，无须让 B 等待 A 上线。Matrix 的用户级 read-up-to 和私有回执体现了这一思路，Delivered 则是本章自定的契约。<a href="#ref-5">[5]</a></p><p>若产品要求“所有设备都已送达”，就必须枚举获得授权的设备，并约定长期离线设备何时到期，不能只取任一设备的最大水位。单聊可以批量上报连续前缀；但大群若让 N 人逐条上报已读，再向 N 人广播，工作量就接近 N²。因此，大群只保存水位并返回用户自己的未读状态，小群则可按需查询少量成员。另外，直接用 <code>tail−read</code> 计算未读条数，可能因可见性、撤回和入群窗口而高估；应按产品语义计算，或维护可修复的索引。</p></div><div class="lang-en"><p>Late D=107 cannot lower stored D=108. User Read merges devices without changing any other device’s receive cursor. Public reads may be disabled while private state tracks personal unread. Receipt ACK proves durable Receipt Store state; A can fetch it later. Lost realtime hints repair from current state, without making B wait for A online. Matrix’s user read-up-to/private receipts support this model; Delivered remains our own contract. <a href="#ref-5">[5]</a></p><p>“All devices delivered” requires enumerating authorized devices and an expiry rule for long-offline ones, rather than any-device max. Batch prefixes suffice for DMs. Broadcasting N readers’ per-message receipts to N group members approaches N² work; large groups retain watermarks and return personal unread, optionally querying a few small-group members. Visibility, retractions and join windows can make <code>tail−read</code> overcount; compute product-aware unread counts or maintain a repairable index.</p></div></div>
+    retry the same watermarks;
+    never regress a stored column</code></pre><div class="bilingual"><div class="lang-zh"><p>迟到的 D=107 不会降低已保存的 D=108。用户级 Read 可以合并多端状态，却不能修改另一台设备的接收游标。用户关闭公开已读后，仍可保留私有水位，用于计算自己的未读消息。回执确认只说明 Receipt Store 已按其耐久契约保存状态，A 可以随后补读；实时提示丢失时，也能从最新状态恢复，无须让 B 等待 A 上线。Matrix 的用户级 read-up-to 和私有回执体现了这一思路，Delivered 则是本章自定的契约。<a href="#ref-5">[5]</a></p><p>若产品要求“所有设备都已送达”，就必须枚举获得授权的设备，并约定长期离线设备何时到期，不能只取任一设备的最大水位。单聊可以批量上报连续前缀；但大群若让 N 人逐条上报已读，再向 N 人广播，工作量就接近 N²。因此，大群只保存水位并返回用户自己的未读状态，小群则可按需查询少量成员。另外，直接用 <code>tail−read</code> 计算未读条数，可能因可见性、撤回和入群窗口而高估；应按产品语义计算，或维护可修复的索引。</p></div><div class="lang-en"><p>Late D=107 cannot lower stored D=108. User Read merges devices without changing any other device’s receive cursor. Public reads may be disabled while private state tracks personal unread. Receipt ACK proves durable Receipt Store state; A can fetch it later. Lost realtime hints repair from current state, without making B wait for A online. Matrix’s user read-up-to/private receipts support this model; Delivered remains our own contract. <a href="#ref-5">[5]</a></p><p>“All devices delivered” requires enumerating authorized devices and an expiry rule for long-offline ones, rather than any-device max. Batch prefixes suffice for DMs. Broadcasting N readers’ per-message receipts to N group members approaches N² work; large groups retain watermarks and return personal unread, optionally querying a few small-group members. Visibility, retractions and join windows can make <code>tail−read</code> overcount; compute product-aware unread counts or maintain a repairable index.</p></div></div>
 </section>
 
 <section><h2><span class="lang-zh">群聊：正文只存一份，按成员和观看连接安排投递</span> <span class="lang-en">Groups: one body, separate membership and viewer fan-out</span></h2>

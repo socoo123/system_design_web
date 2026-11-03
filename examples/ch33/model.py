@@ -47,22 +47,35 @@ def canonical_args(raw):
             require(depth <= 8, "input_depth")
         elif char in "]}":
             depth -= 1
+
     def no_duplicates(pairs):
         result = {}
         for key, value in pairs:
             require(key not in result, "duplicate_key")
             result[key] = value
         return result
+
     def no_constant(value):
         raise Denied("non_json_number:" + value)
+
     try:
         args = json.loads(text, object_pairs_hook=no_duplicates, parse_constant=no_constant)
     except (ValueError, RecursionError) as error:
         raise Denied("invalid_json") from error
-    require(type(args) is dict and set(args) == {"ticket_id", "expected_version", "reason"}, "closed_schema")
-    require(type(args["ticket_id"]) is str and re.fullmatch(r"T-[0-9]{1,12}", args["ticket_id"]), "ticket_id")
-    require(type(args["expected_version"]) is int and 1 <= args["expected_version"] <= 2**31 - 1, "integer_version")
+    require(
+        type(args) is dict and set(args) == {"ticket_id", "expected_version", "reason"},
+        "closed_schema"
+    )
+    require(
+        type(args["ticket_id"]) is str and re.fullmatch(r"T-[0-9]{1,12}", args["ticket_id"]),
+        "ticket_id"
+    )
+    require(
+        type(args["expected_version"]) is int and 1 <= args["expected_version"] <= 2 ** 31 - 1,
+        "integer_version"
+    )
     require(type(args["reason"]) is str and 1 <= len(args["reason"]) <= 160, "reason")
+
     # Reject lone surrogates; no Unicode normalization, defaults or numeric coercion.
     canonical = encode(args)
     canonical.encode("utf-8", errors="strict")
@@ -104,8 +117,10 @@ class Action:
 
     @property
     def proposal(self):
-        return {key: value for key, value in asdict(self).items()
-                if key not in {"grant", "expires", "replay_until"}}
+        return {
+            key: value for key, value in asdict(self).items()
+            if key not in {"grant", "expires", "replay_until"}
+        }
 
 
 @contextmanager
@@ -169,40 +184,59 @@ CREATE TABLE IF NOT EXISTS Audit(event_id INTEGER PRIMARY KEY AUTOINCREMENT,tena
 
     @staticmethod
     def caller(action, context):
-        require((action.tenant, action.actor, action.agent) ==
-                (context.tenant, context.actor, context.agent), "caller_mismatch")
+        require(
+            (action.tenant, action.actor, action.agent) ==
+            (context.tenant, context.actor, context.agent),
+            "caller_mismatch"
+        )
 
     @staticmethod
     def live(db, action):
-        principal = db.execute("SELECT * FROM Principal WHERE tenant=? AND actor=? AND agent=?",
-                               (action.tenant, action.actor, action.agent)).fetchone()
+        principal = db.execute(
+            "SELECT * FROM Principal WHERE tenant=? AND actor=? AND agent=?",
+            (action.tenant, action.actor, action.agent)
+        ).fetchone()
         tool = db.execute("SELECT * FROM Tool WHERE name=?", (action.tool,)).fetchone()
         resource = db.execute("SELECT * FROM Resource WHERE id=?", (action.resource,)).fetchone()
-        return bool(principal and principal["user_allow"] and principal["agent_allow"] and tool and tool["enabled"]
-                    and resource and resource["tenant"] == action.tenant
-                    and (tool["revision"], tool["route"], tool["policy"]) ==
-                    (action.revision, action.route, action.policy))
+
+        return bool(
+            principal and principal["user_allow"] and principal["agent_allow"]
+            and tool and tool["enabled"]
+            and resource and resource["tenant"] == action.tenant
+            and (tool["revision"], tool["route"], tool["policy"]) ==
+            (action.revision, action.route, action.policy)
+        )
 
     def submit(self, context, intent, raw, revision="r7"):
         args, parsed = canonical_args(raw)
         with write(self.path) as db:
-            old = db.execute("SELECT * FROM Intent WHERE tenant=? AND intent=?", (context.tenant, intent)).fetchone()
+            old = db.execute(
+                "SELECT * FROM Intent WHERE tenant=? AND intent=?", (context.tenant, intent)
+            ).fetchone()
             if old:
                 action = self.action(old)
                 self.caller(action, context)
                 require((action.args, action.revision) == (args, revision), "intent_conflict")
                 return action, old["state"]
+
             tool = db.execute("SELECT * FROM Tool WHERE name='ticket.close'").fetchone()
             require(tool and tool["revision"] == revision, "unreviewed_revision")
             now = self.clock()
-            action = Action(context.tenant, context.actor, context.agent, intent, tool["name"], revision,
-                            tool["route"], tool["policy"], args, parsed["ticket_id"], parsed["expected_version"],
-                            str(uuid.uuid4()), now + 300, now + 86400)
+            action = Action(
+                context.tenant, context.actor, context.agent, intent, tool["name"], revision,
+                tool["route"], tool["policy"], args, parsed["ticket_id"], parsed["expected_version"],
+                str(uuid.uuid4()), now + 300, now + 86400
+            )
             require(self.live(db, action), "access_denied")
-            db.execute("INSERT INTO Intent(tenant,intent,snapshot,binding,state) VALUES(?,?,?,?, 'PENDING')",
-                       (*action.key, encode(asdict(action)), action.binding))
-            db.execute("INSERT INTO GrantToken(grant_id,tenant,intent,binding) VALUES(?,?,?,?)",
-                       (action.grant, *action.key, action.binding))
+
+            db.execute(
+                "INSERT INTO Intent(tenant,intent,snapshot,binding,state) VALUES(?,?,?,?, 'PENDING')",
+                (*action.key, encode(asdict(action)), action.binding)
+            )
+            db.execute(
+                "INSERT INTO GrantToken(grant_id,tenant,intent,binding) VALUES(?,?,?,?)",
+                (action.grant, *action.key, action.binding)
+            )
             event(db, action.key, "pending")
             return action, "PENDING"
 
@@ -211,17 +245,28 @@ CREATE TABLE IF NOT EXISTS Audit(event_id INTEGER PRIMARY KEY AUTOINCREMENT,tena
             row = db.execute("SELECT * FROM Intent WHERE tenant=? AND intent=?", key).fetchone()
             require(row is not None, "intent_missing")
             action = self.action(row)
-            require(db.execute("SELECT 1 FROM Approver WHERE tenant=? AND subject=?", (key[0], approver)).fetchone(),
-                    "approver_scope")
+            require(
+                db.execute(
+                    "SELECT 1 FROM Approver WHERE tenant=? AND subject=?", (key[0], approver)
+                ).fetchone(),
+                "approver_scope"
+            )
             require(binding == row["binding"] == action.binding, "approval_binding")
             if row["state"] != "PENDING":
                 return row["state"]
+
             if self.clock() >= action.expires or not self.live(db, action):
-                db.execute("UPDATE Intent SET state='DENIED',reason='expired_or_revoked' WHERE tenant=? AND intent=?", key)
+                db.execute(
+                    "UPDATE Intent SET state='DENIED',reason='expired_or_revoked' WHERE tenant=? AND intent=?",
+                    key
+                )
                 event(db, key, "denied")
                 return "DENIED"
-            changed = db.execute("UPDATE GrantToken SET consumed=1,approver=? WHERE grant_id=? AND binding=? AND consumed=0",
-                                 (approver, action.grant, binding)).rowcount
+
+            changed = db.execute(
+                "UPDATE GrantToken SET consumed=1,approver=? WHERE grant_id=? AND binding=? AND consumed=0",
+                (approver, action.grant, binding)
+            ).rowcount
             require(changed == 1, "grant_consumed")
             db.execute("UPDATE Intent SET state='APPROVED' WHERE tenant=? AND intent=?", key)
             event(db, key, "approved", approver)
@@ -235,21 +280,30 @@ CREATE TABLE IF NOT EXISTS Audit(event_id INTEGER PRIMARY KEY AUTOINCREMENT,tena
             self.caller(action, context)
             if row["state"] != "APPROVED":
                 return None
+
             if self.clock() >= action.expires or row["cancel"] or not self.live(db, action):
-                db.execute("UPDATE Intent SET state='DENIED',reason='dispatch_recheck' WHERE tenant=? AND intent=?", key)
+                db.execute(
+                    "UPDATE Intent SET state='DENIED',reason='dispatch_recheck' WHERE tenant=? AND intent=?",
+                    key
+                )
                 event(db, key, "denied")
                 return None
+
             epoch = row["epoch"] + 1
-            changed = db.execute("UPDATE Intent SET state='DISPATCH_INTENT',epoch=? WHERE tenant=? AND intent=? AND state='APPROVED'",
-                                 (epoch, *key)).rowcount
+            changed = db.execute(
+                "UPDATE Intent SET state='DISPATCH_INTENT',epoch=? WHERE tenant=? AND intent=? AND state='APPROVED'",
+                (epoch, *key)
+            ).rowcount
             require(changed == 1, "claim_race")
             event(db, key, "dispatch", str(epoch))
             return action, epoch
 
     def unknown(self, key, epoch):
         with write(self.path) as db:
-            changed = db.execute("UPDATE Intent SET state='UNKNOWN' WHERE tenant=? AND intent=? AND epoch=? AND state='DISPATCH_INTENT'",
-                                 (*key, epoch)).rowcount
+            changed = db.execute(
+                "UPDATE Intent SET state='UNKNOWN' WHERE tenant=? AND intent=? AND epoch=? AND state='DISPATCH_INTENT'",
+                (*key, epoch)
+            ).rowcount
             if changed:
                 event(db, key, "unknown")
             return bool(changed)
@@ -258,8 +312,11 @@ CREATE TABLE IF NOT EXISTS Audit(event_id INTEGER PRIMARY KEY AUTOINCREMENT,tena
         with write(self.path) as db:
             row = db.execute("SELECT * FROM Intent WHERE tenant=? AND intent=?", key).fetchone()
             require(row and receipt and receipt["binding"] == row["binding"], "receipt_binding")
-            changed = db.execute("UPDATE Intent SET state=?,outcome=?,body=? WHERE tenant=? AND intent=? AND epoch=? AND state IN ('DISPATCH_INTENT','UNKNOWN')",
-                                 (receipt["outcome"], receipt["outcome"], receipt["body"], *key, epoch)).rowcount
+
+            changed = db.execute(
+                "UPDATE Intent SET state=?,outcome=?,body=? WHERE tenant=? AND intent=? AND epoch=? AND state IN ('DISPATCH_INTENT','UNKNOWN')",
+                (receipt["outcome"], receipt["outcome"], receipt["body"], *key, epoch)
+            ).rowcount
             if changed:
                 event(db, key, "outcome", receipt["outcome"])
             return bool(changed)
@@ -275,14 +332,21 @@ CREATE TABLE IF NOT EXISTS Audit(event_id INTEGER PRIMARY KEY AUTOINCREMENT,tena
                 state = "UNKNOWN"
             else:
                 return row["state"]
-            db.execute("UPDATE Intent SET cancel=1,state=?,reason='cancel_requested' WHERE tenant=? AND intent=?", (state, *key))
+
+            db.execute(
+                "UPDATE Intent SET cancel=1,state=?,reason='cancel_requested' WHERE tenant=? AND intent=?",
+                (state, *key)
+            )
             event(db, key, "cancel_requested")
             return state
 
     def takeover(self, key):
         """Fence local result writers only; does not grant permission to redispatch."""
         with write(self.path) as db:
-            changed = db.execute("UPDATE Intent SET epoch=epoch+1,state='UNKNOWN' WHERE tenant=? AND intent=? AND state IN ('DISPATCH_INTENT','UNKNOWN')", key).rowcount
+            changed = db.execute(
+                "UPDATE Intent SET epoch=epoch+1,state='UNKNOWN' WHERE tenant=? AND intent=? AND state IN ('DISPATCH_INTENT','UNKNOWN')",
+                key
+            ).rowcount
             if changed:
                 event(db, key, "recovery_owner")
         return self.status(key)
@@ -304,9 +368,15 @@ CREATE TABLE IF NOT EXISTS Audit(event_id INTEGER PRIMARY KEY AUTOINCREMENT,tena
             action = self.action(row)
             self.caller(action, context)
             now = self.clock()
-            require(not row["cancel"] and now < min(action.expires, action.replay_until) and self.live(db, action), "replay_forbidden")
+            require(
+                not row["cancel"]
+                and now < min(action.expires, action.replay_until)
+                and self.live(db, action),
+                "replay_forbidden"
+            )
             epoch = row["epoch"]
             event(db, key, "same_key_replay", str(epoch))
+
         # This example backend permanently retains deduplication tombstones.
         receipt = backend.apply(context, action)
         self.record(key, epoch, receipt)
@@ -332,25 +402,42 @@ INSERT OR IGNORE INTO Principal VALUES('acme','alice','support-agent',1,1);
         # The envelope comes from an authenticated trusted Adapter; cryptography
         # and delegation validation are production dependencies, not implemented.
         Gateway.caller(action, context)
-        require((action.tool, action.revision, action.route, action.policy) ==
-                ("ticket.close", "r7", "tickets-v1", "p9"), "backend_contract")
+        require(
+            (action.tool, action.revision, action.route, action.policy) ==
+            ("ticket.close", "r7", "tickets-v1", "p9"),
+            "backend_contract"
+        )
         canonical, args = canonical_args(action.args.encode())
-        require((canonical, args["ticket_id"], args["expected_version"]) ==
-                (action.args, action.resource, action.version), "resource_binding")
+        require(
+            (canonical, args["ticket_id"], args["expected_version"]) ==
+            (action.args, action.resource, action.version),
+            "resource_binding"
+        )
+
         with write(self.path) as db:
             old = db.execute("SELECT * FROM Receipt WHERE tenant=? AND intent=?", action.key).fetchone()
             if old:
                 require(old["binding"] == action.binding, "business_key_conflict")
                 return dict(old)
-            principal = db.execute("SELECT * FROM Principal WHERE tenant=? AND actor=? AND agent=?",
-                                   (action.tenant, action.actor, action.agent)).fetchone()
+
+            principal = db.execute(
+                "SELECT * FROM Principal WHERE tenant=? AND actor=? AND agent=?",
+                (action.tenant, action.actor, action.agent)
+            ).fetchone()
             require(principal and principal["user_allow"] and principal["agent_allow"], "backend_access")
-            changed = db.execute("UPDATE Ticket SET state='CLOSED',version=version+1 WHERE tenant=? AND id=? AND version=? AND state='OPEN'",
-                                 (action.tenant, action.resource, action.version)).rowcount
+
+            changed = db.execute(
+                "UPDATE Ticket SET state='CLOSED',version=version+1 WHERE tenant=? AND id=? AND version=? AND state='OPEN'",
+                (action.tenant, action.resource, action.version)
+            ).rowcount
             outcome = "SUCCEEDED" if changed == 1 else "FAILED_KNOWN"
-            body = encode({"ticket": action.resource, "status": "closed" if changed else "stale_precondition"})
-            db.execute("INSERT INTO Receipt(tenant,intent,binding,snapshot,outcome,body) VALUES(?,?,?,?,?,?)",
-                       (*action.key, action.binding, encode(asdict(action)), outcome, body))
+            body = encode({
+                "ticket": action.resource, "status": "closed" if changed else "stale_precondition"
+            })
+            db.execute(
+                "INSERT INTO Receipt(tenant,intent,binding,snapshot,outcome,body) VALUES(?,?,?,?,?,?)",
+                (*action.key, action.binding, encode(asdict(action)), outcome, body)
+            )
         return self.lookup(action.key)
 
     def lookup(self, key):
@@ -360,4 +447,6 @@ INSERT OR IGNORE INTO Principal VALUES('acme','alice','support-agent',1,1);
         # A fixture maintenance operation after the advertised replay window:
         # retain key+binding+outcome indefinitely, never free key identity.
         with write(self.path) as db:
-            db.execute("UPDATE Receipt SET snapshot=NULL,body=NULL,retired=1 WHERE tenant=? AND intent=?", key)
+            db.execute(
+                "UPDATE Receipt SET snapshot=NULL,body=NULL,retired=1 WHERE tenant=? AND intent=?", key
+            )

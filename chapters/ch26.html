@@ -237,9 +237,11 @@
     </figure><div class="bilingual"><div class="lang-zh"><p>设剩余金额为 M、剩余份数为 N、最低每份金额为 m，始终保持 M≥N×m。当 N>1 时，先算上界 U=min(⌊2M/N⌋, M−m×(N−1))，再抽取整数 a∈[m,U]。由于取值不超过上界，更新后仍有 M−a≥m×(N−1)，足以覆盖后面每份的最低金额。N=1 时直接取尽剩余金额。按这个过程逐步推下去，就能证明每份都≥m，且总和恰好等于原总额；图中使用 m=1。</p></div><div class="lang-en"><p>For remaining amount M, count N and minimum m, preserve M≥N×m. For N>1 draw integer a∈[m,U], where U=min(floor(2M/N),M−m×(N−1)). The next remainder still covers every later minimum. Exhaust the last share, proving per-share minimum and conservation by induction. The diagram uses m=1.</p></div></div>
 <pre data-language="Java 17 · runnable pure function" data-kind="runnable" data-source="SplitPlan.java" data-snippet="split"><code>public static List&lt;Share&gt; split(long total, int count, long minimum,
                                 boolean even, RandomGenerator random) {
-    if (count &lt; 1 || count &gt; 100 || minimum &lt; 1 ||
-        total &gt; MAX_CENTS || total &lt; 1 || minimum &gt; total / count)
+    if (count &lt; 1 || count &gt; 100 || minimum &lt; 1
+            || total &gt; MAX_CENTS || total &lt; 1 || minimum &gt; total / count) {
         throw new IllegalArgumentException(&quot;invalid total/count/minimum&quot;);
+    }
+
     var plan = new ArrayList&lt;Share&gt;();
     long money = total;
     for (int left = count; left &gt; 0; left--) {
@@ -250,16 +252,21 @@
             amount = money;
         } else {
             long upper = Math.min(2 * money / left,
-                                  money - minimum * (left - 1));
+                    money - minimum * (left - 1));
             amount = random.nextLong(minimum, upper + 1);
         }
+
         plan.add(new Share(count - left + 1, amount));
         money -= amount; // money &gt;= minimum * (left - 1)
     }
-    if (money != 0 || plan.stream().mapToLong(Share::cents).sum() != total)
+
+    if (money != 0 || plan.stream().mapToLong(Share::cents).sum() != total) {
         throw new IllegalStateException(&quot;non-conserving plan&quot;);
-    for (int i = plan.size() - 1; i &gt; 0; i--)
+    }
+
+    for (int i = plan.size() - 1; i &gt; 0; i--) {
         Collections.swap(plan, i, random.nextInt(i + 1));
+    }
     return List.copyOf(plan); // persist once; retries must load this plan
 }</code></pre>
 <div class="bilingual"><div class="lang-zh"><p>完整的 <a href="../examples/ch26/SplitPlan.java">SplitPlan.java</a> 可用 Java 17 运行，无需第三方依赖。总额上限 10¹² 分保证 2×money 和 minimum×(left−1) 不会溢出 long；校验最低金额时先比较 total/count，避免校验本身的乘法溢出。测试注入固定随机种子，便于复现；真实随机源和可审计抽签需要另外约定。<code>nextLong(origin,bound)</code> 不包含上界 bound <a href="#ref14">[14]</a>。</p></div><div class="lang-en"><p>The complete <a href="../examples/ch26/SplitPlan.java">SplitPlan.java</a> runs on Java 17 without dependencies. The 10¹² cap keeps intermediate products within long; checking minimum against total/count avoids validation overflow. Tests inject fixed seeds for reproducibility; real randomness and auditable lotteries require a separate contract. nextLong(origin,bound) excludes bound <a href="#ref14">[14]</a>.</p></div></div>
@@ -393,72 +400,100 @@
 -- ARGV: trusted expected epoch, authenticated user; no client amount.
 local function integer(s)
   local n = tonumber(s)
-  if not n or n ~= math.floor(n) or n &lt; 0 or n &gt; 9007199254740991 then return nil end
+  if not n or n ~= math.floor(n) or n &lt; 0 or n &gt; 9007199254740991 then
+    return nil
+  end
   return n
 end
-for i, want in ipairs({&#x27;hash&#x27;,&#x27;list&#x27;,&#x27;hash&#x27;,&#x27;hash&#x27;}) do
+
+for i, want in ipairs({&#x27;hash&#x27;, &#x27;list&#x27;, &#x27;hash&#x27;, &#x27;hash&#x27;}) do
   local t = redis.call(&#x27;TYPE&#x27;, KEYS[i]).ok
   if t ~= want and not (t == &#x27;none&#x27; and (i == 2 or i == 4)) then
     return {&#x27;RECOVER&#x27;, &#x27;key type or missing projection&#x27;}
   end
 end
-local m = redis.call(&#x27;HMGET&#x27;, KEYS[1], &#x27;epoch&#x27;,&#x27;status&#x27;,&#x27;deadline_ms&#x27;,&#x27;n&#x27;,&#x27;cents&#x27;)
+
+local m = redis.call(&#x27;HMGET&#x27;, KEYS[1], &#x27;epoch&#x27;, &#x27;status&#x27;, &#x27;deadline_ms&#x27;, &#x27;n&#x27;, &#x27;cents&#x27;)
 local epoch, deadline, n, cents = integer(m[1]), integer(m[3]), integer(m[4]), integer(m[5])
 if not epoch or not deadline or not n or n &gt; 100 or not cents or cents &gt; 1000000000000 then
-  return {&#x27;RECOVER&#x27;,&#x27;bad meta&#x27;}
+  return {&#x27;RECOVER&#x27;, &#x27;bad meta&#x27;}
 end
-if m[1] ~= ARGV[1] or m[2] ~= &#x27;ACTIVE&#x27; then return {&#x27;RETRY&#x27;,&#x27;epoch or gate&#x27;} end
+if m[1] ~= ARGV[1] or m[2] ~= &#x27;ACTIVE&#x27; then
+  return {&#x27;RETRY&#x27;, &#x27;epoch or gate&#x27;}
+end
+
 local old = redis.call(&#x27;HGET&#x27;, KEYS[4], ARGV[2])
 if old then
   local amount = integer(redis.call(&#x27;HGET&#x27;, KEYS[3], old))
-  if not amount or amount &lt; 1 then return {&#x27;RECOVER&#x27;,&#x27;bad prior candidate&#x27;} end
-  return {&#x27;CANDIDATE&#x27;,old,tostring(amount),m[1]}
+  if not amount or amount &lt; 1 then
+    return {&#x27;RECOVER&#x27;, &#x27;bad prior candidate&#x27;}
+  end
+  return {&#x27;CANDIDATE&#x27;, old, tostring(amount), m[1]}
 end
+
 local now = redis.call(&#x27;TIME&#x27;)
-if tonumber(now[1])*1000 + math.floor(tonumber(now[2])/1000) &gt;= deadline then
+if tonumber(now[1]) * 1000 + math.floor(tonumber(now[2]) / 1000) &gt;= deadline then
   return {&#x27;EXPIRED&#x27;} -- advisory only; Packet DB makes the final time decision
 end
 if n == 0 then
-  if cents ~= 0 or redis.call(&#x27;LLEN&#x27;,KEYS[2]) ~= 0 then return {&#x27;RECOVER&#x27;,&#x27;bad empty&#x27;} end
+  if cents ~= 0 or redis.call(&#x27;LLEN&#x27;, KEYS[2]) ~= 0 then
+    return {&#x27;RECOVER&#x27;, &#x27;bad empty&#x27;}
+  end
   return {&#x27;EMPTY&#x27;}
 end
+
 local sid = redis.call(&#x27;LINDEX&#x27;, KEYS[2], 0)
 local amount = sid and integer(redis.call(&#x27;HGET&#x27;, KEYS[3], sid))
-if not amount or amount &lt; 1 or cents &lt; amount or redis.call(&#x27;LLEN&#x27;,KEYS[2]) ~= n then
-  return {&#x27;RECOVER&#x27;,&#x27;bad inventory&#x27;}
+if not amount or amount &lt; 1 or cents &lt; amount or redis.call(&#x27;LLEN&#x27;, KEYS[2]) ~= n then
+  return {&#x27;RECOVER&#x27;, &#x27;bad inventory&#x27;}
 end
+
 -- Validation precedes mutations. A runtime error still does not roll them back.
 redis.call(&#x27;LPOP&#x27;, KEYS[2])
-redis.call(&#x27;HSET&#x27;, KEYS[1], &#x27;n&#x27;, tostring(n-1), &#x27;cents&#x27;, tostring(cents-amount))
+redis.call(&#x27;HSET&#x27;, KEYS[1], &#x27;n&#x27;, tostring(n - 1), &#x27;cents&#x27;, tostring(cents - amount))
 redis.call(&#x27;HSET&#x27;, KEYS[4], ARGV[2], sid)
-return {&#x27;CANDIDATE&#x27;,sid,tostring(amount),m[1]} -- never a durable receipt</code></pre>
+return {&#x27;CANDIDATE&#x27;, sid, tostring(amount), m[1]} -- never a durable receipt</code></pre>
 <div class="bilingual"><div class="lang-zh"><p>Lua 执行期间不会与其他命令交错，但这不表示运行错误会回滚，也不包括数据库提交 <a href="#ref10">[10]</a>。脚本异常可能留下已预留却未确认的份额。此时不能因为超时就用 LPush 放回队列，因为另一个 API 进程仍可能确认它。应先推进 epoch，再通过重建回收这些份额；在此之前，可能暂时少领，但数据库中的剩余金额仍可作为退款依据。Redis 的剩余量指“尚未预扣”，数据库的剩余量指“尚未确认”，在途候选会让两者暂时不同。</p></div><div class="lang-en"><p>Noninterleaving Lua is neither rollback nor DB atomicity <a href="#ref10">[10]</a>. An error may strand a reservation. Never push it back merely after timeout while another API might confirm it. Fence and rebuild to recover availability; durable remaining still supports refunds. Redis tracks unreserved shares; DB tracks unconfirmed shares, with candidates explaining the difference.</p></div></div>
 <h3><span class="lang-zh">领取事务 T_claim：分别约束请求键和业务身份</span><span class="lang-en">T_claim: request identity and business uniqueness</span></h3>
 <pre data-language="Pseudocode · Packet DB transaction" data-kind="pseudocode" data-source="claim.pseudo"><code>claim(authenticatedUser, packet, requestKey, internalCandidate):
-  authorize membership; never accept a browser-supplied share or amount
-  BEGIN READ COMMITTED                         // one Packet DB transaction
-  INSERT request(user, key, packet) ON CONFLICT(user, key) DO NOTHING
-  r = SELECT request(user, key) FOR UPDATE
-  if r.packet != packet: ROLLBACK; return KEY_CONFLICT
-  if r.claim_id exists: COMMIT; return its durable receipt
-  p = SELECT packets(packet) FOR UPDATE
-  c = SELECT claims WHERE packet_id=packet AND user_id=user
-  if c exists: bind request to c; COMMIT; return c
-  require p.state=OPEN and p.ready and p.epoch=internalCandidate.epoch
-  require SELECT clock_timestamp() &lt; p.expire_at // after obtaining the lock
-  s = SELECT immutable shares(packet, internalCandidate.share_id, p.plan_version)
-  require s exists and no claim already uses s.id
-  INSERT claim(c7, packet, user, s.id, s.cents)
-    // NOT NULL + UNIQUE(packet,user) + UNIQUE(packet,share)
-  UPDATE packets SET remaining_n=remaining_n-1,
-    remaining_cents=remaining_cents-s.cents
-    WHERE packet_id=packet AND remaining_n&gt;0 AND remaining_cents&gt;=s.cents
-  require affected_rows=1
-  INSERT outbox(credit:c7, packet, user, currency, s.cents) // frozen payload
-  UPDATE request SET claim_id=c7 WHERE user=user AND key=requestKey
-  COMMIT; return 200 c7, CREDIT_PENDING
-  // Any failed check/write aborts the entire transaction.
-  // A lost COMMIT reply means UNKNOWN: query authority with this user/key.</code></pre>
+    authorize membership;
+    never accept a browser-supplied share or amount
+
+    BEGIN READ COMMITTED                         // one Packet DB transaction
+        INSERT request(user, key, packet) ON CONFLICT(user, key) DO NOTHING
+        r = SELECT request(user, key) FOR UPDATE
+        if r.packet != packet:
+            ROLLBACK;
+            return KEY_CONFLICT
+        if r.claim_id exists:
+            COMMIT;
+            return its durable receipt
+
+        p = SELECT packets(packet) FOR UPDATE
+        c = SELECT claims WHERE packet_id=packet AND user_id=user
+        if c exists:
+            bind request to c;
+            COMMIT;
+            return c
+
+        require p.state=OPEN and p.ready and p.epoch=internalCandidate.epoch
+        require SELECT clock_timestamp() &lt; p.expire_at // after obtaining the lock
+        s = SELECT immutable shares(packet, internalCandidate.share_id, p.plan_version)
+        require s exists and no claim already uses s.id
+
+        INSERT claim(c7, packet, user, s.id, s.cents)
+            // NOT NULL + UNIQUE(packet,user) + UNIQUE(packet,share)
+        UPDATE packets SET remaining_n=remaining_n-1,
+            remaining_cents=remaining_cents-s.cents
+            WHERE packet_id=packet AND remaining_n&gt;0 AND remaining_cents&gt;=s.cents
+        require affected_rows=1
+        INSERT outbox(credit:c7, packet, user, currency, s.cents) // frozen payload
+        UPDATE request SET claim_id=c7 WHERE user=user AND key=requestKey
+    COMMIT;
+    return 200 c7, CREDIT_PENDING
+
+    // Any failed check/write aborts the entire transaction.
+    // A lost COMMIT reply means UNKNOWN: query authority with this user/key.</code></pre>
 <div class="bilingual"><div class="lang-zh"><p>这段伪代码使用 PostgreSQL READ COMMITTED，明确了加锁顺序：先锁请求键行，再锁红包行，两个锁都保持到事务结束 <a href="#ref4">[4]</a>。request 表中的 (user,key) 必须非空且唯一，并绑定一个 packet；claims 表再分别约束 (packet,user) 和 (packet,share) 唯一 <a href="#ref8">[8]</a>。因此，同一用户用同一键并发请求，只会得到一个结果；换键也不能再领一份；把旧键改绑另一红包则报冲突。份额来自内部候选，金额从不可变计划读取，浏览器不能指定领取金额。</p></div><div class="lang-en"><p>The pseudocode makes the PostgreSQL READ COMMITTED order explicit: request row, then packet row, held through transaction end <a href="#ref4">[4]</a>. Non-null (user,key) uniqueness binds the request to a packet; separate (packet,user) and (packet,share) uniqueness protects the business <a href="#ref8">[8]</a>. Same-key races converge, rotated keys cannot win again, and rebinding a user’s key to another packet conflicts. Candidates are internal; amounts come from the immutable plan.</p></div></div>
 <div class="bilingual"><div class="lang-zh"><p>扣减 400 分、保存 claim、绑定 request 和写入 credit Outbox，只要一步失败，整个事务就回滚。若提交回复丢失，应显示“结果查询中”，用原用户和请求键查询权威数据库。只能按已识别的唯一约束冲突处理重复，不能把任意数据库错误都当作成功。持锁期间不调用资金 RPC，也不等待消息投递。已有领取在红包到期或重建后仍可查询；新候选则必须通过当前状态、epoch 和锁内实际时间的检查。</p></div><div class="lang-en"><p>Any failure rolls back the 400-cent debit, claim, request binding and outbox together. A lost commit reply stays query-pending and resolves by the same user/key at authority. Handle identified unique conflicts without interpreting arbitrary DB failures as success. No payment RPC or delivery wait belongs under the lock. Existing receipts survive expiry/recovery; new ones must pass state, epoch and actual locked-time checks.</p></div></div>
 </section>
@@ -559,29 +594,38 @@ return {&#x27;CANDIDATE&#x27;,sid,tostring(amount),m[1]} -- never a durable rece
       </div>
     </figure><div class="bilingual"><div class="lang-zh"><p>下面的教学伪代码约定了账本事务如何处理资金。命令必须来自已提交、不可改的 Outbox，并经过服务身份校验；客户端自行编造一个新键，并不会获得转移资金的权限。credit:c7 绑定本包、u42、CNY 和 400 分，refund:p9 则绑定关闭快照和发送方。资金侧还要保证同一业务效果唯一，且资金池余额不被扣成负数。</p></div><div class="lang-en"><p>This teaching ledger transaction consumes authenticated, immutable committed outbox commands. A caller cannot authorize money movement merely by inventing a key. credit:c7 binds packet, u42, CNY and 400 cents; refund:p9 binds the close snapshot and sender. The receiver also enforces effect uniqueness and the escrow lower bound.</p></div></div>
 <pre data-language="Pseudocode · Payment Ledger transaction" data-kind="pseudocode" data-source="ledger.pseudo"><code>apply(verifiedPacketCommand):                  // authenticated service, frozen grant
-  require positive integer cents, matching currency and canonical operation ID
-  BEGIN                                      // one Payment Ledger transaction
-  if kind == FUND: SELECT sender wallet(currency) FOR UPDATE
-  else: e = SELECT escrow(packet) FOR UPDATE  // credits and refund share this lock
-  old = SELECT inbox(operation_id)
-  if old exists:
-    require old.payload == command.payload   // mismatch is a conflict
-    COMMIT; return old.result
-  if kind == FUND:
-    require no escrow already exists for packet
-    debit sender available balance only if balance &gt;= cents
-    INSERT escrow(packet, sender, currency, total=cents, available=cents)
-  else:
-    require command matches the committed claim or close grant
-    require credit recipient OR refund sender matches that grant
-    require escrow.available &gt;= cents
-    UPDATE escrow SET available=available-cents
-    increment the bound recipient/sender balance
-  INSERT both balanced journal entries        // debit + credit sum to zero
-  INSERT inbox(operation_id, complete payload, APPLIED)
-  COMMIT; return APPLIED
-  // Any failure rolls back balances, entries and inbox together.
-  // Timeout at Relay: keep the obligation; query/replay the same operation ID.</code></pre>
+    require positive integer cents, matching currency and canonical operation ID
+
+    BEGIN                                      // one Payment Ledger transaction
+        if kind == FUND:
+            SELECT sender wallet(currency) FOR UPDATE
+        else:
+            e = SELECT escrow(packet) FOR UPDATE  // credits and refund share this lock
+
+        old = SELECT inbox(operation_id)
+        if old exists:
+            require old.payload == command.payload   // mismatch is a conflict
+            COMMIT;
+            return old.result
+
+        if kind == FUND:
+            require no escrow already exists for packet
+            debit sender available balance only if balance &gt;= cents
+            INSERT escrow(packet, sender, currency, total=cents, available=cents)
+        else:
+            require command matches the committed claim or close grant
+            require credit recipient OR refund sender matches that grant
+            require escrow.available &gt;= cents
+            UPDATE escrow SET available=available-cents
+            increment the bound recipient/sender balance
+
+        INSERT both balanced journal entries        // debit + credit sum to zero
+        INSERT inbox(operation_id, complete payload, APPLIED)
+    COMMIT;
+    return APPLIED
+
+    // Any failure rolls back balances, entries and inbox together.
+    // Timeout at Relay: keep the obligation; query/replay the same operation ID.</code></pre>
 <div class="bilingual"><div class="lang-zh"><p>T_claim 和 T_pay 是两个本地事务。账本提交后、Relay 记录进度前，Outbox 仍可能重复投递 <a href="#ref3">[3]</a>。因此，账本内的去重记录、余额变化、完整的两条平衡分录和 APPLIED 结果，必须一起提交，失败时一起回滚。同键更改金额或收款人会报冲突。Relay 只能根据与原命令匹配的权威结果更新进度，不能把投递标记当成已入账的证据。真实的身份校验、资金渠道和受限账本写入权限仍是实现依赖，伪代码中的参数名本身不提供这些能力。</p></div><div class="lang-en"><p>T_claim and T_pay are separate local transactions; outbox can redeliver between ledger commit and Relay checkpoint <a href="#ref3">[3]</a>. Deduplication, balances, the complete entry pair and APPLIED commit together or roll back together. Changed amount/recipient conflicts. Relay updates progress only from a matching authoritative outcome. Authentication, channels and restricted ledger permissions are dependencies, not implemented by a parameter name.</p></div></div>
 <div class="bilingual"><div class="lang-zh"><p>如果先退回尚未领取的 600 分，escrow 中仍应留下 400 分，用来履行已确认的领取 c7。即使红包已是 expired，这笔入账也要继续处理。超时后，原有的入账责任仍然保留，服务应查询或重投原键。若收到明确的业务拒绝，或自动重试次数耗尽，就进入审查流程，不能把已属于领取人的钱自动退给发送方。监控时要看未决金额，以及最久一笔已经等待了多久。</p></div><div class="lang-en"><p>Refunding the unclaimed 600 first leaves 400 in escrow for confirmed c7. Credit must continue even after packet expiry. Timeout retains the obligation and original identity. Definite business rejection or exhausted automatic retries requires review, never an automatic sender refund of a recipient’s confirmed share. Monitor unresolved amount and oldest age.</p></div></div>
 <div class="bilingual"><div class="lang-zh"><p>Stripe <strong>API v1</strong> 提供了一个保留期限有限的外部例子：端点开始执行后，它保存首次状态码和响应体，包括 500；同键重试时比较参数，至少 24 h 后可以清理，清理后复用该键会成为新请求 <a href="#ref9">[9]</a>。API v2 则可能继续处理失败或部分失败的工作，并更新响应。本章内部的资金业务去重必须覆盖旧命令仍可能执行的完整期间，不能直接采用 v1 的最短窗口，也不能随七天展示记录一起删除。</p></div><div class="lang-en"><p>Stripe <strong>API v1</strong> is a finite-retention example: after execution starts it saves the first status/body, including 500, compares parameters and permits pruning after at least 24 h; reuse after pruning starts a new request <a href="#ref9">[9]</a>. API v2 may continue failed/partial work and update the response. Our internal financial deduplication must outlive executable old commands, rather than copy the v1 minimum or seven-day display retention.</p></div></div>
@@ -688,21 +732,30 @@ return {&#x27;CANDIDATE&#x27;,sid,tostring(amount),m[1]} -- never a durable rece
       </div>
     </figure><div class="bilingual"><div class="lang-zh"><p>调度器 Scheduler 负责唤醒，按到期索引扫描则补上漏掉的任务。关闭事务 T_expire 与领取事务 T_claim 锁住同一条 packets 记录：如果领取先拿到锁，并在尚未到期时通过检查完成确认，对应金额就不会计入后续退款快照；如果关闭先提交，旧 Lua 候选也不能再确认。能否领取，以持锁校验时刻为准，提交可以稍晚。截止前发出的请求，如果截止后才拿到锁，仍不算领取成功。因此，PostgreSQL 要在拿锁后读取 clock_timestamp()，不能用固定在事务开始时刻的 now() <a href="#ref12">[12]</a>。</p></div><div class="lang-en"><p>Scheduler wakes work and a due-index scan covers missed wakeups. T_expire locks the same packet as T_claim. A predeadline locked claim is excluded from the later refund snapshot; a committed close rejects earlier Lua candidates. Eligibility is decided at the locked check, even if commit finishes later. A predeadline request acquiring the lock after expiry loses. Use post-lock clock_timestamp(), not transaction-start now() <a href="#ref12">[12]</a>.</p></div></div>
 <pre data-language="Pseudocode · close and refund snapshot" data-kind="pseudocode" data-source="expire.pseudo"><code>close(packet):
-  BEGIN                                      // same Packet DB and lock as claim
-  p = SELECT packets(packet) FOR UPDATE
-  if p.state in {EXPIRING, EXPIRED}: COMMIT; return original refund result
-  if p.state not in {INITIALIZING, OPEN, RECOVERING}: ROLLBACK; return NOT_FUNDED
-  if SELECT clock_timestamp() &lt; p.expire_at: ROLLBACK; return TOO_EARLY
-  amount = p.remaining_cents; count = p.remaining_n
-  UPDATE packets SET ready=false, remaining_cents=0, remaining_n=0,
-    closed_unclaimed_n=count, refund_pending=amount,
-    state=(amount&gt;0 ? EXPIRING : EXPIRED)
-  if amount&gt;0:
-    INSERT outbox(refund:packet, packet, sender, currency, amount)
-  COMMIT                                     // snapshot and intent survive together
-  disable Redis projection for this epoch    // best effort; DB already rejects
-  // A matching verified APPLIED result moves pending -&gt; applied, then EXPIRED.
-  // An unknown result leaves EXPIRING; confirmed recipient credits still run.</code></pre>
+    BEGIN                                      // same Packet DB and lock as claim
+        p = SELECT packets(packet) FOR UPDATE
+        if p.state in {EXPIRING, EXPIRED}:
+            COMMIT;
+            return original refund result
+        if p.state not in {INITIALIZING, OPEN, RECOVERING}:
+            ROLLBACK;
+            return NOT_FUNDED
+        if SELECT clock_timestamp() &lt; p.expire_at:
+            ROLLBACK;
+            return TOO_EARLY
+
+        amount = p.remaining_cents;
+        count = p.remaining_n
+        UPDATE packets SET ready=false, remaining_cents=0, remaining_n=0,
+            closed_unclaimed_n=count, refund_pending=amount,
+            state=(amount&gt;0 ? EXPIRING : EXPIRED)
+        if amount&gt;0:
+            INSERT outbox(refund:packet, packet, sender, currency, amount)
+    COMMIT                                     // snapshot and intent survive together
+
+    disable Redis projection for this epoch    // best effort; DB already rejects
+    // A matching verified APPLIED result moves pending -&gt; applied, then EXPIRED.
+    // An unknown result leaves EXPIRING; confirmed recipient credits still run.</code></pre>
 <div class="bilingual"><div class="lang-zh"><p>c7 已确认领取 400 分后，关闭事务先保存剩余 600 分和三份未领的快照，再将 available 置零。此时，1,000=400 已确认+0 可领+600 待退。同一事务还保存固定身份 refund:p9，也就是图中简写的 r9；重试始终读取这份快照。若全部领完，就不发送零金额资金命令。initializing 或 recovering 状态的红包到期，也通过同一关闭流程处理；资金结果仍未知的 pending_fund，则先查清原资金操作。</p></div><div class="lang-en"><p>After c7 confirms 400, snapshot 600 cents and three unclaimed shares before zeroing availability: 1,000=400 confirmed+0 available+600 refund pending. Persist refund:p9, the business identity abbreviated r9 in the diagram, in the same transaction. Retries read that snapshot. Fully claimed packets create no zero-value command. Expired initializing/recovering packets close through the same gate; pending_fund first resolves its original funding operation.</p></div></div>
 <div class="bilingual"><div class="lang-zh"><p>退款结果未知时保持 expiring；只有核验到与原操作匹配的 APPLIED，才把退款金额从 pending 转为 applied，并置为 expired。expired 并不保证所有领取款都已到账，完整结清需要另设 settled 标记。Redis EXPIRE 只负责删除到期键 <a href="#ref7">[7]</a>，不会替业务关闭红包或退款。开放期间的库存应禁止淘汰，等关闭并完成对账后再清理。</p></div><div class="lang-en"><p>Unknown refund remains expiring; a matching APPLIED converts pending to applied and marks expired. This does not prove every recipient was credited; settled is separate. Redis EXPIRE only deletes keys <a href="#ref7">[7]</a>, never closes the business or refunds money. Protect open inventory from eviction and clean up after closure/reconciliation.</p></div></div>
 </section>
@@ -804,28 +857,41 @@ return {&#x27;CANDIDATE&#x27;,sid,tostring(amount),m[1]} -- never a durable rece
       </div>
     </figure><div class="bilingual"><div class="lang-zh"><p>Redis 缺键或回退时，先暂停新候选，已持久确认的领取仍可查询。恢复器与领取事务共用数据库行锁，先把代次从 e=7 推进到 8，并置为 recovering，再读取“原计划减去已确认 share_id”。这样，已提交的 s2=400 会被排除；旧 API 进程尚未提交的候选，也会在最终数据库检查时因代次过旧而被拒绝。</p></div><div class="lang-en"><p>Pause new candidates on Redis loss or rollback while durable receipt lookup continues. Recovery shares the DB row lock, advances e=7 to 8 and enters recovering before reading plan minus committed share IDs. Committed s2=400 is excluded; an old API’s uncommitted candidate is fenced at final DB confirmation.</p></div></div>
 <pre data-language="Pseudocode · fenced projection rebuild" data-kind="pseudocode" data-source="recover.pseudo"><code>rebuild(packet):
-  BEGIN
-  p = SELECT packets(packet) FOR UPDATE
-  if p.state not in {OPEN, RECOVERING, INITIALIZING}: abort
-  if p.expire_at exists and actual DB time &gt;= p.expire_at: abort; run close
-  epoch = p.epoch + 1; persist state=RECOVERING, ready=false, epoch
-  snapshot = immutable plan MINUS committed share IDs
-  require snapshot.count=p.remaining_n and snapshot.sum=p.remaining_cents
-  persist token = digest(packet, epoch, plan_version, ordered snapshot, deadline)
-  COMMIT                                      // old confirmations are now fenced
-  install into pkt:{packet}:e:epoch:{meta,list,amounts,users}
-    // One Lua call, every key supplied in KEYS; at most 100 shares.
-    // Missing meta: validate all input/types, install snapshot with status=READY.
-    // Existing identical token: return its status without replacing any list.
-    // Existing different token: reject; never overwrite an ACTIVE generation.
-  BEGIN
-  p = SELECT packets(packet) FOR UPDATE
-  require p.epoch=epoch and p.token=token and p.state=RECOVERING
-  if actual DB time &gt;= p.expire_at: ROLLBACK; run close; return
-  verify READY(epoch, token); persist state=OPEN, ready=true
-  COMMIT
-  activate Redis only if epoch/token match     // retry if crash follows DB commit
-  // Older installers use older namespaces; old API writes fail the DB epoch.</code></pre>
+    BEGIN
+        p = SELECT packets(packet) FOR UPDATE
+        if p.state not in {OPEN, RECOVERING, INITIALIZING}:
+            abort
+        if p.expire_at exists and actual DB time &gt;= p.expire_at:
+            abort;
+            run close
+
+        epoch = p.epoch + 1;
+        persist state=RECOVERING, ready=false, epoch
+        snapshot = immutable plan MINUS committed share IDs
+        require snapshot.count=p.remaining_n and snapshot.sum=p.remaining_cents
+        persist token = digest(packet, epoch, plan_version, ordered snapshot, deadline)
+    COMMIT                                      // old confirmations are now fenced
+
+    install into pkt:{packet}:e:epoch:{meta,list,amounts,users}
+        // One Lua call, every key supplied in KEYS; at most 100 shares.
+        // Missing meta: validate all input/types, install snapshot with status=READY.
+        // Existing identical token: return its status without replacing any list.
+        // Existing different token: reject; never overwrite an ACTIVE generation.
+
+    BEGIN
+        p = SELECT packets(packet) FOR UPDATE
+        require p.epoch=epoch and p.token=token and p.state=RECOVERING
+        if actual DB time &gt;= p.expire_at:
+            ROLLBACK;
+            run close;
+            return
+
+        verify READY(epoch, token);
+        persist state=OPEN, ready=true
+    COMMIT
+
+    activate Redis only if epoch/token match     // retry if crash follows DB commit
+    // Older installers use older namespaces; old API writes fail the DB epoch.</code></pre>
 <div class="bilingual"><div class="lang-zh"><p>每一代使用独立键名，但保留同一个 hash tag，例如 pkt:{p9}:e:8:meta。安装 token 绑定代次、计划、未领份额的有序快照和原 deadline。同 token 重投安装时，脚本只返回当前状态，绝不重新填满已经消费过的 List。迟到的 e=7 安装只能访问 e=7 的键空间，不能覆盖 e=8。数据库重新开放前，还要核对代次、token、ready 和实际时间；如果已经到期，就关闭并退款。对应的 <a href="../examples/ch26/install.lua">安装 Lua</a> 和 <a href="../examples/ch26/activate.lua">激活 Lua</a> 见本章示例。</p></div><div class="lang-en"><p>Each generation has separate key names with one hash tag, such as pkt:{p9}:e:8:meta. The token binds epoch, plan, ordered unclaimed snapshot and original deadline. Same-token installation only returns existing status and never refills a consumed list. A late e=7 installer touches only its own namespace. Recheck epoch, token, readiness and actual time before reopening DB; close/refund if expired. The <a href="../examples/ch26/install.lua">install</a> and <a href="../examples/ch26/activate.lua">activation Lua</a> remain in the examples.</p></div></div>
 <div class="bilingual"><div class="lang-zh"><p>Redis 默认采用异步复制 <a href="#ref2">[2]</a>。即使用 WAIT 等待副本确认，也不会因此变成强一致系统，主节点切换时仍可能丢失已确认写入 <a href="#ref6">[6]</a>。假如投影回退，又把 s2 发给另一个人，数据库的份额唯一约束会拒绝再次确认。这个保证依赖权威数据库不回退已确认行；无法保证时，就要停止写入。恢复期间崩溃可能导致暂时不可领取，因此还需监控恢复状态已持续多久，以及重试是否在推进。</p></div><div class="lang-en"><p>Redis defaults to asynchronous replication <a href="#ref2">[2]</a>; WAIT does not make it strongly consistent or eliminate failover loss <a href="#ref6">[6]</a>. DB share uniqueness blocks a rolled-back projection from reconfirming s2. That proof requires an authority that preserves acknowledged claims; stop writes otherwise. Recovery crashes may reduce availability, so monitor state age and progress.</p></div></div>
 <details><summary><span class="lang-zh">对账：先核金额与份数，再核资金进度</span><span class="lang-en">Two reconciliation equations</span></summary><div class="bilingual"><div class="lang-zh"><p>先核对业务分配金额：total=confirmed_claims+available+refund_pending+refund_applied。p9 依次经历 1,000=400+600+0+0、400+0+600+0、400+0+0+600。份数要另算，关闭后为 4=1 已领+0 可领+3 关包未领。</p><p>资金对账则要按同一截止时点的快照，用 operation_id 对齐两侧记录，再把每笔金额归入已入账、领取在途、仍可领、退款在途或已退款中的一类，每笔只计算一次。即使 ACK 丢失，也不能把已经入账的 400 分，再当作另一笔 pending 400 分计入。</p></div><div class="lang-en"><p>Allocation: total=confirmed claims+available+refund pending+refund applied. p9 moves through 400+600+0+0, 400+0+600+0 and 400+0+0+600. Reconcile count separately: 4=1 claimed+0 available+3 closed unclaimed. Financial reconciliation joins operation IDs at one consistent cutoff, classifying each amount once as credited, pending claim, available, pending refund or refunded. Lost ACK must not double-count posted 400 as another pending 400.</p></div></div>

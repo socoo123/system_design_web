@@ -246,13 +246,16 @@
       </div>
     </figure><div class="bilingual"><div class="lang-zh"><p>长度为 6 的 geohash 共用 30 个比特，经度、纬度各占 15 位。按 A6 的局部平面近似，每格高为 <code>180/32768×111≈0.609741 km</code>，宽为 <code>360/32768×111×cos40°≈0.934178 km</code>。图中的 1 km 圆以格心为圆心，越过了北邻格的远端边界 <code>1.5h≈0.914612 km</code>。15 格外接盒中，四个角格离圆心最近处也至少约为 1.027 km，因此它们不与圆相交，剩下 11 格。11 只适用于图示位置；圆心任意对齐时，保守外接盒的格数上界是 <code>(ceil(2/0.610)+1)×(ceil(2/0.934)+1)=20</code>，不能固定查九格。</p><p>空间相邻也不保证字符串前缀相同。例如，<code>wx4g0b</code> 的南邻是 <code>wx4fbz</code>，只查 <code>LIKE wx4g0%</code> 就会漏掉它。服务应枚举完整覆盖：跨反经线时拆分经度区间，查询圆触及极点时覆盖所有经度。北纬 40° 的 20 格预算不能直接用于高纬度。覆盖还要保守地包含边界点；超出预算时，应拒绝查询，或选择已经维护的更粗层级，不能截掉最后几格。</p><p>沿用同一局部近似，半径为 2 km、5 km 时，六位 geohash 外接盒的格数上界分别为 48、216。5 km 查询若改用五位、约 <code>3.737×4.878 km</code> 的范围，可把范围读取降到最多 16 次。前提是数据行按完整 geohash 排序，支持前缀范围读取；互相独立的六位 Redis 键不会自动组成五位聚合。从 1 km 扩大到 5 km，面积增加到 25 倍，所以范围请求变少并不表示候选变少。</p><p>Redis 内部使用 52 比特编码并动态选择覆盖区间 [1]；H3 的 <code>gridDisk(k)</code> 也不能作为“任意 1 km 查询固定查九格”的依据。H3 中的 k 表示网格跳数，输出不保证顺序 [5]；每层都有 12 个五边形，同层格子的面积也会随位置变化 [4]。</p></div><div class="lang-en"><p>A length-6 geohash has 30 bits, 15 per axis. A6’s local planar approximation gives height <code>180/32768×111≈0.609741 km</code> and width <code>360/32768×111×cos40°≈0.934178 km</code>. The centered 1 km circle passes the northern neighbor at <code>1.5 h≈0.914612 km</code>. Four corners of its 15-cell box start about 1.027 km away, leaving 11 intersecting cells. Eleven is diagram-specific; the arbitrary-center box bound is <code>(ceil(2/0.610)+1)×(ceil(2/0.934)+1)=20</code>, not a fixed nine.</p><p>Nearby points may lose a shared prefix: <code>wx4g0b</code> has southern neighbor <code>wx4fbz</code>, outside <code>LIKE wx4g0%</code>. Enumerate the cover. Split longitude intervals at the antimeridian; a cap touching a pole needs every longitude. The 40-degree 20-cell budget does not hold at high latitudes. Include boundary points conservatively; reject excess work or choose a maintained coarser level, never truncate a cover.</p><p>The same local approximation gives 48/216 length-6 box cells at 2/5 km. Length-5 ranges are about <code>3.737×4.878 km</code> and reduce 5 km to at most 16 range reads. That requires rows ordered by full geohash; separate length-6 Redis keys provide no implicit length-5 aggregate. Area grows 25× from 1 to 5 km; fewer ranges do not imply fewer candidates.</p><p>Redis’s 52-bit encoding and adaptive internal ranges [1], or H3 <code>gridDisk(k)</code>, do not justify fixed nine-cell queries. H3 k counts grid hops with unordered output [5]; each resolution has 12 pentagons and location-dependent areas [4].</p></div></div><h3><span class="lang-zh">实现半径覆盖：先明确采用哪种距离模型</span><span class="lang-en">Cover implementation: declare the distance model</span></h3><div class="bilingual"><div class="lang-zh"><p>下面节选自可运行的 Java 17 示例。输入是查询坐标、允许的半径、精度和格数预算，输出是完整覆盖所需的经纬网格集合，再把格坐标交错编码为 geohash。<strong>覆盖算法与后续 Haversine 测距都使用半径 R=6,371,008.8 m 的同一个球面模型</strong>；这里不承诺椭球距离精度，也不保证坐标等于 GPS 真值。</p><p>主方法先保守包住球面查询圆，再由辅助方法枚举闭区间。覆盖超出格数预算就抛错，不返回截断的集合。代码向外加的微小余量用于避免边界舍入造成遗漏，不能用来抵消定位误差。</p></div><div class="lang-en"><p>This runnable Java 17 excerpt takes coordinates, an allowed radius, precision and cell budget, returning a complete grid cover; interleave grid coordinates to form geohashes. <strong>Covering and final Haversine distance share the chosen R=6,371,008.8 m sphere</strong>. They do not promise spheroidal or GPS ground-truth accuracy. The helper enumerates closed ranges and throws on excess work. Tiny outward padding handles rounding, not location error.</p></div></div><pre data-language="Java 17 · runnable excerpt" data-kind="teaching" data-source="Nearby.java#cover"><code>public static Set&lt;Cell&gt; cover(Point q, double radius, int precision, int maxCells) {
     if (!Set.of(500d, 1000d, 2000d, 5000d).contains(radius)
-            || precision &lt; 1 || precision &gt; 6 || maxCells &lt; 1)
+            || precision &lt; 1 || precision &gt; 6 || maxCells &lt; 1) {
         throw new IllegalArgumentException("radius / precision / budget");
+    }
+
     int bits = 5 * precision, nx = 1 &lt;&lt; ((bits + 1) / 2), ny = 1 &lt;&lt; (bits / 2);
     double phi = Math.toRadians(q.lat), lambda = q.lon;
     double angular = radius / R + 1e-12; // Outward rounding guard (~6 micrometres).
     double south = Math.max(-90, Math.toDegrees(phi - angular));
     double north = Math.min(90, Math.toDegrees(phi + angular));
+
     List&lt;Span&gt; longitude = new ArrayList&lt;&gt;();
     if (Math.abs(phi) + angular &gt;= Math.PI / 2) {
         longitude.add(new Span(-180, 180)); // A cap touching a pole needs all longitudes.
@@ -265,11 +268,15 @@
         } else if (hi &gt; 180) {
             longitude.add(new Span(lo, 180));
             longitude.add(new Span(-180, hi - 360));
-        } else longitude.add(new Span(lo, hi));
+        } else {
+            longitude.add(new Span(lo, hi));
+        }
     }
+
     Set&lt;Cell&gt; cells = new HashSet&lt;&gt;();
-    for (Span span : longitude)
+    for (Span span : longitude) {
         addClosedBox(cells, span, south, north, nx, ny, precision, maxCells);
+    }
     return Set.copyOf(cells); // Budget failures throw; never return a truncated cover.
 }</code></pre><div class="bilingual"><div class="lang-zh"><p>完整类和运行命令见 <a href="../examples/ch19/README.md">示例说明</a>。在极区，六位精度的覆盖可能超过工作量预算，此时可选择更粗的已维护层级，或专门的球面索引。Redis GEO 只接受约 ±85.05112878° 范围内的纬度 [1]；本例支持全纬度球面模型，不代表 Redis 也能接收极点坐标。</p></div><div class="lang-en"><p>See the <a href="../examples/ch19/README.md">example contract</a> for the full class and commands. Polar covers at precision six can exceed budget; use a coarser maintained level or an appropriate spherical index. Redis GEO itself accepts only about ±85.05112878° latitude [1]; this full-latitude model does not make Redis accept a pole.</p></div></div>
 </section>
@@ -390,32 +397,59 @@
     </figure><div class="bilingual"><div class="lang-zh"><p>第 2–5 帧展示了完整过程：Cell Cache 作为旁路缓存；未命中时，Location Service 自行读取索引快照并回填。服务合并完整覆盖中的成员，按 id 去重，然后依次执行<strong>读取权威状态与坐标 → 过滤权限、业务状态和样本年龄 → 计算最终距离 → 从全部合格候选中选出最近的 20 个</strong>。迁移时，同一 id 可能出现在两个格子中，因此读取的权威版本至少不能低于候选版本。权威读取失败，也不能当作已经确认实体被删除。</p><p>如果每格先任取 20 个再过滤，前 20 家都已关门时，第 21 家本该出现的店就会被漏掉。读取过程若没有经过证明的距离下界，就应继续处理全部候选，或明确失败、标为 partial。Redis <code>GEOSEARCH ASC COUNT 20</code> 之后再过滤，也可能无法返回足够的合格地点；<code>COUNT ANY</code> 更不保证得到最近的那些匹配 [2]。另外，Redis 文档给出的球面距离误差最多约为 0.5% [1]，在 1 km 上约是 5 m 的量级，不能据此承诺严格的椭球距离边界。</p></div><div class="lang-en"><p>Frames 2–5 use a side cache: Service loads an index snapshot and fills on a miss. Merge the full cover, deduplicate IDs, then <strong>read authoritative state/coordinates → filter policy, business and age → measure → global top 20</strong>. Migration can duplicate an ID across cells. Authority must be at least as new as each candidate; a failed authority read is not confirmed deletion.</p><p>Arbitrary twenty-per-cell limits miss the 21st open shop after twenty closed shops. Without a proven distance bound, continue through all candidates or fail/mark partial. Filtering after Redis <code>GEOSEARCH ASC COUNT 20</code> can also underfill; <code>COUNT ANY</code> does not guarantee the closest matches [2]. Redis documents up to about 0.5% spherical error [1], roughly five metres per kilometre, rather than strict spheroidal boundaries.</p></div></div><h3><span class="lang-zh">实现候选筛选：先读权威版本，再计算距离</span><span class="lang-en">Filtering implementation: authority before distance</span></h3><div class="bilingual"><div class="lang-zh"><p>下面的 Java 节选与示例源码一致，输入是完整候选集合和新鲜的权威读取快照。Map 中缺少一个键，表示这条记录尚未完成读取；只有 <code>Optional.empty()</code> 才表示已经确认不存在。输出最多 20 条，按实际球面距离、id 排序。私人移动实体只返回按 100 m 划分的距离桶，不返回坐标。</p><p><code>sendBy</code> 表示整条响应最晚何时发送，<code>clockError</code> 表示已经验证的设备时钟误差上界；如果无法在截止时间前发送，就要重新校验或失败。权限撤回若在本次快照之后提交，会影响后续的权威读取；已经发到客户端的副本无法收回。</p></div><div class="lang-en"><p>The same-source Java takes complete candidates and a fresh authority snapshot. A missing Map key means an unfinished read; only <code>Optional.empty()</code> confirms absence. Output contains up to 20 hits sorted by actual spherical distance/id. Private movers expose only a 100 m distance bucket and no coordinates. <code>sendBy</code> is the response send deadline, and <code>clockError</code> is a verified device-clock error bound. If sending misses the deadline, revalidate or fail. Revocations committed after the snapshot affect later authority reads; already delivered copies cannot be recalled.</p></div></div><pre data-language="Java 17 · runnable excerpt" data-kind="teaching" data-source="Nearby.java#rank"><code>public static List&lt;Hit&gt; rank(Point query, double radius, String type, long viewer,
         Collection&lt;Member&gt; members, Map&lt;Long, Optional&lt;Row&gt;&gt; authority,
         long sendBy, long clockError, int maxCandidates) {
-    if (clockError &lt; 0 || maxCandidates &lt; 1 || !Set.of(500d, 1000d, 2000d, 5000d).contains(radius))
+    if (clockError &lt; 0 || maxCandidates &lt; 1
+            || !Set.of(500d, 1000d, 2000d, 5000d).contains(radius)) {
         throw new IllegalArgumentException("policy");
-    if (members.size() &gt; maxCandidates) throw new Unavailable("candidate budget");
+    }
+    if (members.size() &gt; maxCandidates) {
+        throw new Unavailable("candidate budget");
+    }
+
     Map&lt;Long, Long&gt; recalled = new HashMap&lt;&gt;();
-    for (Member m : members) recalled.merge(m.id, m.version, Math::max);
+    for (Member m : members) {
+        recalled.merge(m.id, m.version, Math::max);
+    }
+
     List&lt;Ranked&gt; eligible = new ArrayList&lt;&gt;();
     for (var entry : recalled.entrySet()) {
         Optional&lt;Row&gt; value = authority.get(entry.getKey());
-        if (value == null) throw new Unavailable("authority missing, not confirmed absent");
-        if (value.isEmpty()) continue; // Confirmed absent in the authoritative snapshot.
+        if (value == null) {
+            throw new Unavailable("authority missing, not confirmed absent");
+        }
+        if (value.isEmpty()) {
+            continue; // Confirmed absent in the authoritative snapshot.
+        }
+
         Row row = value.get();
-        if (row.id != entry.getKey() || row.version &lt; entry.getValue())
+        if (row.id != entry.getKey() || row.version &lt; entry.getValue()) {
             throw new Unavailable("authority behind candidate");
-        if (row.deleted || !row.open || !row.type.equals(type)) continue;
-        if ((!row.published || row.mover) &amp;&amp; !row.audience.contains(viewer)) continue;
+        }
+        if (row.deleted || !row.open || !row.type.equals(type)) {
+            continue;
+        }
+        if ((!row.published || row.mover) &amp;&amp; !row.audience.contains(viewer)) {
+            continue;
+        }
         if (row.mover) {
             double ageUpper = (double) sendBy - row.observedAt + clockError;
-            if (ageUpper &lt; 0 || ageUpper &gt; 30_000) continue;
+            if (ageUpper &lt; 0 || ageUpper &gt; 30_000) {
+                continue;
+            }
         }
+
         double metres = distance(query, row.point); // Latest permitted coordinates first.
-        if (metres &lt;= radius) eligible.add(new Ranked(row, metres));
+        if (metres &lt;= radius) {
+            eligible.add(new Ranked(row, metres));
+        }
     }
+
     eligible.sort(Comparator.comparingDouble(Ranked::metres).thenComparingLong(r -&gt; r.row.id));
-    return eligible.stream().limit(20).map(r -&gt; new Hit(r.row.id, r.row.version,
-            r.row.mover ? Math.floor(r.metres / 100) * 100 : r.metres,
-            r.row.mover ? null : r.row.point)).toList(); // Never serialize private coordinates.
+    return eligible.stream()
+            .limit(20)
+            .map(r -&gt; new Hit(r.row.id, r.row.version,
+                    r.row.mover ? Math.floor(r.metres / 100) * 100 : r.metres,
+                    r.row.mover ? null : r.row.point))
+            .toList(); // Never serialize private coordinates.
 }</code></pre><div class="bilingual"><div class="lang-zh"><p>即使已读取全部候选，也不代表候选覆盖了当前权威数据全集。例如，一个实体从未查询的旧格移进查询圆，但更新事件尚未到达新格，服务就召回不到它的 id。上面的代码只能校正已经召回的候选，因此独立异步索引仍须保留 <code>index_as_of</code> 和最终可见的约定。缺格或工作量超限时，默认返回 503；即使明确返回 partial，也不能把结果称为当前全局精确的最近 20 个。</p><p>缓存键包含格子 cell、路由代次 route_epoch 和格快照修订号 cell_revision。entity_version 属于实体，revision 属于格快照，不能混用。服务在同一次 MVCC 快照中读取修订号和成员，再写入对应版本的缓存键。快照从<strong>开始读取索引</strong>时就带上绝对截止时间 <code>not_after≤start+2s</code>，迟到回填和缓存命中都不能重新计时。设计时还要明确：每次先读当前版本，还是允许使用有年龄上限的旧快照。索引可见 p99 为 2 秒、缓存最多保留 2 秒，只能解释正常情况下的窗口；发生积压后，并没有 4 秒的硬上界。</p><p>热格有 1 万条成员记录，每条 64 B，一份完整快照就是 10,000 × 64 B = 640 KB；每秒读取 222.22 次，约需传输 142.22 MB/s。若达到 90% 的命中率目标，回源可降到每秒约 22.22 次、14.22 MB/s。但移动热格每秒写入 400 次、每次都改变 revision，不能直接沿用这个命中率。缓存全部失效时，每秒 222.22 次回源需求超过整层每秒 100 次的预算，所以仍要合并请求并限流；只在单个进程内合并，不能保证全局只回源一次。</p></div><div class="lang-en"><p>Complete candidates do not imply complete current authority: a mover can enter the circle from an unread old cell before its new-cell event arrives. This code corrects recalled IDs only. Preserve the async index’s <code>index_as_of</code> and eventual-visibility contract. Missing cells or work-limit failures default to 503; explicit partial results cannot claim the exact global top 20.</p><p>Cache keys include cell, route_epoch and cell_revision; entity_version belongs to an entity. Read revision and members in one MVCC snapshot, then fill its matching version key. From the <strong>start of the index read</strong>, retain an absolute <code>not_after≤start+2 s</code>; neither delayed fills nor hits reset it. Choose current-version reads or bounded-old snapshots explicitly. A 2 s projection p99 target plus 2 s cache age explains a healthy window, not a four-second failure bound.</p><p>A hot snapshot is 10,000×64 B=640 KB, or about 142.22 MB/s at 222.22/s. A 90% hit target leaves 22.22 origin reads/s and 14.22 MB/s. A 400-write/s moving cell that changes revision per write needs a new measured hit rate. Total cache loss demands 222.22/s against the 100/s aggregate origin budget; coalesce and limit. Process-local coalescing is not globally once.</p></div></div>
 </section>
 
@@ -548,25 +582,33 @@
         <figcaption><span class="lang-zh">Index Writer 完成更新后，才向队列确认处理完成。索引可见 p99 为 2 秒只是目标，故障时可能更久。若业务要求更新后立即搜索就能找到，应等待可见水位，或让近期写入进入额外的候选召回层。</span> <span class="lang-en">Writer acknowledges processing after apply. Two seconds is a p99 visibility target, not a failure bound. Read-after-write recall needs a visibility watermark or an additional recent-write recall layer.</span></figcaption>
       </div>
     </figure><div class="bilingual"><div class="lang-zh"><p>只有扩展到移动实体时，才需要持续接收位置上报。8 万个实体每分钟最多上报 4 次，得到 80,000 × 4 ÷ 60 ≈ 5,333.33 次/秒；每条最新记录 96 B，共需 7.68 MB。若每次上报都追加保存，每天约产生 44.2368 GB，保存三份约为 132.71 GB/天，还没有计入日志、队列和索引。每分钟 4 次是接受额度，不是均匀每 15 秒一次的保证；如果实体在一分钟开头连报 4 次，随后仍可能因为样本超过 30 秒而被隐藏。</p><p>服务要验证上报者是否为实体属主、当前共享政策、设备会话和递增序号。客户端时间只有在<strong>时钟误差上界可以验证</strong>时，才能用来承诺观测年龄；否则，只能说明服务多久前收到坐标，不能声称 GPS 观测仍然新鲜。稳定的 request_id 要绑定完整请求意图。服务锁住实体后，先查找并返回已经提交的回执，再检查时间和额度，避免响应丢失后的重试被当成第五次上报。</p></div><div class="lang-en"><p>Continuous reports belong to the mover extension. 80,000×4/60≈5,333.33/s gives 7.68 MB of 96 B latest rows. Append-only samples would produce 44.2368 GB/day, or 132.71 GB/day for three copies, before logs, queues and indexes. Four/minute is a quota, not one report every 15 s; clustered reports can leave a mover hidden by the 30 s age threshold.</p><p>Validate ownership, sharing, device session and increasing sequence. Client timestamps support an observation-age contract only with a <strong>verified clock-error bound</strong>. Otherwise promise receipt age, not fresh GPS observations. A stable request_id binds the complete intent. Under the entity lock, recover committed receipts before time/quota checks so a lost response does not turn a retry into a fifth report.</p></div></div><h3><span class="lang-zh">权威提交：最新记录、额度、回执与 outbox 一起保存</span><span class="lang-en">Authority commit: row, quota, receipt and outbox together</span></h3><pre data-language="Pseudocode · authority report" data-kind="pseudocode" data-source="report.pseudo"><code>report(auth, request_id, intent):
-  authenticate owner; validate request shape and immutable intent hash
+  authenticate owner;
+  validate request shape and immutable intent hash
+
   BEGIN on the authoritative entity shard
   row = SELECT Entity WHERE id = intent.entity FOR UPDATE
   require row.owner = auth.owner
   receipt = SELECT Receipt WHERE (entity, request_id) = (...)
   if receipt exists:
     require receipt.intent_hash = hash(intent), otherwise 409
-    COMMIT; return receipt.original_response
+    COMMIT;
+    return receipt.original_response
+
   require active device session, sequence &gt; row.last_sequence
   require bounded device clock, valid sample age and current sharing policy
   require accepted_count_in_window &lt; 4, otherwise ROLLBACK and 429
+
   v = row.version + 1
   UPDATE Entity SET point, observed_at, session, sequence, version = v
   INSERT AcceptedReport(entity, accepted_at) // Same shard; charged once.
   INSERT Outbox(event_id, entity, v, old_point, new_point, original_sample)
   INSERT Receipt(entity, request_id, intent_hash, {version:v, index:"pending"})
+
   COMMIT // Entity lock + unique(entity, request_id) + one DB transaction.
   return 200 with stored response
-on unknown commit outcome: retry the SAME request_id and SAME intent
+
+on unknown commit outcome:
+  retry the SAME request_id and SAME intent
 // Authorization/read errors are 503, never absence. A rejected transaction charges nothing.
 // Session/sequence, quota, receipt and outbox share this DB. No cross-service atomic claim.</code></pre><div class="bilingual"><div class="lang-zh"><p>上面的协议依赖同一实体分片中的数据库行锁、唯一回执键和事务提交。连接或提交超时，只能说明结果未知，客户端应使用原来的请求键重试；会话或权限依赖不可用时，返回 503。outbox 中的 event_id 可以用于去重，以 entity_id 作为聚合键有助于保持同分区顺序 [6]。不过，Relay 自己也必须按顺序发布，不能仅凭事件落在同一分区，就认定发布已经有序。</p></div><div class="lang-en"><p>One entity-shard database provides the row lock, unique receipt and commit. A connection/commit timeout leaves an unknown outcome: retry the same identity. Unavailable session/policy checks return 503. Outbox event_id supports deduplication and entity_id as aggregate key supports partition order [6], but the relay must preserve that order; a shared partition alone does not order publication.</p></div></div><h3><span class="lang-zh">索引投影：每格内用事务，跨格更新靠重试完成</span><span class="lang-en">Projection commit: local cell atomicity and cross-cell retries</span></h3><pre data-language="Pseudocode · versioned projection" data-kind="pseudocode" data-source="project.pseudo"><code>apply(event): // Immutable event; route before/after points to old/new cell for this generation.
   if event.new_cell exists:
@@ -574,6 +616,7 @@ on unknown commit outcome: retry the SAME request_id and SAME intent
   if event.old_cell exists and event.old_cell != event.new_cell:
     put_if_newer(event.old_cell, event.entity, event.version, TOMBSTONE, null)
   // A delete has no new_cell; a same-cell move updates coordinates without self-deletion.
+
   ACK source offset only after every required write is durably acknowledged
   // A crash between writes retries both; no distributed transaction across cells.
 
@@ -582,13 +625,18 @@ put_if_newer(cell, entity, version, state, sample):
   guard = INSERT CellGuard(cell) IF ABSENT
   SELECT guard FOR UPDATE // Serializes revision and all membership changes for this cell.
   old = SELECT Membership WHERE (cell, entity) = (...)
-  if old exists and old.version &gt; version: COMMIT; return STALE
+  if old exists and old.version &gt; version:
+    COMMIT;
+    return STALE
   if old exists and old.version == version:
     require identical state and immutable payload, otherwise corruption alarm
-    COMMIT; return DUPLICATE
+    COMMIT;
+    return DUPLICATE
+
   UPSERT Membership(cell, entity, version, state, sample)
   UPDATE CellGuard SET revision = revision + 1
   COMMIT // Row/state/revision are one local transaction, including tombstones.
+
 // Read revision + members in one MVCC snapshot; cache fills inherit its absolute expiry.
 // Retain tombstones while older events/snapshots may replay. GC needs a durable replay fence.
 // Migration invokes apply for both generations; unknown-child tombstones copy to all four.
@@ -735,20 +783,30 @@ put_if_newer(cell, entity, version, state, sample):
   P = ALL source partitions that can emit a move into or out of parent
   pause projectors at hole-free applied offsets S[p] for every p in P
   snapshot = read parent members + tombstones while its writers are fenced
-  resume parent projection; COPY live rows by point and tombstones to ALL four children
+  resume parent projection;
+  COPY live rows by point and tombstones to ALL four children
   // Copy guards compare versions, even if a newer live replay arrived first.
-  REPLAY source offsets &gt; S[p] to children; do not skip deletes or cross-border moves
+  REPLAY source offsets &gt; S[p] to children;
+  do not skip deletes or cross-border moves
   CAS durable route directory: PARENT(e) -&gt; MIGRATING(e, parent + children)
   // Parent keeps receiving all live changes; copy/replay may safely retry.
+
   pause every relevant projector at offsets W[p] after its in-flight writes finish
   drain child replay until applied[p] &gt;= W[p] for ALL p in P
   // Advance applied[p] only over a contiguous prefix with all destination effects durable.
   CAS directory: MIGRATING(e) -&gt; CHILDREN(e+1)
-  invalidate route/cell-cache pointers; retain their ORIGINAL not_after deadlines
+  invalidate route/cell-cache pointers;
+  retain their ORIGINAL not_after deadlines
   resume projection to BOTH parent and children through the old-reader grace period
+
   wait until all old routes expired AND all readers using them finished/expired
-  fence old parent writers/readers; retire parent; project only to children
-on failure before cutover: keep parent serving; resume from durable migration state
+  fence old parent writers/readers;
+  retire parent;
+  project only to children
+
+on failure before cutover:
+  keep parent serving;
+  resume from durable migration state
 // Pauses affect index visibility, not authority commits; events stay in the durable log.
 // An entity version is NOT a cross-entity offset. W is a per-partition vector.
 // Leases/epochs are checked by storage; a late worker cannot continue on a retired parent.

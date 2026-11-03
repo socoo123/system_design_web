@@ -6,13 +6,17 @@ resolve_or_cancel(owner, key, exact_intent, token):   // trusted reconciler, sam
     VALUES (...) ON CONFLICT(identity) DO NOTHING
   if inserted:
     INSERT outbox(REQUEST_TERMINAL, receipt(CANCELLED, version=1, token))
-    COMMIT; return CANCELLED                          // durable tombstone closes late CREATE
+    COMMIT;
+    return CANCELLED                                  // durable tombstone closes late CREATE
+
   r = SELECT * FROM requests WHERE identity=:identity FOR UPDATE // new statement
   require r.digest == SHA256(canonical(owner, CREATE_HOLD, exact_intent))
   if r.outcome == CREATED:
     h = SELECT * FROM holds WHERE hold_id=r.hold_id
-    COMMIT; return {original_receipt:r.original_receipt, current_state:h.state}
-  COMMIT; return r.original_receipt                   // existing terminal event is retryable
+    COMMIT;
+    return {original_receipt:r.original_receipt, current_state:h.state}
+  COMMIT;
+  return r.original_receipt                            // existing terminal event is retryable
 // CREATE claims this SAME unique identity before any stock allocation.
 // Its uncommitted claim makes INSERT wait; rollback lets cancel win; commit reveals hold.
 // HELD: wait or call normal expiry. CONFIRMED: no restock. Unknown: keep pending.

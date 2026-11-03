@@ -360,8 +360,10 @@
       </div>
     </figure>
 <div class="bilingual"><div class="lang-zh"><p><strong>先保存意图，再分别确认发布与消费。</strong>Order 在事务中一起提交订单与待发消息记录（outbox）；Relay 扫描待办，把 e17 发布到 Events，收到 Broker ACK 后才标记为已发布。如果先提交订单，再依赖内存发布消息，进程在两步之间崩溃就会丢事件；如果反过来先发布，消费者又可能处理一笔尚不存在的订单。本地事务解决了这个双写窗口，但没有把数据库与 Broker 变成同一个事务 <a href="#ref-2">[2]</a>。ACK 丢失仍可能导致重复投递，重发时事件 ID 保持不变。</p><p>图三的消费者只修改自己的积分。下面的伪代码将唯一的 <code>(tenant,consumer,event_id)</code> 消费记录（inbox）与积分更新放在同一数据库事务中，组成身份的列都显式声明 NOT NULL，并要求非空。如果同一个事件 ID 对应了不同内容，就隔离冲突，不能直接发送 ACK。实际 schema 与绑定参数的适配器见 <a href="../examples/ch44/schema.sql">schema.sql</a> / <a href="../examples/ch44/check_transactions.py">check_transactions.py</a>。这里验证的是 SQLite 的本地事务，不能据此认为已验证 PostgreSQL 的并发行为。</p></div><div class="lang-en"><p><strong>Persist intent, then acknowledge publication and consumption separately.</strong> Order commits order/outbox. Relay scans pending e17, publishes to Events, and marks published only after broker ACK. Commit-then-memory-publish can lose events; publish-before-commit can expose nonexistent orders. A local transaction closes that dual-write window without making DB and broker atomic. <a href="#ref-2">[2]</a> Lost ACK can repeat publication with the same event ID.</p><p>Deck three changes only local points. This pseudocode commits unique <code>(tenant,consumer,event_id)</code> inbox and points together, with explicit NOT NULL/nonempty identity columns. Changed payload for one ID is quarantined without silent ACK. See <a href="../examples/ch44/schema.sql">schema.sql</a> / <a href="../examples/ch44/check_transactions.py">check_transactions.py</a> for schema/bound SQL. SQLite local transaction checks do not prove PostgreSQL concurrency behavior.</p></div></div><pre data-language="Pseudocode · inbox" data-kind="pseudocode" data-source="consume.pseudo"><code>consume(tenant, consumer, event_id, account_id, delta):
-  require nonempty canonical identity; authorize tenant/account/event source
+  require nonempty canonical identity;
+  authorize tenant/account/event source
   digest = SHA256(canonical(account_id, delta))
+
   BEGIN
   won = SQL INSERT INTO inbox(tenant, consumer, event_id, digest, result)
         VALUES (:tenant, :consumer, :event_id, :digest, :delta)
@@ -369,15 +371,25 @@
   if won is empty:
     old = SQL SELECT digest, result FROM inbox
               WHERE tenant=:tenant AND consumer=:consumer AND event_id=:event_id
-    if old is empty: ROLLBACK; RETRY_LATER_SAME_EVENT
-    if old.digest != digest: ROLLBACK; QUARANTINE_CONFLICT_WITHOUT_ACK
+    if old is empty:
+      ROLLBACK;
+      RETRY_LATER_SAME_EVENT
+    if old.digest != digest:
+      ROLLBACK;
+      QUARANTINE_CONFLICT_WITHOUT_ACK
     ROLLBACK
-    ACK; return old.result
+    ACK;
+    return old.result
+
   affected = SQL UPDATE accounts SET points=points+:delta
                  WHERE tenant=:tenant AND account_id=:account_id
-  if affected != 1: ROLLBACK; RETRY_OR_QUARANTINE_WITHOUT_ACK
+  if affected != 1:
+    ROLLBACK;
+    RETRY_OR_QUARANTINE_WITHOUT_ACK
+
   COMMIT
-  ACK; return delta
+  ACK;
+  return delta
 # On DB/commit error: discard connection; do not ACK, replay same event_id.
 # Inbox is retained; its insert and local effect share this one DB transaction.
 # External email/payment is not inside this transaction.</code></pre><div class="bilingual"><div class="lang-zh"><p>如果在提交前崩溃，inbox 与积分变更都回滚；如果在提交后、ACK 前崩溃，重投的消息会命中 inbox，积分不会再次增加。示例永久保留 inbox，若要清理，必须另行约定最晚可能重放到什么时候。外部邮件不在这个事务中：先发邮件再记结果可能重复发送，先记结果再发邮件可能漏发。它需要外部系统支持稳定键以及原子执行或结果查询，或者明确接受重复并通过对账处理。</p><p>A4 的原始事件流为 200×1 KB=200 KB/s，按十进制计算，副本另算。停止消费 180 s 后，积压 36,000 条，即 36 MB。恢复后每秒消费 300 条，同时仍有 200 条进入，所以每秒只净减少 100 条，需要 360 s 追平；如果消费能力只有每秒 200 条，就永远追不平。在持久存储快被积压占满之前，应收紧新意图的准入。</p></div><div class="lang-en"><p>A pre-commit crash rolls both changes back; a post-commit/pre-ACK crash replays into the inbox without more points. This example retains inbox records; cleanup requires a maximum replay contract. Email lies outside this transaction: send-before-record can duplicate, record-before-send can lose delivery. It needs external stable identity with atomic execution/query, or accepted duplicates and reconciliation.</p><p>A4 raw events are 200×1 KB=200 KB/s, decimal and before replicas. A 180s outage accumulates 36,000 events=36 MB. Recovery consumes 300/s while 200/s still arrives: 100/s net, 360s to catch up. At 200/s it never catches up. Tighten intake before durable obligations exhaust storage.</p></div></div></section>
@@ -639,15 +651,27 @@
 <div class="bilingual"><div class="lang-zh"><p><strong>所有等待都消耗同一份时间预算。</strong>第五组图另用只读库存 API，整体截止时间仍为 800 ms。gRPC 默认不设置 deadline；传播截止时间时会扣除已经消耗的时间，服务端应用还负责停止派生工作 <a href="#ref-5">[5]</a><a href="#ref-6">[6]</a>。线程调度、服务发现等待、DNS、连接、远端排队与处理都要计入预算。各进程用本地单调时钟计算剩余时间，跨进程传递剩余时长，不能直接比较两台机器的单调时间戳。</p><p>A6 各阶段的计划上限为 80+220+40+220+140=700ms，距 800 ms 留下 100 ms，<strong>这不是各段 P99 之和，也不是硬实时保证</strong>。排队和线程晚醒可能消耗余量，因此每次都要重算。下面的伪代码把一次尝试至少需要的可用时间设为教学值 100 ms，上限为 220 ms，并预留 140 ms 完成处理和响应回程。如果总共只剩 250 ms，再退避 40 ms、扣除预留的 140 ms，调用就只剩 70 ms，应当停止。线程唤醒后，以及 worker 实际发出 I/O 前，都要对照同一个绝对截止时间 attempt_end 检查，不能给每个阶段重新分配 220 ms。</p></div><div class="lang-en"><p><strong>Charge every wait to one budget.</strong> Deck five is a separate read-only stock API with an 800ms deadline. gRPC sets no deadline by default, deducts elapsed time during propagation, and leaves spawned-work cancellation to the server application. <a href="#ref-5">[5]</a><a href="#ref-6">[6]</a> Include scheduling, discovery, DNS, connect, remote queue and processing. Use local monotonic time and propagate remaining duration, never compare machines’ monotonic timestamps.</p><p>A6 planned stage caps total 700ms, leaving 100ms under 800. <strong>This is neither summed P99s nor a hard real-time guarantee.</strong> Queueing/late wakeups can spend the slack. This pseudocode uses a teaching 100ms useful minimum, a 220ms attempt cap and 140ms finish/return reserve. With 250ms remaining and 40ms backoff, only 70ms remains: stop. Recheck on wakeup and in the actual I/O worker against the same absolute attempt_end; never reset each phase to 220ms.</p></div></div><pre data-language="Pseudocode · retry" data-kind="pseudocode" data-source="retry.pseudo"><code>readStock(request, D):                         # D: local monotonic deadline
   for attempt in [1, 2]:                      # Order is the only retry owner
     if attempt == 2:
-      if not previous.transient or not previous.local_io_terminal: STOP
+      if not previous.transient or not previous.local_io_terminal:
+        STOP
       sleep_cancellable(random(0, 40ms), D - 140ms)
-    if cancelled or D - now() &lt; 100ms + 140ms: STOP
+    if cancelled or D - now() &lt; 100ms + 140ms:
+      STOP
+
     slot = inventory_slots.tryAcquire()       # local bounded I/O; no wait queue
-    if slot is empty: STOP
+    if slot is empty:
+      STOP
     ticket = inventory_breaker.tryAcquire()   # OPEN rejects; HALF_OPEN: one probe
-    if ticket is empty: release(slot); STOP
+    if ticket is empty:
+      release(slot);
+      STOP
+
     attempt_end = min(now() + 220ms, D - 140ms)
-    submit worker (on rejection: finish(ticket, IGNORED); release(slot); STOP):
+    submit worker (
+      on rejection:
+        finish(ticket, IGNORED);
+        release(slot);
+        STOP
+    ):
       outcome = NOT_DISPATCHED
       try:                                   # covers ALL owned-resource paths
         if not cancelled and attempt_end - now() &gt;= 100ms:
@@ -664,53 +688,88 @@
       catch unexpected_local_error:
         outcome = LOCAL_FAILURE              # quota/parse/SDK errors included
       finally:
-        try: finish(ticket, IGNORED)          # once-only ticket ignores fallback
-        finally: release(slot)               # after quota/local I/O really exits
+        try:
+          finish(ticket, IGNORED)            # once-only ticket ignores fallback
+        finally:
+          release(slot)                     # after quota/local I/O really exits
       report outcome with local_io_terminal=true
+
     previous = await worker result only until attempt_end
-    if caller wait timed out: request cancellation; STOP
-    if previous.success: return previous     # then &lt;=140ms finishing allowance
+    if caller wait timed out:
+      request cancellation;
+      STOP
+    if previous.success:
+      return previous                        # then &lt;=140ms finishing allowance
   return failure_or_explicit_stale_read       # never invent stock/paid success
 # spend_once admits &lt;=20 extras per fixed second across ALL callers in A7.
 # Its quota I/O must honor quota_end/cancellation; unknown may waste a token.
 # Keep a slot for live local I/O; timeout/cancel does not prove remote rollback.
-# A timed-out write resolves UNKNOWN using durable K, not this read-only loop.</code></pre><div class="bilingual"><div class="lang-zh"><p>这些调用还依赖适配器兑现具体约定：<code>inventory_read_once</code> 只发起一次调用，并关闭自动重试；预期网络错误归为依赖失败 FAILURE，额度查询、解析或 SDK 的意外本地异常则记为 IGNORED。worker 对检查、获取额度与 I/O 的处理都放在同一个外层 try/catch/finally 中，finally 兜底调用 finish 完成收尾，并归还已结束的本地 I/O 所占槽位，不能漏掉半开探针的收尾。等待异步结果的 Future 超时，不能证明底层传输已退出。代码此时保守停止重试，等本地 I/O 真正结束后才归还槽位；远端仍可能继续执行，因此还需要自己的准入与幂等机制。</p><p><code>spend_once</code> 最多等待 10 ms，也不能晚于 attempt_end−100ms，并且必须响应取消。如果结果未知或额度被拒绝，就不向 Inventory 发请求，也不重试这次额度扣减；已经扣掉的令牌可以浪费。获取额度后，还要再次检查发出调用前的剩余时间。额度必须由所有调用实例共用的权威原子限额实现：本例按权威自身的时间划分固定的一秒窗口，满足 <code>used&lt;20</code> 才原子递增。额度服务失败或不可达时就不重试，不能给每个进程都分配每秒 20 次。A7 在同一窗口内有 200 个原始请求，加上最多 20 次重试，共计最多 220 次准入。固定窗口交界可能短时集中调用，严格滑动窗口约定另见 Ch04；这里统计的是准入次数，不保证实际网络发送严格匀速。拿到令牌后如果在发出调用前已过期，可以浪费令牌，不能超额发送。</p><p>五层调用如果每层总共最多尝试三次，最深层最坏可能收到 3⁵=243 次调用；本例则只由 Order 负责重试，每个请求总共最多尝试两次。次数、时间和额外流量都要有上限，鉴权失败、参数错误和业务冲突不重试。AWS 同样建议只选一层负责重试，限制次数，并使用退避与随机抖动 <a href="#ref-12">[12]</a>。退避本身不会增加服务容量。</p></div><div class="lang-en"><p>The adapter contract matters: <code>inventory_read_once</code> performs one call with automatic retries disabled. Network errors become dependency FAILURE; unexpected quota/parse/SDK errors are IGNORED. One outer try/catch/finally covers checks, quota and I/O, with a once-only finish fallback and terminal slot release. Future timeout does not prove transport termination: the loop conservatively stops, holding its slot until local I/O ends. Remote work may continue and needs its own admission/idempotency.</p><p><code>spend_once</code> waits at most 10ms and never past attempt_end−100ms, honors cancellation, and treats unknown/denied as no Inventory dispatch. Do not retry an unknown quota debit; a token may be wasted. Recheck time afterward. It needs one atomic authority across all caller instances: in this example a conditional <code>used&lt;20</code> increment in authority-time fixed one-second windows. Failure/unavailability denies retry; it is not 20/s per process. A7 admits 200 originals plus at most 20 extras per window. Window boundaries may cluster calls; strict rolling limits belong in Ch04. This counts admission, not perfectly paced physical sends. An expired dispatch may waste a token safely.</p><p>Five layers with three total attempts each can yield 3⁵=243 deepest calls. Here Order alone owns two total attempts. Bound count, time and aggregate extras; authorization/input/conflict errors are terminal. AWS likewise recommends one retry layer, caps and backoff/jitter. <a href="#ref-12">[12]</a> Backoff does not create capacity.</p></div></div><h3><span class="lang-zh">调用方熔断：OPEN 拒绝调用，HALF_OPEN 只放一个探针</span><span class="lang-en">Caller breaker: OPEN rejects, HALF_OPEN probes once</span></h3><div class="bilingual"><div class="lang-zh"><p>在 Order → Inventory 这条依赖上设置一个<strong>进程内</strong>熔断器。连续观测到三次依赖失败后，熔断器进入断开状态（OPEN）一秒，拒绝新调用；冷却结束后进入半开状态（HALF_OPEN），只放行一个探针。探针成功就关闭熔断（CLOSED），失败或未派发则重新冷却。三次失败、一秒冷却都是本章教学值。这个熔断器不控制所有实例的总流量，也不能撤销在途请求。模式说明见 <a href="#ref-13">[13]</a>，下面的状态片段取自同源的 Java 17 可运行示例。</p></div><div class="lang-en"><p>Put a <strong>process-local</strong> breaker on Order → Inventory. Three observed dependency failures open it for one second. After cooldown, HALF_OPEN admits one probe: success closes, failure or abandoned dispatch cools again. Three/one-second are teaching values. This neither caps all caller instances nor revokes in-flight calls. The pattern is documented in <a href="#ref-13">[13]</a>; this state machine is extracted from the runnable Java17 example.</p></div></div><pre data-language="Java 17 · breaker" data-kind="runnable" data-source="ServiceGovernance.java" data-region="breaker"><code>enum State { CLOSED, OPEN, HALF_OPEN }
-enum Verdict { SUCCESS, FAILURE, IGNORED }
-static final class Breaker {
-  final LongSupplier clock;                 // monotonic; read inside the lock
-  State state = State.CLOSED;
-  long epoch, openedAt;
-  int failures;
-  Breaker(LongSupplier clock) { this.clock = clock; }
-  final class Ticket {
-    final Breaker owner = Breaker.this;
-    final long generation = epoch;
-    boolean done;
+# A timed-out write resolves UNKNOWN using durable K, not this read-only loop.</code></pre><div class="bilingual"><div class="lang-zh"><p>这些调用还依赖适配器兑现具体约定：<code>inventory_read_once</code> 只发起一次调用，并关闭自动重试；预期网络错误归为依赖失败 FAILURE，额度查询、解析或 SDK 的意外本地异常则记为 IGNORED。worker 对检查、获取额度与 I/O 的处理都放在同一个外层 try/catch/finally 中，finally 兜底调用 finish 完成收尾，并归还已结束的本地 I/O 所占槽位，不能漏掉半开探针的收尾。等待异步结果的 Future 超时，不能证明底层传输已退出。代码此时保守停止重试，等本地 I/O 真正结束后才归还槽位；远端仍可能继续执行，因此还需要自己的准入与幂等机制。</p><p><code>spend_once</code> 最多等待 10 ms，也不能晚于 attempt_end−100ms，并且必须响应取消。如果结果未知或额度被拒绝，就不向 Inventory 发请求，也不重试这次额度扣减；已经扣掉的令牌可以浪费。获取额度后，还要再次检查发出调用前的剩余时间。额度必须由所有调用实例共用的权威原子限额实现：本例按权威自身的时间划分固定的一秒窗口，满足 <code>used&lt;20</code> 才原子递增。额度服务失败或不可达时就不重试，不能给每个进程都分配每秒 20 次。A7 在同一窗口内有 200 个原始请求，加上最多 20 次重试，共计最多 220 次准入。固定窗口交界可能短时集中调用，严格滑动窗口约定另见 Ch04；这里统计的是准入次数，不保证实际网络发送严格匀速。拿到令牌后如果在发出调用前已过期，可以浪费令牌，不能超额发送。</p><p>五层调用如果每层总共最多尝试三次，最深层最坏可能收到 3⁵=243 次调用；本例则只由 Order 负责重试，每个请求总共最多尝试两次。次数、时间和额外流量都要有上限，鉴权失败、参数错误和业务冲突不重试。AWS 同样建议只选一层负责重试，限制次数，并使用退避与随机抖动 <a href="#ref-12">[12]</a>。退避本身不会增加服务容量。</p></div><div class="lang-en"><p>The adapter contract matters: <code>inventory_read_once</code> performs one call with automatic retries disabled. Network errors become dependency FAILURE; unexpected quota/parse/SDK errors are IGNORED. One outer try/catch/finally covers checks, quota and I/O, with a once-only finish fallback and terminal slot release. Future timeout does not prove transport termination: the loop conservatively stops, holding its slot until local I/O ends. Remote work may continue and needs its own admission/idempotency.</p><p><code>spend_once</code> waits at most 10ms and never past attempt_end−100ms, honors cancellation, and treats unknown/denied as no Inventory dispatch. Do not retry an unknown quota debit; a token may be wasted. Recheck time afterward. It needs one atomic authority across all caller instances: in this example a conditional <code>used&lt;20</code> increment in authority-time fixed one-second windows. Failure/unavailability denies retry; it is not 20/s per process. A7 admits 200 originals plus at most 20 extras per window. Window boundaries may cluster calls; strict rolling limits belong in Ch04. This counts admission, not perfectly paced physical sends. An expired dispatch may waste a token safely.</p><p>Five layers with three total attempts each can yield 3⁵=243 deepest calls. Here Order alone owns two total attempts. Bound count, time and aggregate extras; authorization/input/conflict errors are terminal. AWS likewise recommends one retry layer, caps and backoff/jitter. <a href="#ref-12">[12]</a> Backoff does not create capacity.</p></div></div><h3><span class="lang-zh">调用方熔断：OPEN 拒绝调用，HALF_OPEN 只放一个探针</span><span class="lang-en">Caller breaker: OPEN rejects, HALF_OPEN probes once</span></h3><div class="bilingual"><div class="lang-zh"><p>在 Order → Inventory 这条依赖上设置一个<strong>进程内</strong>熔断器。连续观测到三次依赖失败后，熔断器进入断开状态（OPEN）一秒，拒绝新调用；冷却结束后进入半开状态（HALF_OPEN），只放行一个探针。探针成功就关闭熔断（CLOSED），失败或未派发则重新冷却。三次失败、一秒冷却都是本章教学值。这个熔断器不控制所有实例的总流量，也不能撤销在途请求。模式说明见 <a href="#ref-13">[13]</a>，下面的状态片段取自同源的 Java 17 可运行示例。</p></div><div class="lang-en"><p>Put a <strong>process-local</strong> breaker on Order → Inventory. Three observed dependency failures open it for one second. After cooldown, HALF_OPEN admits one probe: success closes, failure or abandoned dispatch cools again. Three/one-second are teaching values. This neither caps all caller instances nor revokes in-flight calls. The pattern is documented in <a href="#ref-13">[13]</a>; this state machine is extracted from the runnable Java17 example.</p></div></div><pre data-language="Java 17 · breaker" data-kind="runnable" data-source="ServiceGovernance.java" data-region="breaker"><code>  enum State {
+      CLOSED, OPEN, HALF_OPEN
   }
-  synchronized Ticket tryAcquire() {
-    long now = clock.getAsLong();
-    if (state == State.HALF_OPEN) return null;
-    if (state == State.OPEN) {
-      if (now - openedAt &lt; 1_000_000_000L) return null;
-      state = State.HALF_OPEN;              // exactly one local probe
-    }
-    return new Ticket();
+
+  enum Verdict {
+      SUCCESS, FAILURE, IGNORED
   }
-  synchronized void finish(Ticket t, Verdict v) {
-    if (t == null || t.owner != this || t.done) return;
-    t.done = true;
-    if (t.generation != epoch) return;      // ignore old in-flight completion
-    if (state == State.HALF_OPEN) {
-      state = v == Verdict.SUCCESS ? State.CLOSED : State.OPEN;
-      failures = 0; epoch++; openedAt = clock.getAsLong();
-    } else if (state == State.CLOSED) {
-      if (v == Verdict.SUCCESS) failures = 0;
-      if (v == Verdict.FAILURE &amp;&amp; ++failures == 3) {
-        state = State.OPEN; epoch++; openedAt = clock.getAsLong();
+
+  static final class Breaker {
+      final LongSupplier clock; // monotonic; read inside the lock
+      State state = State.CLOSED;
+      long epoch, openedAt;
+      int failures;
+
+      Breaker(LongSupplier clock) {
+          this.clock = clock;
       }
-    }
-  }
-}</code></pre><div class="bilingual"><div class="lang-zh"><p>所有状态转换与时钟观察都放在同一把锁内，I/O 则在锁外执行。Ticket 带有代次，并且只能完成一次，因此旧调用迟到的失败结果，不能在新探针成功后再次打开熔断器。FAILURE 只计入能够归因于依赖的失败；本地准入被拒、鉴权失败和业务冲突记为 IGNORED，不表示依赖坏了。处于 CLOSED 时，成功调用会把连续失败数清零。如果半开探针一直不结束，熔断器就会持续拒绝其他新调用，所以适配器必须有本地终止与收尾路径。每个实例都有自己的探针，重启也会重置状态；全局流量仍要靠额外调用额度与下游准入控制。</p><p>客户端超时或取消只是停止等待，写入可能已经提交，仍需按 UNKNOWN 查清结果。取消持久保存的订单需要单独的业务命令；A2 已受理的后台履约，不会因为 HTTP 连接断开就被删除。不能把这个只读重试循环直接用于扣款。</p></div><div class="lang-en"><p>State transitions and clock observations share one lock; I/O stays outside it. Each generation-tagged ticket completes once, so an old failure cannot reopen after a newer successful probe. Count attributable dependency failures only; local denial, authorization and business conflicts are IGNORED. Success in CLOSED resets the consecutive count. A probe that never terminates keeps admission closed, so adapters need local termination/cleanup. Every caller instance has its own probe, and restart resets state; aggregate budgets and downstream admission remain necessary.</p><p>Client timeout/cancel stops waiting but cannot prove a write did not commit: it remains UNKNOWN. Cancel a durable order through a separate business command. A2 background fulfillment survives HTTP disconnect. Never reuse this read retry loop for charging.</p></div></div></section>
+
+      final class Ticket {
+          final Breaker owner = Breaker.this;
+          final long generation = epoch;
+          boolean done;
+      }
+
+      synchronized Ticket tryAcquire() {
+          long now = clock.getAsLong();
+          if (state == State.HALF_OPEN) {
+              return null;
+          }
+          if (state == State.OPEN) {
+              if (now - openedAt &lt; 1_000_000_000L) {
+                  return null;
+              }
+              state = State.HALF_OPEN; // exactly one local probe
+          }
+
+          return new Ticket();
+      }
+
+      synchronized void finish(Ticket t, Verdict v) {
+          if (t == null || t.owner != this || t.done) {
+              return;
+          }
+
+          t.done = true;
+          if (t.generation != epoch) {
+              return; // ignore old in-flight completion
+          }
+
+          if (state == State.HALF_OPEN) {
+              state = v == Verdict.SUCCESS ? State.CLOSED : State.OPEN;
+              failures = 0;
+              epoch++;
+              openedAt = clock.getAsLong();
+          } else if (state == State.CLOSED) {
+              if (v == Verdict.SUCCESS) {
+                  failures = 0;
+              }
+              if (v == Verdict.FAILURE &amp;&amp; ++failures == 3) {
+                  state = State.OPEN;
+                  epoch++;
+                  openedAt = clock.getAsLong();
+              }
+          }
+      }
+  }</code></pre><div class="bilingual"><div class="lang-zh"><p>所有状态转换与时钟观察都放在同一把锁内，I/O 则在锁外执行。Ticket 带有代次，并且只能完成一次，因此旧调用迟到的失败结果，不能在新探针成功后再次打开熔断器。FAILURE 只计入能够归因于依赖的失败；本地准入被拒、鉴权失败和业务冲突记为 IGNORED，不表示依赖坏了。处于 CLOSED 时，成功调用会把连续失败数清零。如果半开探针一直不结束，熔断器就会持续拒绝其他新调用，所以适配器必须有本地终止与收尾路径。每个实例都有自己的探针，重启也会重置状态；全局流量仍要靠额外调用额度与下游准入控制。</p><p>客户端超时或取消只是停止等待，写入可能已经提交，仍需按 UNKNOWN 查清结果。取消持久保存的订单需要单独的业务命令；A2 已受理的后台履约，不会因为 HTTP 连接断开就被删除。不能把这个只读重试循环直接用于扣款。</p></div><div class="lang-en"><p>State transitions and clock observations share one lock; I/O stays outside it. Each generation-tagged ticket completes once, so an old failure cannot reopen after a newer successful probe. Count attributable dependency failures only; local denial, authorization and business conflicts are IGNORED. Success in CLOSED resets the consecutive count. A probe that never terminates keeps admission closed, so adapters need local termination/cleanup. Every caller instance has its own probe, and restart resets state; aggregate budgets and downstream admission remain necessary.</p><p>Client timeout/cancel stops waiting but cannot prove a write did not commit: it remains UNKNOWN. Cancel a durable order through a separate business command. A2 background fulfillment survives HTTP disconnect. Never reuse this read retry loop for charging.</p></div></div></section>
 <section id="idempotency"><h2><span class="lang-zh">六 · 幂等记录要跨实例共享，未知结果不能靠过期放行</span><span class="lang-en">6 · Durable cross-instance idempotency and UNKNOWN</span></h2><figure class="deck">
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d6s1t d6s1d">
@@ -833,8 +892,11 @@ static final class Breaker {
       </div>
     </figure>
 <div class="bilingual"><div class="lang-zh"><p><strong>K 对应业务意图，不能随实例变化。</strong>tenant / operation / K 三项都要非空且经过规范化，客户端重试时保持 K 和请求内容不变。Order 检查当前授权与规范化后的摘要：同键同摘要就回放结果，同键但内容不同就返回冲突。并发竞争由数据库的组合唯一约束裁决，不能先查“没有”，再不加约束地插入。PostgreSQL 18 的唯一与 NOT NULL 约束见 <a href="#ref-8">[8]</a>。下面的伪代码对应图六；完整 schema 使用可延迟检查的外键，让永久 K 映射指向同一事务中创建的订单。</p></div><div class="lang-en"><p><strong>K belongs to intent, not an instance.</strong> Scope nonempty canonical tenant/operation/K; keep K and request content stable. Order checks current authorization and canonical digest. Same key/digest replays, changed content conflicts. Database composite uniqueness arbitrates concurrency; unchecked read-then-insert cannot. PostgreSQL18 documents uniqueness and NOT NULL. <a href="#ref-8">[8]</a> This implements deck six; the full schema uses a deferred foreign key from permanent K mapping to the order created in the same transaction.</p></div></div><pre data-language="Pseudocode · accept" data-kind="pseudocode" data-source="accept.pseudo"><code>accept(authorized_tenant, operation, K, canonical_payload, deadline):
-  require nonempty canonical identity; authorize create for this tenant
-  digest = SHA256(canonical_payload); new_id = random_UUID()
+  require nonempty canonical identity;
+  authorize create for this tenant
+  digest = SHA256(canonical_payload);
+  new_id = random_UUID()
+
   # DB connection/lock/statement waits consume deadline; READ COMMITTED.
   BEGIN
   won = SQL INSERT INTO intents(tenant, operation, k, digest, order_id)
@@ -843,11 +905,16 @@ static final class Breaker {
   if won is empty:
     old = SQL SELECT digest, order_id, result FROM intents
               WHERE tenant=:tenant AND operation=:operation AND k=:K
-    if old is empty: ROLLBACK; return UNKNOWN(K)
-    if old.digest != digest: ROLLBACK; return CONFLICT
+    if old is empty:
+      ROLLBACK;
+      return UNKNOWN(K)
+    if old.digest != digest:
+      ROLLBACK;
+      return CONFLICT
     authorize current access to old.order_id
     ROLLBACK
     return old.result or QUERY_CURRENT_STATE(old.order_id)
+
   SQL INSERT INTO orders(tenant, order_id, state)
       VALUES (:tenant, :new_id, &#x27;ACCEPTED&#x27;)
   SQL INSERT INTO outbox(event_id, tenant, order_id)
@@ -855,6 +922,7 @@ static final class Breaker {
   result = immutable {order_id: new_id, state: ACCEPTED}
   SQL UPDATE intents SET result=:result
       WHERE tenant=:tenant AND operation=:operation AND k=:K
+
   COMMIT
   return 201(result, operation_id=new_id)
 # Any DB/commit error: discard connection; return UNKNOWN(K), never new K.

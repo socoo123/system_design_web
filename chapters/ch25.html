@@ -161,31 +161,42 @@
 <div class="bilingual"><div class="lang-zh"><p>每次触发都由非空唯一键 (job_id, schedule_version, scheduled_at UTC) 标识，分别对应任务、计划版本和原定的 UTC 触发时刻，不能改用机器当前时间。修改任务定义只影响后续生成的 run；已有 run 沿用自己的处理参数和业务键 effect_key，领取执行权时也不会重新读取最新任务参数。业务键要按业务意图选择，例如用同一租户下的 close:o7 标识同一次关单。新增一个 schedule_version，并不自动意味着业务可以再生效一次。[3]</p></div><div class="lang-en"><p>The non-null unique key is (job_id, schedule_version, scheduled_at UTC), rather than a machine’s current time. Edits affect future materialization; an existing run keeps its frozen input and effect_key, and claims do not reload new job parameters. Choose effect identity by business intent, such as tenant-scoped close:o7. A new schedule version does not automatically authorize another effect. [3]</p></div></div>
 <pre data-language="SQL · PostgreSQL 18 teaching schema" data-kind="teaching" data-source="schema.sql"><code>-- PostgreSQL 18 teaching schema; one authoritative scheduler database.
 CREATE TABLE job (
-  id text PRIMARY KEY, version bigint NOT NULL CHECK (version &gt; 0),
+  id text PRIMARY KEY,
+  version bigint NOT NULL CHECK (version &gt; 0),
   shard smallint NOT NULL CHECK (shard BETWEEN 0 AND 15),
-  enabled boolean NOT NULL, next_run_at timestamptz,
-  policy text NOT NULL CHECK (policy IN (&#x27;skip&#x27;,&#x27;coalesce&#x27;,&#x27;catch_up&#x27;)),
+  enabled boolean NOT NULL,
+  next_run_at timestamptz,
+  policy text NOT NULL CHECK (policy IN (&#x27;skip&#x27;, &#x27;coalesce&#x27;, &#x27;catch_up&#x27;)),
   lateness_ms bigint NOT NULL DEFAULT 60000 CHECK (lateness_ms &gt;= 0),
-  spec jsonb NOT NULL, recovery_cutoff timestamptz
+  spec jsonb NOT NULL,
+  recovery_cutoff timestamptz
 );
 CREATE INDEX job_due ON job(shard, next_run_at, id) WHERE enabled;
+
 CREATE TABLE run (
-  id uuid PRIMARY KEY, job_id text NOT NULL REFERENCES job(id),
-  schedule_version bigint NOT NULL, scheduled_at timestamptz NOT NULL,
-  payload jsonb NOT NULL, effect_key text NOT NULL,
+  id uuid PRIMARY KEY,
+  job_id text NOT NULL REFERENCES job(id),
+  schedule_version bigint NOT NULL,
+  scheduled_at timestamptz NOT NULL,
+  payload jsonb NOT NULL,
+  effect_key text NOT NULL,
   state text NOT NULL CHECK (state IN
-    (&#x27;ready&#x27;,&#x27;running&#x27;,&#x27;retry_wait&#x27;,&#x27;succeeded&#x27;,&#x27;cancelled&#x27;,&#x27;review&#x27;)),
+    (&#x27;ready&#x27;, &#x27;running&#x27;, &#x27;retry_wait&#x27;, &#x27;succeeded&#x27;, &#x27;cancelled&#x27;, &#x27;review&#x27;)),
   attempts integer NOT NULL DEFAULT 0 CHECK (attempts BETWEEN 0 AND 5),
   generation bigint NOT NULL DEFAULT 0 CHECK (generation &gt;= 0),
-  owner text, lease_until timestamptz, retry_at timestamptz,
+  owner text,
+  lease_until timestamptz,
+  retry_at timestamptz,
   cancel_requested boolean NOT NULL DEFAULT false,
-  effect_unknown boolean NOT NULL DEFAULT false, result jsonb,
+  effect_unknown boolean NOT NULL DEFAULT false,
+  result jsonb,
   CONSTRAINT occurrence UNIQUE(job_id, schedule_version, scheduled_at),
   CHECK ((state = &#x27;running&#x27; AND owner IS NOT NULL AND lease_until IS NOT NULL)
       OR (state &lt;&gt; &#x27;running&#x27; AND owner IS NULL AND lease_until IS NULL))
 );
 CREATE INDEX run_ready ON run(state, retry_at, scheduled_at);
 CREATE INDEX run_expired ON run(lease_until) WHERE state = &#x27;running&#x27;;
+
 -- spec includes the pinned calendar/timezone rules and handler input.
 -- A separate audit table stores skip/coalesce ranges in the same T1.</code></pre>
 <div class="bilingual"><div class="lang-zh"><p>下面的伪代码对应第 2、4 帧中的火点生成与恢复。PostgreSQL 18 的 SKIP LOCKED 适合多个消费者并发处理队列表，但查询会跳过已锁定的行，因此读到的是不完整视图。行锁在事务结束时释放，只保护本次生成 run 的过程，不能代替后续执行所需的租约。[1][2]</p></div><div class="lang-en"><p>This pseudocode implements frames 2/4. PostgreSQL 18 SKIP LOCKED suits consumers of a queue-like table but gives an incomplete view. Row locks end with the transaction; they protect materialization, not handler execution. [1][2]</p></div></div>
@@ -194,25 +205,30 @@ CREATE INDEX run_expired ON run(lease_until) WHERE state = &#x27;running&#x27;;
   jobs = SELECT * FROM job WHERE enabled AND shard = :shard
          AND next_run_at &lt;= clock_timestamp()
          ORDER BY next_run_at, id LIMIT 100 FOR UPDATE SKIP LOCKED
+
   for j in jobs:
     t = SELECT clock_timestamp()            // after acquiring this row lock
     if calendar.is_recurring(j.spec) and (j.recovery_cutoff != null
        or j.next_run_at &lt; t - j.lateness_ms * 1ms):
       continue                             // bounded misfire planner owns this case
+
     fire = j.next_run_at
     next = calendar.next_after(j.spec, fire) // null for a one-shot; else &gt; fire
     require next == null or next &gt; fire
     payload, key = freeze_input_and_business_key(j, fire)
+
     inserted = INSERT INTO run(id, job_id, schedule_version, scheduled_at,
                   payload, effect_key, state)
                VALUES(uuid(), j.id, j.version, fire, payload, key, &#x27;ready&#x27;)
                ON CONFLICT ON CONSTRAINT occurrence DO NOTHING RETURNING id
     if inserted is empty:
       old = SELECT * FROM run WHERE job_id=j.id AND schedule_version=j.version
-                                  AND scheduled_at=fire
+                                   AND scheduled_at=fire
       require old.payload == payload and old.effect_key == key
+
     UPDATE job SET next_run_at=next WHERE id=j.id
   COMMIT                                  // do not dispatch before this succeeds
+
   // Any pre-commit error rolls back runs AND cursors.
   // Unknown COMMIT: discard connection, re-read authoritative cursor/runs.
   // Dispatch/recovery scans persisted ready rows; duplicates retain run.id.</code></pre>
@@ -436,21 +452,30 @@ CREATE INDEX run_expired ON run(lease_until) WHERE state = &#x27;running&#x27;;
   BEGIN
   r = SELECT * FROM run WHERE id=run_id FOR UPDATE
   t = SELECT clock_timestamp()             // not transaction-start now()
-  if r is absent or r.cancel_requested: ROLLBACK; return NOT_CLAIMED
+  if r is absent or r.cancel_requested:
+    ROLLBACK;
+    return NOT_CLAIMED
+
   eligible = (r.state == &#x27;ready&#x27;)
           or (r.state == &#x27;retry_wait&#x27; and r.retry_at &lt;= t)
           or (r.state == &#x27;running&#x27; and r.lease_until &lt;= t)
-  if not eligible: ROLLBACK; return BUSY_OR_TERMINAL
+  if not eligible:
+    ROLLBACK;
+    return BUSY_OR_TERMINAL
+
   if r.attempts == 5:
     UPDATE run SET state=&#x27;review&#x27;, owner=null, lease_until=null,
                    effect_unknown=true WHERE id=run_id
-    COMMIT; return REVIEW
+    COMMIT;
+    return REVIEW
+
   UPDATE run SET state=&#x27;running&#x27;, attempts=attempts+1, generation=generation+1,
                  owner=:owner, lease_until=t+30s, retry_at=null,
                  effect_unknown=true WHERE id=run_id
     RETURNING id, owner, generation, lease_until, payload, effect_key
   COMMIT
   return committed claim                   // handler runs outside the transaction
+
   // A lost commit ACK is not a failed claim. Read this owner from the primary
   // and obtain its current generation/valid lease before issuing any effect.
   // Do not create another occurrence or issue an RPC from an unconfirmed claim.</code></pre>
@@ -461,34 +486,54 @@ CREATE INDEX run_expired ON run(lease_until) WHERE state = &#x27;running&#x27;;
   BEGIN
   r = SELECT * FROM run WHERE id=:id FOR UPDATE
   t = SELECT clock_timestamp()             // read AFTER lock acquisition
-  if r is absent: ROLLBACK; return NOT_FOUND
+  if r is absent:
+    ROLLBACK;
+    return NOT_FOUND
+
   if action == &#x27;cancel&#x27;:                    // authenticated management command
     r.cancel_requested = true
-    if r.state == &#x27;ready&#x27; and r.attempts == 0: r.state = &#x27;cancelled&#x27;
-    if r.state == &#x27;retry_wait&#x27;: r.state = &#x27;review&#x27;
+    if r.state == &#x27;ready&#x27; and r.attempts == 0:
+      r.state = &#x27;cancelled&#x27;
+    if r.state == &#x27;retry_wait&#x27;:
+      r.state = &#x27;review&#x27;
     // A running attempt can still report a confirmed effect; cancel is not undo.
   else if action == &#x27;reap&#x27;:
-    if r.state != &#x27;running&#x27; or r.lease_until &gt; t: ROLLBACK; return NO_CHANGE
+    if r.state != &#x27;running&#x27; or r.lease_until &gt; t:
+      ROLLBACK;
+      return NO_CHANGE
+
     r.effect_unknown = true                 // expiry does not prove no effect
     r.state = &#x27;review&#x27; if r.cancel_requested or r.attempts == 5 else &#x27;retry_wait&#x27;
     r.retry_at = t + bounded_backoff(r.attempts) if r.state == &#x27;retry_wait&#x27; else null
   else:
     if r.state != &#x27;running&#x27; or r.owner != owner or r.generation != gen
-       or r.lease_until &lt;= t: ROLLBACK; return STALE
-    if action == &#x27;heartbeat&#x27;: r.lease_until = t + 30s
+       or r.lease_until &lt;= t:
+      ROLLBACK;
+      return STALE
+
+    if action == &#x27;heartbeat&#x27;:
+      r.lease_until = t + 30s
     else if action == &#x27;complete&#x27;:
       require result is a durable, authenticated result for r.effect_key/payload
-      r.state = &#x27;succeeded&#x27;; r.result = result; r.effect_unknown = false
+      r.state = &#x27;succeeded&#x27;;
+      r.result = result;
+      r.effect_unknown = false
     else if action == &#x27;timeout&#x27;:
       r.effect_unknown = true               // retain the SAME business key
       r.state = &#x27;review&#x27; if r.cancel_requested or r.attempts == 5 else &#x27;retry_wait&#x27;
       r.retry_at = t + bounded_backoff(r.attempts) if r.state == &#x27;retry_wait&#x27; else null
-    else: ROLLBACK; return BAD_ACTION
-  if r.state != &#x27;running&#x27;: r.owner = null; r.lease_until = null
+    else:
+      ROLLBACK;
+      return BAD_ACTION
+
+  if r.state != &#x27;running&#x27;:
+    r.owner = null;
+    r.lease_until = null
   UPDATE run SET state=r.state, owner=r.owner, lease_until=r.lease_until,
     retry_at=r.retry_at, cancel_requested=r.cancel_requested,
     effect_unknown=r.effect_unknown, result=r.result WHERE id=:id
   COMMIT
+
   // Errors roll back. Lost ACK: read the saved state, never overwrite success.</code></pre>
 <div class="bilingual"><div class="lang-zh"><p>20 秒 RPC 超时只表示本地停止等待，不能证明订单没有关闭。第 5 次尝试在租约有效时仍可提交确定结果；如果该次尝试超时或租约过期，任务就因尝试次数耗尽转入持久的待核查状态 review，此时业务效果仍可能未知。只有业务适配器验证了同一租户、同一操作键和固定输入对应的确定结果，才能提交 complete；accepted、网络超时，或尚未提交的结果行暂时查不到，都不能作为完成证据。Worker 失去租约后应停止发起新动作，已经发出的在途动作仍由接收端幂等保护。</p></div><div class="lang-en"><p>A 20 s RPC timeout ends local waiting without proving the order remained open. Five exhausted attempts enter durable review, possibly with unknown effects. complete requires the business adapter to verify a durable result for the same tenant, operation key and frozen input; acceptance, timeouts or absence of an uncommitted row are insufficient. Stop new actions after losing authority; receiver idempotency still protects in-flight actions.</p></div></div>
 <div class="bilingual"><div class="lang-zh"><p>取消时也要区分是否尝试过。尚未执行过的 ready 可以记为 cancelled；正在 running 的任务只记录取消请求，由执行方配合停止，若随后拿到确定的业务结果，仍允许记录完成。已有尝试的 retry_wait 则转入 review，不能把它说成“从未执行”。核查或人工处理都要沿用原业务键并留下审计记录；本例不实现完整的人工控制台。</p><p>还要区分单次运行与共享资源：单个 run 的代次只在这个 run 内递增，不能充当跨任务的资源隔离令牌（fence）。若多个任务需要操作同一资源，必须另用同一权威分配单调递增的令牌，并由该资源验证。</p></div><div class="lang-en"><p>An unattempted ready run may become cancelled. Running cancellation records a cooperative request and still permits confirmed completion. A previously attempted retry_wait becomes review, not “never executed.” Review/query/manual actions retain the original key and audit evidence; a full review console is outside this example. Per-run generations are not resource fences across jobs: shared resources need tokens from a common monotonic authority enforced by that resource.</p></div></div>
@@ -603,15 +648,21 @@ CREATE INDEX run_expired ON run(lease_until) WHERE state = &#x27;running&#x27;;
   BEGIN
   j = SELECT * FROM job WHERE id=job_id FOR UPDATE
   t = SELECT clock_timestamp()
-  if not j.enabled or j.next_run_at == null: ROLLBACK; return NONE
+  if not j.enabled or j.next_run_at == null:
+    ROLLBACK;
+    return NONE
+
   missed_before = t - j.lateness_ms * 1ms
   if j.recovery_cutoff == null and j.next_run_at &gt;= missed_before:
-    ROLLBACK; return NONE
+    ROLLBACK;
+    return NONE
+
   cutoff = j.recovery_cutoff ?? calendar.first_at_or_after(j.spec, missed_before)
   // Equality at t-tolerance remains live; use the SAME predicate as materialize.
   // Pin this cutoff across catch-up pages. Missed fires are in [cursor, cutoff).
   from = j.next_run_at
   require cutoff &gt; from
+
   if j.policy == &#x27;catch_up&#x27;:
     fires = calendar.first_at_most_100(j.spec, from, cutoff)
     for fire in fires:
@@ -623,13 +674,18 @@ CREATE INDEX run_expired ON run(lease_until) WHERE state = &#x27;running&#x27;;
     INSERT one ready occurrence at last, with immutable range [from, cutoff)
     // The handler contract must cover the entire range; use the same T1 insert.
     next = cutoff
-  else if j.policy == &#x27;skip&#x27;: next = cutoff
-  else: ROLLBACK; return BAD_POLICY
+  else if j.policy == &#x27;skip&#x27;:
+    next = cutoff
+  else:
+    ROLLBACK;
+    return BAD_POLICY
+
   INSERT audit(job_id, version, from, next, policy)
   UPDATE job SET next_run_at=next,
                  recovery_cutoff=(cutoff if next &lt; cutoff else null)
     WHERE id=job_id
   COMMIT
+
   // No RPC in T1. Failure rolls back the page and cursor; ACK loss re-reads both.
   // Live cutoff fires use the normal path, independently of missed intervals.</code></pre>
 <div class="bilingual"><div class="lang-zh"><p>这段恢复过程只处理仍有后续火点的周期计划 calendar。每个任务定义都保存非负的迟到容忍 lateness_ms，默认为 60,000 毫秒。只有 next_run_at &lt; t−lateness_ms 才算错过火点（misfire），恰好等于边界时仍走正常路径。cutoff 由 calendar.first_at_or_after(spec, t−lateness_ms) 返回，是不早于该阈值的第一个原计划火点，不能用从 epoch 起取模的方式代替。例如，原火点为第 30、90、150 秒，容忍为零，在第 180 秒恢复时，下一个火点是第 210 秒，合并运行的身份是第 150 秒。</p><p>一次性任务默认补做原 deadline 对应的执行；T1 保留原身份，并把 next_run_at 置为 null。如果产品允许放弃，必须明确记录 skipped，不能因为找不到下一次 cron 时间就漏掉这次工作。</p></div><div class="lang-en"><p>This routine is for recurring calendars that still have future occurrences. Each definition stores nonnegative lateness_ms, defaulting to 60,000 milliseconds. Only next_run_at &lt; t−lateness_ms is a misfire; equality remains on the normal path. cutoff is the first original occurrence returned by calendar.first_at_or_after(spec, t−lateness_ms), rather than epoch modulo. For fires at seconds 30, 90 and 150, recovery at 180 with zero tolerance gives next=210 and coalesced identity=150. A one-shot defaults to materializing its original deadline, retaining identity and setting next_run_at=null. Dropping it requires an explicit audited skip policy; absence of a next cron instant must not lose it.</p></div></div>
@@ -873,14 +929,23 @@ CREATE INDEX run_expired ON run(lease_until) WHERE state = &#x27;running&#x27;;
   require caller may close this tenant&#x27;s order and key == &#x27;close:&#x27; + order_id
   BEGIN                                    // T2 is ONLY in Order DB
   o = SELECT * FROM orders WHERE tenant=:tenant AND id=order_id FOR UPDATE
-  if o is absent: ROLLBACK; return NOT_FOUND
+  if o is absent:
+    ROLLBACK;
+    return NOT_FOUND
+
   old = SELECT * FROM inbox WHERE tenant=:tenant AND operation_key=key
   if old exists:
-    if old.payload != canonical_payload: ROLLBACK; return CONFLICT
-    COMMIT; return old.result
+    if old.payload != canonical_payload:
+      ROLLBACK;
+      return CONFLICT
+    COMMIT;
+    return old.result
+
   t = SELECT clock_timestamp()              // Order DB judges business deadline
   if o.state == &#x27;UNPAID&#x27; and o.close_at &gt; t:
-    ROLLBACK; return RETRY_AT(o.close_at)     // do NOT cache an early no-op receipt
+    ROLLBACK;
+    return RETRY_AT(o.close_at)     // do NOT cache an early no-op receipt
+
   if o.state == &#x27;UNPAID&#x27;:
     changed = UPDATE orders SET state=&#x27;CLOSED&#x27;
               WHERE tenant=:tenant AND id=order_id AND state=&#x27;UNPAID&#x27;
@@ -888,9 +953,13 @@ CREATE INDEX run_expired ON run(lease_until) WHERE state = &#x27;running&#x27;;
     require changed has exactly one row
     result = CLOSED
     INSERT INTO outbox(tenant, event_id, payload) VALUES(:tenant, &#x27;closed:&#x27;+o.id, ...)
-  else: result = NOOP_TERMINAL              // paid/closed cannot reopen here
+  else:
+    result = NOOP_TERMINAL              // paid/closed cannot reopen here
+
   INSERT INTO inbox(tenant, operation_key, payload, result) VALUES(...)
-  COMMIT; return result
+  COMMIT;
+  return result
+
   // Any error rolls back order + receipt + event; unknown COMMIT =&gt; same-key retry.
   // Worker marks run succeeded only after CLOSED/NOOP_TERMINAL is confirmed.
   // Relay sends committed events, then records delivery; a lost ACK may resend.

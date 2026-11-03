@@ -194,13 +194,18 @@ enqueue(attempt, trusted_tenant, prompt_tokens, max_output, now):
   require fixed model/template/tokenizer; 1 &lt;= prompt_tokens &lt;= 2048
   require 1 &lt;= max_output &lt;= 512 and prompt_tokens + max_output &lt;= 2560
   row = read_authority_attempt(attempt)       # read failure is unknown, never an empty row
-  if row.state == TERMINAL: return row.saved_http_result
-  if row.state != ASSIGNED or row.owner != attempt.owner: return PENDING
-  if attempt is already queued or active: return saved_status(attempt)
+  if row.state == TERMINAL:
+    return row.saved_http_result
+  if row.state != ASSIGNED or row.owner != attempt.owner:
+    return PENDING
+  if attempt is already queued or active:
+    return saved_status(attempt)
   if queued_total == 100 or queued[trusted_tenant].size == 25:
     return reject_unstarted(attempt.owner, 429, OVERLOADED) # next listing
   # Input/output quota reservation belongs to attempt, not the HTTP connection.
-  if attempt.quota != RESERVED: return PENDING # recover the same quota reservation
+  if attempt.quota != RESERVED:
+    return PENDING # recover the same quota reservation
+
   r = Entry(attempt, trusted_tenant, prompt_tokens, max_output)
   r.wait_deadline = now + 600ms             # local monotonic time, not persisted
   r.request_deadline = now + validated_remaining_service_budget
@@ -213,33 +218,54 @@ admit_waiters(now):                        # execute on the same event loop
     while q and now &gt;= q.head.wait_deadline:
       expired = q.head
       decision = reject_unstarted(expired.owner, 429, WAIT_EXPIRED)
-      if decision == PENDING: recover_owner(q.pop()); continue # no guessed refund
+      if decision == PENDING:
+        recover_owner(q.pop());
+        continue # no guessed refund
       q.pop()
-    if not q: continue
+    if not q:
+      continue
+
     r = q.head
     need = ceil((r.prompt_tokens + r.max_output) / 16)
-    if active[tenant] == 32 or tenant_page_credits[tenant] + need &gt; 5120: continue
-    if active_total == measured_safe_sequence_cap: continue
-    if not calibrated_shape_allows(r): continue
+    if active[tenant] == 32 or tenant_page_credits[tenant] + need &gt; 5120:
+      continue
+    if active_total == measured_safe_sequence_cap:
+      continue
+    if not calibrated_shape_allows(r):
+      continue
     # Only this scheduler mutates local credits; worker validates boot/generation.
-    if not worker_ledger.admit(r.owner, r.prompt_tokens, r.max_output): continue
-    q.pop(); active[tenant] += 1; tenant_page_credits[tenant] += need
+    if not worker_ledger.admit(r.owner, r.prompt_tokens, r.max_output):
+      continue
+
+    q.pop();
+    active[tenant] += 1;
+    tenant_page_credits[tenant] += need
     charged[r.owner] = (tenant, need)
     ready[tenant].append(r)                # prefill runs in iteration(), below
   rotate_ring_start()                      # blocked tenant does not block others
 
 on_release(owner):                         # same event loop; poll ledger transitions
-  if worker_ledger.state(owner) != RELEASED: return
+  if worker_ledger.state(owner) != RELEASED:
+    return
   grant = charged.get(owner)
-  if not grant: return                     # already fully settled locally
+  if not grant:
+    return                     # already fully settled locally
+
   persist_terminal_and_quota_settlement(owner) # actual use; recover unknown commit by same attempt
   # Failure keeps charged as retryable work; schedule retry until durable confirmation.
   charged.remove(owner)                    # remove only after confirmed terminal/outbox
-  active[grant.tenant] -= 1; tenant_page_credits[grant.tenant] -= grant.need</code></pre><h3><span class="lang-zh">队列满后：先保存拒绝结果，再可靠释放配额</span><span class="lang-en">A full queue is a durable terminal result with recoverable quota release</span></h3><div class="bilingual"><div class="lang-zh"><p>请求已经预留了 token 配额，因此返回 429 时还要处理这份预留。系统先在保存 Attempt 的同一个数据库事务中，写入终态、原始 429 结果和这次尝试唯一的结算事件。以后用同一个 key 重试，仍返回这个 429；即使队列已经空出位置，也不重新入队。配额服务按 attempt 原子释放未消费的预留，转发程序（relay）确认成功后才确认结算事件（ACK）。如果释放结果的回包丢失，或者释放后尚未 ACK 就崩溃，可以重复投递同一事件。依赖故障时，结算保持待处理并持续重试，因此不能承诺故障期间一定在固定秒数内退还配额。</p><p>首次向 GPU 提交工作前，必须通过条件更新确认取得 RUN_GRANTED。拒绝事务只接受仍为 ASSIGNED 的 owner，所以拒绝与启动竞争时，最多只有一方成功。已经启动或执行结果未知的请求，不能一律按“未消费”退还全部配额。</p><p>本地的 on_release 也要先确认终态与结算 outbox 已持久保存，才能删除 charged 待办并退还租户计数。如果写入失败或提交结果未知，就保留待办，按原 attempt 查询并重试。这段是教学伪代码；已有双 SQLite 适配检查事务和重复投递，但没有运行跨机器的配额服务。</p></div><div class="lang-en"><p>Input quota is already reserved, so 429 cannot merely discard HTTP state. Commit the terminal attempt, original 429 result, and a unique attempt settlement event in one database transaction. Same-key retries keep that 429 even after capacity returns. The quota authority atomically releases unused reservations once per attempt; acknowledge the outbox only after confirmation. Lost replies and release-before-ACK crashes safely retry. Outages retain pending settlement for recovery, without a fixed refund-time promise.</p><p>Before first GPU submission, conditionally obtain RUN_GRANTED. Rejection accepts only the still-ASSIGNED owner, so it races execution with one winner. Started or unknown execution cannot receive a blanket unused refund. Local on_release confirms the durable terminal/outbox before removing charged and decrementing tenant counters. Failed or unknown commits keep charged retryable under the same attempt. This is teaching pseudocode, with an actual two-SQLite adaptation for transaction/redelivery checks, not a cross-machine quota experiment.</p></div></div><pre data-language="Pseudocode · durable rejection" data-kind="pseudocode" data-source="reject.pseudo"><code># Teaching pseudocode: Attempt + SettlementOutbox share one authoritative DB.
+  active[grant.tenant] -= 1;
+  tenant_page_credits[grant.tenant] -= grant.need</code></pre><h3><span class="lang-zh">队列满后：先保存拒绝结果，再可靠释放配额</span><span class="lang-en">A full queue is a durable terminal result with recoverable quota release</span></h3><div class="bilingual"><div class="lang-zh"><p>请求已经预留了 token 配额，因此返回 429 时还要处理这份预留。系统先在保存 Attempt 的同一个数据库事务中，写入终态、原始 429 结果和这次尝试唯一的结算事件。以后用同一个 key 重试，仍返回这个 429；即使队列已经空出位置，也不重新入队。配额服务按 attempt 原子释放未消费的预留，转发程序（relay）确认成功后才确认结算事件（ACK）。如果释放结果的回包丢失，或者释放后尚未 ACK 就崩溃，可以重复投递同一事件。依赖故障时，结算保持待处理并持续重试，因此不能承诺故障期间一定在固定秒数内退还配额。</p><p>首次向 GPU 提交工作前，必须通过条件更新确认取得 RUN_GRANTED。拒绝事务只接受仍为 ASSIGNED 的 owner，所以拒绝与启动竞争时，最多只有一方成功。已经启动或执行结果未知的请求，不能一律按“未消费”退还全部配额。</p><p>本地的 on_release 也要先确认终态与结算 outbox 已持久保存，才能删除 charged 待办并退还租户计数。如果写入失败或提交结果未知，就保留待办，按原 attempt 查询并重试。这段是教学伪代码；已有双 SQLite 适配检查事务和重复投递，但没有运行跨机器的配额服务。</p></div><div class="lang-en"><p>Input quota is already reserved, so 429 cannot merely discard HTTP state. Commit the terminal attempt, original 429 result, and a unique attempt settlement event in one database transaction. Same-key retries keep that 429 even after capacity returns. The quota authority atomically releases unused reservations once per attempt; acknowledge the outbox only after confirmation. Lost replies and release-before-ACK crashes safely retry. Outages retain pending settlement for recovery, without a fixed refund-time promise.</p><p>Before first GPU submission, conditionally obtain RUN_GRANTED. Rejection accepts only the still-ASSIGNED owner, so it races execution with one winner. Started or unknown execution cannot receive a blanket unused refund. Local on_release confirms the durable terminal/outbox before removing charged and decrementing tenant counters. Failed or unknown commits keep charged retryable under the same attempt. This is teaching pseudocode, with an actual two-SQLite adaptation for transaction/redelivery checks, not a cross-machine quota experiment.</p></div></div><pre data-language="Pseudocode · durable rejection" data-kind="pseudocode" data-source="reject.pseudo"><code># Teaching pseudocode: Attempt + SettlementOutbox share one authoritative DB.
 reject_unstarted(owner, status, reason):
-  BEGIN; row = SELECT Attempt WHERE id=owner.attempt FOR UPDATE
-  if row.state == TERMINAL: COMMIT; return row.saved_http_result
-  if row.owner != owner or row.state != ASSIGNED: COMMIT; return PENDING
+  BEGIN;
+  row = SELECT Attempt WHERE id=owner.attempt FOR UPDATE
+  if row.state == TERMINAL:
+    COMMIT;
+    return row.saved_http_result
+  if row.owner != owner or row.state != ASSIGNED:
+    COMMIT;
+    return PENDING
+
   UPDATE Attempt SET state=TERMINAL, saved_http_result=(status, reason)
     WHERE id=:attempt_id AND owner=:owner AND state=ASSIGNED
   require affected_rows == 1
@@ -385,18 +411,29 @@ settlement_relay(event):                     # durable retries, independent quot
       </div>
     </figure><div class="bilingual"><div class="lang-zh"><p>图中 L0、L1、L2 分别映射到 P7、P2、P9，表示物理地址可以分散；注意力计算按页表（block table）读取 KV。演示用每页 4 个状态，因此 7→8 时填满 P2，8→9 时才增加 P9；容量估算则始终按每页 16 token 计算。PagedAttention 可以减少要求连续分配带来的碎片，但是否把同一份容量承诺给多个请求，仍要由准入策略控制。<a href="#ref-2">[2]</a></p><p>本章采用保守策略：为每个请求的输入与最大输出预留完整页信用，物理页随实际缓存状态增长而分配。因此，物理空页可能已经承诺给活动请求的未来输出，只有总承诺还有余量时，才能接纳新请求。下面可运行的 Java 17 模型在<strong>一个 worker 的 CPU 锁</strong>内，串行执行信用检查、扣除和物理页分配；跨进程的尝试身份仍由共享记录负责。</p></div><div class="lang-en"><p>L0/L1/L2 map to P7/P2/P9: physical blocks may be scattered while attention follows the block table. Toy pages hold four states; 7→8 fills P2 and 8→9 adds P9. Capacity assumptions use sixteen-token pages. PagedAttention reduces contiguous-allocation fragmentation without solving logical overcommit. <a href="#ref-2">[2]</a></p><p>Our conservative policy reserves prompt-plus-output-cap credits while allocating physical blocks on demand. Empty physical blocks may already be promised to active requests’ future output. Admission needs uncommitted credits. This runnable Java17 model serializes credit checks/debits and allocation under <strong>one worker’s CPU lock</strong>; shared records separately govern distributed attempt identity.</p></div></div><pre data-language="Java17 · runnable model excerpt" data-kind="runnable" data-source="KvLedger.java#admission"><code>public synchronized boolean admit(Owner owner, int prompt, int maxOutput) {
     long total = (long) prompt + maxOutput;
-    if (prompt &lt;= 0 || maxOutput &lt;= 0 || total &gt; contextLimit)
+    if (prompt &lt;= 0 || maxOutput &lt;= 0 || total &gt; contextLimit) {
         throw new IllegalArgumentException(&quot;Token limits&quot;);
-    if (!healthy || !boot.equals(owner.boot())) return false;
+    }
+    if (!healthy || !boot.equals(owner.boot())) {
+        return false;
+    }
+
     int need = (int) ((total + BLOCK - 1) / BLOCK);
     Generation prior = generations.get(owner);
     if (prior != null) {
-        if (prior.credits != need) throw new IllegalArgumentException(&quot;Changed request&quot;);
+        if (prior.credits != need) {
+            throw new IllegalArgumentException(&quot;Changed request&quot;);
+        }
         return prior.state == State.RUNNING;
     }
+
     boolean oldOwnerLive = generations.entrySet().stream().anyMatch(e -&gt;
-            e.getKey().attempt().equals(owner.attempt()) &amp;&amp; e.getValue().state != State.RELEASED);
-    if (oldOwnerLive || need &gt; pool.length - reserved) return false;
+            e.getKey().attempt().equals(owner.attempt())
+                    &amp;&amp; e.getValue().state != State.RELEASED);
+    if (oldOwnerLive || need &gt; pool.length - reserved) {
+        return false;
+    }
+
     generations.put(owner, new Generation(need));
     reserved += need;                    // promise full output; allocate no page yet
     return true;
@@ -404,10 +441,16 @@ settlement_relay(event):                     # durable retries, independent quot
 
 public synchronized Handle allocate(Owner owner) {
     Generation gen = mutable(owner);
-    if (gen.pages.size() &gt;= gen.credits) throw new IllegalStateException(&quot;Credit exhausted&quot;);
+    if (gen.pages.size() &gt;= gen.credits) {
+        throw new IllegalStateException(&quot;Credit exhausted&quot;);
+    }
+
     for (int i = 0; i &lt; pool.length; i++) {
         Page page = pool[i];
-        if (page.refs != 0 || page.pins != 0) continue;
+        if (page.refs != 0 || page.pins != 0) {
+            continue;
+        }
+
         page.incarnation = Math.incrementExact(page.incarnation);
         page.cached = page.sealed = false; // evict an unused cache entry if needed
         page.refs = 1;
@@ -562,36 +605,50 @@ public synchronized Handle allocate(Owner owner) {
 iteration(now):
   retire_only_completed_gpu_tickets()       # apply phase/output progress once, then on_release
   admit_waiters(now)
-  batch = []; budget = measured_iteration_envelope
+  batch = [];
+  budget = measured_iteration_envelope
+
   for tenant in rotating_ready_tenant_ring:
     deficit[tenant] = min(deficit_cap, deficit[tenant] + weight[tenant] * quantum)
     # Each tenant&#x27;s request cursor survives across iterations.
     for r in ready[tenant].one_round_from_cursor():
-      if r.state != RUNNING or r.in_flight: continue
+      if r.state != RUNNING or r.in_flight:
+        continue
       if now &gt;= r.request_deadline or (not r.prefill_started and now &gt;= r.wait_deadline):
-        worker_ledger.stop(r.owner, DEADLINE); continue
+        worker_ledger.stop(r.owner, DEADLINE);
+        continue
       if r.outputs &gt;= r.max_output:
-        worker_ledger.stop(r.owner, EOS); continue
+        worker_ledger.stop(r.owner, EOS);
+        continue
       if r.send_buffer &gt;= 64KiB or r.no_progress &gt;= 2s:
-        worker_ledger.stop(r.owner, CANCEL); continue
+        worker_ledger.stop(r.owner, CANCEL);
+        continue
+
       if r.prefill_remaining:
         n = min(r.prefill_remaining, chunk_cap, budget.remaining_tokens)
         n = largest_positive_chunk_fitting_profile(r, n, batch, budget)
       else:
         n = 1                             # one decode step, never entire output
-      if n == 0: continue
+      if n == 0:
+        continue
       cost = profile_cost(r.context, n, r.phase)
-      if cost &gt; deficit[tenant] or not budget.fits(r, n, batch): continue
-      if not ensure_blocks_within_reserved_credit(r, n): fail_worker_accounting()
+      if cost &gt; deficit[tenant] or not budget.fits(r, n, batch):
+        continue
+      if not ensure_blocks_within_reserved_credit(r, n):
+        fail_worker_accounting()
+
       batch.append(r.owner, r.phase, n)
-      deficit[tenant] -= cost; budget.consume(r, n)
+      deficit[tenant] -= cost;
+      budget.consume(r, n)
       # This r can enter only once in this iteration.
     advance_request_cursor(tenant)
   rotate_ready_tenant_ring_start()
+
   if batch:
     batch = keep_confirmed_run_grants(batch) # first issue: ASSIGNED -&gt; RUN_GRANTED or saved same grant
     # Terminal grant denial stops the local generation; unknown grants park for recovery.
-    if not batch: return                   # denied/unknown grants must not launch
+    if not batch:
+      return                   # denied/unknown grants must not launch
     ticket = worker_ledger.issue(batch.owners)  # snapshot refs and pin before launch
     launch_gpu(batch, ticket)               # record all-stream/copy completion fence
   # Deficits carry over; choose cap &gt;= largest legal chunk cost.
@@ -711,18 +768,25 @@ iteration(now):
         <figcaption><span class="lang-zh">完整生命周期为 RUNNING→CANCEL_PENDING→RETIRED→RELEASED→下一次准入。连接可用时尽量发送终止事件；客户端已经断开时，就无法收到，不能把一次发送尝试计为送达。</span><span class="lang-en">Complete lifecycle: RUNNING→CANCEL_PENDING→RETIRED→RELEASED→next admission. Emit a terminal event when possible; a disconnected client cannot receive it, so an attempted send is not delivery.</span></figcaption>
       </div>
     </figure><div class="bilingual"><div class="lang-zh"><p>图中依次是运行（RUNNING）、等待取消完成（CANCEL_PENDING）、访问已退休（RETIRED）和资源已释放（RELEASED）。Java 模型把等待退休的状态记作 RETIRING；满足 <code>inFlight==0</code> 后，就进入访问已退休并立即释放的阶段，不另外保存一个瞬态字段。提交 GPU 工作前，ticket 先固定 owner 与页快照，并增加在途访问计数 pin。取消操作只标记停止；正常结束（EOS）和取消在同一把锁内竞争，以最先记录的停止原因为准。</p></div><div class="lang-en"><p>The diagram is RUNNING → CANCEL_PENDING → RETIRED → RELEASED. Java calls the waiting state RETIRING; <code>inFlight==0</code> allows RETIRED and immediate release without storing that transient phase. Before launch, a ticket snapshots owners/pages and pins them. Cancel marks stop; EOS and cancel contend for the first stop reason under the same lock.</p></div></div><pre data-language="Java17 · runnable model excerpt" data-kind="runnable" data-source="KvLedger.java#issue-stop"><code>public synchronized Ticket issue(List&lt;Owner&gt; batch) {
-    if (!healthy || batch.isEmpty() || new HashSet&lt;&gt;(batch).size() != batch.size())
+    if (!healthy || batch.isEmpty() || new HashSet&lt;&gt;(batch).size() != batch.size()) {
         throw new IllegalArgumentException(&quot;Invalid batch&quot;);
+    }
+
     List&lt;Hold&gt; holds = new ArrayList&lt;&gt;();
     for (Owner owner : batch) {
         Generation gen = mutable(owner);
-        if (gen.pages.isEmpty()) throw new IllegalStateException(&quot;Missing KV&quot;);
+        if (gen.pages.isEmpty()) {
+            throw new IllegalStateException(&quot;Missing KV&quot;);
+        }
         holds.add(new Hold(owner, List.copyOf(gen.pages)));
     }                                   // validate everything before mutating
+
     long id = Math.incrementExact(nextTicket);
     for (Hold hold : holds) {
         generations.get(hold.owner()).inFlight++;
-        for (Handle h : hold.pages()) page(h).pins++;
+        for (Handle h : hold.pages()) {
+            page(h).pins++;
+        }
     }
     nextTicket = id;
     launches.put(id, List.copyOf(holds));
@@ -732,17 +796,28 @@ iteration(now):
 public synchronized boolean stop(Owner owner, Reason reason) {
     Objects.requireNonNull(reason);
     Generation gen = generations.get(owner);
-    if (!healthy || gen == null || gen.state != State.RUNNING) return false;
+    if (!healthy || gen == null || gen.state != State.RUNNING) {
+        return false;
+    }
+
     gen.reason = reason;                 // first stop/EOS wins
     gen.state = State.RETIRING;           // prevents all later issue calls
     releaseIfRetired(gen);
     return true;
 }</code></pre><div class="bilingual"><div class="lang-zh"><p>真实适配器需要提供覆盖全部相关访问的完成证据，包括读写 KV、访问页表，以及相关复制操作涉及的所有 stream 依赖。CUDA event 只证明它捕获的工作与依赖已经完成；查询一个不相关的 stream，不能作为还页依据。下面的模型由测试手工调用 <code>complete</code>，模拟“这些完成证据已经成立”，没有实际执行 CUDA。<a href="#ref-10">[10]</a></p></div><div class="lang-en"><p>A real adapter must cover every stream dependency accessing KV, block tables, or related copies. A CUDA event proves completion only for the work/dependencies it captures; querying an unrelated stream cannot authorize release. Tests manually call <code>complete</code> to simulate established completion evidence. They do not execute CUDA. <a href="#ref-10">[10]</a></p></div></div><pre data-language="Java17 · runnable model excerpt" data-kind="runnable" data-source="KvLedger.java#retire"><code>public synchronized boolean complete(Ticket ticket, Set&lt;Owner&gt; eos) {
-    if (!healthy || !boot.equals(ticket.boot())) return false;
+    if (!healthy || !boot.equals(ticket.boot())) {
+        return false;
+    }
+
     List&lt;Hold&gt; holds = launches.remove(ticket.id());
-    if (holds == null) return false;      // duplicate/old completion
+    if (holds == null) {
+        return false;      // duplicate/old completion
+    }
+
     for (Hold hold : holds) {
-        for (Handle h : hold.pages()) page(h).pins--;
+        for (Handle h : hold.pages()) {
+            page(h).pins--;
+        }
         Generation gen = generations.get(hold.owner());
         gen.inFlight--;
         if (eos.contains(hold.owner()) &amp;&amp; gen.state == State.RUNNING) {
@@ -755,8 +830,13 @@ public synchronized boolean stop(Owner owner, Reason reason) {
 }
 
 private void releaseIfRetired(Generation gen) {
-    if (gen.state != State.RETIRING || gen.inFlight != 0) return;
-    for (Handle h : gen.pages) page(h).refs--;
+    if (gen.state != State.RETIRING || gen.inFlight != 0) {
+        return;
+    }
+
+    for (Handle h : gen.pages) {
+        page(h).refs--;
+    }
     gen.pages.clear();
     reserved -= gen.credits;             // return promise exactly once
     gen.state = State.RELEASED;
@@ -882,9 +962,15 @@ claim(principal, key, canonical_body_hash, now):
     VALUES(principal,key,canonical_body_hash,&#x27;CLAIMED&#x27;,now + 24h)
     ON CONFLICT(principal,key) DO NOTHING
   row = SELECT ... WHERE principal=? AND key=? FOR UPDATE
-  if row.body_hash != canonical_body_hash: ROLLBACK; return CONFLICT
-  if row.expires_at &lt;= authority_now_after_lock(): ROLLBACK; return RETRY_WINDOW_CLOSED
-  COMMIT; return row                     # same key never starts a new generation
+  if row.body_hash != canonical_body_hash:
+    ROLLBACK;
+    return CONFLICT
+  if row.expires_at &lt;= authority_now_after_lock():
+    ROLLBACK;
+    return RETRY_WINDOW_CLOSED
+
+  COMMIT;
+  return row                     # same key never starts a new generation
 
 bind_owner(principal, key, boot, generation):
   UPDATE attempt SET state=&#x27;ASSIGNED&#x27;, owner_boot=boot, owner_gen=generation
@@ -899,10 +985,14 @@ finish(principal, key, boot, generation, terminal_metadata):
 
 retry(principal, key, hash):
   row = claim(principal, key, hash, authority_now())
-  if conflict_or_expired(row): return row
-  if row.state in [CLAIMED, ASSIGNED, RUN_GRANTED]: return PENDING_WITHOUT_SECOND_STREAM
-  if row.saved_http_status == 429: return row.saved_http_result # no new queue admission
-  if row.metadata.reason == DONE: return COMPLETION_METADATA
+  if conflict_or_expired(row):
+    return row
+  if row.state in [CLAIMED, ASSIGNED, RUN_GRANTED]:
+    return PENDING_WITHOUT_SECOND_STREAM
+  if row.saved_http_status == 429:
+    return row.saved_http_result # no new queue admission
+  if row.metadata.reason == DONE:
+    return COMPLETION_METADATA
   return INTERRUPTED_REQUIRES_EXPLICIT_NEW_KEY
 # Unknown dispatch/terminal commits are queried by the same key, never guessed.
 # Crash after ASSIGNED before enqueue may fail closed as INTERRUPTED after fencing.

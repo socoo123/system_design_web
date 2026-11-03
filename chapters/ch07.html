@@ -326,12 +326,17 @@
 BEGIN
 row = SELECT generation, high_exclusive FROM windows
       WHERE worker = :worker FOR UPDATE
+
 lo = max(1, :observed_now, row.high_exclusive)
 hi = lo + 30_000
 REQUIRE hi &lt;= 2^41
-UPDATE windows SET generation = row.generation + 1,
-                   high_exclusive = hi WHERE worker = :worker
+
+UPDATE windows
+SET generation = row.generation + 1,
+    high_exclusive = hi
+WHERE worker = :worker
 COMMIT  # must survive every permitted failover
+
 # Return only after confirmation; ambiguous commit =&gt; burn and reserve again.
 return Grant(worker, row.generation + 1, lo, hi)
 
@@ -341,10 +346,15 @@ row = SELECT generation, high_exclusive FROM windows
       WHERE worker = :worker FOR UPDATE
 REQUIRE row.generation == :my_generation
 REQUIRE row.high_exclusive == :my_hi
+
 new_hi = row.high_exclusive + 30_000
 REQUIRE new_hi &lt;= 2^41
-UPDATE windows SET high_exclusive = new_hi WHERE worker = :worker
+
+UPDATE windows
+SET high_exclusive = new_hi
+WHERE worker = :worker
 COMMIT
+
 # Install hi under the SAME local lock; preserve last and sequence.
 # Ambiguous extension: halt; a fresh boot obtains a fresh window.</code></pre>
 <div class="bilingual"><div class="lang-zh"><p><strong>先走正常流程，再看反例。</strong>旧窗 [1000,1030) 已经发到 (1000,7,42)，替代进程领取 [1030,1060)。如果新进程的时钟仍为 1000，它就还不能启动发号；等到 1030，才可以从 seq=0 开始。旧进程暂停后可能迟到返回 (1000,7,43)，这个 ID 数值更小，却不会与新窗重合。相反，如果恢复旧窗并把 seq 清零，就会再次发出 (1000,7,0)。代码测试专门复现了这个错误，也说明本地锁不能代替生成器身份管理。</p><p>窗宽 30,000 限定的是可使用的时间戳范围。时钟向前跳可能提前用尽窗口，停钟或回拨可能触发本地错误，进程暂停也会延后响应。因此，不能承诺断网后一定还能再发号 30 秒。重启可能要等到旧 H，频繁重启还会弃用更多未来窗口。只有同一份活状态机可以续窗，并且必须保留 last/seq；旧代次被拒绝续窗后，就不再获得新的发号空间。时间窗隔离的是 ID 的数值范围，<strong>不能保证下游拒绝旧持有者产生的业务副作用</strong>；后者需要下游隔离机制（fencing），见 <a href="ch08.html">Ch08</a>。</p><p>这套时间窗协议是本章的教学设计，并非 Twitter 的内置协议。历史实现只校验传入的 worker/datacenter；Leaf 则使用持久顺序节点分配身份。<a href="#ref1">[1]</a><a href="#ref2">[2]</a> 即使采用独占部署、身份永不复用的简化方案，也仍要处理重启后时间片被重新使用，以及进程状态丢失的问题。</p></div><div class="lang-en"><p><strong>Normal path and counterexample:</strong> the old [1000,1030) window issues through (1000,7,42); a replacement gets [1030,1060). It cannot start at clock 1000, but may emit sequence 0 at 1030. The old process may later return (1000,7,43): smaller, yet disjoint. Replaying the old window with a reset sequence duplicates (1000,7,0). The test reproduces that error rather than treating a local lock as identity management.</p><p>A 30,000-wide window bounds timestamps only. Clock jumps consume it early, a frozen/backward clock can fail locally, and pauses delay replies. It does not promise thirty extra seconds after disconnection. Restart may wait for old H; repeated restarts burn more future windows. Extension is only for the same live state machine with last/sequence retained; a rejected stale generation gets no new space. Windows isolate ID values, <strong>not stale business side effects</strong>; downstream fencing is covered in <a href="ch08.html">Ch08</a>.</p><p>This is a teaching design, not a built-in Twitter protocol. Historical code validates supplied worker/datacenter numbers; Leaf describes persistent sequential-node identity allocation. <a href="#ref1">[1]</a><a href="#ref2">[2]</a> Even a simpler exclusive-deployment/no-reuse policy must handle timestamp reuse after lost process state.</p></div></div>
@@ -446,22 +456,31 @@ COMMIT
       </div>
     </figure><div class="bilingual"><div class="lang-zh"><p>下面是 <a href="../examples/ch07/IdExample.java">可运行 Java 17 示例</a> 的核心方法，不依赖外部库。构造器要求传入已确认提交、且只绑定单一实例的 Window，并校验 worker 与 1≤L&lt;H≤2^41。这个例子<strong>不实现 Registry</strong>，只使用一个固定时间窗；续窗协议仅在前面的伪代码中说明。</p><p>Clock.millis() 返回相对于统一 epoch 的毫秒时间，nanos() 用于进程内的单调计时，pause() 只让出执行机会，之后仍须重新读时钟。测试会注入可控时钟；部署时应分别接入墙钟与 System.nanoTime，不能用墙钟计算等待预算。</p></div><div class="lang-en"><p>This is the core method from the dependency-free <a href="../examples/ch07/IdExample.java">runnable Java17 example</a>. Construction requires a committed, single-instance Window and validates worker plus 1≤L&lt;H≤2^41; it <strong>does not implement Registry</strong> and consumes one fixed window; extension is only specified in the earlier pseudocode. Clock.millis() is relative to the shared epoch, nanos() measures monotonic local elapsed time, and pause() merely yields before re-reading. Tests inject a controlled clock. Deployment adapters use wall time and System.nanoTime separately; wall time must not measure the wait budget.</p></div></div>
 <pre data-language="Java 17 · local state machine" data-kind="runnable" data-source="IdExample.java#next-id"><code>synchronized long nextId() {
-    if (halted) throw new IllegalStateException(&quot;HALTED: obtain a fresh window&quot;);
+    if (halted) {
+        throw new IllegalStateException(&quot;HALTED: obtain a fresh window&quot;);
+    }
+
     long started = clock.nanos();
     boolean waited = false;
     for (;;) {
         long now = clock.millis();
-        if (now &lt; grant.lo() || now &gt;= grant.hi())
+        if (now &lt; grant.lo() || now &gt;= grant.hi()) {
             throw stop(&quot;outside committed timestamp window&quot;);
-        if (last - now &gt; 5) throw stop(&quot;rollback exceeds 5 ms&quot;);
-        if (waited &amp;&amp; clock.nanos() - started &gt;= 5_000_000L)
+        }
+        if (last - now &gt; 5) {
+            throw stop(&quot;rollback exceeds 5 ms&quot;);
+        }
+        if (waited &amp;&amp; clock.nanos() - started &gt;= 5_000_000L) {
             throw stop(&quot;wait budget exhausted&quot;);
+        }
+
         int candidate = now == last ? sequence + 1 : 0;
         if (now &gt;= last &amp;&amp; candidate &lt; 4096) {
             last = now;
             sequence = candidate;
             return (now &lt;&lt; 22) | ((long) grant.worker() &lt;&lt; 12) | sequence;
         }
+
         // Small rollback or same-millisecond exhaustion: re-read, never wrap.
         waited = true;
         clock.pause();
@@ -614,13 +633,17 @@ COMMIT
 -- ledger(name TEXT PRIMARY KEY, high BIGINT NOT NULL CHECK (high &gt;= 1))
 -- high is the first ID not yet reserved; seed orders with high = 1000.
 BEGIN;
+
 UPDATE ledger
 SET high = high + :step
-WHERE name = :name AND :step &gt; 0
+WHERE name = :name
+  AND :step &gt; 0
   AND high &lt;= 9223372036854775807 - :step
 RETURNING high - :step AS lo, high AS hi;
+
 -- Require exactly one returned row; retain [lo, hi) privately until COMMIT.
 COMMIT;
+
 -- Only after confirmed commit: install the range in one live allocator.
 -- Timeout / lost commit reply: discard this result and reserve another range.
 -- Never decrement high; after restart discard ALL old in-memory grants.</code></pre>

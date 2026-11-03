@@ -446,51 +446,88 @@ egress B/s = peak B/s × [(RF − 1) + 2 groups] + replay + repair
       </div>
     </figure><div class="bilingual"><div class="lang-zh"><p><strong>先分清拉取位置 position、实际交付记录的完成前缀，以及已提交位点 committed。</strong>一次 poll 拿到 41–50 后，本地 position 可以到 51，但业务效果还没完成，不能据此提交 51。下面的 Java 17 代码只跟踪一个分区的一批实际交付记录，每批最多 500 条。处理期间暂停该分区，poll 线程仍继续处理消费组协议。工作线程把成功结果放入邮箱，由同一个 poll 线程调用 completed；它们不并发调用 KafkaConsumer。<a href="#ref-4">[4]</a></p><p>代码的输入是按升序排列的实际 offset，以及<strong>本次 poll 的 nextOffsets 终点</strong>；输出是第一条未完成记录的 offset，全部完成后才使用终点。offset 可能不连续。例如实际交付 [41,45,50]，终点为 53：先完成 50，仍只能提交 41；再完成 41，可以提交 45；全部完成后才提交 53。不存在的 42–44 无需等待，尚未完成的 45 则不能越过。<a href="#ref-14">[14]</a></p></div><div class="lang-en"><p><strong>Separate position, completion frontier, and committed position.</strong> Polling 41–50 can make position 51 before effects finish. This Java 17 tracker holds one bounded batch per partition, at most 500 records. Pause that partition while the poll thread continues membership work. Workers send completion messages to that thread; they never call KafkaConsumer concurrently. <a href="#ref-4">[4]</a></p><p>Inputs are sorted delivered offsets and <strong>that poll’s nextOffsets terminal</strong>. The output is the first unfinished delivered offset, or the terminal after all finish. For [41,45,50] ending 53, finishing 50 leaves 41; finishing 41 permits 45; completing all permits 53. Missing 42–44 are not tasks, and unfinished 45 cannot be skipped. <a href="#ref-14">[14]</a></p></div></div><pre data-language="Java 17 · teaching excerpt" data-kind="teaching" data-source="PartitionProgress.java"><code>public List&lt;Ticket&gt; register(List&lt;Long&gt; offsets, long polledNext) {
     // Exactly one bounded batch per partition; pause it until pending is empty.
-    if (phase != Phase.ACTIVE || !pending.isEmpty()) throw new IllegalStateException();
+    if (phase != Phase.ACTIVE || !pending.isEmpty()) {
+        throw new IllegalStateException();
+    }
+
     List&lt;Long&gt; copy = List.copyOf(offsets);
-    if (copy.size() &gt; maxBatch || polledNext &lt; safeNext) throw new IllegalArgumentException();
+    if (copy.size() &gt; maxBatch || polledNext &lt; safeNext) {
+        throw new IllegalArgumentException();
+    }
+
     long previous = -1;
     for (long offset : copy) {
-        if (offset &lt; safeNext || offset &lt;= previous || offset &gt;= polledNext)
+        if (offset &lt; safeNext || offset &lt;= previous || offset &gt;= polledNext) {
             throw new IllegalArgumentException();
+        }
         previous = offset;
     }
+
     batchNext = polledNext; // from this poll&#x27;s nextOffsets(), not a later position()
     var tickets = new ArrayList&lt;Ticket&gt;();
     for (long offset : copy) {
         Ticket ticket = new Ticket(this, offset);
-        pending.addLast(new Work(ticket)); tickets.add(ticket);
+        pending.addLast(new Work(ticket));
+        tickets.add(ticket);
     }
+
     safeNext = pending.isEmpty() ? batchNext : pending.getFirst().ticket.offset;
     return List.copyOf(tickets);
 }
 
 public boolean completed(Ticket ticket) {
     // A fresh tracker is created on assignment; old workers cannot complete it.
-    if (phase == Phase.CLOSED || ticket == null || ticket.owner != this) return false;
+    if (phase == Phase.CLOSED || ticket == null || ticket.owner != this) {
+        return false;
+    }
+
     Work found = null;
-    for (Work work : pending) if (work.ticket == ticket) { found = work; break; }
-    if (found == null || found.done) return false;
+    for (Work work : pending) {
+        if (work.ticket == ticket) {
+            found = work;
+            break;
+        }
+    }
+    if (found == null || found.done) {
+        return false;
+    }
+
     found.done = true; // only after the durable effect (or duplicate result) succeeds
-    while (!pending.isEmpty() &amp;&amp; pending.getFirst().done) pending.removeFirst();
+    while (!pending.isEmpty() &amp;&amp; pending.getFirst().done) {
+        pending.removeFirst();
+    }
+
     safeNext = pending.isEmpty() ? batchNext : pending.getFirst().ticket.offset;
     return true;
 }
 </code></pre><div class="bilingual"><div class="lang-zh"><p>这段代码节选自 <a href="../examples/ch20/PartitionProgress.java">PartitionProgress.java</a>，完整类可以编译。它先校验整批输入，再修改状态；校验失败就不领取新工作。这个内存对象<strong>只计算安全位点，不提供分布式所有权或持久保存能力</strong>。业务效果失败，或结果仍为 UNKNOWN 时，不能标记成功；应暂停该分区，用同一事件重试，不能提交失败记录的后一位来跳过它。</p><p>对于只完成一部分的批次，教学适配器使用 <code>new OffsetAndMetadata(safeNext)</code>，省略没有跟踪的 epoch。只有整批完成，才原样复用本次 nextOffsets 元数据；不能把批尾的 epoch 附在更早的完成前缀上。</p></div><div class="lang-en"><p>This teaching excerpt comes from compilable <a href="../examples/ch20/PartitionProgress.java">PartitionProgress.java</a>. Validate the entire batch before mutation. This in-memory object <strong>computes a checkpoint, not distributed ownership or durability</strong>. A failed or UNKNOWN effect never completes its ticket; pause and retry the same event rather than skip it. For a partial prefix, this adapter uses <code>new OffsetAndMetadata(safeNext)</code>, omitting the untracked epoch. Only a fully completed batch reuses its nextOffsets metadata; never attach a terminal epoch to an earlier prefix.</p></div></div><h3><span class="lang-zh">撤销与丢失：停止工作后，还要判断能否提交</span><span class="lang-en">Revoked versus lost: stop work, then determine commit eligibility</span></h3><div class="bilingual"><div class="lang-zh"><p>使用 4.1 的新协议 <code>group.protocol=consumer</code>，需要客户端显式启用；心跳与会话时间由服务端控制，每个成员都有自己的 member epoch，没有转移的分区可以继续处理。对于需要交接的分区，<strong>正常撤销</strong>时，旧成员还可以在限定时间内等待在途工作完成，再尝试提交安全位点；<strong>所有权已经丢失</strong>时，新成员可能早已接手，旧成员不能再提交。必须区分这两个回调。<a href="#ref-5">[5]</a><a href="#ref-13">[13]</a></p></div><div class="lang-en"><p>The 4.1 <code>group.protocol=consumer</code> protocol needs client opt-in; server settings control heartbeat and session timing; members have individual epochs, and unmoved partitions may continue. <strong>Graceful revocation</strong> allows bounded drain/commit; after <strong>ownership is lost</strong>, another member may already own the partition and no commit is attempted. Distinguish the callbacks. <a href="#ref-5">[5]</a><a href="#ref-13">[13]</a></p></div></div><pre data-language="Pseudocode · consumer adapter" data-kind="pseudocode" data-source="rebalance.pseudo"><code># Teaching adapter: ALL KafkaConsumer calls/tracker changes run on the poll thread.
 # Workers post confirmed durable results; UNKNOWN never completes a ticket.
 onEveryPoll(records):                                # includes an EMPTY poll
-  apply success mailbox to each message&#x27;s tracker/ticket; closed old trackers ignore it
+  apply success mailbox to each message&#x27;s tracker/ticket;
+  closed old trackers ignore it
+
   for p in records.nextOffsets().keys:
     tasks = tracker[p].register(records[p].offsets, records.nextOffsets()[p].offset)
     terminal[p] = records.nextOffsets()[p]            # save THIS poll&#x27;s metadata
-    consumer.pause({p}); dispatch tasks to bounded per-key-serial workers
+    consumer.pause({p});
+    dispatch tasks to bounded per-key-serial workers
+
   eligible = ALL current-owned ACTIVE trackers         # not only this poll&#x27;s partitions
-  for p,t in eligible: if t.idle(): consumer.resume({p})
+  for p,t in eligible:
+    if t.idle():
+      consumer.resume({p})
+
   map = safeMap(eligible)
   if map is not empty:
-    try: consumer.commitSync(map, bounded_timeout)
-    catch TimeoutException: record UNKNOWN; retain work state; do not invent a rollback
-    catch ownership_or_rebalance_rejection: discard map; process handoff before rebuilding
+    try:
+      consumer.commitSync(map, bounded_timeout)
+    catch TimeoutException:
+      record UNKNOWN;
+      retain work state;
+      do not invent a rollback
+    catch ownership_or_rebalance_rejection:
+      discard map;
+      process handoff before rebuilding
   # Never retry a saved map across reassignment; a later commit rebuilds current eligibility.
 
 safeMap(eligible):
@@ -499,19 +536,33 @@ safeMap(eligible):
     safe = t.checkpoint()                              # first unfinished offset or terminal
     if t.idle() and terminal[p] exists and terminal[p].offset == safe:
       map[p] = terminal[p]                            # whole batch: original epoch metadata
-    else: map[p] = new OffsetAndMetadata(safe)         # partial/no poll: omit unknown epoch
+    else:
+      map[p] = new OffsetAndMetadata(safe)         # partial/no poll: omit unknown epoch
+
   return map                                          # includes completions on empty polls
 
 onPartitionsRevoked(partitions):
-  stop admitting work for these partitions; tracker.beginRevocation()
-  until short drain deadline: apply queued successful completions
-  try: consumer.commitSync(safeMap(THESE still-eligible trackers), bounded_timeout)
-  catch TimeoutException: record UNKNOWN
-  catch ownership_or_rebalance_rejection: replay from the stored checkpoint
-  finally: close trackers; cancel remaining work; forget ownership and terminal metadata
+  stop admitting work for these partitions;
+  tracker.beginRevocation()
+
+  until short drain deadline:
+    apply queued successful completions
+
+  try:
+    consumer.commitSync(safeMap(THESE still-eligible trackers), bounded_timeout)
+  catch TimeoutException:
+    record UNKNOWN
+  catch ownership_or_rebalance_rejection:
+    replay from the stored checkpoint
+  finally:
+    close trackers;
+    cancel remaining work;
+    forget ownership and terminal metadata
 
 onPartitionsLost(partitions):
-  close trackers; cancel work; forget ownership and terminal metadata  # NO commit
+  close trackers;
+  cancel work;
+  forget ownership and terminal metadata  # NO commit
 
 onPartitionsAssigned(partitions):
   create NEW trackers for newly acquired partitions at recovered next offsets
@@ -618,20 +669,31 @@ onPartitionsAssigned(partitions):
 # Output: APPLIED/ALREADY_APPLIED(result) or failure; no Kafka commit inside this DB txn.
 applyEvent(handler, event_id, account_id, delta_cents):
   BEGIN
+
   inserted = INSERT INTO inbox(handler,event_id,account_id,delta_cents)
     VALUES(:handler,:event_id,:account_id,:delta_cents)
     ON CONFLICT (handler,event_id) DO NOTHING RETURNING event_id
   if inserted is empty:
     old = SELECT account_id,delta_cents,result_balance FROM inbox
       WHERE handler=:handler AND event_id=:event_id
-    if old missing or old.result_balance is NULL: ROLLBACK; fail invariant
+    if old missing or old.result_balance is NULL:
+      ROLLBACK;
+      fail invariant
     if old.account_id != account_id or old.delta_cents != delta_cents:
-      ROLLBACK; fail EVENT_ID_REUSED_WITH_DIFFERENT_INTENT
-    COMMIT; return ALREADY_APPLIED(old.result_balance)
+      ROLLBACK;
+      fail EVENT_ID_REUSED_WITH_DIFFERENT_INTENT
+
+    COMMIT;
+    return ALREADY_APPLIED(old.result_balance)
+
   result = UPDATE ledger SET balance_cents=balance_cents+:delta_cents
     WHERE account_id=:account_id RETURNING balance_cents
-  if result is empty: ROLLBACK; fail UNKNOWN_ACCOUNT
+  if result is empty:
+    ROLLBACK;
+    fail UNKNOWN_ACCOUNT
+
   UPDATE inbox SET result_balance=:result WHERE handler=:handler AND event_id=:event_id
+
   COMMIT                               # only confirmed commit completes this work
   return APPLIED(result)
 # Any statement error: ROLLBACK; do not complete the worker ticket.
@@ -641,17 +703,23 @@ applyEvent(handler, event_id, account_id, delta_cents):
 # Stable transactional.id per logical task; auto.commit=false; input/output read_committed.
 producer.initTransactions()             # resolve the previous producer incarnation first
 batch = consumer.poll(bounded_duration)
+
 try:
   producer.beginTransaction()
   for record in batch:
     producer.send(transformToKafkaRecord(record))
   producer.sendOffsetsToTransaction(batch.nextOffsets(), consumer.groupMetadata())
 except fatal_producer_error:            # fencing, authorization, invalid epoch, etc.
-  close producer and consumer; stop
+  close producer and consumer;
+  stop
 except abortable_precommit_error:
-  try: producer.abortTransaction()
-  except timeout_or_other_error: close producer and consumer; restart
-  close producer and consumer; restart  # recover committed offsets, not current position
+  try:
+    producer.abortTransaction()
+  except timeout_or_other_error:
+    close producer and consumer;
+    restart
+  close producer and consumer;
+  restart  # recover committed offsets, not current position
 
 while bounded_commit_retry_budget_remains:
   try:
@@ -660,8 +728,11 @@ while bounded_commit_retry_budget_remains:
   except TimeoutException:
     continue                           # retry SAME commit; DO NOT switch to abort
   except other_error:
-    close producer and consumer; restart
-close producer and consumer; restart   # outcome UNKNOWN; initTransactions resolves it
+    close producer and consumer;
+    restart
+
+close producer and consumer;
+restart   # outcome UNKNOWN; initTransactions resolves it
 # Never start the next batch after an unresolved commit/abort.
 # Restart is an application recovery loop; it does not assert that UNKNOWN was aborted.
 </code></pre><div class="bilingual"><div class="lang-zh"><p><strong>外部业务效果需要另外安排。</strong>支付服务商 PSP 或 HTTP 调用都不在 Kafka 事务范围内。如果需要付款，先在同一数据库事务中提交 inbox 与持久付款任务 payment_job，再推进位点。任务工作进程复用业务幂等键；遇到 UNKNOWN 时保留未完成责任，并查询核对付款结果。如果目标端不提供幂等与查询契约，本地唯一记录无法证明只扣款一次。</p><p>较长的 Kafka 事务还会增加等待稳定事务边界 LSO 的时间，因此应限制事务大小与时长，并监控尚未结束的事务。</p></div><div class="lang-en"><p><strong>External effects:</strong> PSP/HTTP is outside Kafka’s transaction scope. Persist inbox and a payment_job together before checkpointing the obligation. A job worker reuses a business idempotency key and reconciles UNKNOWN. A local unique row cannot prove one charge without destination idempotency/query guarantees. Bound Kafka transaction size/duration and monitor open transactions because long ones delay LSO.</p></div></div>

@@ -16,9 +16,14 @@ else:
 now = clock.now()                       # ONE eligibility/budget sample
 if not evidence.canSend(now):
     return error(503, cacheControl="no-store")
+
 n = evidence.sharedSeconds(now) # deduct clock + final-send margin
-headers = {CacheControl: "public, max-age=0, s-maxage=" + n + ", must-revalidate",
-           Vary: "Accept-Language, Accept-Encoding", ETag: weakTag(evidence, key)}
+headers = {
+    CacheControl: "public, max-age=0, s-maxage=" + n + ", must-revalidate",
+    Vary: "Accept-Language, Accept-Encoding",
+    ETag: weakTag(evidence, key)
+}
+
 # RFC parser handles lists, weak comparison and '*' for this GET.
 if evidence.exists and ifNoneMatchMatches(request, headers.ETag):
     return response(304, headers, noBody)

@@ -214,27 +214,35 @@
 <div class="bilingual"><div class="lang-zh"><p>发布接口 POST /v1/posts 接受幂等键 Idempotency-Key。同一作者用相同键提交相同正文时，返回原来的 201 回执；正文不同则返回 409。语法错误返回 400，未登录返回 401，无权限返回 403，触发限流返回 429。如果提交结果未知或依赖不可用，则返回 503，客户端重试时继续使用原来的键。幂等回执至少保留 24 h；清理之后，本章不再承诺永久去重。</p><p>帖子记录 Post 保存 post_id、author_id、服务端生成的 created_at、正文、媒体 URL、status 和 version。创建时间用于展示排序，不能代表跨分片提交的全局先后顺序。Outbox 保存 event_id、post_id、原始时间和路由模式的代际。Timeline 只保存指针：<strong>(user_id,post_id) 唯一约束</strong>负责防止重复，另一个有序索引支持按排序键定位下一批记录（seek）。大 V 日志 CelebLog 则以 (author_id,post_id) 为唯一键。下面的 SQL 标出约束实际所在的数据库；不同分片之间没有共同事务。<a href="https://www.postgresql.org/docs/18/sql-insert.html">PostgreSQL INSERT [8]</a></p></div><div class="lang-en"><p>POST /v1/posts accepts Idempotency-Key. The same author/key/body replays the original 201; a changed body returns 409. Use 400 for invalid syntax, 401 for no authentication, 403 for denial and 429 for throttling. Unknown commit results or unavailable dependencies return 503; retry with the same key. Retain receipts for at least 24 h; no permanent deduplication is promised after cleanup.</p><p>Post stores post_id, author_id, server-created time, body, media URLs, status and version. Time is a display-order key, not a cross-shard commit order. Outbox stores event_id, post_id, original time and routing generation. Timeline stores pointers: <strong>unique (user_id,post_id)</strong> prevents duplication, while a separate ordered index supports seek. CelebLog is unique by (author_id,post_id). The SQL locates real constraints without pretending different shards share a transaction. <a href="https://www.postgresql.org/docs/18/sql-insert.html">PostgreSQL INSERT [8]</a></p></div></div>
 <pre data-language="SQL · PostgreSQL 18 teaching constraints" data-kind="teaching" data-source="schema.sql"><code>-- PostgreSQL 18; the author shard owns Post, Outbox and PublishKey.
 CREATE TABLE publish_key (
-  author_id bigint NOT NULL, idem_key text NOT NULL,
-  request_hash bytea NOT NULL, post_id bigint NOT NULL,
-  response_json jsonb NOT NULL, retain_until timestamptz NOT NULL,
-  PRIMARY KEY (author_id, idem_key)
+    author_id bigint NOT NULL,
+    idem_key text NOT NULL,
+    request_hash bytea NOT NULL,
+    post_id bigint NOT NULL,
+    response_json jsonb NOT NULL,
+    retain_until timestamptz NOT NULL,
+    PRIMARY KEY (author_id, idem_key)
 );
 -- Post has unique post_id; Outbox has unique event_id.
 -- They are inserted with publish_key in ONE author-shard transaction.
 
 -- A different store, partitioned by reader; not in that transaction.
 CREATE TABLE timeline (
-  user_id bigint NOT NULL, post_id bigint NOT NULL,
-  author_id bigint NOT NULL, created_at_ms bigint NOT NULL,
-  PRIMARY KEY (user_id, post_id)
+    user_id bigint NOT NULL,
+    post_id bigint NOT NULL,
+    author_id bigint NOT NULL,
+    created_at_ms bigint NOT NULL,
+    PRIMARY KEY (user_id, post_id)
 );
+
 CREATE INDEX timeline_seek
-  ON timeline (user_id, created_at_ms DESC, post_id DESC);
+    ON timeline (user_id, created_at_ms DESC, post_id DESC);
+
 -- Bound parameters; same exclusive tuple bound on every source:
 SELECT * FROM timeline
- WHERE user_id = :viewer
-   AND (created_at_ms, post_id) &lt; (:before_ms, :before_id)
- ORDER BY created_at_ms DESC, post_id DESC LIMIT :batch;
+WHERE user_id = :viewer
+    AND (created_at_ms, post_id) &lt; (:before_ms, :before_id)
+ORDER BY created_at_ms DESC, post_id DESC
+LIMIT :batch;
 </code></pre>
 <div class="bilingual"><div class="lang-zh"><p>关注关系 Follow 的正向集合用于读取时过滤作者，按作者建立的反向索引则供 Worker 分页查找粉丝。TAO 原文介绍了这种对象、关联和有序列表的访问模型，但这不表示 TAO 就是本题的 Feed 实现。<a href="https://www.usenix.org/system/files/conference/atc13/atc13-bronson.pdf">TAO §3 [1]</a> 返回内容前，仍要以当前权威的关注和拉黑关系检查权限。游标只记录读取进度，不能充当授权凭证；权限服务不可用时应拒绝读取，不能从旧收件箱里还有指针推断读者仍有权限。</p></div><div class="lang-en"><p>Forward Follow sets support read filtering; reverse author indexes let Worker page followers. TAO supports this objects/associations and ordered-list access model, not a claim that TAO is this feed implementation. <a href="https://www.usenix.org/system/files/conference/atc13/atc13-bronson.pdf">TAO §3 [1]</a> Permission follows the current follow/block state at read time; a cursor is not authorization. Fail closed when permission service is unavailable rather than inferring access from an old inbox.</p></div></div>
 </section>
@@ -407,57 +415,66 @@ SELECT * FROM timeline
         <figcaption><span class="lang-zh">整个流程允许至少一次投递。Worker 如果处理到一半重启，就从持久保存的分页检查点继续。重复写入同一 post_id 不会新增行，也不会改动原来的 created_at，因此不会把旧帖重新顶到首页。</span><span class="lang-en">The complete board allows at-least-once delivery. A Worker restarting midway resumes from a durable page checkpoint. Rewriting an existing post_id adds no row, preserves created_at and does not lift an old post to the top.</span></figcaption>
       </div>
     </figure><pre data-language="Pseudocode · publish + relay" data-kind="pseudocode" data-source="publish.pseudo"><code>publish(authenticated_author, key, request):
-  author = authenticated_author
-  hash = digest(canonicalizeAndValidate(request))
-  prior = primary.readPublishKey(authenticated_author, key)
-  if prior exists: return replayOr409(prior, hash)
-  post_id, event_id = allocateUniqueIds()
-  response = {status: 201, post_id: post_id}
-  try:
-    BEGIN on the author&#x27;s PostgreSQL shard
-    INSERT PublishKey(author, key, hash, post_id, response, now + 24h)
-    mode = SELECT AuthorMode FOR SHARE  // serialized with cutover
-    INSERT Post(post_id, author, server_created_at, request, live, v=1)
-    INSERT Outbox(event_id, post_id, server_created_at, mode.generation)
-    COMMIT
-    return response
-  catch unique_conflict on PublishKey(author, key):
-    ROLLBACK
-    prior = primary.readPublishKey(author, key)  // NEW statement
-    if prior absent: return 503  // no invented success
-    return replayOr409(prior, hash)
-  catch commit_result_unknown:
-    discardConnection(); return 503  // retry the SAME key
-  catch other_database_failure:
-    ROLLBACK if possible; return 503
+    author = authenticated_author
+    hash = digest(canonicalizeAndValidate(request))
+
+    prior = primary.readPublishKey(authenticated_author, key)
+    if prior exists:
+        return replayOr409(prior, hash)
+
+    post_id, event_id = allocateUniqueIds()
+    response = {status: 201, post_id: post_id}
+    try:
+        BEGIN on the author&#x27;s PostgreSQL shard
+        INSERT PublishKey(author, key, hash, post_id, response, now + 24h)
+        mode = SELECT AuthorMode FOR SHARE  // serialized with cutover
+        INSERT Post(post_id, author, server_created_at, request, live, v=1)
+        INSERT Outbox(event_id, post_id, server_created_at, mode.generation)
+        COMMIT
+        return response
+    catch unique_conflict on PublishKey(author, key):
+        ROLLBACK
+        prior = primary.readPublishKey(author, key)  // NEW statement
+        if prior absent:
+            return 503  // no invented success
+        return replayOr409(prior, hash)
+    catch commit_result_unknown:
+        discardConnection();
+        return 503  // retry the SAME key
+    catch other_database_failure:
+        ROLLBACK if possible;
+        return 503
 
 relay(event):
-  broker.publish(event)  // same event_id on every retry
-  await broker.durableAck()
-  primary.markPublished(event.event_id)
+    broker.publish(event)  // same event_id on every retry
+    await broker.durableAck()
+    primary.markPublished(event.event_id)
 </code></pre>
 <div class="bilingual"><div class="lang-zh"><p>并发发布由数据库唯一键决定谁先成功，API 进程内的 Set 无法替代它。遇到唯一键冲突后，先执行 ROLLBACK，再以 READ COMMITTED 隔离级别下的<strong>新语句</strong>从主库读取已经成功的回执，并比较 request_hash。事务已经失败，就不能继续在其中查询；查询明确未找到记录与查询本身失败，也要分别识别，不能凭空返回成功。</p><p>如果 COMMIT 的确认丢失，提交结果就是未知的。API 应丢弃这条连接、返回 503，由客户端用同一键重试，找回原帖。正文校验和摘要计算要采用稳定的规范化规则，鉴权与限流则由外层处理。</p></div><div class="lang-en"><p>The database unique key arbitrates concurrent requests; an API-local Set cannot. After conflict, ROLLBACK and use a <strong>new READ COMMITTED statement</strong> on the primary to read the winner and compare request_hash. Do not query inside an aborted transaction or confuse an empty result with a failed query. A lost COMMIT acknowledgement means unknown outcome: discard the connection, return 503, and retry the same key. Use stable canonicalization for validation/digest; outer adapters handle authentication and admission.</p></div></div>
 <h3><span class="lang-zh">Worker：先把输出写入持久库，再推进检查点</span><span class="lang-en">Worker: durable output before advancing the checkpoint</span></h3>
 <pre data-language="Pseudocode · restartable fan-out" data-kind="pseudocode" data-source="fanout.pseudo"><code>consume(event):
-  job = tasks.insertOrLoadUnique(event.event_id, pinned_mode,
-                                retained_audience_snapshot, cursor=START)
-  while not job.done:
-    old = job.cursor
-    if job.mode == PULL:
-      CelebLog.INSERT(event.author, event.post_id, event.created_at)
-        ON CONFLICT (author_id, post_id) DO NOTHING
-      page = END
-    else:
-      page = FollowGraph.page(job.snapshot, old, max=500)
-      for reader in page.readers:
-        TimelineStore.INSERT(reader, event.post_id, event.author, event.created_at)
-          ON CONFLICT (user_id, post_id) DO NOTHING
-        // Preserve original time; a replay never moves a post upward.
-        TimelineCache.invalidateBestEffort(reader)
-    // All outputs above have DURABLE acknowledgements; never reverse.
-    tasks.compareAndSetCursor(event.event_id, old, page.nextOrEND)
-    job = tasks.reload(event.event_id)
-  broker.ack(event)  // published_at alone does not mean job.done
+    job = tasks.insertOrLoadUnique(event.event_id, pinned_mode,
+                                   retained_audience_snapshot, cursor=START)
+
+    while not job.done:
+        old = job.cursor
+        if job.mode == PULL:
+            CelebLog.INSERT(event.author, event.post_id, event.created_at)
+                ON CONFLICT (author_id, post_id) DO NOTHING
+            page = END
+        else:
+            page = FollowGraph.page(job.snapshot, old, max=500)
+            for reader in page.readers:
+                TimelineStore.INSERT(reader, event.post_id, event.author, event.created_at)
+                    ON CONFLICT (user_id, post_id) DO NOTHING
+                // Preserve original time; a replay never moves a post upward.
+                TimelineCache.invalidateBestEffort(reader)
+
+        // All outputs above have DURABLE acknowledgements; never reverse.
+        tasks.compareAndSetCursor(event.event_id, old, page.nextOrEND)
+        job = tasks.reload(event.event_id)
+
+    broker.ack(event)  // published_at alone does not mean job.done
 </code></pre>
 <div class="bilingual"><div class="lang-zh"><p>任务表 task 以 event_id 为唯一键，保存本次固定的路由模式、可恢复的粉丝快照引用、分页游标和完成标记 done。Worker 每次向关注图查询的页面，都必须来自<strong>同一个稳定快照，而且这个快照要能保留到任务完成</strong>。快照失效后应修复或重建，不能悄悄换成当前关注图继续翻页。如果反向索引异步维护，还要靠变更日志和对账补齐遗漏。</p><p>Timeline 与 CelebLog 分别在自己的持久库中执行唯一约束。任务库则用比较并交换（CAS）推进游标，只有当前游标仍等于预期旧值时才允许前进。输出写入和检查点更新不在同一个跨库事务中，所以顺序必须是先输出、后检查点：输出后崩溃会重复处理，若先记检查点再崩溃，则可能永久漏掉这一页粉丝。</p><p>两个重复任务可能读到同一页，但相同 post_id 不会重复插入，原始时间也不会变化，最终只有一个 CAS 能成功。大 V 分支只写入一条作者日志。任务和去重记录必须保留到事件重放窗口结束，过期事件也不能重新插入已经超出读取窗口的旧指针。Kafka 事务不会自动覆盖外部收件箱，因此这里采用的是至少一次投递加持久幂等。<a href="https://kafka.apache.org/41/design/design/#message-delivery-semantics">Kafka 4.1 [3]</a></p></div><div class="lang-en"><p>A task is unique by event_id and retains pinned mode, a recoverable audience-snapshot reference, cursor and done state. Graph pages must use <strong>one stable snapshot retained until task completion</strong>. Expiry requires repair/rebuild, not silently switching pagination to an arbitrary current graph. An asynchronous reverse index also needs a change log and reconciliation. Each durable output store enforces its own unique key; the task store CAS advances only the expected old cursor. No cross-store atomicity is assumed: a crash after output repeats work, whereas checkpoint-first ordering permanently loses followers.</p><p>Duplicate runners may read the same page; repeated post_id inserts add no rows and preserve time, while only one CAS wins. Celebrity routing appends one author-log row. Retain task/dedup state through the replay window and reject expired events outside the readable retention window. Kafka transactions do not automatically cover external inboxes; this design explicitly uses at-least-once plus durable idempotency. <a href="https://kafka.apache.org/41/design/design/#message-delivery-semantics">Kafka 4.1 [3]</a></p></div></div>
 </section>
@@ -728,25 +745,29 @@ relay(event):
         <figcaption><span class="lang-zh">最后看旧查询与删除并发的窗口。如果 DEL 丢失，缓存端仍要求旧回填在 2 s 内完成，写入后只保留固定的 25 s TTL，合计最多约 27 s；再加 API 最多 2 s 的响应时间，总计约 29 s，才落在约 30 s 的目标内。</span><span class="lang-en">Close the concurrency window. If DEL is lost, a cache-side 2 s install deadline + fixed 25 s TTL bounds residence to 27 s; at most 2 s API response time gives about 29 s within the roughly-30 s target.</span></figcaption>
       </div>
     </figure><pre data-language="Pseudocode · generation-checked cache fill" data-kind="pseudocode" data-source="cache.pseudo"><code>readBody(post_id):
-  hit = cache.getUnexpired(post_id)  // hits never extend expiry
-  if hit exists: return hit.body
-  grant = cache.issueLease(post_id, installWithin=2s)
-  body = primary.read(post_id, requestDeadline)
-  result = cache.installIfCurrent(grant, body, fixedTTL=25s)
-  // CACHE SERVER atomically checks epoch, generation AND install deadline.
-  if result == REVOKED or result == TOO_LATE:
-    retryFromPrimaryWithinRequestDeadlineOr503()
-  else: return body
+    hit = cache.getUnexpired(post_id)  // hits never extend expiry
+    if hit exists:
+        return hit.body
+
+    grant = cache.issueLease(post_id, installWithin=2s)
+    body = primary.read(post_id, requestDeadline)
+    result = cache.installIfCurrent(grant, body, fixedTTL=25s)
+    // CACHE SERVER atomically checks epoch, generation AND install deadline.
+    if result == REVOKED or result == TOO_LATE:
+        retryFromPrimaryWithinRequestDeadlineOr503()
+    else:
+        return body
 
 deletePost(authenticated_author, post_id):
-  BEGIN on the author shard
-  UPDATE Post SET status=deleted, version=version+1
-    WHERE post_id=:post_id AND author_id=:authenticated_author
-  require exactly one authorized row; otherwise fail
-  INSERT Outbox(invalidation_event, post_id, new_version)
-  COMMIT
-  cache.revokeGenerationAndDelete(post_id)  // one atomic cache operation
-  // Relay retries invalidation; no synchronous scan of follower inboxes.
+    BEGIN on the author shard
+    UPDATE Post SET status=deleted, version=version+1
+        WHERE post_id=:post_id AND author_id=:authenticated_author
+    require exactly one authorized row; otherwise fail
+    INSERT Outbox(invalidation_event, post_id, new_version)
+    COMMIT
+
+    cache.revokeGenerationAndDelete(post_id)  // one atomic cache operation
+    // Relay retries invalidation; no synchronous scan of follower inboxes.
 </code></pre>
 <div class="bilingual"><div class="lang-zh"><p><strong>有条件回填 installIfCurrent 的约束由缓存节点执行。</strong>节点必须用一次原子操作，同时检查令牌的 epoch/代际与<strong>服务端写入截止时间</strong>；缓存失效时，也要原子地撤销代际并删除数据。节点重启或元数据被淘汰后，旧令牌不能再用。即使 SET 已在网络中排队，缓存节点实际执行时仍要拒绝过期令牌；API 本地超时，不代表远端 SET 已被取消。标准 Redis ZADD 没有这套租约 API，需要另外实现。singleflight 只能合并请求负载，不能提供这些保证。<a href="https://www.usenix.org/system/files/conference/nsdi13/nsdi13-final170_update.pdf">Memcache §3.2.1 [4]</a></p><p><strong>失效消息丢失时，再靠数据的最长有效时间兜底。</strong>回填只使用主库新语句读到的数据，不复用删除前长事务中的旧快照。旧查询结果最迟在授予租约（grant）后 2 s 写入缓存，之后保留固定的 25 s TTL，因此最坏可延续到删帖后约 27 s。API 从取得值到发出响应还必须不超过 2 s，总计约 29 s，才能满足约 30 s 的服务端目标；客户端已经显示的内容不在这个承诺内。缓存命中不刷新 TTL，过期后也不继续提供旧值。时间线缓存同样使用 0.5+0.5≤1 s 的预算。整层缓存故障时可以绕过租约直接回源，但仍必须先通过回源额度检查。</p><p>共享键 post:{id} 只能缓存正文和状态，不能缓存“这个用户已经获得授权”。每次返回内容前，仍要检查当前关注和拉黑关系。立即撤回或私密内容必须读取权威状态，并计算这类检查的容量成本；普通删帖约 29 s 的滞后承诺不能作为权限边界。已经发送或下载的内容，也不会因为 DEL 而被追回。</p></div><div class="lang-en"><p><strong>Who enforces installIfCurrent?</strong> The cache node atomically checks token epoch/generation and the <strong>server-side install deadline</strong>; invalidation atomically revokes generation and deletes the value. Never reuse old tokens after restart or metadata eviction. A SET delayed in the network must still fail its deadline at execution; an API timeout does not cancel a remote SET. Standard Redis ZADD has no such lease API; implement it separately. Singleflight only coalesces load. <a href="https://www.usenix.org/system/files/conference/nsdi13/nsdi13-final170_update.pdf">Memcache §3.2.1 [4]</a></p><p><strong>Hard age bounds cover lost invalidation.</strong> Fill with a new primary statement, never a long transaction snapshot from before deletion. An old read installs within 2 s of its grant and stays for a fixed 25 s, bounding cache residence to roughly 27 s after deletion. Require no more than 2 s from value retrieval to sending the API response for roughly 29 s total, fitting the approximate 30 s server target. This excludes content already displayed by clients. Hits never renew TTL; never serve expired values. Timeline similarly budgets 0.5+0.5≤1 s. A failed cache permits a lease-free origin bypass only through admission control.</p><p>A shared post:{id} may cache body/state, never “this viewer is authorized.” Check current follow/block state on every response. Immediate revocation or private content requires authoritative checks with an explicit capacity cost; the ordinary 29 s delete bound is no permission boundary. DEL cannot reclaim content already sent or downloaded.</p></div></div>
 </section>
@@ -890,39 +911,57 @@ deletePost(authenticated_author, post_id):
         <figcaption><span class="lang-zh">最后返回 items 和下一页游标。默认每页最多消费 5×20=100 个候选；只有预算耗尽、仍有后续候选且页面未满时，才返回 partial=true。所有来源已确认耗尽时，短页可以正常结束。游标指向实际消费的最后一个候选，不能直接跳到预取批次末尾，否则会越过尚未处理的有效帖子。</span><span class="lang-en">Complete the return. A default page consumes at most 5×20=100 candidates. A short page is partial=true only when the budget is exhausted and more candidates remain; confirmed exhaustion permits a normal short page. The cursor names the last candidate actually consumed, not the end of a prefetched batch, so untouched valid posts are not skipped.</span></figcaption>
       </div>
     </figure><div class="bilingual"><div class="lang-zh"><p>下面是兼容 Java 17 的可运行核心，对应图中的 Merge→Hydrate。每个 Source 都是在同一游标和保留窗口下打开的惰性有序流，按需提供下一条候选；返回空值只表示已经确认该来源耗尽。任何一个来源缺失或查询失败，都应抛错并映射为 503。</p><p>外层适配器负责实现 View.requireReady，检查游标签名、user_id、follow_version、snapshot_id 及有效期，并确认来源集合完整。读页结束前还要重新检查当前权限版本，若已变化则返回 409；签名本身不会生成快照，也不能授予权限。Bodies.load 对应有硬性截止时间的批量读取适配接口，此处逐条调用，是为了说明过滤顺序。</p></div><div class="lang-en"><p>This runnable Java 17-compatible core implements Merge→Hydrate. Each Source is a lazy ordered stream opened under the same cursor and retention bound; null means confirmed exhaustion. A missing or failed source throws and maps to 503. The outer View.requireReady adapter validates cursor signature, user_id, follow_version, snapshot_id/expiry and the complete source set. The final check rereads the current permission version; a change returns 409. Signing creates neither a snapshot nor authorization. Bodies.load is an adapter for bounded batch reads; individual calls expose filter order here.</p></div></div>
-<pre data-language="Java 17 · runnable page core" data-kind="runnable" data-source="FeedPage.java"><code>  public static Page readPage(int limit, View view, List&lt;Source&gt; sources,
-                              Bodies bodies) {
-    if (limit &lt; 1 || limit &gt; 50) throw new IllegalArgumentException(&quot;limit&quot;);
-    view.requireReady();
-    var heap = new PriorityQueue&lt;Head&gt;(
-        (a, b) -&gt; b.item.key.compareTo(a.item.key));
-    for (Source source : sources) {
-      Candidate first = source.next();
-      if (first != null) heap.add(new Head(first, source));
+<pre data-language="Java 17 · runnable page core" data-kind="runnable" data-source="FeedPage.java"><code>    public static Page readPage(int limit, View view, List&lt;Source&gt; sources,
+                                Bodies bodies) {
+        if (limit &lt; 1 || limit &gt; 50) {
+            throw new IllegalArgumentException(&quot;limit&quot;);
+        }
+
+        view.requireReady();
+        var heap = new PriorityQueue&lt;Head&gt;(
+                (a, b) -&gt; b.item.key.compareTo(a.item.key));
+        for (Source source : sources) {
+            Candidate first = source.next();
+            if (first != null) {
+                heap.add(new Head(first, source));
+            }
+        }
+
+        var seen = new HashSet&lt;Long&gt;();
+        var out = new ArrayList&lt;Post&gt;();
+        Key last = null;
+        int scanned = 0;
+        while (!heap.isEmpty() &amp;&amp; out.size() &lt; limit &amp;&amp; scanned &lt; 5 * limit) {
+            Head head = heap.remove();
+            Candidate candidate = head.item;
+            last = candidate.key; // consumed, not merely prefetched
+            scanned++;
+
+            Candidate next = head.source.next();
+            if (next != null) {
+                heap.add(new Head(next, head.source));
+            }
+            if (!seen.add(candidate.key.postId)) {
+                continue;
+            }
+
+            Post post = bodies.load(candidate.key.postId);
+            if (post == null) {
+                continue;
+            }
+            if (!post.key.equals(candidate.key)) {
+                throw new IllegalStateException(&quot;corrupt pointer&quot;);
+            }
+            if (post.live &amp;&amp; view.allows(post.author)) {
+                out.add(post);
+            }
+        }
+
+        view.checkStillCurrent(); // also required for an empty page
+        boolean more = !heap.isEmpty();
+        return new Page(List.copyOf(out), more ? last : null,
+                        more &amp;&amp; out.size() &lt; limit, scanned);
     }
-    var seen = new HashSet&lt;Long&gt;();
-    var out = new ArrayList&lt;Post&gt;();
-    Key last = null;
-    int scanned = 0;
-    while (!heap.isEmpty() &amp;&amp; out.size() &lt; limit &amp;&amp; scanned &lt; 5 * limit) {
-      Head head = heap.remove();
-      Candidate candidate = head.item;
-      last = candidate.key; // consumed, not merely prefetched
-      scanned++;
-      Candidate next = head.source.next();
-      if (next != null) heap.add(new Head(next, head.source));
-      if (!seen.add(candidate.key.postId)) continue;
-      Post post = bodies.load(candidate.key.postId);
-      if (post == null) continue;
-      if (!post.key.equals(candidate.key))
-        throw new IllegalStateException(&quot;corrupt pointer&quot;);
-      if (post.live &amp;&amp; view.allows(post.author)) out.add(post);
-    }
-    view.checkStillCurrent(); // also required for an empty page
-    boolean more = !heap.isEmpty();
-    return new Page(List.copyOf(out), more ? last : null,
-                    more &amp;&amp; out.size() &lt; limit, scanned);
-  }
 </code></pre>
 <div class="bilingual"><div class="lang-zh"><p><strong>游标记录最后实际消费的候选，而不是预取进度。</strong>默认 limit=20，最多消费 100 行来源记录，重复行也计入预算；limit 不能超过 50。如果预取了 100 条，在第 23 条候选时就凑齐 20 条有效正文，游标只推进到第 23 条，剩下的下次重新读取。已删除或已取关的候选同样消耗预算并推进游标，避免下次反复扫描。预算用完、仍有后续候选且页面未满时，返回 partial=true 和续读位置（continuation）；只有全部来源都确认耗尽，才省略 next_cursor。外层把排序边界与版本字段封装成一个不透明游标。</p><p><strong>按排序键定位能避免 OFFSET 的位置漂移，但不能保证没有遗漏。</strong>新帖插入不会让翻页位置随页码偏移，迟到的扇出却可能落在已经跨过的上界之上，本轮继续下翻仍看不到，刷新首页后才可见。固定快照也只稳定它已经包含的集合；若要保证历史严格完整，还要等全部来源都处理到选定的提交位点，或者直接读取权威作者索引。超出 1,000 条指针的保留窗口后，应明确告知历史已结束，或转去读取归档，不能悄悄改成无界扫描作者历史。<a href="https://www.postgresql.org/docs/18/queries-limit.html">LIMIT/OFFSET [5]</a></p></div><div class="lang-en"><p><strong>The cursor names the last consumed candidate.</strong> Default limit=20 allows at most 100 source rows, counting duplicates; limit≤50. If candidate 23 completes 20 valid bodies out of 100 prefetched rows, advance only to 23 and reread the rest. Deleted/unfollowed candidates also advance progress. Budget exhaustion with a short page returns partial=true and a continuation; omit next_cursor only after every source confirms exhaustion. The outer layer seals the boundary and version fields into one opaque cursor.</p><p><strong>Seek avoids OFFSET shifts, not every omission.</strong> New posts do not move page numbers, but late fan-out can land above an already passed bound and remain absent until refresh. A fixed snapshot stabilizes only the set it contains. Strict historical completeness additionally waits for all source watermarks through a chosen commit position, or reads authoritative author indexes. Beyond the 1,000-pointer retention window, report history end or use archives rather than switching to unbounded author scans. <a href="https://www.postgresql.org/docs/18/queries-limit.html">LIMIT/OFFSET [5]</a></p></div></div>
 </section>

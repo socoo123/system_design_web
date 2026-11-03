@@ -151,21 +151,29 @@
 <div class="bilingual"><div class="lang-zh"><p>下面是一个使用 Java 17 标准库的可运行示例，展示了计算部署台数的核心方法。输入中，每天的工作量 dailyWork 已按读写成本统一为工作单位；整数峰值系数 peakFactor 用来把平均需求放大到峰值；单机基准 unitQps 也必须使用相同的工作量单位。计划使用比例 utilizationPercent 取 1–100 的整数百分比，failures 表示同时不可用的实例数。方法最后返回需要部署的台数。</p><p>中间计算使用 BigInteger，避免乘法溢出和浮点数造成的向上取整误差。输入不合法时抛出 IllegalArgumentException；计算结果超出 int 范围时抛出 ArithmeticException。</p></div><div class="lang-en"><p>This is the core of a Java 17 standard-library example. dailyWork is cost-normalized daily work, peakFactor an integer multiplier, unitQps the matching per-instance baseline, utilizationPercent a planning percentage from 1–100, and failures the simultaneously unavailable instance count. It returns deployed instances. BigInteger avoids intermediate overflow and floating-point ceilings; invalid inputs throw IllegalArgumentException, and counts outside int throw ArithmeticException.</p></div></div><pre data-language="Java 17 · runnable excerpt" data-kind="runnable" data-source="CapacityEstimate.java"><code>// dailyWork is cost-normalized work units, not arbitrary mixed QPS.
 static int instances(long dailyWork, int peakFactor, long unitQps,
                      int utilizationPercent, int failures) {
-    if (dailyWork &lt; 0 || peakFactor &lt; 1 || unitQps &lt;= 0
-            || utilizationPercent &lt; 1 || utilizationPercent &gt; 100
+    if (dailyWork &lt; 0
+            || peakFactor &lt; 1
+            || unitQps &lt;= 0
+            || utilizationPercent &lt; 1
+            || utilizationPercent &gt; 100
             || failures &lt; 0) {
         throw new IllegalArgumentException(&quot;invalid capacity assumption&quot;);
     }
-    if (dailyWork == 0) return 0; // no minimum warm pool in this model
+    if (dailyWork == 0) {
+        return 0; // no minimum warm pool in this model
+    }
+
     BigInteger numerator = BigInteger.valueOf(dailyWork)
             .multiply(BigInteger.valueOf(peakFactor))
             .multiply(BigInteger.valueOf(100));
     BigInteger denominator = BigInteger.valueOf(86_400)
             .multiply(BigInteger.valueOf(unitQps))
             .multiply(BigInteger.valueOf(utilizationPercent));
+
     BigInteger[] qr = numerator.divideAndRemainder(denominator);
     BigInteger survivors = qr[0].add(qr[1].signum() == 0
             ? BigInteger.ZERO : BigInteger.ONE); // exact ceiling
+
     return survivors.add(BigInteger.valueOf(failures)).intValueExact();
 }</code></pre><div class="bilingual"><div class="lang-zh"><p>本例每天共有 2.1 亿个等成本工作单位，调用 instances(210_000_000,3,1000,60,0) 返回 13；把 failures 设为 1，则返回 14。计算沿用了第一组动画的“每日请求数 → 峰值 → 单机预算”过程，同时改用精确日秒数，并把写入成本计入总量。</p><p>零负载时返回 0，模型没有设置最小热备实例池。方法也不直接接受小数成本或小数峰值系数；需要先用共同的整数单位归一化，并验证这样得到的成本模型。这段代码验证的是算术，实际吞吐、少一台后的流量切换速度，以及服务目标能否达成，仍需另外验证。</p></div><div class="lang-en"><p>instances(210_000_000,3,1000,60,0) returns 13; failures=1 returns 14. It follows deck one’s daily-demand→peak→budget steps, with exact day length and write cost. Zero demand returns zero, excluding a minimum warm pool. Fractional costs/multipliers are not directly supported; normalize into common integer units and validate that model. This verifies arithmetic, not throughput, failover speed, or SLOs.</p></div></div><div class="bilingual"><div class="lang-zh"><p>完整示例见 <a href="../examples/ch03/CapacityEstimate.java">CapacityEstimate.java</a>，其中包含正常输入、取整阈值、非法输入和故障容量不足的检查。先运行 <code>javac --release 17 -d /tmp/ch03-java examples/ch03/CapacityEstimate.java</code> 编译，再运行 <code>java -cp /tmp/ch03-java CapacityEstimate</code>。</p></div><div class="lang-en"><p>Complete normal, threshold, invalid-input, and failure-capacity checks: <a href="../examples/ch03/CapacityEstimate.java">CapacityEstimate.java</a>. Run <code>javac --release 17 -d /tmp/ch03-java examples/ch03/CapacityEstimate.java</code>, then <code>java -cp /tmp/ch03-java CapacityEstimate</code>.</p></div></div>
 </section>

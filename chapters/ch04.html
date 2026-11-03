@@ -323,30 +323,40 @@
 local function integer(x, lo, hi)
   return type(x) == &#x27;number&#x27; and x &gt;= lo and x &lt;= hi and x == math.floor(x)
 end
+
 local cost = tonumber(ARGV[1])
 if #KEYS ~= 1 or not integer(cost, 1, 4) then
   return redis.error_reply(&#x27;INVALID_COST_OR_KEY&#x27;)
 end
+
 local time = redis.call(&#x27;TIME&#x27;)
 local now = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
 local raw = redis.call(&#x27;GET&#x27;, KEYS[1])
-local state = {v=1, credit=60000, last=now}
-if raw then state = cjson.decode(raw) end
+local state = {v = 1, credit = 60000, last = now}
+if raw then
+  state = cjson.decode(raw)
+end
+
 -- The timestamp bound also keeps JSON encoding exact for this example.
-if not integer(now, 0, 9000000000000) or type(state) ~= &#x27;table&#x27;
-   or state.v ~= 1 or not integer(state.credit, 0, 60000)
-   or not integer(state.last, 0, 9000000000000) then
+if not integer(now, 0, 9000000000000)
+    or type(state) ~= &#x27;table&#x27;
+    or state.v ~= 1
+    or not integer(state.credit, 0, 60000)
+    or not integer(state.last, 0, 9000000000000) then
   return redis.error_reply(&#x27;INVALID_STATE_OR_CLOCK&#x27;)
 end
+
 local effective = math.max(now, state.last)
 local elapsed = math.min(60000, effective - state.last)
 local available = math.min(60000, state.credit + elapsed)
+
 local needed = cost * 15000
 local allowed = available &gt;= needed
 local remaining = allowed and (available - needed) or available
 local lag = effective - now
 local wait_ms = allowed and 0 or (lag + needed - available)
-local payload = cjson.encode({v=1, credit=remaining, last=effective})
+
+local payload = cjson.encode({v = 1, credit = remaining, last = effective})
 -- The only write commits both state and expiry; errors return no allow.
 redis.call(&#x27;SET&#x27;, KEYS[1], payload, &#x27;PX&#x27;, 120000 + lag)
 return {allowed and 1 or 0, remaining, wait_ms}
@@ -432,10 +442,12 @@ return {allowed and 1 or 0, remaining, wait_ms}
       </div>
     </figure><div class="bilingual"><div class="lang-zh"><p>加权估计的公式是 <code>C+P×(1−f)+cost</code>，其中 C 为当前固定窗口计数，P 为上一固定窗口计数，f 为当前窗口已过去的时间比例。图中算得 0+7×0.5+1=4.5≤7，因此允许；实际窗口 (30,90] 却会有 7+1=8 次，应该拒绝。再看另一组数字：P=5、C=3、f=0.3，已有请求的估计用量为 6.5，加上新请求后是 7.5&gt;7，必须拒绝。Cloudflare 原文明确假设上一采样期的速率恒定，因此文中观测到的准确率不能当作严格保证。<a href="#ref-6">[6]</a></p></div><div class="lang-en"><p>Use <code>C+P×(1−f)+cost</code>. The diagram estimates 0+7×0.5+1=4.5≤7 and allows, although the real interval (30,90] contains 7+1=8 and must deny. Separately, P=5, C=3, f=0.3 gives 6.5 before the candidate and 7.5&gt;7 afterward: deny. Cloudflare explicitly assumes a constant previous-period rate; observed accuracy is not a guarantee. <a href="#ref-6">[6]</a></p></div></div><h3><span class="lang-zh">精确滑动日志怎样完成一次判定</span><span class="lang-en">Minimal exact-log transition</span></h3><pre data-language="Pseudocode" data-kind="pseudocode"><code class="language-text"># Teaching pseudocode: one authoritative serialized operation
 # Contract: accepted requests in (now - W, now], cost = 1
+
 checkRolling(key, now, uniqueAttempt):
     remove entries with timestamp &lt;= now - W
     if count(entries) &gt;= L:
         return DENY                    # rejected attempts are not logged
+
     insert (timestamp=now, member=uniqueAttempt)
     return ALLOW                       # only after the insertion succeeds</code></pre><div class="bilingual"><div class="lang-zh"><p>这段是算法伪代码。用 Redis 实现时，可以在同一次 EVAL 中，对有序集合依次删除过期记录、统计数量、添加新记录。整个过程必须串行执行，不能拆成客户端的三次调用；脚本报错应按依赖失败处理，也不能假定此前写入会自动回滚。每次尝试都要有唯一标识 <code>uniqueAttempt</code>，不能只用时间戳当成员名，否则同一毫秒到达的不同请求会互相覆盖。请求重试如何去重，需要另行设计。本例限制的是获准请求数，所以只保存获准请求，每桶最多有 L 条有效记录。100 万个桶、L=7 时，最多需要 700 万条有效记录，还要另算键和索引的开销。</p></div><div class="lang-en"><p>This is algorithm pseudocode. A Redis implementation can remove, count, and insert sorted-set entries inside one EVAL. The whole sequence must serialize; three client calls do not suffice. Treat script errors as dependency failures without assuming automatic rollback. <code>uniqueAttempt</code> must uniquely identify this attempt, so simultaneous requests cannot overwrite a shared timestamp member. Retry deduplication is separate. Counting admissions retains at most L valid entries: a million buckets at L=7 need up to seven million entries plus key and index overhead.</p></div></div><div class="bilingual"><div class="lang-zh"><p>本例的窗口为 <code>(now−W,now]</code>，恰好落在左边界的记录也要删除。这里的“精确”，仍以权威时间前后一致、状态不丢失和判定原子执行为前提；改用日志，并不会消除时钟跳变或切主丢状态的问题。</p></div><div class="lang-en"><p>The interval is <code>(now−W,now]</code>; remove entries exactly at the left boundary. Exactness still assumes consistent authoritative time, retained state, and atomic decisions. Logs do not eliminate clock jumps or failover loss.</p></div></div><details><summary><span class="lang-zh">五种算法各自满足什么约定</span><span class="lang-en">Choose among five contracts</span></summary><table><thead><tr><th><span class="lang-zh">算法</span><span class="lang-en">Algorithm and contract</span></th><th><span class="lang-zh">保留的状态</span><span class="lang-en">Retained state</span></th><th><span class="lang-zh">能保证什么，要付出什么代价</span><span class="lang-en">Behavior and cost</span></th></tr></thead><tbody><tr><td><span class="lang-zh">令牌桶</span><span class="lang-en">Token bucket</span></td><td><span class="lang-zh">剩余令牌数 tokens、上次计时位置 last</span><span class="lang-en">tokens, last</span></td><td><span class="lang-zh">把获准总成本限制在 B+rT 内，允许积攒突发额度，不排队</span><span class="lang-en">Bounds B+rT; allows saved burst credit, no queue</span></td></tr>
 <tr><td><span class="lang-zh">固定窗口</span><span class="lang-en">Fixed window</span></td><td><span class="lang-zh">请求计数、窗口标识</span><span class="lang-en">count, window ID</span></td><td><span class="lang-zh">每个固定区间内计数准确，但跨边界的突发可接近 2L</span><span class="lang-en">Exact within fixed intervals; boundary burst approaches 2L</span></td></tr>
@@ -530,16 +542,20 @@ checkRolling(key, now, uniqueAttempt):
         <figcaption><span class="lang-zh">把突发也算进去，降级流量在 1 秒内最多获准 200+2,000=2,200 次，低于本例每秒 6,000 次的容量计划。但瞬间仍可能进入 200 次请求，需要并发保护。若扩到 8 台网关，上界就会翻倍，因此故障期间要控制实例成员变化。</span><span class="lang-en">Over 1 s, fallback allows at most 200+2,000=2,200 against the teaching plan of 6,000/s; concurrency protection must still absorb the instant 200. Eight gateways double the envelope, so membership changes must be controlled.</span></figcaption>
       </div>
     </figure><h3><span class="lang-zh">把允许、确认超额、无法判定写成代码</span><span class="lang-en">Write the three return paths</span></h3><pre data-language="Pseudocode" data-kind="pseudocode"><code class="language-text"># Teaching pseudocode: every admitted request still faces Service capacity
+
 handle(request):
     identity = authenticate(request)
     key = quotaKey(identity, normalizedRoute(request))
+
     if not localPrecheck.tryConsume():
         return 429(code=&quot;local_protection&quot;)
+
     result = quota.checkOnce(key, cost=1, deadline=5ms)
     if result is DENY:
         return 429(code=&quot;quota_exceeded&quot;, retryAfter=result.wait)
     if result is ALLOW:
         return Service.callOnceWithinCapacity(request)
+
     # Timeout, script error, or unavailable authority: never invent a denial.
     if request is not an eligible ordinary read:
         return 503(code=&quot;quota_unavailable&quot;)

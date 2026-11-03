@@ -1,9 +1,13 @@
 release_buffered_sentences(principal, bundle, pack, draft):
   for sentence in bounded_sentence_buffer(draft):
     parsed = parse_structured_claims_and_citation_ids(sentence)
-    if parse fails OR any ID not in pack.actual_ids: block_whole_sentence()
+    if parse fails OR any ID not in pack.actual_ids:
+      block_whole_sentence()
+
     for claim in parsed.claims:
-      if claim.requires_evidence AND claim.citation_ids is empty: block_sentence()
+      if claim.requires_evidence AND claim.citation_ids is empty:
+        block_sentence()
+
       cited = pack.exact_spans(claim.citation_ids)
       if a structured_domain_fact(claim):
         require source_entity == claim.entity AND source_unit == claim.unit
@@ -12,6 +16,7 @@ release_buffered_sentences(principal, bundle, pack, draft):
         verdict = support_judge(claim, cited, pinned_judge_version, deadline)
         require verdict == SUPPORTED           # UNKNOWN/timeout => block
         # A fallible statistical judgment; calibrate false acceptance with humans.
+
     # Recheck AFTER potentially slow judge work, before every network release.
     BEGIN authoritative_read                 # shared locks, canonical doc order
     lock current membership AND every pack doc/current/ACL dependency

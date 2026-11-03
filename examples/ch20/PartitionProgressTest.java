@@ -2,14 +2,23 @@ import java.util.List;
 
 public final class PartitionProgressTest {
     private static int checks;
+
     private static void check(boolean ok, String message) {
         checks++;
-        if (!ok) throw new AssertionError(message);
+        if (!ok) {
+            throw new AssertionError(message);
+        }
     }
+
     private static void invalid(Runnable action, Class<? extends Exception> kind) {
-        try { action.run(); throw new AssertionError("expected " + kind); }
-        catch (Exception e) { check(kind.isInstance(e), "wrong failure: " + e); }
+        try {
+            action.run();
+            throw new AssertionError("expected " + kind);
+        } catch (Exception e) {
+            check(kind.isInstance(e), "wrong failure: " + e);
+        }
     }
+
     public static void main(String[] args) {
         var normal = new PartitionProgress(41, 500);
         var n = normal.register(List.of(41L, 42L, 43L), 44);
@@ -56,7 +65,8 @@ public final class PartitionProgressTest {
         invalid(() -> bounded.register(List.of(41L, 41L), 42), IllegalArgumentException.class);
         invalid(() -> bounded.register(List.of(40L), 42), IllegalArgumentException.class);
         invalid(() -> bounded.register(List.of(41L), 41), IllegalArgumentException.class);
-        check(bounded.checkpoint().orElseThrow() == 41 && bounded.idle(), "invalid batch atomic validation");
+        check(bounded.checkpoint().orElseThrow() == 41 && bounded.idle(),
+                "invalid batch atomic validation");
         bounded.register(List.of(41L), 42);
         invalid(() -> bounded.register(List.of(42L), 43), IllegalStateException.class);
         check(!bounded.completed(null), "null completion ignored");
@@ -65,6 +75,7 @@ public final class PartitionProgressTest {
         permutations(order, 0);
         System.out.println("PartitionProgress Java 17 checks passed: " + checks);
     }
+
     private static void permutations(int[] order, int at) {
         if (at == order.length) {
             long[] offsets = {7, 9, 12, 18};
@@ -72,18 +83,28 @@ public final class PartitionProgressTest {
             var tickets = p.register(List.of(7L, 9L, 12L, 18L), 23);
             boolean[] done = new boolean[4];
             for (int i : order) {
-                done[i] = true; p.completed(tickets.get(i));
+                done[i] = true;
+                p.completed(tickets.get(i));
+
                 int first = 0;
-                while (first < 4 && done[first]) first++;
+                while (first < 4 && done[first]) {
+                    first++;
+                }
                 check(p.checkpoint().orElseThrow() == (first == 4 ? 23 : offsets[first]),
                         "permutation prefix with offset gaps");
             }
             return;
         }
         for (int i = at; i < order.length; i++) {
-            int tmp = order[at]; order[at] = order[i]; order[i] = tmp;
+            int tmp = order[at];
+            order[at] = order[i];
+            order[i] = tmp;
+
             permutations(order, at + 1);
-            tmp = order[at]; order[at] = order[i]; order[i] = tmp;
+
+            tmp = order[at];
+            order[at] = order[i];
+            order[i] = tmp;
         }
     }
 }

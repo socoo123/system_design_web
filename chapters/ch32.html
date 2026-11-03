@@ -344,26 +344,37 @@
 principal = authenticate(credentials)                 # never trust tenant header
 tenant = principal.tenant
 digest = H(canonical_full_request)                    # includes accepted policy revision
+
 if Ledger.lookup(principal.tenant, rid) exists:
     require same digest and current access
     return recorded status/result                     # no new model dispatch
+
 plan = pin_route_revision(alias)
-eligible = [d for d in plan.deployments
+eligible = [
+    d for d in plan.deployments
     if principal.may_use(d) and data.may_leave_to(d)
     and required_capabilities &lt;= d.capabilities
     and final_input_bound(d) + enforced_output_cap(d) &lt;= d.context
-    and caller.accepts(d.quality)]
+    and caller.accepts(d.quality)
+]
 require eligible is not empty
+
 candidate = AnswerCache.lookup(H(principal.access_scope, digest, plan, data_rev))
 if reusable_task and candidate is COMPLETE and current_access(candidate.dependencies):
-    if unexpired(candidate) and candidate.served_model in {d.model_revision for d in eligible}
-            and candidate.route_revision == plan.revision and candidate.data_revision == data_rev:
+    if unexpired(candidate)
+            and candidate.served_model in {d.model_revision for d in eligible}
+            and candidate.route_revision == plan.revision
+            and candidate.data_revision == data_rev:
         deliver_cache_only_if_unique_record_created(tenant, rid, digest, candidate)
         return recorded status                        # loser never starts another response
+
 pool = rank_by_health_latency_cost(eligible).first
 require shared_rate_and_concurrency.admit(pool.limit_group)
+
 created = Ledger.reserve_first(tenant, rid, digest, plan, bound(pool))
-if not created: return recorded status                  # concurrent winner owns I/O
+if not created:
+    return recorded status                  # concurrent winner owns I/O
+
 Adapter.dispatch_once(created.attempt, pool)             # disable hidden retries
 # Cache record uses the same unique (tenant,rid)+digest; service price is separate.
 # Rate permits and Ledger are separate stores: lost permits may be wasted.</code></pre><div class="bilingual"><div class="lang-zh"><p>下面的路由策略伪代码从可信配置读取候选能力。缓存命中后，也必须先在同一账本中竞争唯一的服务记录，才能取得交付资格。<code>deliver_cache_only_if_unique_record_created</code> 代表这一步：记录以 (tenant,rid) 唯一识别，请求正文摘要必须一致，竞争失败者只读取已有状态。后面的 SQLite 代码展示了未命中缓存时，如何创建唯一请求和调用记录。缓存交付同样要经过提交屏障，也不能回放其他用户的结果。</p><p>坏参数、无权限和安全拒绝都不能触发备用调用。请求发出后才超时，上游可能已经产生计费用量。因此，策略不允许额外调用费用时，只能返回结果未知（UNKNOWN）；允许额外费用的只读任务，才可以保留原调用 a1 的未决预占，再为备用调用 a2 另行预占。SDK 或代理的隐藏重试必须关闭，或者计入总共不超过 2 次的限制。每次发起调用，都要重新通过所属共享限流组的检查；换一个 key 不一定能获得另一份配额。</p><p>这个次数上限只约束同一批逻辑请求：1,200 条请求最多产生 2,400 次调用，预留的总工作量最多为 7.2M token。只有这些调用也落在同一分钟，或满足稳态条件时，才可写成约每秒 40 次、每分钟 7.2M token；跨时间窗的积压不能据此推导瞬时速率上界。</p><p>首响应各阶段的预算合计 0.2+0.8+0.2+0.7=1.9 秒，只留 0.1 秒余量，备用调用不能重置总截止时间。如果有效的 Retry-After 要求等待的时间已经超过剩余预算，就停止。累计配额耗尽使用稳定的 quota_exhausted 分类；提交前没有合格容量时返回 503。<a href="#ref-2">[2]</a><a href="#ref-7">[7]</a></p></div><div class="lang-en"><p>This is policy pseudocode using trusted capability configuration. The cache-record operation means one service record in the same Ledger under unique (tenant,rid) and a matching body digest; competitors read existing state. SQLite below shows actual miss-side request/attempt creation. Cache delivery also needs unique ownership and the commitment barrier; it cannot replay another user’s result.</p><p>Bad parameters, access failures and safety refusals do not authorize fallback. A post-dispatch timeout may have generated billable output: strict one-attempt policy returns UNKNOWN; cost-tolerant read-only work can retain a1’s hold and reserve a2 separately. Disable hidden SDK/proxy retries or count them in the total of at most two. Readmit every dispatch against its shared limit group; another key may share the same quota.</p><p>The cap bounds one request cohort: 1,200 logical requests permit at most 2,400 calls and 7.2M reserved token-work. About 40/s and 7.2M/min require matching dispatch windows or steady conditions; cross-window backlog has no such peak bound. The first-response budget 0.2+0.8+0.2+0.7=1.9s leaves 0.1s; fallback never resets the total deadline. Stop when a valid Retry-After exceeds the remaining budget. Use stable quota_exhausted and precommit no-capacity 503 classifications. <a href="#ref-2">[2]</a><a href="#ref-7">[7]</a></p></div></div></section>
@@ -564,41 +575,56 @@ Adapter.dispatch_once(created.attempt, pool)             # disable hidden retrie
         <figcaption><span class="lang-zh">最后加入核账程序（Reconciler），让它查找未决记录；此时图中的预占仍为 3,000。只有上游支持用量报告、且证据验证通过，才能补齐原调用并幂等结算。上游不支持报告时，只能按明确的估算或人工核账规则保留暂估状态（provisional），不能靠 TTL 自动退款，也不能重新生成来补证据。</span><span class="lang-en">The hold remains 3,000. Only supported, verified upstream evidence permits idempotent settlement of the same attempt. Without reporting support, apply explicit provisional/review rules; no automatic TTL refund or regeneration.</span></figcaption>
       </div>
     </figure><h3><span class="lang-zh">预占额度与发送意图必须在同一事务中保存</span><span class="lang-en">Hold and intent share one transaction</span></h3><div class="bilingual"><div class="lang-zh"><p>下面摘录的是可运行的 Python/SQLite 文件数据库示例。事务函数 <code>write_tx</code> 实际执行 BEGIN IMMEDIATE，再执行 COMMIT 或 ROLLBACK；条件更新预算、创建唯一请求和保存调用发送意图，都在同一事务中完成。只有首次取得 <code>created=True</code> 的原调用者，才获准发出一次网络请求；提交确认丢失后，不能因为查到了发送意图就再次发送。SQLite 通过数据库写锁协调不同连接和进程，锁的粒度比 PostgreSQL 行锁更粗。<a href="#ref-8">[8]</a><a href="#ref-9">[9]</a></p></div><div class="lang-en"><p>This runnable Python/SQLite file-database excerpt uses actual BEGIN IMMEDIATE and COMMIT/ROLLBACK in write_tx. Conditional budget mutation, unique request creation and attempt intent share a transaction. Only the original created=True caller may send once; finding an intent after a lost ACK does not authorize redispatch. SQLite serializes writers across connections/processes at coarser granularity than PG row locks. <a href="#ref-8">[8]</a><a href="#ref-9">[9]</a></p></div></div><pre data-language="Python · SQLite" data-kind="runnable" data-source="ledger.py#reserve"><code>def _hold(db, q, n, pool, bound, owner, price, model):
-    changed = db.execute(&quot;&quot;&quot;UPDATE budgets SET held=held+?
+    changed = db.execute(
+        &quot;&quot;&quot;UPDATE budgets SET held=held+?
         WHERE tenant=? AND period=? AND blocked=0
           AND cap-settled-held&gt;=?&quot;&quot;&quot;,
-        (bound, q[&quot;tenant&quot;], q[&quot;period&quot;], bound)).rowcount
+        (bound, q[&quot;tenant&quot;], q[&quot;period&quot;], bound)
+    ).rowcount
     if changed != 1:
         raise Denied(&quot;quota_exhausted&quot;)
-    db.execute(&quot;&quot;&quot;INSERT INTO attempts
+
+    db.execute(
+        &quot;&quot;&quot;INSERT INTO attempts
         (tenant,rid,n,pool,price,owner,bound,state,expected_model)
         VALUES(?,?,?,?,?,?,?,&#x27;INTENT&#x27;,?)&quot;&quot;&quot;,
-        (q[&quot;tenant&quot;], q[&quot;rid&quot;], n, pool, price, owner, bound, model))
-    db.execute(&quot;UPDATE requests SET selected=? WHERE tenant=? AND rid=?&quot;,
-               (n, q[&quot;tenant&quot;], q[&quot;rid&quot;]))
+        (q[&quot;tenant&quot;], q[&quot;rid&quot;], n, pool, price, owner, bound, model)
+    )
+    db.execute(
+        &quot;UPDATE requests SET selected=? WHERE tenant=? AND rid=?&quot;,
+        (n, q[&quot;tenant&quot;], q[&quot;rid&quot;])
+    )
 
 
 def reserve_first(db, tenant, rid, digest, period, route, pool,
                   bound, owner, allow_extra=False, price=&quot;price-v1&quot;, model=None):
     valid_bound(bound)
+
     with write_tx(db):  # BEGIN IMMEDIATE / COMMIT or ROLLBACK
         q = request(db, tenant, rid)
         if q:
             if q[&quot;digest&quot;] != digest:
                 raise Conflict(&quot;rid_body_mismatch&quot;)
             return {&quot;created&quot;: False, &quot;request&quot;: dict(q)}
-        db.execute(&quot;&quot;&quot;INSERT INTO requests
+
+        db.execute(
+            &quot;&quot;&quot;INSERT INTO requests
             (tenant,rid,digest,period,route,allow_extra)
             VALUES(?,?,?,?,?,?)&quot;&quot;&quot;,
-            (tenant, rid, digest, period, route, int(allow_extra)))
+            (tenant, rid, digest, period, route, int(allow_extra))
+        )
         q = request(db, tenant, rid)
         _hold(db, q, 1, pool, bound, owner, price, model or pool)
+
         return {&quot;created&quot;: True, &quot;attempt&quot;: 1, &quot;owner&quot;: owner}</code></pre><div class="bilingual"><div class="lang-zh"><p>如果剩余额度只够一次预占，并发竞争时只有一个事务能成功，失败方连同请求插入一起回滚。备用预占函数 <code>reserve_fallback</code> 在同一事务中检查同一请求行：调用方允许额外费用、a1 已失败、请求尚未提交或关闭、a1 的工作者身份匹配，而且当前选中的仍是 a1（selected=1）。检查通过后，再新增一份预占、插入 a2，并把所选调用改为 a2（selected=2）。迟到的 a1 仍可结算用量，却不能再交付响应或关闭 a2。移植到生产 PostgreSQL 时，需要为请求、调用和预算确定一致的加锁顺序，并处理唯一约束冲突、死锁和提交结果未知；本章没有执行 PostgreSQL 版本。</p></div><div class="lang-en"><p>With one hold left, one transaction wins and the loser rolls back request creation too. reserve_fallback checks extra-cost permission, failed a1, no commitment/closure, matching owner and selected=1 in the same transaction. It adds another hold, inserts a2 and changes selected to 2. Late a1 may settle usage but cannot deliver or close a2. A PG port needs consistent request/attempt/budget lock order plus unique-conflict, deadlock and unknown-commit handling; PG was not executed here.</p></div></div><h3><span class="lang-zh">每次调用只结算一次，换事件编号不能再次扣款</span><span class="lang-en">Settle once per attempt, not once per arbitrary event ID</span></h3><pre data-language="Python · SQLite" data-kind="runnable" data-source="ledger.py#settle"><code>def settle(db, tenant, rid, n, input_tokens, output_tokens, evidence,
            *, upstream_id, served_model):
     # Evidence is final and authenticated by the trusted adapter/reconciler.
-    if any(type(x) is not int or not 0 &lt;= x &lt;= 10**12
-           for x in (input_tokens, output_tokens)) or not evidence:
+    if any(
+        type(x) is not int or not 0 &lt;= x &lt;= 10**12
+        for x in (input_tokens, output_tokens)
+    ) or not evidence:
         raise ValueError(&quot;final nonnegative usage and evidence required&quot;)
+
     with write_tx(db):
         q, a = request(db, tenant, rid), attempt(db, tenant, rid, n)
         if not q or not a:
@@ -606,20 +632,27 @@ def reserve_first(db, tenant, rid, digest, period, route, pool,
         if not a[&quot;upstream_id&quot;] or (upstream_id, served_model) != (
                 a[&quot;upstream_id&quot;], a[&quot;expected_model&quot;]):
             raise Conflict(&quot;wrong_usage_source&quot;)
+
         payload = (input_tokens, output_tokens, evidence)
         if a[&quot;state&quot;] == &quot;SETTLED&quot;:
             if payload != (a[&quot;input_tokens&quot;], a[&quot;output_tokens&quot;], a[&quot;evidence&quot;]):
                 raise Conflict(&quot;conflicting_final_usage&quot;)
             return False
+
         actual = input_tokens + output_tokens
-        db.execute(&quot;&quot;&quot;UPDATE budgets SET held=held-?, settled=settled+?,
+        db.execute(
+            &quot;&quot;&quot;UPDATE budgets SET held=held-?, settled=settled+?,
             blocked=CASE WHEN ?&gt;? OR settled+?+held-?&gt;cap THEN 1 ELSE blocked END
             WHERE tenant=? AND period=?&quot;&quot;&quot;,
-            (a[&quot;bound&quot;], actual, actual, a[&quot;bound&quot;], actual, a[&quot;bound&quot;], tenant, q[&quot;period&quot;]))
-        db.execute(&quot;&quot;&quot;UPDATE attempts SET state=&#x27;SETTLED&#x27;,
+            (a[&quot;bound&quot;], actual, actual, a[&quot;bound&quot;], actual, a[&quot;bound&quot;], tenant, q[&quot;period&quot;])
+        )
+        db.execute(
+            &quot;&quot;&quot;UPDATE attempts SET state=&#x27;SETTLED&#x27;,
             input_tokens=?,output_tokens=?,evidence=?
             WHERE tenant=? AND rid=? AND n=?&quot;&quot;&quot;,
-            (*payload, tenant, rid, n))
+            (*payload, tenant, rid, n)
+        )
+
         return True</code></pre><div class="bilingual"><div class="lang-zh"><p>结算以租户、请求和调用编号 (tenant,rid,attempt) 作为唯一身份。相同的最终证据重复到达，只返回原结果；用量证据冲突则转人工核账，不能换一个 event id 再扣一次。预占 3,000、实际使用 2,400 时，未决预占 held 减少 3,000，已结算用量 settled 增加 2,400，净可用额度增加 600。如果两次调用都实际执行，就分别结算，总用量可能达到 4,800。迟到的记录仍归属原预算周期，不能在月末自动清零未决预占。</p><p>本例只接受经过可信适配器或核账程序验证的最终输入、输出用量证据。先把上游请求标识和预期服务模型绑定到原调用，结算时再次核对，避免把 a1 的用量记到 a2。每次调用都保留来源与价格版本，货币费用按计量类别另算。如果实际用量违反了输入或输出上界，仍要记录真实债务并阻止新工作，不能通过回滚证据掩盖超额。此时安全上界的前提已经失效，不能再声称硬预算保证成立。暂估值 provisional 只表示未决估算，不是最终已结算用量；产品若需要先按估算入账，还要另建支持幂等修正的审计链。</p><p>OpenAI Chat Completions 的 include_usage 尾包可能因中断或取消而缺失；Claude message_delta 返回的用量是累计值，应取最终累计值，不能逐条相加。两家的速率规则也不同，Claude 分别限制 RPM、ITPM 和 OTPM。缺少最终用量时，保留 UNKNOWN 预占；只有上游具备报告能力时，才按原调用核账。本地发送意图与外部生成无法原子提交，恢复者不能盲目重新生成。<a href="#ref-1">[1]</a><a href="#ref-3">[3]</a><a href="#ref-4">[4]</a><a href="#ref-7">[7]</a></p></div><div class="lang-en"><p>The unique accounting identity is (tenant,rid,attempt). Identical final evidence returns the prior result; conflicting usage requires review, not another debit under a new event ID. Holding 3,000 then consuming 2,400 subtracts the entire 3,000 hold and adds 2,400 settled, releasing 600 net. Two executed attempts can cost 4,800. Late evidence stays in its original budget period; month boundaries cannot erase pending holds.</p><p>The model accepts only final input/output evidence authenticated by the trusted Adapter/Reconciler. Bind the upstream request ID and expected served model to the original attempt and check them at settlement; a1 usage cannot settle a2. Attempts retain source and price revision; compute currency charges by category separately. If a supposed upper bound is violated, record actual debt and block new work rather than roll back evidence. That invalidates the hard-bound premise. Provisional values remain estimates, not final settled charges; provisional debits need their own idempotent adjustment audit chain.</p><p>Interrupted/cancelled OpenAI Chat Completions may lose the include_usage tail; Claude message_delta usage is cumulative, so take the final cumulative value rather than sum events. Claude separately limits RPM/ITPM/OTPM. Missing usage retains UNKNOWN holds; use supported reports to reconcile the original attempt. Local intent and external generation cannot commit atomically, so recovery never blindly regenerates. <a href="#ref-1">[1]</a><a href="#ref-3">[3]</a><a href="#ref-4">[4]</a><a href="#ref-7">[7]</a></p></div></div></section>
 
   <section><h2><span class="lang-zh">精确答案缓存：请求条件相同，也要检查当前权限</span><span class="lang-en">Exact cache: matching keys still require current authorization</span></h2><div class="bilingual"><div class="lang-zh"><p><strong>缓存可以提供旧答案，却不能证明用户当前仍有访问权。</strong>缓存键要覆盖完整请求、租户与权限指纹，以及路由、模型和数据版本。命中后，还要重新检查当前访问权、条目是否完整、原过期时间，以及实际服务模型是否符合本次路由契约。如果模型别名已经指向新版本，旧版本答案不能混入新契约。</p></div><div class="lang-en"><p><strong>A cache entry is permission to reuse an old answer, not an access credential.</strong> Key the full request, tenant/access scope and route/model/data revisions. Recheck current access, complete state, original expiry and served-model eligibility. Repointing an alias must not mix old answers into a new contract.</p></div></div><figure class="deck">
@@ -1122,19 +1155,28 @@ def reserve_first(db, tenant, rid, digest, period, route, pool,
 for event in bounded_utf8_sse(upstream, read_cap=16KiB, event_cap=16KiB):
     require absolute_deadline_not_expired and idle_read_deadline_not_expired
     normalized = Adapter.translate(event, encoded_cap=16KiB)
+
     if normalized.final_usage:
         require usage_source_matches(attempt, upstream_request_id, served_model)
         Ledger.settle(attempt, authenticated_usage)     # survives old-attempt arrival
-    if normalized.error: raise trusted_Adapter_classification(normalized)
+
+    if normalized.error:
+        raise trusted_Adapter_classification(normalized)
     if normalized.success_terminal:
         require validated_complete_output
+
     if normalized.public_output:
         if not locally_committed:
             won = Ledger.claim_commit(rid, attempt.number, attempt.owner)
-            if not won: abort_upstream(); stop         # stale/unknown ACK: never send
+            if not won:
+                abort_upstream();
+                stop         # stale/unknown ACK: never send
+
             locally_committed = true
             Edge.begin_headers()                      # Edge sends no earlier heartbeat
+
         await Edge.write_all(normalized, blocked_write_limit=10s)
+
 require valid_protocol_terminal and validated_complete_output
 Ledger.close_if_selected(rid, attempt.number, attempt.owner)
 AnswerCache.publish_if_reuse_authorized(complete_answer)
@@ -1142,6 +1184,7 @@ AnswerCache.publish_if_reuse_authorized(complete_answer)
 on timeout, disconnect, oversized_event, parse_error, classified_upstream_failure:
     abort_upstream_best_effort()
     Ledger.mark_failure(attempt, UNKNOWN_unless_proven_otherwise)
+
     if locally_committed:
         send_declared_error_if_writable_or_close_EOF()   # no success DONE, no fallback
         Ledger.close_if_selected(rid, attempt.number, attempt.owner)
@@ -1150,8 +1193,10 @@ on timeout, disconnect, oversized_event, parse_error, classified_upstream_failur
         acquire_backup_rate_and_concurrency_permit()
         created = Ledger.reserve_fallback(rid, failed_owner, backup, new_bound, new_owner)
         # Same request-row transaction excludes commitment; UNKNOWN a1 stays held.
-        if created: dispatch_a2_once()                # &lt;=2 total; no deadline reset
-        else: stop_and_recover_status()                # denial/unknown ACK never dispatches
+        if created:
+            dispatch_a2_once()                # &lt;=2 total; no deadline reset
+        else:
+            stop_and_recover_status()                # denial/unknown ACK never dispatches
     else:
         Ledger.close_if_selected(rid, attempt.number, attempt.owner)
         return_precommit_error()

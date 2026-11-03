@@ -5,7 +5,9 @@ reserve(orderId, expectedGeneration, courierId, attemptId):
     old = SELECT attempt WHERE id = attemptId
     if old exists:
       require old binds (orderId, expectedGeneration, courierId) else CONFLICT
-      commit; return old.offerReceipt, currentSnapshot(o) // no new occupation
+      commit;
+      return old.offerReceipt, currentSnapshot(o) // no new occupation
+
     c = SELECT courier_capacity FOR UPDATE             // same authority in all zones
     now = SELECT clock_timestamp()                     // after both locks, not now()
     require o.state == pending_match and o.currentAttempt == null else CONFLICT
@@ -14,6 +16,7 @@ reserve(orderId, expectedGeneration, courierId, attemptId):
     require point exists and now <= point.validUntil else REMATCH
     require not c.paused and c.occupied < c.capacity else REMATCH
     require courierId not in this order's persisted cooldown set else REMATCH
+
     slot = smallest unused slot in [0, c.capacity)
     deadline = min(now + 20 seconds, o.matchDeadline)
     INSERT attempt(attemptId, orderId, o.generation, courierId, deadline, offered)
@@ -22,6 +25,7 @@ reserve(orderId, expectedGeneration, courierId, attemptId):
     UPDATE order SET state = offered, currentAttempt = attemptId,
                      attemptCount = attemptCount + 1
     INSERT outbox(eventKey = "offer:" + attemptId, immutableOfferPayload)
-  commit; return offerReceipt, currentSnapshot(o)
+  commit;
+  return offerReceipt, currentSnapshot(o)
   // Any statement/constraint failure rolls back every write; do not send yet.
   // Retry deadlock/serialization aborts with the same identity and fresh reads.

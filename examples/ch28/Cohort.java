@@ -14,8 +14,10 @@ public final class Cohort {
     public static Selected select(Auth auth, Rule rule) {
         if (!auth.namespace().equals(rule.namespace()) || rule.percent() < 0
                 || rule.percent() > 100 || rule.generation() < 0 || rule.revision() < 0
-                || rule.stable() == null || (rule.canary() == null && rule.percent() != 0))
+                || rule.stable() == null || (rule.canary() == null && rule.percent() != 0)) {
             throw new IllegalArgumentException("invalid scope or rule");
+        }
+
         int bucket = bucket(rule.namespace(), rule.salt(), auth.instanceId());
         boolean canary = auth.cluster().equals(rule.cluster())
                 && rule.canary() != null && bucket < rule.percent();
@@ -31,6 +33,7 @@ public final class Cohort {
                 digest.update(ByteBuffer.allocate(4).putInt(bytes.length).array());
                 digest.update(bytes); // length prefixes avoid ambiguous concatenation
             }
+
             long first64 = ByteBuffer.wrap(digest.digest()).getLong();
             return (int) Long.remainderUnsigned(first64, 100);
         } catch (NoSuchAlgorithmException impossible) {

@@ -322,17 +322,25 @@
       </div>
     </figure><div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p><p>Query 解析 SUM(price) 和时间、国家过滤条件，规划器根据固定快照选出候选文件；Worker 再读取所需页范围、解码、精确过滤并完成局部聚合。Parquet 在行组（row group）中按列组织列块（column chunk），通过文件元数据定位所需内容 <a href="#ref-3">[3]</a>。图中的 decode 和 local sum 都是同一个 Worker 内的执行算子。Query 汇总局部结果后才返回 Client，文件服务不能把尚未聚合的金额列直接交给客户端。</p><p><strong>A3 的报表有全表读取权限，不按 tenant_id 过滤行。</strong>如果租户报表必须读取 tenant_id，而可靠元数据又无法证明候选数据都属于该租户，就需要读取 4 列：1 TB×4/20÷4=50 GB。8 台 Worker 独占资源时，扫描下界为 25 s；两条查询均分时为 50 s。不能因为已经鉴权，就漏算过滤所用的字段。处理删除所需的字段和 delete 文件也要另算；37.5 GB 只覆盖三列数据页，并非查询的全部 I/O。</p><p>按 A3，先用一天的时间范围把 30 TB 原始候选缩小到 1 TB，再读取 20 个等宽字段中的 3 个，得到 150 GB 未压缩列数据；按 A4 压缩 4:1 后为 37.5 GB。30,000 GB÷37.5 GB=800，比较基线是扫描全时段、全部字段的原始数据，而非已经压缩的行存。时间剪枝贡献 30 倍，减少列数贡献约 6.67 倍，压缩贡献 4 倍，三者相乘才得到 800 倍。</p><p>少读列减少的是完整事件内容 payload 的搬运，并没有消除所有 CPU 开销。过滤所需的 country 和 event_time 仍要读取；若没有可用统计来排除数据页，即使最终能过滤掉很多行，也仍需读页并解码。相似列值有利于字典、RLE 等编码，高基数字符串或加密 payload 则未必容易压缩。只读取少数列，也可能产生更多随机范围请求。向量化一次处理一批值，延迟物化则在确有需要时才拼成完整行；这些能力共同降低执行成本，不能把列式引擎理解为“每列拆一张行表” <a href="#ref-2">[2]</a>。</p><p>Dremel 的 T1 实验包含 850 亿条记录、87 TB 未压缩数据。单列实验读取约 0.5 TB 压缩数据，按记录布局的 MR 则读取约 87 TB。两者的压缩和执行模型都不同，因此 174 倍只表示该实验的读取字节比，不能用作本章的延迟承诺。<a href="#ref-1">[1 §7 / Figure 10]</a></p><p>A5 假设 8 台 Worker 合计有效吞吐为 8×250 MB/s=2 GB/s，因此 37.5 GB÷2 GB/s=18.75 s。这只是独占带宽、且没有其他瓶颈时的数据扫描下界。两条查询均分资源后，每条只有 1 GB/s，下界变为 37.5 s，已经超过 A2 的 30 s 目标。此时应控制并发、在实测基础上增加资源，或缩小查询范围。COUNT DISTINCT 和高基数 GROUP BY 还会扩大聚合状态与 shuffle 开销；读取很多列或拼接完整记录时，列存的收益也会减小。</p></div><div class="lang-en"><p class="col-kicker">English</p><p>Query plans a snapshot-bound SUM with time/country filters. Workers get page ranges, decode, filter and partially aggregate. Parquet column chunks sit inside row groups, and metadata locates needed content <a href="#ref-3">[3]</a>. Decode/sum are local operators, not remote services. Query merges partials before replying.</p><p><strong>A3 is an authorized whole-table report with no tenant_id row filter.</strong> A tenant report that must read tenant_id needs 4 fields unless trusted metadata proves tenant scope: 1 TB×4/20÷4=50 GB, with 25 s exclusive or 50 s shared scan lower bounds. Include delete fields/files separately; 37.5 GB covers only the three data fields, not all query I/O.</p><p>A3 reduces 30 TB raw to 1 TB by date, then 3/20 fields to 150 GB; A4 compression gives 37.5 GB. 30,000/37.5=800 compares all-period/all-field raw bytes, not a compressed row-store baseline. Time contributes 30×, projection about 6.67× and compression 4×.</p><p>Projection removes payload transfer, not all CPU. Read both predicate fields; unavailable pruning statistics still require page reads and decoding. Dictionary/RLE benefit suitable values, not arbitrary high-cardinality or encrypted payloads. Vectorized operations and late materialization complement column layouts; vertically splitting row tables is not a complete engine <a href="#ref-2">[2]</a>.</p><p>Dremel’s T1 experiment contains 85B records and 87 TB uncompressed. Its one-column scan reads about 0.5 TB compressed versus 87 TB for record-oriented MR. Compression and execution differ; 174× describes that experiment’s byte ratio, not this chapter’s latency. <a href="#ref-1">[1 §7 / Figure 10]</a></p><p>Eight A5 workers offer an assumed 2 GB/s effective data rate. 37.5/2=18.75 s is a scan lower bound; two equally sharing queries each need at least 37.5 s, beyond A2’s 30 s target. Bound concurrency, measure additional capacity or narrow scope. Distinct/group-by state, shuffle and wide record assembly add costs.</p></div></div><h3><span class="lang-zh">关键实现：内存放不下时，分块落盘并限制归并路数</span><span class="lang-en">Implementation: spill bounded chunks and merge with bounded fan-in</span></h3><div class="bilingual"><div class="lang-zh"><p>第 2 组图中的 local sum 遇到高基数 GROUP BY 时，不能让 HashMap 无限制增长。下面是<strong>仅使用标准库的可运行 Java17 摘录</strong>。输入行已经鉴权、固定 snapshot、精确过滤，并应用了应生效的删除；分组键长度有上限，金额非空且以整数分表示。算法先对最多 B=maxRows 行排序，把同键金额相加，写成有序临时文件（run）；随后每次最多合并 F=fanIn 份文件，直到得到一份完整候选结果。国家列通常只有少数取值，这个算法也能处理取值更多、但键长度仍有上限的分组。</p></div><div class="lang-en"><p>The local sum in deck 2 must not grow a hash map without bound for high-cardinality GROUP BY. This <strong>runnable Java17 excerpt uses only the standard library</strong>. Input rows are already authorized, snapshot-bound, exactly filtered and delete-aware; values are non-null integer cents with bounded keys. Sort and reduce at most B=maxRows rows per run, then merge at most F=fanIn runs per wave until one complete candidate remains. Country normally has few groups; the same algorithm supports higher-cardinality bounded keys.</p></div></div><pre data-kind="runnable" data-language="Java 17" data-source="ExternalAggregate.java:external"><code>static Path aggregate(Iterator&lt;Row&gt; input, int maxRows, int fanIn, Path job)
         throws IOException {
-    if (maxRows &lt; 1 || fanIn &lt; 2) throw new IllegalArgumentException(&quot;budget&quot;);
+    if (maxRows &lt; 1 || fanIn &lt; 2) {
+        throw new IllegalArgumentException(&quot;budget&quot;);
+    }
+
     Files.createDirectory(job); // unique attempt; never overwrite another job
     Path stage = Files.createDirectory(job.resolve(&quot;stage-0&quot;));
     long count = 0;
     while (input.hasNext()) {
         List&lt;Row&gt; block = new ArrayList&lt;&gt;();
-        while (block.size() &lt; maxRows &amp;&amp; input.hasNext()) block.add(input.next());
+        while (block.size() &lt; maxRows &amp;&amp; input.hasNext()) {
+            block.add(input.next());
+        }
         block.sort(Comparator.comparing(Row::key));
         writeChunk(block, stage.resolve(&quot;run-&quot; + count++));
     }
-    if (count == 0) return Files.createFile(stage.resolve(&quot;run-0&quot;));
+    if (count == 0) {
+        return Files.createFile(stage.resolve(&quot;run-0&quot;));
+    }
+
     for (int pass = 1; count &gt; 1; pass++) {
         Path next = Files.createDirectory(job.resolve(&quot;stage-&quot; + pass));
         long outputs = 0;
@@ -347,20 +355,27 @@
         stage = next;
         count = outputs;
     }
+
     Path candidate = stage.resolve(&quot;run-0&quot;);
-    try (InputStream verify = Files.newInputStream(candidate)) { verify.read(); }
+    try (InputStream verify = Files.newInputStream(candidate)) {
+        verify.read();
+    }
     return candidate; // readable now; publication/retention is the caller&#x27;s job
 }</code></pre><div class="bilingual"><div class="lang-zh"><p>count 记录本轮应有的有序文件数量，归并时按预期的 run-i 逐一打开，不根据“目录里还剩哪些文件”猜测输入是否完整。少一份输入就失败。返回最终候选前也要实际打开读取，因此只有一个 run、无需归并时，丢失文件也不会被漏过。但这只能证明检查当时可读，交接后仍可能发生删除；发布层还须保护对象标识、保留期限，并协调垃圾回收隔离机制（GC fence）。B 限制块内存，F 限制文件句柄、缓冲区和堆中的候选记录；内存中只保存当前归并组的路径，不再另存全部文件路径。下一轮全部完成后，才清理上一轮；发生异常时不返回可发布的结果。</p></div><div class="lang-en"><p>The recorded count defines the complete input set; open expected run-i identities rather than infer completeness from a directory listing. Missing input fails. Open/read the final candidate before return, including a single run with no merge wave. This momentary check cannot prevent deletion after handoff; publication still owns identity, retention and GC fencing. B bounds chunk storage, while F bounds handles, buffers and heap heads; retain paths only for the current group. Delete a wave only after its successor completes. Any exception returns no publishable result.</p></div></div><pre data-kind="runnable" data-language="Java 17" data-source="ExternalAggregate.java:merge"><code>static void merge(List&lt;Path&gt; runs, Path output) throws IOException {
     PriorityQueue&lt;Head&gt; queue = new PriorityQueue&lt;&gt;(
             Comparator.comparing((Head h) -&gt; h.row().key())
                     .thenComparingInt(Head::reader));
+
     try (RunReaders readers = new RunReaders(runs);
          BufferedWriter out = Files.newBufferedWriter(output,
                  StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)) {
         for (int i = 0; i &lt; runs.size(); i++) {
             Row row = readRow(readers.get(i));
-            if (row != null) queue.add(new Head(i, row));
+            if (row != null) {
+                queue.add(new Head(i, row));
+            }
         }
+
         String key = null;
         long sum = 0;
         while (!queue.isEmpty()) {
@@ -372,10 +387,15 @@
             }
             key = row.key();
             sum = Math.addExact(sum, row.cents());
+
             Row next = readRow(readers.get(head.reader()));
-            if (next != null) queue.add(new Head(head.reader(), next));
+            if (next != null) {
+                queue.add(new Head(head.reader(), next));
+            }
         }
-        if (key != null) writeRow(out, new Row(key, sum));
+        if (key != null) {
+            writeRow(out, new Row(key, sum));
+        }
     }
 }</code></pre><div class="bilingual"><div class="lang-zh"><p>优先队列为每个 run 最多保留一条头部记录。每次取出最小 key，累加金额，再从同一来源补入下一条；同一个 key 即使分散在所有 run 中，最终也只输出一条记录。完整源码 <a href="../examples/ch43/ExternalAggregate.java">ExternalAggregate.java</a> 包含 writeChunk 的同键归并、资源关闭和驱动程序。设初始文件数 R=ceil(N/B)，约需 ceil(log<sub>F</sub>R) 轮归并；不计压缩和局部聚合缩减，每轮近似完整读写输入一次。还要为临时磁盘空间、查询截止时间、取消和磁盘写满分别留出预算或定义失败行为。</p><p><strong>简化边界：</strong>key 限 1–32 个 ASCII 字符；真实引擎要按字节分配内存，不能只数行数。所有中间和都必须在 long 范围内，addExact 溢出就立即失败，即使后续负值可能抵消也不继续。这段示例只实现本机外部排序归并，不提供表提交或分布式 exactly-once 保证。Worker 重试或推测执行时，Query 对每个 (snapshot, split, operator-version) 只接纳一个成功 attempt 的完整结果；把两个 attempt 的结果都做 SUM，会把同一分片计算两遍。</p></div><div class="lang-en"><p>Keep at most one head per run. Pop the least key, accumulate, and refill from that reader; one key spread across all runs becomes one output. The <a href="../examples/ch43/ExternalAggregate.java">full source</a> includes chunk reduction, resource handling and the driver. With R=ceil(N/B) initial runs, about ceil(log<sub>F</sub>R) waves are needed. Before compression/local reduction, each wave reads and writes the input once. Budget scratch space, deadlines, cancellation and disk-full failure.</p><p><strong>Scope:</strong> keys have 1–32 ASCII characters; real engines allocate bytes, not just row counts. Every intermediate sum must fit long; addExact aborts on overflow even if later negatives could cancel it. This local example provides no table commit or distributed exactly-once guarantee. Query must accept one complete successful attempt per (snapshot, split, operator-version); summing both speculative attempts doubles a split.</p></div></div><table><thead><tr><th><span class="lang-zh">轨迹</span><span class="lang-en">Trace</span></th><th><span class="lang-zh">结果与边界</span><span class="lang-en">Result and boundary</span></th></tr></thead><tbody><tr><td>US:7, CN:3, US:-2, JP:9, CN:4, US:5; B=1, F=2</td><td><span class="lang-zh">6 份有序文件经过 3 轮归并，得到 CN:7 / JP:9 / US:10；同一个 key 跨块出现也不会丢失</span><span class="lang-en">6 runs, 3 waves: CN:7 / JP:9 / US:10; cross-run keys are preserved</span></td></tr><tr><td><span class="lang-zh">run-0 落盘后丢失，包括 B=9、3 行输入只生成一份 run、无需归并的情形</span><span class="lang-en">run-0 disappears after spill, including 3 rows with B=9 and no merge wave</span></td><td><span class="lang-zh">打开预期输入或最终候选时失败；不返回少算的结果，也不返回已不存在的文件路径</span><span class="lang-en">Opening expected input/final candidate fails; return neither partial sums nor a missing path</span></td></tr><tr><td>Long.MAX_VALUE + 1 / fanIn=1</td><td><span class="lang-zh">金额溢出时明确失败；fanIn=1 在开始前就被拒绝，避免归并轮次永不收敛</span><span class="lang-en">The first aborts; the second is rejected before work to avoid nonconverging waves</span></td></tr></tbody></table></section>
 
@@ -675,32 +695,37 @@
         <figcaption><span class="lang-zh">红线表示 Catalog 返回冲突。本地超时只能说明结果未知（UNKNOWN），不能证明服务端提交失败。两种情况都先查询 b17；冲突还需刷新并验证。UNKNOWN 未解决前，不能重新追加或删除候选输出。</span><span class="lang-en">The red arrow is a Catalog conflict reply; a local timeout yields UNKNOWN without proving server failure. Resolve b17 first, refresh/validate conflicts, and protect unresolved output.</span></figcaption>
       </div>
     </figure><div class="bilingual"><div class="lang-zh"><p class="col-kicker">中文</p><p>湖仓中的“表格式”规定如何用快照、schema、分区、文件和删除等元数据描述一张表。Catalog 提供当前元数据入口，计算引擎执行读写；表格式本身不在 Query 和 Object Files 之间转发字节。本章以 Iceberg v2 的 snapshot/manifest 机制为例 <a href="#ref-6">[6]</a>，说明原子发布和恢复分别需要承担什么职责。其他格式可能采用不同协议，因此不能把这幅 Catalog CAS 图直接当作所有 Hudi 写入的实现。</p><p>正常写入先固定基线 s40 和批次 b17。提交器（Committer）生成唯一对象键，上传不可变数据文件，再上传引用它们的 manifest 和新元数据树。所有依赖对象都已完成后，才请求 Catalog：当前指针仍是 meta40 时，更新为 meta41。条件更新成功后，提交结果才沿 Catalog→Committer→Writer 返回写入方。图中前两步的 upload completion 只确认存储完成，第三步才确认表已可见；文件名最新或桶中文件最多，都不能用来判断当前表版本。</p><p>两个写入方都基于 s40 时，一方先发布 s41，另一方的条件更新就会失败。失败的一方需要刷新元数据入口，检查自己的新增能否安全追加、是否与并发删除或重写冲突，再构建新的候选提交。Iceberg 可靠性文档强调原子元数据指针交换和乐观并发重试 <a href="#ref-5">[5]</a>，并非允许失败后直接覆盖 Catalog。普通追加可能复用已写文件，替换和删除则必须验证输入仍然有效。控制面容量还要考虑重试次数、退避和提交并发上限。</p><p>最危险的窗口是 CAS 已成功，确认回复（ACK）却丢了。Writer 只能得到 UNKNOWN；若重新上传并追加 b17，就可能重复计算整批。可信提交记录需要保留 b17，或等价的稳定输入范围标识，以便恢复时查询它是否已被接受。即使 current 已从 s41 前进到 s42，也不能仅凭当前指针不再指向自己的版本，就认定提交失败。历史证据若已被裁剪，又没有可查询的幂等结果，就应保留输出并转人工核对，不能猜测尚未提交。表格式提供原子快照，也不自动保证业务 event_id 唯一。</p><p>需要区分三个崩溃窗口：数据已写而元数据未完成，只留下尚未引用的候选；元数据已写而 Catalog 未发布，留下完整但不可见的候选；Catalog 已发布而客户端没收到回复，提交已经可见，但客户端不知道结果。前两类可以恢复发布，或等待满足条件后回收；第三类必须先查询提交标识。外部事件位点与表提交若不在同一事务中，就要先确认表已持久提交，再推进位点，并用稳定 ID 对重放去重。先推进位点再写表，会让这个故障窗口造成永久漏数。</p></div><div class="lang-en"><p class="col-kicker">English</p><p>A table format specifies snapshots, schemas, partition/files/deletes, not a byte-forwarding service. Catalog resolves metadata and engines execute reads/writes. The diagram models Iceberg v2 snapshot/manifest publication <a href="#ref-6">[6]</a>; other formats can use different protocols.</p><p>Fix s40 and batch b17, upload unique immutable data and its metadata tree, then conditionally change meta40 to meta41 only if the base still matches. Upload completion is storage confirmation; catalog publication makes the table visible. Return through Committer only afterward. Filename recency and bucket contents do not define the current table.</p><p>If two writers share s40, the second loses the conditional update after s41 is published. Refresh, validate compatibility and construct a new commit rather than overwrite Catalog. Iceberg documents atomic pointer replacement and optimistic retry <a href="#ref-5">[5]</a>. Safe appends may reuse files; replacements/deletes require stronger input validation. Bound retries and commit concurrency.</p><p>A lost ACK after successful CAS creates UNKNOWN. Re-appending b17 can duplicate the batch. Preserve trusted batch/range identity in recoverable commit history or an equivalent idempotent result. A newer current pointer is not proof that b17 failed. Without retained evidence, keep output and escalate rather than guess. Atomic snapshots do not enforce business event_id uniqueness.</p><p>Distinguish data-only candidates, complete metadata not yet published, and published commits with lost replies. Recover publication or safely collect the first two; resolve identity first for the third. When input offsets and table commits are separate, advance progress only after confirmed table durability and deduplicate replay. Advancing first can lose data.</p></div></div><h3><span class="lang-zh">关键实现：快照指针和批次标识在同一事务提交</span><span class="lang-en">Implementation: commit pointer and batch identity together</span></h3><div class="bilingual"><div class="lang-zh"><p>第 4 组的 b17 怎样在故障后查回结果？下面给出<strong>自定义 Catalog 的教学伪代码</strong>，并非 Iceberg API。catalog(table_id PRIMARY KEY, current) 和 accepted(table_id, batch_id, digest, snapshot) 保存在<strong>同一个支持事务的权威数据库</strong>中；accepted 的 (table_id,batch_id) 唯一，所有字段非空。Catalog 服务负责鉴权、串行化条件更新，并在一个事务中提交两张表。恢复查询必须从权威数据库一致读取。摘要 digest 绑定表、操作、输入分区范围和处理版本，重试时保持不变；安全刷新基线（rebase）后，可以重新构建 candidate。</p></div><div class="lang-en"><p>How is b17 recoverable? This is <strong>teaching pseudocode for a custom Catalog, not an Iceberg API</strong>. Store catalog(table_id PRIMARY KEY, current) and accepted(table_id,batch_id,digest,snapshot) in <strong>one authoritative transactional database</strong>, with a non-null unique (table_id,batch_id). The authorized Catalog serializes conditional updates and atomically commits both tables; recovery uses authoritative reads. Bind digest to table, operation, input ranges and transform version. Retain it across retries; a safe rebase may rebuild candidate metadata.</p></div></div><pre data-kind="pseudocode" data-language="Pseudocode" data-source="publish.pseudo"><code>publish(table, batch, digest, expected, candidate):
-  # All candidate objects are durable; batch identifies one logical operation.
-  BEGIN TRANSACTION
-    known = SELECT digest, snapshot FROM accepted
-            WHERE table_id = table AND batch_id = batch
-    if known exists:
-      require known.digest == digest
-      COMMIT; return known.snapshot
-    changed = UPDATE catalog SET current = candidate
-              WHERE table_id = table AND current = expected
-    if changed != 1:
-      ROLLBACK; return CONFLICT
-    INSERT accepted(table_id, batch_id, digest, snapshot)
-           VALUES(table, batch, digest, candidate)
-    # UNIQUE(table_id, batch_id); any insert failure rolls back UPDATE too.
-  COMMIT
-  return candidate
+    # All candidate objects are durable; batch identifies one logical operation.
+    BEGIN TRANSACTION
+        known = SELECT digest, snapshot FROM accepted
+                WHERE table_id = table AND batch_id = batch
+        if known exists:
+            require known.digest == digest
+            COMMIT;
+            return known.snapshot
+
+        changed = UPDATE catalog SET current = candidate
+                  WHERE table_id = table AND current = expected
+        if changed != 1:
+            ROLLBACK;
+            return CONFLICT
+
+        INSERT accepted(table_id, batch_id, digest, snapshot)
+               VALUES(table, batch, digest, candidate)
+        # UNIQUE(table_id, batch_id); any insert failure rolls back UPDATE too.
+    COMMIT
+    return candidate
 
 on timeout or CONFLICT:
-  known = strongly_read_accepted(table, batch)
-  if known exists:
-    require known.digest == digest
-    return known.snapshot
-  # Absence does not rule out an in-flight transaction.
-  retry SAME batch + digest within budget, or return UNKNOWN
-  # Rebase only after refreshing and validating operation-specific assumptions.
-  # Never delete output while publication can still complete.</code></pre><div class="bilingual"><div class="lang-zh"><p>正常从 meta40 发布到 meta41 时，b17 的结果和指针一起提交。ACK 丢失后，即使 current 已到 meta42，也能通过 accepted 找回 meta41。相同 b17 若带了不同摘要，必须拒绝；标识冲突或事务中断时，指针更新也必须回滚，然后重新查询批次结果。死锁或序列化失败时，在重试预算内重跑整个事务。accepted 的保留期要覆盖重试和恢复窗口；超出窗口的旧请求必须明确拒绝，不能当作新批次接受。</p><p>一次查询没有找到 b17，并不能证明提交最终失败，因为旧事务可能仍在执行。可以用相同标识继续幂等重试，或保持 UNKNOWN。若要回收候选输出，服务端必须先终结或隔离这次 attempt，保证它以后也无法发布，再检查引用和安全窗口。每次重建候选，还要分别验证追加、DELETE 或 rewrite 的前提；通用事务只能保证原子性，不能证明过期的合并结果仍可安全发布。<a href="#ref-5">[5 Retry validation]</a></p></div><div class="lang-en"><p>For meta40→meta41, b17’s result commits with the pointer. A lost ACK is resolved through accepted even after current reaches meta42. Reject a changed digest for b17. An identity conflict or aborted transaction rolls back the pointer, then resolves the identity; retry the whole transaction for bounded deadlock/serialization failures. Retain accepted through the retry/recovery horizon and explicitly reject identities older than that horizon.</p><p>An absent lookup does not prove failure while an old transaction can still execute. Retry with the same identity or remain UNKNOWN. Before collecting output, the service must terminate/fence that attempt against future publication and check reachability and safety windows. Rebuilt candidates still need append/DELETE/rewrite-specific validation; the transaction does not validate a stale compaction automatically. <a href="#ref-5">[5 Retry validation]</a></p></div></div></section>
+    known = strongly_read_accepted(table, batch)
+    if known exists:
+        require known.digest == digest
+        return known.snapshot
+
+    # Absence does not rule out an in-flight transaction.
+    retry SAME batch + digest within budget, or return UNKNOWN
+    # Rebase only after refreshing and validating operation-specific assumptions.
+    # Never delete output while publication can still complete.</code></pre><div class="bilingual"><div class="lang-zh"><p>正常从 meta40 发布到 meta41 时，b17 的结果和指针一起提交。ACK 丢失后，即使 current 已到 meta42，也能通过 accepted 找回 meta41。相同 b17 若带了不同摘要，必须拒绝；标识冲突或事务中断时，指针更新也必须回滚，然后重新查询批次结果。死锁或序列化失败时，在重试预算内重跑整个事务。accepted 的保留期要覆盖重试和恢复窗口；超出窗口的旧请求必须明确拒绝，不能当作新批次接受。</p><p>一次查询没有找到 b17，并不能证明提交最终失败，因为旧事务可能仍在执行。可以用相同标识继续幂等重试，或保持 UNKNOWN。若要回收候选输出，服务端必须先终结或隔离这次 attempt，保证它以后也无法发布，再检查引用和安全窗口。每次重建候选，还要分别验证追加、DELETE 或 rewrite 的前提；通用事务只能保证原子性，不能证明过期的合并结果仍可安全发布。<a href="#ref-5">[5 Retry validation]</a></p></div><div class="lang-en"><p>For meta40→meta41, b17’s result commits with the pointer. A lost ACK is resolved through accepted even after current reaches meta42. Reject a changed digest for b17. An identity conflict or aborted transaction rolls back the pointer, then resolves the identity; retry the whole transaction for bounded deadlock/serialization failures. Retain accepted through the retry/recovery horizon and explicitly reject identities older than that horizon.</p><p>An absent lookup does not prove failure while an old transaction can still execute. Retry with the same identity or remain UNKNOWN. Before collecting output, the service must terminate/fence that attempt against future publication and check reachability and safety windows. Rebuilt candidates still need append/DELETE/rewrite-specific validation; the transaction does not validate a stale compaction automatically. <a href="#ref-5">[5 Retry validation]</a></p></div></div></section>
 
 <section><h2><span class="lang-zh">5 · 快照读取：固定一份完整文件集合</span><span class="lang-en">5 · Snapshot reads pin one complete file set</span></h2><figure class="deck">
       <div class="slide">

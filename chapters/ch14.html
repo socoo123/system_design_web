@@ -107,36 +107,41 @@
         <figcaption><span class="lang-zh">500,000×300 MB=150 TB/天，上传带宽平均约为 13.9 Gb/s，按 5 倍峰值约为 69.4 Gb/s。为了让 API 不必转发这条大流量，本章选择客户端直传。</span><span class="lang-en">500,000 × 300 MB = 150 TB/day, about 13.9 Gb/s average and 69.4 Gb/s at a 5× peak. This byte budget favors direct upload.</span></figcaption>
       </div>
     </figure><div class="bilingual"><div class="lang-zh"><p>创建视频时，<code>POST /videos</code> 用上传者身份和幂等键（owner,idempotency_key）组成唯一约束，保存视频标识 video_id 与请求摘要。同一键、同一摘要返回原收据；摘要不同则返回 409。如果并发请求争用唯一键，失败方先回滚，再用一条新语句读出已成功保存的记录。提交响应丢失时，客户端用原键重试，避免创建第二部视频。服务端先指定 bucket/key、上传标识 upload_id、源版本 source_version、期望大小和完整对象校验值，再为该 key 签发限时上传能力。[1][15]</p><p>分块上传（multipart）把文件切成连续字节块，完成操作 Complete 按分块序号 part number 拼成对象。每块不必能独立解码，也不必对齐 GOP。没有完成的分块上传要显式终止，或由生命周期规则清理。传完后，客户端调用 <code>POST /videos/{id}/uploads/{upload_id}/complete</code>；对象完成事件也只触发同一套核实流程，不能直接把视频标成可播。[2][3]</p></div><div class="lang-en"><p><code>POST /videos</code> persists video_id and a request digest under unique (owner,idempotency_key). Equal intent recovers its receipt; a different digest returns 409. After a uniqueness race, roll back and read the winner in a new statement. A lost commit reply requires same-key retry. The server selects bucket/key, upload_id, source_version, expected size and full-object checksum before signing scoped access. [1][15]</p><p>Multipart parts are contiguous bytes assembled by part number; they need not decode or align GOPs. Abort or lifecycle-clean incomplete uploads. After completion, call <code>POST /videos/{id}/uploads/{upload_id}/complete</code>. Events merely trigger the same verification, never playback readiness. [2][3]</p></div></div><h3><span class="lang-zh">实现 1：在同一事务中固定源版本并保存唯一任务</span><span class="lang-en">Implementation 1: source binding and unique work co-commit</span></h3><pre data-language="Pseudocode · verify and bind" data-kind="pseudocode" data-source="complete.pseudo"><code>complete(owner, video_id, upload_id, physical_version):
-  u = primary.read_upload(video_id, upload_id)
-  require u != null  # Missing upload: 404; a failed read: 503.
-  require u.owner == owner and physical_version not in {null, "null"}
-  if u.bound_version != null:
-    return u.receipt if u.bound_version == physical_version else 409
-  # Upload rows protect their server-assigned key from GC until retired.
-  p = HEAD(u.bucket, u.key, versionId=physical_version, checksumMode=ENABLED)
-  require p.size == u.expected_size
-  require p.checksum.algorithm == CRC32 and p.checksum.type == FULL_OBJECT
-  require p.checksum == u.expected_full_object_checksum
-  BEGIN
-    v = SELECT Video WHERE id = video_id FOR UPDATE
-    u = SELECT Upload WHERE id = upload_id FOR UPDATE
-    require u.owner == owner
+    u = primary.read_upload(video_id, upload_id)
+    require u != null  # Missing upload: 404; a failed read: 503.
+    require u.owner == owner and physical_version not in {null, "null"}
     if u.bound_version != null:
-      ROLLBACK
-      return u.receipt if u.bound_version == physical_version else 409
-    require u.state == UPLOADING and u.expires_at &gt; db_clock()
-    require v.active_upload == upload_id and v.visibility != REMOVED
-    source = (video_id, u.source_version, u.bucket, u.key, physical_version,
-              p.size, p.checksum)
-    INSERT SourceBinding(source)  # unique (video_id, source_version)
-    UPDATE Upload SET state = UPLOADED, bound_version = physical_version,
-                      receipt = source WHERE id = upload_id
-    J = (video_id, u.source_version, v.target_recipe)
-    UPDATE Video SET target = J WHERE id = video_id
-    INSERT Job(J, state=QUEUED, epoch=0, attempts=0, next_at=db_clock())
-      ON CONFLICT (video_id, source_version, recipe_version) DO NOTHING
-  COMMIT
-  return 202 with source  # Stored source receipt; not a playback promise.</code></pre>
+        return u.receipt if u.bound_version == physical_version else 409
+
+    # Upload rows protect their server-assigned key from GC until retired.
+    p = HEAD(u.bucket, u.key, versionId=physical_version, checksumMode=ENABLED)
+    require p.size == u.expected_size
+    require p.checksum.algorithm == CRC32 and p.checksum.type == FULL_OBJECT
+    require p.checksum == u.expected_full_object_checksum
+
+    BEGIN
+        v = SELECT Video WHERE id = video_id FOR UPDATE
+        u = SELECT Upload WHERE id = upload_id FOR UPDATE
+        require u.owner == owner
+        if u.bound_version != null:
+            ROLLBACK
+            return u.receipt if u.bound_version == physical_version else 409
+
+        require u.state == UPLOADING and u.expires_at &gt; db_clock()
+        require v.active_upload == upload_id and v.visibility != REMOVED
+        source = (video_id, u.source_version, u.bucket, u.key, physical_version,
+                  p.size, p.checksum)
+        INSERT SourceBinding(source)  # unique (video_id, source_version)
+        UPDATE Upload SET state = UPLOADED, bound_version = physical_version,
+                          receipt = source WHERE id = upload_id
+
+        J = (video_id, u.source_version, v.target_recipe)
+        UPDATE Video SET target = J WHERE id = video_id
+        INSERT Job(J, state=QUEUED, epoch=0, attempts=0, next_at=db_clock())
+            ON CONFLICT (video_id, source_version, recipe_version) DO NOTHING
+    COMMIT
+
+    return 202 with source  # Stored source receipt; not a playback promise.</code></pre>
 <div class="bilingual"><div class="lang-zh"><p>这段伪代码接收已认证的上传者身份 owner，以及服务器分配的上传标识。<code>require</code> 检查失败就中止操作；如果已经进入事务，则先回滚。HEAD 请求必须指定非 null 的物理 versionId，检查实际大小 size，并确认存储校验的<strong>算法、FULL_OBJECT 类型和校验值</strong>都与预期一致。本例明确选择 CRC32 完整对象校验；multipart 的 ETag 不能当作整文件 MD5，SHA-256 复合校验也不等于整文件 SHA-256。[11][13] API 只读取元数据，媒体字节由转码和验证工作进程读取。</p><p>上传桶必须提前配置并持续启用版本化。预签名 URL 在到期前可以重用，但再次上传只产生另一个物理版本；已经绑定的 GET 始终读取原版本，不会转向该 key 的当前版本。上传能力不包含删除版本或修改版本配置的权限，上传收据也不授予源文件读取或播放权限。服务把源绑定和任务记录 Job 的插入放进同一个主库事务；事件与每分钟扫描只按任务键 J 唤醒工作，不依赖数据库和队列的双写来保证原子性。归属不符返回 403，上传不存在返回 404，过期返回 410；存储或数据库出错返回 503，校验失败返回 422，已绑定其他版本返回 409。若无法确认 COMMIT 是否成功，应重新连接并读取 Upload 收据，不能猜测提交失败。[1][11][14]</p></div><div class="lang-en"><p>This is pseudocode for an authenticated owner and server-assigned upload. Failed <code>require</code> aborts; transactional failures roll back. HEAD pins a non-null physical version and compares actual size plus checksum <strong>algorithm, FULL_OBJECT type and value</strong>. This example explicitly uses full-object CRC32. Multipart ETag is not whole-file MD5, and composite SHA-256 is not whole-file SHA-256. [11][13] API reads metadata; encoding/verifier workers read media.</p><p>Versioning is configured before use and remains enabled. Reusing an unexpired signed URL creates another physical version; bound GETs never drift to the current key. Upload permissions cannot delete versions or change versioning. The receipt grants neither source GET nor playback access. Binding and Job insertion share one primary transaction. Events and one-minute scans wake J rather than trusting database/queue dual writes. Return 403 for wrong ownership, 404 for missing upload, 410 for expiry, 503 for storage/DB errors, 422 for failed validation and 409 for conflicting completion. Unknown COMMIT requires a fresh read of the stored receipt. [1][11][14]</p></div></div>
 </section>
 <section>
@@ -209,93 +214,112 @@
       </div>
     </figure><table><thead><tr><th><span class="lang-zh">记录 / 状态</span><span class="lang-en">Record / state</span></th><th><span class="lang-zh">保证与失败行为</span><span class="lang-en">Guarantee and failure behavior</span></th></tr></thead><tbody><tr><td><span class="lang-zh">上传记录 Upload：UPLOADING→UPLOADED / EXPIRED</span><span class="lang-en">Upload: UPLOADING→UPLOADED / EXPIRED</span></td><td><span class="lang-zh">UPLOADED 只承诺完整源版本已固定。过期清理和 complete 都按 Video→Upload 的顺序锁定同一组记录，先标记退出使用的状态，再删除源对象。</span><span class="lang-en">UPLOADED only promises a complete source version. Expiry/complete share Video→Upload locks; mark retirement before deleting.</span></td></tr><tr><td><span class="lang-zh">任务 Job：QUEUED→RUNNING→DONE</span><span class="lang-en">Job: QUEUED→RUNNING→DONE</span></td><td><span class="lang-zh">临时错误进入 RETRY_WAIT；预算耗尽或源损坏进入 FAILED；目标已被替代则进入 OBSOLETE。DONE 与可播指针 ready 同事务提交，任务失败不会清除旧的可播版本。</span><span class="lang-en">Transient errors enter RETRY_WAIT; exhausted/invalid input is FAILED; superseded targets are OBSOLETE. DONE co-commits with ready; failure keeps any old playable version.</span></td></tr><tr><td><span class="lang-zh">产物构建 Build：(J,epoch)，BUILDING→PUBLISHED / DELETING</span><span class="lang-en">Build: (J,epoch), BUILDING→PUBLISHED / DELETING</span></td><td><span class="lang-zh">每个领取代次使用独立前缀，保存根清单 root 和确切的对象清单。进入 PUBLISHED 后，普通工作进程不能改写或删除这些字节；进入 DELETING 后则永远不能发布。</span><span class="lang-en">Isolated prefix per epoch; persist root and exact object inventory. Ordinary workers cannot rewrite/delete published bytes, and DELETING can never publish.</span></td></tr><tr><td><span class="lang-zh">视频 Video：target、ready_version、visibility</span><span class="lang-en">Video: target, ready_version, visibility</span></td><td><span class="lang-zh">新目标 target 处理中时，旧可播版本 ready 仍可服务；首次发布前没有 ready，就返回处理中。下架状态 REMOVED 阻止新会话和迟到发布，已经发出的访问能力按单独策略撤销。</span><span class="lang-en">A new target can process while old ready serves; no first ready means processing. REMOVED denies new sessions and late publication; issued capabilities have a separate revocation policy.</span></td></tr></tbody></table>
 <h3><span class="lang-zh">实现 2：领取和续租怎样约束旧执行者</span><span class="lang-en">Implementation 2: claims, renewal and stale workers</span></h3><pre data-language="Pseudocode · claim with epoch" data-kind="pseudocode" data-source="claim.pseudo"><code>claim(J):
-  BEGIN  # One PostgreSQL primary; the same lock order for publish and GC.
-    v = SELECT Video WHERE id = J.video_id FOR UPDATE
-    j = SELECT Job WHERE key = J FOR UPDATE
-    if j.state in {DONE, FAILED, OBSOLETE}:
-      COMMIT; return TERMINAL
-    if v.target != J or v.visibility == REMOVED:
-      UPDATE Job SET state = OBSOLETE WHERE key = J
-      COMMIT; return TERMINAL
-    now = db_clock()  # Evaluate after obtaining row locks.
-    due = (j.state in {QUEUED, RETRY_WAIT} and j.next_at &lt;= now)
-          or (j.state == RUNNING and j.lease_until &lt;= now)
-    if not due:
-      COMMIT; return NO_CLAIM
-    if j.attempts &gt;= 3:
-      UPDATE Job SET state = FAILED, error = "attempt budget exhausted"
-        WHERE key = J
-      COMMIT; return TERMINAL
-    epoch = j.epoch + 1
-    UPDATE Job SET state = RUNNING, epoch = epoch,
-                   attempts = attempts + 1, lease_until = now + 120s
-      WHERE key = J
-    INSERT Build(J, epoch, state=BUILDING, prefix="outputs/J/epoch/")
-  COMMIT
-  return (J, epoch, source_binding(J), immutable_recipe(J))</code></pre>
+    BEGIN  # One PostgreSQL primary; the same lock order for publish and GC.
+        v = SELECT Video WHERE id = J.video_id FOR UPDATE
+        j = SELECT Job WHERE key = J FOR UPDATE
+        if j.state in {DONE, FAILED, OBSOLETE}:
+            COMMIT;
+            return TERMINAL
+        if v.target != J or v.visibility == REMOVED:
+            UPDATE Job SET state = OBSOLETE WHERE key = J
+            COMMIT;
+            return TERMINAL
+
+        now = db_clock()  # Evaluate after obtaining row locks.
+        due = (j.state in {QUEUED, RETRY_WAIT} and j.next_at &lt;= now)
+              or (j.state == RUNNING and j.lease_until &lt;= now)
+        if not due:
+            COMMIT;
+            return NO_CLAIM
+        if j.attempts &gt;= 3:
+            UPDATE Job SET state = FAILED, error = "attempt budget exhausted"
+                WHERE key = J
+            COMMIT;
+            return TERMINAL
+
+        epoch = j.epoch + 1
+        UPDATE Job SET state = RUNNING, epoch = epoch,
+                       attempts = attempts + 1, lease_until = now + 120s
+            WHERE key = J
+        INSERT Build(J, epoch, state=BUILDING, prefix="outputs/J/epoch/")
+    COMMIT
+
+    return (J, epoch, source_binding(J), immutable_recipe(J))</code></pre>
 <div class="bilingual"><div class="lang-zh"><p>行锁在短事务结束时释放，不跨越编码或网络调用。领取、发布和产物清理都按 Video→Job→Build 的顺序加锁，依靠单主库行锁与唯一主键约束并发，本地 Set 无法替代这些保证。数据库租约有效期为 120 秒，每 30 秒尝试条件续租：任务必须仍是 RUNNING，领取代次仍相同，而且租约尚未过期，才允许延期。续租失败或结果未知时就停止发布。代次能让数据库拒绝旧执行者提交，却不能取消它仍在运行的 CPU 任务，或收回已经发出的对象 PUT。[14]</p><p>队列消息只负责唤醒，持久任务保存在 Job 中，因此领取结果为 TERMINAL 或 NO_CLAIM 时可以确认消息。恢复扫描会找出已到执行时间的 QUEUED、RETRY_WAIT，以及租约已过期的 RUNNING，再发送同一个任务键 J；不能因为曾经发过唤醒，就永久跳过未完成工作。每次领取都消耗一次预算，领取后立即崩溃也算，最多领取三次。错误处理沿用相同锁序，只能更新仍处于 RUNNING 的同一代次：源损坏或预算耗尽设为 FAILED；临时错误设为 RETRY_WAIT，并持久保存采用指数退避和随机抖动计算的下次执行时间 next_at。确认提交后才确认队列消息；数据库结果未知时不确认。终态任务进入可审查的死信视图 Dead letters，人工重新驱动时要记录操作并增加预算，不能把 epoch 清零后当成新任务。</p></div><div class="lang-en"><p>Locks end with short transactions, never span encoding/network calls. Lock order is Video→Job→Build on one primary, with real row locks and primary keys. Renew the 120s DB lease every 30s only while RUNNING, at the same epoch and before expiry. Failed/unknown renewal stops publication. Epoch fencing rejects stale commits; it cannot cancel old CPU work or issued PUTs. [14]</p><p>The queue only wakes: TERMINAL/NO_CLAIM may ACK because Job remains durable. Scan due QUEUED/RETRY_WAIT and expired RUNNING jobs and re-wake J, even after an earlier wake was sent. Each claim consumes one of three attempts, including crashes. Error handling uses the same lock order and updates only the still-RUNNING matching epoch: invalid/exhausted work becomes FAILED; transient failure commits RETRY_WAIT and next_at with exponential jitter. ACK only after that commit; unknown DB results do not ACK. Dead letters is an inspectable terminal-work view; reviewed redrive records an action and increases budget without resetting epoch.</p></div></div><h3><span class="lang-zh">实现 3：固定产物的物理版本，避免字节被覆盖</span><span class="lang-en">Implementation 3: pin physical output versions</span></h3><pre data-language="Pseudocode · immutable artifacts" data-kind="pseudocode" data-source="build.pseudo"><code>put_exact(prefix, name, bytes):
-  key = prefix + name
-  result = PUT(key, bytes, If-None-Match="*")
-  if result is 412 or result is UNKNOWN:
-    # A lost PUT response is not evidence of a failed write.
-    result = HEAD(key)  # A miss/error retries the conditional PUT later.
-  require result is SUCCESS and result.versionId not in {null, "null"}
-  ref = (bucket, key, result.versionId, len(bytes), SHA256(bytes))
-  actual = GET(ref.bucket, ref.key, versionId=ref.versionId)
-  require len(actual) == ref.size and SHA256(actual) == ref.sha256
-  return ref
+    key = prefix + name
+    result = PUT(key, bytes, If-None-Match="*")
+    if result is 412 or result is UNKNOWN:
+        # A lost PUT response is not evidence of a failed write.
+        result = HEAD(key)  # A miss/error retries the conditional PUT later.
+    require result is SUCCESS and result.versionId not in {null, "null"}
+
+    ref = (bucket, key, result.versionId, len(bytes), SHA256(bytes))
+    actual = GET(ref.bucket, ref.key, versionId=ref.versionId)
+    require len(actual) == ref.size and SHA256(actual) == ref.sha256
+    return ref
 
 build(claim):
-  J, epoch, source, recipe = claim
-  prefix = "outputs/J/epoch/"  # Different claim epochs never share keys.
-  source_bytes = GET(source.bucket, source.key, versionId=source.versionId)
-  require len(source_bytes) == source.size
-  require full_object_checksum(source_bytes) == source.checksum
-  refs = {}
-  # Heartbeat every 30s: renew only the same RUNNING epoch before expiry.
-  # A failed/unknown renewal stops publication; it cannot undo old I/O.
-  for output in encode_and_package(source_bytes, recipe):
-    refs[output.name] = put_exact(prefix, output.name, output.bytes)
-  require media_rungs(refs) == recipe.required_rungs
-  for playlist in recipe.playlists_in_leaf_to_root_order:
-    # Every child/init/media URI explicitly carries its own versionId.
-    bytes = render_playlist(playlist, versioned_cdn_uris(refs))
-    refs[playlist.name] = put_exact(prefix, playlist.name, bytes)
-  return Bundle(J, epoch, refs[recipe.root_playlist], refs)</code></pre>
+    J, epoch, source, recipe = claim
+    prefix = "outputs/J/epoch/"  # Different claim epochs never share keys.
+    source_bytes = GET(source.bucket, source.key, versionId=source.versionId)
+    require len(source_bytes) == source.size
+    require full_object_checksum(source_bytes) == source.checksum
+
+    refs = {}
+    # Heartbeat every 30s: renew only the same RUNNING epoch before expiry.
+    # A failed/unknown renewal stops publication; it cannot undo old I/O.
+    for output in encode_and_package(source_bytes, recipe):
+        refs[output.name] = put_exact(prefix, output.name, output.bytes)
+    require media_rungs(refs) == recipe.required_rungs
+
+    for playlist in recipe.playlists_in_leaf_to_root_order:
+        # Every child/init/media URI explicitly carries its own versionId.
+        bytes = render_playlist(playlist, versioned_cdn_uris(refs))
+        refs[playlist.name] = put_exact(prefix, playlist.name, bytes)
+
+    return Bundle(J, epoch, refs[recipe.root_playlist], refs)</code></pre>
 <div class="bilingual"><div class="lang-zh"><p>只在路径里写上版本号，并不能保护实际字节。本例按领取代次隔离对象 key，由桶策略强制使用 <code>If-None-Match: *</code>，而且工作进程没有 DeleteObject、删除版本或修改桶配置的权限。这样即使不同代次生成的编码结果不同，也不会互相覆盖。收到 412 或无法确认 PUT 结果时，要先读回实际字节进行比较，不能把“对象存在”当成“内容相同”。这里的 put_exact 使用单对象 PUT，遇到 409 可稍后重试条件 PUT；若使用 multipart 完成操作，遇到 409 则必须重新发起分块上传，两者的恢复方式不同。[12]</p><p>每个产物都保存桶、key、物理版本、大小和完整字节摘要，即 (bucket,key,versionId,size,SHA256)。生成顺序从叶子到根：先媒体和初始化数据，再子清单，最后根清单。<strong>每条 URI 都显式带上它自己的 versionId</strong>，不能指望自动继承父清单的查询参数。CDN 的缓存标识必须保留 versionId，并在回源时传给 Origin；其他授权参数按相应策略处理。任务尚未结束或仍在保留窗口内时，源绑定也会阻止源文件被垃圾回收（GC）。源桶和产物桶持续启用版本化，所以即使某个 key 后来出现新版本，已发布 URI 仍读取原来的字节。[11] 这里的 SHA256 由工作进程或验证器对完整字节计算，不是把 S3 multipart 的校验字段误当作完整 SHA256。[13]</p></div><div class="lang-en"><p>A version-like path alone does not protect bytes. Epochs isolate keys; bucket policy requires <code>If-None-Match: *</code>, and workers cannot delete objects/versions or change bucket configuration. Different epochs may produce different encodes safely. On 412/unknown reply, verify actual bytes rather than equating existence with equality. put_exact uses single-object PUT; retry a 409 conditionally. Multipart completion instead requires re-initiating the multipart upload after 409. [12]</p><p>Record (bucket,key,versionId,size,SHA256) for each artifact. Write media/init data, then leaf playlists, then root. <strong>Every URI explicitly includes its own versionId</strong>; parent query strings are not inherited. CDN cache identity retains and forwards versionId to Origin; handle authorization parameters separately. Source references also block source GC throughout unfinished work and retention. Both buckets stay versioned, so later current versions cannot change published reads. [11] SHA256 is computed over full bytes by workers/verifiers, not misread from an S3 multipart checksum field. [13]</p></div></div><h3><span class="lang-zh">实现 4：沿清单核实全部引用，再原子发布并完成任务</span><span class="lang-en">Implementation 4: validate closure, co-commit ready and done</span></h3><pre data-language="Pseudocode · verify and publish" data-kind="pseudocode" data-source="publish.pseudo"><code>publish(bundle):
-  J, epoch = bundle.J, bundle.epoch
-  # Trusted verifier walks actual playlists, not just the worker's list.
-  refs = parse_transitive_references_by_exact_GET(bundle.root)
-  require refs union {bundle.root} == set(bundle.refs.values())
-  for ref in refs union {bundle.root}:
-    require ref.key starts_with "outputs/J/epoch/"
-    require ref.versionId not in {null, "null"}
-    bytes = GET(ref.bucket, ref.key, versionId=ref.versionId)
-    require len(bytes) == ref.size and SHA256(bytes) == ref.sha256
-  require validate_rungs_timeline_and_decode(refs, immutable_recipe(J))
-  BEGIN
-    v = SELECT Video WHERE id = J.video_id FOR UPDATE
-    j = SELECT Job WHERE key = J FOR UPDATE
-    b = SELECT Build WHERE key = (J, epoch) FOR UPDATE
-    if j.state == DONE:
-      COMMIT; return ALREADY_DONE  # Never republish an old pointer.
-    require v.target == J and v.visibility != REMOVED
-    require j.state == RUNNING and j.epoch == epoch
-    require j.lease_until &gt; db_clock() and b.state == BUILDING
-    UPDATE Build SET state = PUBLISHED, root = bundle.root,
-                     inventory = refs union {bundle.root}, published_at = db_clock()
-      WHERE key = (J, epoch)
-    UPDATE Video SET ready_version = (J, epoch), ready_root = bundle.root
-      WHERE id = J.video_id
-    UPDATE Job SET state = DONE, result = (J, epoch) WHERE key = J
-  COMMIT
-  return PUBLISHED
+    J, epoch = bundle.J, bundle.epoch
+    # Trusted verifier walks actual playlists, not just the worker's list.
+    refs = parse_transitive_references_by_exact_GET(bundle.root)
+    require refs union {bundle.root} == set(bundle.refs.values())
+    for ref in refs union {bundle.root}:
+        require ref.key starts_with "outputs/J/epoch/"
+        require ref.versionId not in {null, "null"}
+        bytes = GET(ref.bucket, ref.key, versionId=ref.versionId)
+        require len(bytes) == ref.size and SHA256(bytes) == ref.sha256
+    require validate_rungs_timeline_and_decode(refs, immutable_recipe(J))
+
+    BEGIN
+        v = SELECT Video WHERE id = J.video_id FOR UPDATE
+        j = SELECT Job WHERE key = J FOR UPDATE
+        b = SELECT Build WHERE key = (J, epoch) FOR UPDATE
+        if j.state == DONE:
+            COMMIT;
+            return ALREADY_DONE  # Never republish an old pointer.
+
+        require v.target == J and v.visibility != REMOVED
+        require j.state == RUNNING and j.epoch == epoch
+        require j.lease_until &gt; db_clock() and b.state == BUILDING
+
+        UPDATE Build SET state = PUBLISHED, root = bundle.root,
+                         inventory = refs union {bundle.root}, published_at = db_clock()
+            WHERE key = (J, epoch)
+        UPDATE Video SET ready_version = (J, epoch), ready_root = bundle.root
+            WHERE id = J.video_id
+        UPDATE Job SET state = DONE, result = (J, epoch) WHERE key = J
+    COMMIT
+
+    return PUBLISHED
 
 on_wakeup(J):
-  c = claim(J)
-  if c in {TERMINAL, NO_CLAIM}: ACK; return
-  publish(build(c))  # On error: do not report success; persist retry/failure.
-  ACK  # Unknown COMMIT =&gt; reconnect and read Job.result before ACK.</code></pre>
+    c = claim(J)
+    if c in {TERMINAL, NO_CLAIM}:
+        ACK;
+        return
+
+    publish(build(c))  # On error: do not report success; persist retry/failure.
+    ACK  # Unknown COMMIT =&gt; reconnect and read Job.result before ACK.</code></pre>
 <div class="bilingual"><div class="lang-zh"><p>可信验证器从实际根清单出发，递归解析它引用的清单、初始化数据和所有必需分片，形成完整的引用集合，也就是引用闭包。验证器逐一检查确切的物理版本、大小和摘要，拒绝指向本次前缀之外或不在允许域名内的 URI，并核对必需档位、分片数、时长、时间戳连续性和解码结果。encode_and_package、清单解析器和解码器都是明确需要接入的适配器，这几行伪代码没有实现编码器。本例保守地重新读取完整字节；生产中可在算法和类型一致时，用可信存储校验优化验证，内部读取带宽仍需另计。</p><p>验证在事务外完成；真正发布时，必须同时满足这些条件：<strong>目标仍为 J、任务仍为 RUNNING、epoch 匹配、租约仍有效、Build 仍为 BUILDING</strong>。Build 的对象清单、Video.ready 和 Job.DONE 在同一事务中提交成功，随后才确认队列消息，因此半套产物不会对外可见。COMMIT 回包丢失只表示结果未知，要用新连接读取 Job.result；遇到 DONE 重放只确认结果，不能把可播指针改回旧版本。更换源或配方时先更新目标 target，这样旧工作进程即使还在执行，也不能覆盖新目标。</p><p><strong>垃圾回收与发布都按 Video→Job→Build 的顺序锁定同一组记录。</strong>只有某个 Build 既没有当前 ready 引用，也没有有效会话或留存引用，而且没有有效的当前领取时，清理器才可先提交 DELETING，再删除该前缀下的精确物理版本；普通生命周期规则不能删除这些受管理对象。如果清理器先标记，即使发布方刚完成验证，发布也会被拒绝；如果发布先提交，清理器看到引用就不能删除。发放和续期播放能力也必须持有同一组锁，先提交保护引用再签发，详见 14.4。若只是普通读取 ready 后直接签名，就会重新引入垃圾回收竞态。租约过期本身不代表可以删除产物。失去领取权的进程仍可能写出孤儿对象，需要在其访问能力到期或进程停机后再次扫描清理；这些对象已经没有发布资格。</p></div><div class="lang-en"><p>A trusted verifier parses the actual recursive manifest closure, checks exact versions, sizes and hashes for playlists, initialization and all required media, rejects URIs outside the epoch prefix/allowed hosts, and validates required rungs, counts, duration, timeline and decode. Encoder/packager, playlist parser and decoder are explicit adapters, not implemented by this pseudocode. Conservative full-byte verification adds internal reads; trusted checksums can optimize matching algorithm/type cases.</p><p>Validation runs outside the transaction. Publication requires <strong>target J, RUNNING, epoch, live lease and BUILDING</strong> together. Build inventory, Video.ready and Job.DONE commit together before ACK. Partial output stays hidden. A lost COMMIT reply is unknown: reconnect and inspect Job.result. DONE replay confirms the receipt without restoring an old pointer. Changing source/recipe first changes target and rejects late workers.</p><p><strong>GC shares Video→Job→Build locks:</strong> only when current-ready, valid-session and retention references are absent, and no live current claim exists, may it commit DELETING before deleting exact versions. Generic lifecycle deletion excludes managed objects. GC-first rejects even a just-validated publisher; publish-first creates references that block GC. Playback issuance/renewal also locks and commits references before signing (14.4); reading ready then signing directly reopens the GC race. Lease expiry alone never authorizes deletion. A stale worker may leave late orphan objects; rescan after its capability expires or it stops. It cannot publish again.</p></div></div><details><summary><span class="lang-zh">进一步讨论：低档先播、失败恢复与容量</span><span class="lang-en">Base-first publication, recovery and capacity follow-ups</span></summary><div class="bilingual"><div class="lang-zh"><p>如果要支持低档先播，就要明确拆成基础配方 BASE（例如只有 360p）和完整配方 FULL，让目标 target 允许 BASE 或 FULL，并保存目标版本与质量级别。发布 CAS 要检查源相同、配方在允许范围内，而且质量级别只能提高；FULL 发布后，迟到的 BASE 必须被拒绝。FULL 任务失败时保留已经可播的 BASE，两份不可变清单分别发布。本页代码采用完整三档都通过的门槛，没有实现这个变体。</p><p>评估队列积压时，要看最老任务等待了多久，以及剩余工作量还有多少工作槽秒（worker-seconds）。首个可播版本的任务优先，AV1 后台补档任务的优先级更低。4,961 个槽只满足平均负载下 70% 的使用率预算；五倍峰值持续多久，才决定积压量和消化积压所需时间，因此这个数字不能保证固定的上传到可播延迟。增加工作进程前，还要检查源文件读取和 Origin 写入是否承受得住。</p></div><div class="lang-en"><p>Base-first needs explicit BASE (for example 360p) and FULL recipes, allowed targets and a quality rank. Publish CAS checks the same source, an allowed recipe and monotonically increasing quality; reject late BASE after FULL. FULL failure preserves BASE. Each uses a separate immutable manifest. The displayed code implements the full-three-rung gate, not this variant.</p><p>Measure oldest age and remaining worker-seconds. Prioritize first-playable work above optional AV1/high-rung work. 4,961 slots only meets average load at a 70% budget; peak duration determines backlog and drain time, not a fixed publish delay. Check source reads and Origin writes before adding workers.</p></div></div></details>
 </section>
 <section>
@@ -437,40 +461,45 @@ on_wakeup(J):
         <figcaption><span class="lang-zh">按吞吐的 0.8 倍留出余量，此时选择 0.8 Mb/s 档位。下一片下载需要 3.2 秒，缓冲变成 8−3.2+4=8.8 秒。这是对下一次请求的选择，无法把已经下载的分片改小。</span><span class="lang-en">At 0.8 × throughput choose 0.8 Mb/s. Download takes 3.2 s and buffer becomes 8 − 3.2 + 4 = 8.8 s. This changes the next request, not an existing segment.</span></figcaption>
       </div>
     </figure><div class="bilingual"><div class="lang-zh"><p>控制 API 先鉴权，再返回已发布根清单 root 的精确版本 URL 和播放能力。媒体请求经过 Client→CDN→Origin，未命中时响应沿原路逐跳返回。HLS 播放器依次获取多版本清单、媒体清单，再请求初始化数据和分片；本组图省略了只传小份 JSON 的控制请求。[4] 对私有媒体，每一次 GET 都要验证权限，即使命中缓存也一样。</p></div><div class="lang-en"><p>The control API authorizes and returns an exact published-root URL plus playback capability. Media follows Client→CDN→Origin with hop-by-hop miss responses. HLS fetches multivariant/media playlists before init/media; the deck omits the small JSON control call. [4] Private media requires authorization on every GET, even cache hits.</p></div></div><h3><span class="lang-zh">播放授权：先保护将要读取的产物，再签发访问能力</span><span class="lang-en">Protect playback references before issuing capabilities</span></h3><pre data-language="Pseudocode · playback admission" data-kind="pseudocode" data-source="grant.pseudo"><code>play_grant(viewer, video_id, key, renew_grant_id = NONE):
-  intent = canonical(viewer, video_id, renew_grant_id)
-  BEGIN
-    v = SELECT Video WHERE id = video_id FOR UPDATE
-    require current_playback_policy(viewer, v) and v.visibility != REMOVED
-    prior = PlaybackGrant[viewer, key]
-    require prior is absent or prior.intent == intent else KEY_REUSED
-    if prior exists: chosen = prior.build
-    else if renew_grant_id != NONE:
-      old = owned_grant(viewer, video_id, renew_grant_id)
-      require old.expires_at &gt; db_clock() else EXPIRED
-      chosen = old.build
-    else: chosen = v.ready_version  # Re-read under lock, never a cached pointer.
-    require chosen != NONE else PROCESSING
-    j = SELECT Job WHERE key = chosen.J FOR UPDATE
-    b = SELECT Build WHERE key = chosen FOR UPDATE
-    require b.belongs_to(video_id) and b.state == PUBLISHED
-    if prior exists:
-      require prior.expires_at &gt; db_clock() else EXPIRED
-      g = prior  # Replay never extends an already committed deadline.
-    else:
-      expires = db_clock() + 300s
-      protected_until = expires + clock_skew_bound + read_drain_bound + manifest_window
-      g = Grant(viewer, key, intent, chosen, b.root, expires, protected_until)
-      INSERT PlaybackGrant(g)  # Unique (viewer, key); fixed root and expiry.
-      UPDATE Build SET gc_not_before = max(gc_not_before, protected_until)
-        WHERE key = chosen
-  COMMIT
-  # Unknown COMMIT: reconnect and recover this same viewer/key; do not sign yet.
-  g = primary.read_committed_grant(viewer, key)
-  require g != NONE else RETRY_SAME_KEY
-  require g.intent == intent else KEY_REUSED
-  require trusted_now() &lt; g.expires_at else EXPIRED
-  return sign(g.root, g.build_prefix, expires_at=g.expires_at)
-  # The signer cannot replace the root or restart the 300s TTL.</code></pre><div class="bilingual"><div class="lang-zh"><p>播放授权也在同一主库的短事务中完成，不跨越 CDN 网络调用。授权记录 PlaybackGrant 以观看者和请求键（viewer,key）唯一，固定请求意图、确切的 Build、根清单 root 及 versionId、资源前缀和绝对到期时刻 expires_at。发起新播放时，服务加锁后重新读取 ready；续期时，服务使用新 key，选择属于该观看者且仍有效的旧 grant。两种请求都按 <strong>Video→Job→Build</strong> 的顺序持锁，检查当前播放策略和 PUBLISHED 状态，先持久保存 grant 并延长禁止回收的期限 gc_not_before，确认提交后才签发能力。视频下架和播放策略变更也要锁定 Video，按同一顺序串行处理。</p><p>如果垃圾回收先把产物标为 DELETING，授权就要拒绝，或重新选择可播版本；如果 grant 先提交，清理器看到引用就不能删除。COMMIT 结果未知时，服务按同一 (viewer,key) 从主库读回记录，并核对请求意图 intent，未确认前不签发。这样才能避免误用另一意图后来占用同一键的记录。签名只使用持久保存的 root 和<strong>固定到期时刻</strong>，响应丢失后的重试不能从当前时间重新计满五分钟。签名前已经过期，就要拒绝或重新走受保护的准入流程。</p><p>产物保留期限必须覆盖访问能力的有效期、部署约定的 CDN 时钟误差、已限定的在途读取排空时间，以及清单使用窗口。令牌到期并不代表已经发起的 GET 都已结束；如果无法约束或确认读取已经排空，就要继续保留引用。本页给出的是这套约定和竞态验证，没有测出实际部署中的这些上界。</p></div><div class="lang-en"><p>This is a short primary-DB transaction without CDN calls. PlaybackGrant is unique by (viewer,key), fixing intent, exact Build/root/versionId, resource prefix and absolute expires_at. New playback re-reads ready under lock; renewal selects the owner’s still-valid grant with a new key. Both lock <strong>Video→Job→Build</strong>, check current policy and PUBLISHED, persist the grant and extend gc_not_before before confirmed commit and signing. Removal/policy changes serialize on Video too.</p><p>GC-first DELETING rejects or reselects; grant-first references prevent deletion. Unknown COMMIT requires an authoritative same-key read and intent check before signing, never recovery of a different intent that later won that key. Sign only the stored root and <strong>fixed expiry</strong>; retrying a lost response cannot restart five minutes. Reject an expired grant or repeat protected admission.</p><p>Protection includes capability lifetime, deployment bounds for CDN clock error, bounded in-flight read drain and manifest use. Token expiry alone is not completed GETs. If drain cannot be bounded/confirmed, retain references. These are contracts and race checks, not measured deployment limits.</p></div></div><div class="bilingual"><div class="lang-zh"><p>简单的自适应码率选择（ABR）同时观察近期吞吐和可播放缓冲秒数：选择码率不超过吞吐×0.8 的档位，缓冲下降时提前降档。真实播放器还要平滑吞吐估计、延迟升档，并考虑设备解码限制。在 16 Mb/s 链路上，4 秒×4 Mb/s=16 Mb 的分片下载需要 1 秒，缓冲净增 3 秒。吞吐降到 1 Mb/s 后，仍请求高档就需要 16 秒，原有 8 秒缓冲会耗尽；如果在发起下一次请求时立即改选 0.8 Mb/s，下载需要 3.2 秒，缓冲变为 8−3.2+4=8.8 秒。这是两种选择的对比，不能已经等了 16 秒，还把缓冲当成原来的 8 秒。</p><p>高档分片已经在下载时，可以取消，并从同一时间边界重新请求低档；已经交付的字节仍要计费，重取还会多一次 RTT。单片出错只能在截止时间内有限重试或降档。能力过期导致 403 时需要续期；已发布引用返回 404，则应告警并排查发布或产物故障。客户端要上报首帧、卡顿和解码错误，因为 CDN 全部返回 200 也不能证明用户成功播放。</p><p>如果改成 2 秒分片，媒体 GET 会翻倍到平均 86,806 次/秒、峰值 434,028 次/秒，同码率下的交付字节却不会减半。短分片能更快换档，也会增加请求和关键帧开销。对于单码率的短视频，也可以把初始化信息放在文件前部，使用渐进式 MP4（progressive MP4）配合 Range 边下边播；需要多档切换时，再承担 HLS/DASH 的清单成本。</p></div><div class="lang-en"><p>A simple ABR uses recent throughput and playable buffer: select at 0.8× throughput and downgrade early; real players add smoothing, upgrade hysteresis and decode limits. At 16Mb/s, a four-second 4Mb/s segment is 16Mb, taking one second and adding three buffer seconds. At 1Mb/s it takes sixteen seconds and drains an eight-second buffer. An immediate next 0.8Mb/s request takes 3.2s and yields 8−3.2+4=8.8s. Do not keep the initial eight seconds after already waiting sixteen.</p><p>Cancel/retry an in-flight high rung at the same boundary if needed, accounting for spent bytes and another RTT. Retry/downgrade only within the deadline. Renew expired capabilities on 403; a published-reference 404 signals publication/output failure. Clients report startup, stalls and decode errors; all-200 CDN responses do not prove playback.</p><p>Two-second segments double GETs to 86,806/s average and 434,028/s peak, without halving bytes. Shorter segments switch faster but add request/keyframe overhead. A short single-rate progressive MP4 can start before full download with suitable initialization and Range; multirung switching justifies HLS/DASH packaging.</p></div></div>
+    intent = canonical(viewer, video_id, renew_grant_id)
+
+    BEGIN
+        v = SELECT Video WHERE id = video_id FOR UPDATE
+        require current_playback_policy(viewer, v) and v.visibility != REMOVED
+        prior = PlaybackGrant[viewer, key]
+        require prior is absent or prior.intent == intent else KEY_REUSED
+        if prior exists:
+            chosen = prior.build
+        else if renew_grant_id != NONE:
+            old = owned_grant(viewer, video_id, renew_grant_id)
+            require old.expires_at &gt; db_clock() else EXPIRED
+            chosen = old.build
+        else:
+            chosen = v.ready_version  # Re-read under lock, never a cached pointer.
+        require chosen != NONE else PROCESSING
+
+        j = SELECT Job WHERE key = chosen.J FOR UPDATE
+        b = SELECT Build WHERE key = chosen FOR UPDATE
+        require b.belongs_to(video_id) and b.state == PUBLISHED
+        if prior exists:
+            require prior.expires_at &gt; db_clock() else EXPIRED
+            g = prior  # Replay never extends an already committed deadline.
+        else:
+            expires = db_clock() + 300s
+            protected_until = expires + clock_skew_bound + read_drain_bound + manifest_window
+            g = Grant(viewer, key, intent, chosen, b.root, expires, protected_until)
+            INSERT PlaybackGrant(g)  # Unique (viewer, key); fixed root and expiry.
+            UPDATE Build SET gc_not_before = max(gc_not_before, protected_until)
+                WHERE key = chosen
+    COMMIT
+
+    # Unknown COMMIT: reconnect and recover this same viewer/key; do not sign yet.
+    g = primary.read_committed_grant(viewer, key)
+    require g != NONE else RETRY_SAME_KEY
+    require g.intent == intent else KEY_REUSED
+    require trusted_now() &lt; g.expires_at else EXPIRED
+    return sign(g.root, g.build_prefix, expires_at=g.expires_at)
+    # The signer cannot replace the root or restart the 300s TTL.</code></pre><div class="bilingual"><div class="lang-zh"><p>播放授权也在同一主库的短事务中完成，不跨越 CDN 网络调用。授权记录 PlaybackGrant 以观看者和请求键（viewer,key）唯一，固定请求意图、确切的 Build、根清单 root 及 versionId、资源前缀和绝对到期时刻 expires_at。发起新播放时，服务加锁后重新读取 ready；续期时，服务使用新 key，选择属于该观看者且仍有效的旧 grant。两种请求都按 <strong>Video→Job→Build</strong> 的顺序持锁，检查当前播放策略和 PUBLISHED 状态，先持久保存 grant 并延长禁止回收的期限 gc_not_before，确认提交后才签发能力。视频下架和播放策略变更也要锁定 Video，按同一顺序串行处理。</p><p>如果垃圾回收先把产物标为 DELETING，授权就要拒绝，或重新选择可播版本；如果 grant 先提交，清理器看到引用就不能删除。COMMIT 结果未知时，服务按同一 (viewer,key) 从主库读回记录，并核对请求意图 intent，未确认前不签发。这样才能避免误用另一意图后来占用同一键的记录。签名只使用持久保存的 root 和<strong>固定到期时刻</strong>，响应丢失后的重试不能从当前时间重新计满五分钟。签名前已经过期，就要拒绝或重新走受保护的准入流程。</p><p>产物保留期限必须覆盖访问能力的有效期、部署约定的 CDN 时钟误差、已限定的在途读取排空时间，以及清单使用窗口。令牌到期并不代表已经发起的 GET 都已结束；如果无法约束或确认读取已经排空，就要继续保留引用。本页给出的是这套约定和竞态验证，没有测出实际部署中的这些上界。</p></div><div class="lang-en"><p>This is a short primary-DB transaction without CDN calls. PlaybackGrant is unique by (viewer,key), fixing intent, exact Build/root/versionId, resource prefix and absolute expires_at. New playback re-reads ready under lock; renewal selects the owner’s still-valid grant with a new key. Both lock <strong>Video→Job→Build</strong>, check current policy and PUBLISHED, persist the grant and extend gc_not_before before confirmed commit and signing. Removal/policy changes serialize on Video too.</p><p>GC-first DELETING rejects or reselects; grant-first references prevent deletion. Unknown COMMIT requires an authoritative same-key read and intent check before signing, never recovery of a different intent that later won that key. Sign only the stored root and <strong>fixed expiry</strong>; retrying a lost response cannot restart five minutes. Reject an expired grant or repeat protected admission.</p><p>Protection includes capability lifetime, deployment bounds for CDN clock error, bounded in-flight read drain and manifest use. Token expiry alone is not completed GETs. If drain cannot be bounded/confirmed, retain references. These are contracts and race checks, not measured deployment limits.</p></div></div><div class="bilingual"><div class="lang-zh"><p>简单的自适应码率选择（ABR）同时观察近期吞吐和可播放缓冲秒数：选择码率不超过吞吐×0.8 的档位，缓冲下降时提前降档。真实播放器还要平滑吞吐估计、延迟升档，并考虑设备解码限制。在 16 Mb/s 链路上，4 秒×4 Mb/s=16 Mb 的分片下载需要 1 秒，缓冲净增 3 秒。吞吐降到 1 Mb/s 后，仍请求高档就需要 16 秒，原有 8 秒缓冲会耗尽；如果在发起下一次请求时立即改选 0.8 Mb/s，下载需要 3.2 秒，缓冲变为 8−3.2+4=8.8 秒。这是两种选择的对比，不能已经等了 16 秒，还把缓冲当成原来的 8 秒。</p><p>高档分片已经在下载时，可以取消，并从同一时间边界重新请求低档；已经交付的字节仍要计费，重取还会多一次 RTT。单片出错只能在截止时间内有限重试或降档。能力过期导致 403 时需要续期；已发布引用返回 404，则应告警并排查发布或产物故障。客户端要上报首帧、卡顿和解码错误，因为 CDN 全部返回 200 也不能证明用户成功播放。</p><p>如果改成 2 秒分片，媒体 GET 会翻倍到平均 86,806 次/秒、峰值 434,028 次/秒，同码率下的交付字节却不会减半。短分片能更快换档，也会增加请求和关键帧开销。对于单码率的短视频，也可以把初始化信息放在文件前部，使用渐进式 MP4（progressive MP4）配合 Range 边下边播；需要多档切换时，再承担 HLS/DASH 的清单成本。</p></div><div class="lang-en"><p>A simple ABR uses recent throughput and playable buffer: select at 0.8× throughput and downgrade early; real players add smoothing, upgrade hysteresis and decode limits. At 16Mb/s, a four-second 4Mb/s segment is 16Mb, taking one second and adding three buffer seconds. At 1Mb/s it takes sixteen seconds and drains an eight-second buffer. An immediate next 0.8Mb/s request takes 3.2s and yields 8−3.2+4=8.8s. Do not keep the initial eight seconds after already waiting sixteen.</p><p>Cancel/retry an in-flight high rung at the same boundary if needed, accounting for spent bytes and another RTT. Retry/downgrade only within the deadline. Renew expired capabilities on 403; a published-reference 404 signals publication/output failure. Clients report startup, stalls and decode errors; all-200 CDN responses do not prove playback.</p><p>Two-second segments double GETs to 86,806/s average and 434,028/s peak, without halving bytes. Shorter segments switch faster but add request/keyframe overhead. A short single-rate progressive MP4 can start before full download with suitable initialization and Range; multirung switching justifies HLS/DASH packaging.</p></div></div>
 </section>
 <section>
 <h2><span class="lang-zh">14.5 · CDN：分别核算源站容量与边缘出口费用</span><span class="lang-en">14.5 · CDN: separate origin capacity from edge cost</span></h2>

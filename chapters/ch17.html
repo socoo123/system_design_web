@@ -264,32 +264,43 @@
       </div>
     </figure><div class="bilingual"><div class="lang-zh"><p><strong>先确定路由 route_id 和适用的 audience，再验证凭证。</strong>令牌中的 issuer 只能用于选择预先允许的验证配置，未经验证的声明不能授予权限。密钥只从固定、可信的 JWKS 来源获取，不能跟随令牌中的任意 jku/x5u 地址。[1] 验证内容包括算法、签名、issuer、audience、exp/nbf 和用途；采用 RFC 9068 时，typ 接受 <code>at+jwt</code> 或 <code>application/at+jwt</code>。ID token 不能因为同样采用 JWT 格式，就替代 API access token。[2]</p><p>验证得到用户身份 subject 后，还要依据该签发者获准的租户映射确定 tenant；重复或有歧义的凭证直接拒绝。无效凭证返回 401，并附 Bearer challenge；身份已验证但缺少所需 scope 时返回 403；验证依赖不可用时返回 503。Bearer 凭证通过 TLS 传输，日志中不记录原始凭证。[3]</p></div><div class="lang-en"><p><strong>Determine route_id and audience, then validate credentials.</strong> An issuer can only select preallowed verification policy; unverified claims grant no authority. Use fixed trusted JWKS locations, never arbitrary token jku/x5u URLs. [1] Validate algorithm, signature, issuer, audience, exp/nbf and purpose. Under RFC 9068 accept typ <code>at+jwt</code> or <code>application/at+jwt</code>. A JWT ID token is not an interchangeable API access token. [2]</p><p>Derive subject from validation and tenant from the issuer's allowed tenant mapping. Reject duplicate/ambiguous credentials. Invalid credentials return 401 with a Bearer challenge; insufficient scope returns 403; unavailable validation dependencies return 503. Protect bearer tokens with TLS and exclude raw credentials from logs. [3]</p></div></div><h3><span class="lang-zh">实现 1：为一次请求固定快照，建立受控身份上下文</span><span class="lang-en">Implementation 1: a pinned snapshot and controlled identity</span></h3><pre data-language="Pseudocode · request entry" data-kind="pseudocode" data-source="entry.pseudo"><code># Pseudocode: one HTTP request; adapters below are part of the contract.
 handle(raw, transport):
-  deadline = local_deadline_at_receipt(300_ms)
-  snap = snapshots.get()                 # one immutable local reference
-  if snap is absent or snap.security_expired(): return 503
-  req = parse_once_and_canonicalize(raw, snap.normalization)
-  route = snap.match(req.host, req.method, req.path)
-  if route is absent: return 404
-  client_ip = transport.original_peer_from_trusted_LB_listener()
-  # Ignore public Forwarded/X-Forwarded-*; trust no arbitrary chain prefix.
-  headers = req.headers.remove_reserved_identity_forwarding_and_canary()
-  token = req.require_single_bearer_token()
-  try:
-    auth = verify_access(token, snap.allowed_issuers, route.audience)
-    # Trusted JWKS only; alg/typ/signature/iss/aud/exp/nbf + tenant mapping.
-  catch InvalidCredential: return 401_with_bearer_challenge
-  catch ValidationDependencyUnavailable: return 503
-  if not auth.scopes.contains_all(route.scopes): return 403
-  target = route.choose(auth.tenant, auth.subject, snap.rollout_salt)
-  ctx = InternalContext(auth.tenant, auth.subject, route.id, snap.version)
-  # Local object, never reconstructed from an inbound identity header.
-  admission = admit_once(ctx, route, deadline.remaining())
-  if admission.denied: return admission.http_error
-  if deadline.expired(): return 504          # ALLOW cannot extend time
-  # Pin snap, route, target version and ctx for the whole request/retry.
-  return proxy(req, target, headers, ctx, deadline)
-  # Only Gateway-authenticated mTLS reaches the internal listener.
-  # BFF preserves ctx over another authenticated hop; Orders checks ownership.</code></pre>
+    deadline = local_deadline_at_receipt(300_ms)
+    snap = snapshots.get()                 # one immutable local reference
+    if snap is absent or snap.security_expired():
+        return 503
+
+    req = parse_once_and_canonicalize(raw, snap.normalization)
+    route = snap.match(req.host, req.method, req.path)
+    if route is absent:
+        return 404
+
+    client_ip = transport.original_peer_from_trusted_LB_listener()
+    # Ignore public Forwarded/X-Forwarded-*; trust no arbitrary chain prefix.
+    headers = req.headers.remove_reserved_identity_forwarding_and_canary()
+    token = req.require_single_bearer_token()
+    try:
+        auth = verify_access(token, snap.allowed_issuers, route.audience)
+        # Trusted JWKS only; alg/typ/signature/iss/aud/exp/nbf + tenant mapping.
+    catch InvalidCredential:
+        return 401_with_bearer_challenge
+    catch ValidationDependencyUnavailable:
+        return 503
+    if not auth.scopes.contains_all(route.scopes):
+        return 403
+
+    target = route.choose(auth.tenant, auth.subject, snap.rollout_salt)
+    ctx = InternalContext(auth.tenant, auth.subject, route.id, snap.version)
+    # Local object, never reconstructed from an inbound identity header.
+    admission = admit_once(ctx, route, deadline.remaining())
+    if admission.denied:
+        return admission.http_error
+    if deadline.expired():
+        return 504          # ALLOW cannot extend time
+
+    # Pin snap, route, target version and ctx for the whole request/retry.
+    return proxy(req, target, headers, ctx, deadline)
+    # Only Gateway-authenticated mTLS reaches the internal listener.
+    # BFF preserves ctx over another authenticated hop; Orders checks ownership.</code></pre>
 <div class="bilingual"><div class="lang-zh"><p>这段<strong>伪代码</strong>用来说明入口契约，尚未实现 HTTP 解析、JWT 密码学和网络适配器。解析器必须用同一套规则处理 host、method 和 path，并拒绝有歧义的编码或非法分隔符，避免认证和代理转发因二次解码而指向不同资源。外部请求中的内部身份头、Forwarded/X-Forwarded-* 和 canary 头都要清理，<code>InternalContext</code> 只能由验证器产生。即使已经认证服务对端，也要限制它可以代表哪些用户，BFF 不能任意提升权限。</p><p><strong>代理链信息本身不能证明身份。</strong>RFC 7239 §8.1 指出，客户端也能修改 Forwarded。[10] 本例只信任受保护的 LB listener 提供的原始来源元数据，例如仅允许已登记 LB 使用的 PROXY 协议通道；公网传来的同名头全部忽略。如果 LB 没有保留可信的原始地址，就无法可靠取得客户端 IP，不能把 LB 地址当成用户身份来分配公平配额。Gateway→BFF→Orders 的每一跳都要认证对端、限制入口，Orders 还要检查对象归属。端到端验证令牌或签署上下文，是另一种可选的信任设计。</p><p>遇到未知 kid 时，网关合并刷新请求，并将每实例刷新频率限制为每秒最多一次，四台合计最多 4 次/秒。用于记录查无此密钥的负缓存也要限制容量和 TTL，不能让攻击者用任意 kid 把缓存填满。已知密钥只能在获准的有效期内使用。轮换时先发布新公钥，再签发新令牌；旧密钥要保留到旧令牌寿命与允许的时钟误差都已覆盖。依赖不可用时不能跳过验签。5 分钟令牌寿命、0.2 ms 验签耗时和刷新率都是教学假设，尚未测量真实身份提供方（IdP）。</p></div><div class="lang-en"><p>This is <strong>pseudocode</strong>: HTTP parsing, JWT cryptography and network adapters are not implemented. One parser policy normalizes host/method/path and rejects ambiguous encoding/separators, preventing authentication and forwarding from decoding different resources. Clear reserved identity, Forwarded/X-Forwarded-* and canary headers at the external boundary. Only the verifier creates <code>InternalContext</code>. Authenticated intermediaries must also be restricted in whose authority they may assert.</p><p><strong>A forwarding chain is not a credential.</strong> RFC 7239 §8.1 notes that clients can modify Forwarded. [10] This design trusts original-peer metadata only from a protected LB listener, such as a PROXY-protocol channel restricted to registered LBs; ignore public forwarding headers. Without trusted original-peer metadata, client IP is unavailable: LB IP is not a fair user identity. Authenticate and restrict every Gateway→BFF→Orders hop, then enforce object ownership in Orders. End-to-end token validation or signed context is an alternative trust design.</p><p>Coalesce unknown-kid refreshes and cap at one/s/instance, four/s across the pool. Bound negative-cache size and TTL against arbitrary attacker keys. Cached keys have a usability expiry. Publish new public keys before issuance and retain old ones through token life plus allowed skew; dependency failure never skips verification. Five-minute tokens, 0.2 ms and refresh rates are unmeasured teaching assumptions.</p></div></div></section>
 
 <section><h2><span class="lang-zh">限流三种结果：允许、拒绝和未知</span><span class="lang-en">Three admission outcomes: ALLOW, DENY, UNKNOWN</span></h2>
@@ -398,21 +409,30 @@ handle(raw, transport):
       </div>
     </figure><div class="bilingual"><div class="lang-zh"><p>限流键采用已验证 <code>(tenant,subject,method+route_id)</code> 的无歧义元组编码，不能直接拼接字符串，也不能让任意 URL 参数无限创建新桶。A7 的桶容量为 40、每秒补充 20 份令牌，因此可以先突发 40 次，随后持续速率趋近每秒 20 次；四台各自发放完整额度，就会放大成每秒 80 次、突发 160 次。共享 Redis 用单键短脚本，原子完成补充、判断、扣除和设置闲置 TTL。脚本执行期间会阻塞其他工作，集群中的多键操作还要求键共址。[4] 具体 Lua 与时间、TTL 条件见 <a href="ch04.html">Ch04</a>。</p><p>正常每秒判定 1 万次、每次耗时 2 ms，约有 20 次判定同时在途。100 万个活跃桶×100 B=100 MB，保存两份为 200 MB；这只是键和值的容量下限，分配器、复制、索引和恢复开销另计。用户公平配额不能替代服务总容量保护：10 万人各自每秒发出 20 次请求，合计仍达 200 万 QPS，因此还要限制总速率、活动请求和限流客户端的在途数量。</p></div><div class="lang-en"><p>Use unambiguous tuple encoding of validated <code>(tenant,subject,method+route_id)</code>, not raw string concatenation or arbitrary URL parameters. Capacity 40 with 20/s refill admits a burst of 40 then approaches 20/s. Four full local quotas would grant 80/s and burst 160. One short Redis script atomically refills, checks, debits and updates idle TTL; scripts block other work, and multi-key cluster operations need colocation. [4] See <a href="ch04.html">Ch04</a> for Lua and clock/TTL conditions.</p><p>10,000 decisions/s at 2 ms imply about 20 in flight. One million buckets×100 B gives 100 MB/copy or 200 MB for two, only a key/value floor excluding allocation, replication, indexes and recovery. User fairness does not protect total capacity: 100,000 users at 20/s still produce two million QPS. Cap aggregate rate, active work and quota-client concurrency too.</p></div></div><h3><span class="lang-zh">实现 2：限流判定未知时，按明确策略选择降级</span><span class="lang-en">Implementation 2: explicit fallback on an unknown decision</span></h3><pre data-language="Pseudocode · one admission" data-kind="pseudocode" data-source="admission.pseudo"><code># Pseudocode: one decision/request; UNKNOWN is not quota exhaustion.
 admit_once(ctx, route, remaining):
-  if remaining &lt;= 0: return ERROR(504)
-  key = encode_tuple(ctx.tenant, ctx.subject, route.method_and_id)
-  verdict = quota.take_once(key, timeout=min(5_ms, remaining))
-  # Server adapter: short atomic refill/check/debit + idle TTL (see Ch04).
-  # timeout/transport error -&gt; UNKNOWN; server may already have debited.
-  # No automatic retry/refund; a late result cannot forward this request.
-  if verdict.kind == ALLOW: return ALLOW
-  if verdict.kind == DENY: return ERROR(429, retry_after=verdict.wait_hint)
-  if not route.explicit_public_safe_read: return ERROR(503)
-  if not deployment.fixed_pool_policy_valid(): return ERROR(503)
-  # Four non-overlapping owners; new/restarted owner starts EMPTY.
-  # At construction: tokens=0, last=monotonic_now(); cap=100, rate=100/s.
-  # Existing buckets never reset when Redis fails/recovers.
-  if emergency_bucket.try_take(monotonic_now()): return ALLOW_DEGRADED
-  return ERROR(503)                     # dependency/fallback capacity failure
+    if remaining &lt;= 0:
+        return ERROR(504)
+
+    key = encode_tuple(ctx.tenant, ctx.subject, route.method_and_id)
+    verdict = quota.take_once(key, timeout=min(5_ms, remaining))
+    # Server adapter: short atomic refill/check/debit + idle TTL (see Ch04).
+    # timeout/transport error -&gt; UNKNOWN; server may already have debited.
+    # No automatic retry/refund; a late result cannot forward this request.
+    if verdict.kind == ALLOW:
+        return ALLOW
+    if verdict.kind == DENY:
+        return ERROR(429, retry_after=verdict.wait_hint)
+
+    if not route.explicit_public_safe_read:
+        return ERROR(503)
+    if not deployment.fixed_pool_policy_valid():
+        return ERROR(503)
+
+    # Four non-overlapping owners; new/restarted owner starts EMPTY.
+    # At construction: tokens=0, last=monotonic_now(); cap=100, rate=100/s.
+    # Existing buckets never reset when Redis fails/recovers.
+    if emergency_bucket.try_take(monotonic_now()):
+        return ALLOW_DEGRADED
+    return ERROR(503)                     # dependency/fallback capacity failure
 
 # emergency_bucket.try_take, under one process-local mutex:
 #   elapsed = max(0, now - last); last = max(last, now)
@@ -756,83 +776,137 @@ admit_once(ctx, route, remaining):
         long end = receivedMs + 300;
         return new Deadline(end, Math.min(nowMs + 240, end - 40));
     }
+
     long nextAttemptMs(long nowMs, long perTryMs) {
         return Math.max(0, Math.min(perTryMs, upstreamEndMs - nowMs));
     }
 }
-enum Failure { RESET, CONNECT, TIMEOUT, HTTP_STATUS, CLIENT_CANCEL }
+
+enum Failure {
+    RESET, CONNECT, TIMEOUT, HTTP_STATUS, CLIENT_CANCEL
+}
+
 record Replay(String method, boolean bufferedBody, boolean responseStarted,
-              int attempts, Failure failure) {}
+              int attempts, Failure failure) {
+}
+
 static boolean mayRetry(Replay r, Deadline d, long nowMs, long delayMs) {
     // This gateway chooses the conservative GET/HEAD subset.
     boolean methodOk = r.method.equals("GET") || r.method.equals("HEAD");
     boolean transientFailure = r.failure == Failure.RESET
-            || r.failure == Failure.CONNECT || r.failure == Failure.TIMEOUT;
+            || r.failure == Failure.CONNECT
+            || r.failure == Failure.TIMEOUT;
+
     return methodOk &amp;&amp; r.bufferedBody &amp;&amp; !r.responseStarted
             &amp;&amp; r.attempts == 1 &amp;&amp; transientFailure &amp;&amp; delayMs &gt;= 0
             &amp;&amp; d.nextAttemptMs(nowMs + delayMs, 80) &gt;= 20;
 }</code></pre>
 <div class="bilingual"><div class="lang-zh"><p><strong>代理不得自动重试非幂等请求。</strong>RFC 9110 §9.2.2 使用的要求是 MUST NOT。[6] 本网关更保守，只允许 GET/HEAD；即使 PUT/DELETE 在 HTTP 语义上幂等，也不会自动获得重试资格。POST 带有 Idempotency-Key，也不改变本章的代理策略。应用客户端如果按业务契约恢复 POST，服务必须持久保存幂等键与参数、执行中状态、结果和去重保留期的绑定关系；这属于业务恢复。</p><p>允许额外尝试还要同时满足：首次失败属于配置允许的暂时传输故障或超时，尚未向客户端发送任何响应，完整请求体已在有界内存或磁盘中保存、可以重放，且原本地传输流已经终止。每个请求最多增加一次尝试，本例不会因 429/503 或其中的 Retry-After 自动重试。示例为首次 80 ms、含抖动的退避最多 20 ms、第二次 80 ms，再加策略处理 20 ms，共 200 ms。退避结束后仍要重算预算，至少剩余 20 ms 才能尝试，单次取 min(80,remaining)。如果已经开始发送响应，就只能终止流，不能伪装成一份新的 504。</p></div><div class="lang-en"><p><strong>A proxy MUST NOT automatically retry non-idempotent requests</strong> under RFC 9110 §9.2.2. [6] This gateway is stricter: only GET/HEAD qualify. HTTP-idempotent PUT/DELETE are not automatically eligible, and Idempotency-Key does not change our POST policy. Application clients may recover a POST only under a business contract that durably binds key, parameters, in-progress state, outcome and retention; that is business recovery.</p><p>Require a configured transient transport failure/timeout, no response sent to the client, a fully replayable bounded memory/disk body, and a terminated prior local stream. Allow only one extra attempt. This example does not automatically retry HTTP 429/503 or act on Retry-After. Two 80 ms attempts, at most 20 ms jittered backoff and 20 ms policy total 200 ms. Recheck after waking; require at least 20 ms, and allocate min(80,remaining). Once a response has started, terminate the stream instead of fabricating a fresh 504.</p></div></div><h3><span class="lang-zh">实现 4：先取得重试信用，再占用真实资源</span><span class="lang-en">Implementation 4: retry credit and actual resource occupancy</span></h3><pre data-language="Java 17 · earned retries and active streams" data-kind="teaching" data-source="GatewayPolicy.java#retry-budget"><code>static final class RetryBudget {
     private int remainder, credits;       // EMPTY on process start
+
     synchronized void originalAdmitted() { // exactly once, never for a retry
         if (++remainder == 20) {
             credits = Math.min(125, credits + 1);
             remainder = 0;
         }
     }
+
     synchronized boolean takeRetry() {
-        if (credits == 0) return false;
+        if (credits == 0) {
+            return false;
+        }
+
         credits--;
         return true;                       // never refund consumed credit
     }
 }
+
 static final class ActiveStreams {
     private final Semaphore slots = new Semaphore(800);
+
     StreamPermit start() {              // no hidden queue
         return slots.tryAcquire() ? new StreamPermit(slots) : null;
     }
 }
+
 static final class StreamPermit {
     final Semaphore slots;
     final AtomicBoolean released = new AtomicBoolean();
-    StreamPermit(Semaphore slots) { this.slots = slots; }
+
+    StreamPermit(Semaphore slots) {
+        this.slots = slots;
+    }
+
     void transportTerminated() {
-        if (released.compareAndSet(false, true)) slots.release();
+        if (released.compareAndSet(false, true)) {
+            slots.release();
+        }
     }                                    // timer expiry alone is not terminal
 }</code></pre>
 <div class="bilingual"><div class="lang-zh"><p>每个实例每准入 20 个原始请求，就获得一份额外尝试的信用。信用初始为空，最多积存 125 份，用掉后不退还，重试本身也不赚取信用。因此，从每个进程启动算起，Rᵢ≤⌊Oᵢ/20⌋；合并所有进程与代次，仍有 <strong>R≤O/20</strong>，重启只会丢失额度。固定四台最多积存 500 份突发信用。每秒准入 1 万个原始请求时，稳态约每秒赚取 500 份信用，总尝试约 10,500 次/秒；这<strong>不是任意一秒的硬上限</strong>，因为还能花掉之前的积存。若需要硬速率上限，要另设总尝试桶。</p><p>本章假设每台最多有 800 条本地活动上游流，这不是从 CPU 自动推导出的产品默认值。慢路径有 10,000/s×0.24s=2,400 条在途，四台均分约每台 600 条，三台则约每台 800 条；按完整 300 ms 请求计算，约有 3,000 个在途请求。HTTP/2 流与 TCP 连接数量不同。拿不到流槽许可（permit）时，立即返回 503，不暗中排队。只有本地流实际终止或关闭后，才能释放许可；逻辑超时先返回客户端，并不表示槽位已空。终止回调还要保证幂等，避免重复释放。远端业务仍可能继续执行，因此服务端也必须限制并发。</p><p>重试按这个顺序集成：确认旧本地流终止 → 有界退避 → 重算期限并检查客户端取消 → 消耗重试信用 → 尝试占用流槽 → 通过熔断准入 → 发送前立即再次检查期限。后两道门拒绝时，释放尚未使用的流槽，但不退还信用。探针不重试；已经获准、却在发送前放弃的探针，按失败完成。每个原始请求只计一次 O。三层各尝试两次，会放大成 2³=8 次，因此 Gateway、BFF 和客户端要约定由哪一层负责重试。</p></div><div class="lang-en"><p>Each instance earns one credit per 20 admitted originals, starts empty, stores at most 125, never refunds a consumed credit, and earns none from retries. Since each process start, Rᵢ≤floor(Oᵢ/20); summing all processes/epochs preserves <strong>R≤O/20</strong>. Restart only loses credit. Four fixed instances store at most 500 burst credits. At 10,000 original QPS, steady-state earning is about 500/s and attempts about 10,500/s; <strong>this is not an arbitrary one-second ceiling</strong>. Add a total-attempt rate bucket if required.</p><p>800 local active upstream streams/instance is our assumption, not a product default. 10,000/s×0.24s=2,400 slow-path work, about 600 each with four or 800 with three; full 300 ms requests imply about 3,000. HTTP/2 streams are not TCP connections. Reject immediately with 503 when no permit is available. Release only when the local stream actually terminates/closes, not merely when a timer returns an error to the client; duplicate terminal callbacks cannot release twice. Remote business execution may persist, requiring server-side limits too.</p><p>Integrate in order: terminate the prior stream → bounded backoff → recheck expiry/cancellation → consume retry credit → acquire stream slot → breaker admission → recheck expiry immediately before dispatch. Later rejection releases an unused slot without refunding credit. Probes never retry; an abandoned admitted probe completes as failure. Count each original once. Three layers each trying twice can yield 2³=8 attempts: agree on one retry owner.</p></div></div><h3><span class="lang-zh">实现 5：每实例一条探针，迟到结果不能改变新状态</span><span class="lang-en">Implementation 5: one local probe; fence late completions</span></h3><pre data-language="Java 17 · health breaker" data-kind="teaching" data-source="GatewayPolicy.java#breaker"><code>    final LongSupplier clock;
-    Breaker() { this(elapsedClock()); }
-    Breaker(LongSupplier monotonicMs) { this.clock = monotonicMs; }
+
+    Breaker() {
+        this(elapsedClock());
+    }
+
+    Breaker(LongSupplier monotonicMs) {
+        this.clock = monotonicMs;
+    }
 
     synchronized Ticket enter() {
         long nowMs = clock.getAsLong();  // observe time AFTER acquiring monitor
         if (state == State.OPEN) {
-            if (nowMs &lt; retryAt) return null;
-            state = State.HALF_OPEN; epoch++;
+            if (nowMs &lt; retryAt) {
+                return null;
+            }
+
+            state = State.HALF_OPEN;
+            epoch++;
         }
         if (state == State.HALF_OPEN) {
-            if (probeActive) return null;
+            if (probeActive) {
+                return null;
+            }
+
             probeActive = true;
             return new Ticket(epoch, true);
         }
         return new Ticket(epoch, false);
     }
+
     synchronized void complete(Ticket t, boolean ok) {
         long nowMs = clock.getAsLong();  // terminal observation, not event time
-        if (t.done) return;
+        if (t.done) {
+            return;
+        }
+
         t.done = true;
-        if (t.epoch != epoch) return;       // ignore a stale completion
+        if (t.epoch != epoch) {
+            return;       // ignore a stale completion
+        }
+
         if (t.probe) {
-            probeActive = false; epoch++; samples.clear();
+            probeActive = false;
+            epoch++;
+            samples.clear();
             state = ok ? State.CLOSED : State.OPEN;
-            if (!ok) retryAt = nowMs + 5000;
+            if (!ok) {
+                retryAt = nowMs + 5000;
+            }
         } else if (state == State.CLOSED) {
             samples.addLast(new Sample(nowMs, ok));
-            while (!samples.isEmpty() &amp;&amp; nowMs - samples.peekFirst().observedMs &gt;= 10000)
+            while (!samples.isEmpty()
+                    &amp;&amp; nowMs - samples.peekFirst().observedMs &gt;= 10000) {
                 samples.removeFirst();
-            long failed = samples.stream().filter(s -&gt; !s.success).count();
+            }
+
+            long failed = samples.stream()
+                    .filter(s -&gt; !s.success)
+                    .count();
             if (samples.size() &gt;= 100 &amp;&amp; failed * 2 &gt;= samples.size()) {
-                state = State.OPEN; retryAt = nowMs + 5000; epoch++;
+                state = State.OPEN;
+                retryAt = nowMs + 5000;
+                epoch++;
                 samples.clear();
             }
         }

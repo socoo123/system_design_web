@@ -311,25 +311,42 @@
 <pre data-language="Java 17 · executable contract model" data-kind="runnable" data-source="ReadPath.java"><code>    Snapshot read(Request request) {
         boolean strong = request.strong() || request.minPos() != null;
         if (strong) {                          // classify BEFORE any cache lookup
-            if (!budget.admit()) throw new Unavailable(&quot;origin budget&quot;);
+            if (!budget.admit()) {
+                throw new Unavailable(&quot;origin budget&quot;);
+            }
+
             Snapshot value = origin.freshPrimary(request.key());
-            if (!value.covers(request.minPos()))
+            if (!value.covers(request.minPos())) {
                 throw new Unavailable(&quot;required history unavailable&quot;);
+            }
             return value;                      // never downgrade to stale data
         }
+
         try {
             Snapshot hit = cache.get(request.key());
-            if (hit != null) return hit;
-        } catch (Unavailable ignored) { /* cache error is not an empty DB result */ }
-        if (!budget.admit()) throw new Unavailable(&quot;origin budget&quot;);
+            if (hit != null) {
+                return hit;
+            }
+        } catch (Unavailable ignored) {
+            /* cache error is not an empty DB result */
+        }
+
+        if (!budget.admit()) {
+            throw new Unavailable(&quot;origin budget&quot;);
+        }
+
         long startedAt = clock.millis();
         Snapshot value = origin.staleReplica(request.key());
         // Failed DB reads throw. Do not convert failures into cached empty results.
         long remainingTtl = ttlMillis - (clock.millis() - startedAt);
         if (remainingTtl &gt; 0) {
-            try { cache.put(request.key(), value, remainingTtl); }
-            catch (Unavailable ignored) { /* a successful stale-ok read still returns */ }
+            try {
+                cache.put(request.key(), value, remainingTtl);
+            } catch (Unavailable ignored) {
+                /* a successful stale-ok read still returns */
+            }
         }
+
         return value;                          // TTL is not a replica-freshness proof
     }</code></pre>
 <div class="bilingual"><div class="lang-zh"><p><code>freshPrimary</code> 的真实适配器必须固定使用同一连接，并确认它连接的节点具有当前读权威，再建立新快照并提供这份快照的历史前缀证明。<code>appliedPrefixes</code> 必须来自快照证明，不能由客户端填写。模型用“历史 → 前缀”的映射，区分合法的祖先历史与已经丢失的历史分支。</p><p><code>Budget</code> 只表示所有应用共享的速率准入：合计每秒最多 400 次，并非每个进程各有 400 次。准入组件不可用时，就关闭回源。准入判断返回的布尔值只说明是否放行，不代表占用了一份并发许可；真实的 Origin 适配器还要通过有界执行或连接池限制并发，并在 finally 中释放占用。</p><p>普通读取遇到副本失败时，也返回不可用。如果另外设计回退到主库的路径，每一次尝试都必须重新获得回源额度。</p></div><div class="lang-en"><p>The real <code>freshPrimary</code> adapter pins one connection/read authority, opens a fresh snapshot and supplies its history-prefix evidence. Its <code>appliedPrefixes</code> is snapshot evidence, never client input. The model maps histories to prefixes to distinguish valid ancestors from lost branches. <code>Budget</code> models only aggregate rate admission across apps, not 400 per process; an unavailable guard closes origin access. The real Origin adapter separately bounds execution/connections and releases occupancy in finally; a boolean admission is not a concurrency permit. Replica failure also fails the ordinary read. Any added primary fallback must acquire admission for each attempt.</p></div></div>
@@ -859,8 +876,10 @@ worker(event):
     else:
         require explicit accepted RPO for any lost suffix
     apply required prefix before exposing reads
-    promote candidate; publish new routing generation
-    resume writes; rebuild an independent replica
+    promote candidate;
+    publish new routing generation
+    resume writes;
+    rebuild an independent replica
     # Any missing proof: remain paused. A timeout never proves rollback.</code></pre>
 <div class="bilingual"><div class="lang-zh"><p>默认使用异步复制时，201 只表示主库已在本地持久提交。如果主库磁盘失效，已经确认、但尚未复制出去的日志尾部仍可能丢失。若要求在这类故障中也保住所有已确认的写入，返回成功前就必须取得位于独立故障域的合格副本的持久确认；提升新主时，还要验证候选节点覆盖了全部已确认的日志前缀。条件不满足就暂停写入，不能悄悄改成异步确认后仍返回成功。旧主恢复后也要保持隔离，完成重建后才能作为副本加入。<a href="#ref-failover">[3]</a></p></div><div class="lang-en"><p>Default asynchronous 201 means local durable primary commit; losing its disk can lose an acknowledged unreplicated suffix. Preserving acknowledged writes through that failure requires durable confirmation from an eligible independent replica before success and promotion coverage of all acknowledged commits. Missing prerequisites pause writes rather than allowing asynchronous success. A recovered old primary remains isolated until rebuilt as a replica. <a href="#ref-failover">[3]</a></p></div></div>
 <details><summary><span class="lang-zh">数据库参数还要结合实际配置理解</span><span class="lang-en">Product settings are not the business contract</span></summary><div class="bilingual"><div class="lang-zh"><p>在 PostgreSQL 17 中，先配置同步副本，<code>synchronous_commit=on</code> 才会等待远端刷盘；<code>remote_apply</code> 还会等待副本应用日志。<code>remote_write</code> 则不能保证数据在副本操作系统崩溃后仍然持久。若没有配置同步副本，仅靠参数名称不会产生远端保证。MySQL 8.4 的半同步 ACK 在 relay log 刷盘后返回，但等不到 ACK 时会回退为异步复制；如果业务要求已确认写入零丢失，就必须控制这种降级。<a href="#ref-sync-commit">[4]</a> <a href="#ref-semisync">[5]</a></p></div><div class="lang-en"><p>With synchronous standbys configured, PostgreSQL 17 <code>synchronous_commit=on</code> waits for remote flush, while <code>remote_apply</code> also waits for apply. <code>remote_write</code> does not ensure survival of a replica OS crash. Without the standby configuration, the parameter name alone adds no remote guarantee. MySQL 8.4 semi-sync ACK follows relay-log flush but waiting can time out into async; a zero-loss contract must control that downgrade. <a href="#ref-sync-commit">[4]</a> <a href="#ref-semisync">[5]</a></p></div></div>

@@ -208,6 +208,7 @@
         <figcaption><span class="lang-zh">处理完 offset 81 后，才提交 next=82。并发处理时，只能推进连续完成的记录前缀，不能直接提交最大的已完成 offset，跳过尚未完成的记录。</span><span class="lang-en">Commit next=82 only after completing 81. Concurrent handling advances the contiguous prefix, not the largest finished offset.</span></figcaption>
       </div>
     </figure><div class="bilingual"><div class="lang-zh"><p><strong>图 1 的处理顺序是：拉取消息（fetch）→ 提交业务效果库（Effect DB）→ 提交组内消费位点（Group Cursor）。</strong>如果先确认消费位点再修改业务，崩溃后可能漏掉业务效果；如果先修改业务再确认位点，崩溃后可能重放消息。后一种情况要由接收端幂等处理来恢复，消息本身仍可能重复投递。<a href="#ref-2">[2]</a></p><p>下面的<strong>SQL 与应用分支伪代码</strong>对应图 1 的第 2–5 帧。可信消费者先验证输入中的身份和权限；scope 表示作用范围，包含租户和业务职责，digest 则由规范化后的操作、账户和金额计算而来。去重表 inbox 与账本表 ledger 都使用<code>PRIMARY KEY(scope,event_id)</code>。身份列还必须显式声明<code>NOT NULL</code>并拒绝空字符串，以避免 SQLite 复合主键允许 NULL 的例外。<a href="#ref-18">[18]</a></p></div><div class="lang-en"><p><strong>Deck 1 orders fetch → Effect DB commit → Group Cursor commit.</strong> Acknowledging the position first can lose an effect on crash. Applying first can replay after crash, which receiver idempotency must handle. This is not once-only delivery. <a href="#ref-2">[2]</a></p><p>The following <strong>SQL plus application-branch pseudocode</strong> implements frames 2–5. A trusted consumer validates identity/authorization; scope includes tenant and business responsibility. Compute the digest from canonical operation/account/amount data. Both inbox and ledger use <code>PRIMARY KEY(scope,event_id)</code> with explicit <code>NOT NULL</code> and nonempty identities, including SQLite’s composite-key NULL caveat. <a href="#ref-18">[18]</a></p></div></div><pre data-language="SQL / pseudocode" data-kind="pseudocode" data-source="effect.pseudo"><code>reject missing, empty or noncanonical scope/event/account as PERMANENT_SCHEMA_ERROR
+
 BEGIN IMMEDIATE                       // one SQLite write transaction
 claimed = SQL(&quot;&quot;&quot;
   INSERT INTO inbox(scope, event_id, digest, result)
@@ -215,13 +216,17 @@ claimed = SQL(&quot;&quot;&quot;
   ON CONFLICT(scope, event_id) DO NOTHING
   RETURNING event_id
 &quot;&quot;&quot;)
+
 if claimed has one row:
     SQL(&quot;INSERT INTO ledger VALUES (:scope, :event, :account, :delta)&quot;)
     changed = SQL(&quot;&quot;&quot;
       UPDATE account SET balance = balance + :delta
       WHERE account_id = :account
     &quot;&quot;&quot;).rowCount
-    if changed != 1: ROLLBACK; fail MISSING_ACCOUNT
+    if changed != 1:
+        ROLLBACK;
+        fail MISSING_ACCOUNT
+
     COMMIT                            // inbox + ledger + balance + result
     return APPLIED
 else:
@@ -229,7 +234,10 @@ else:
       SELECT digest, result FROM inbox
       WHERE scope = :scope AND event_id = :event
     &quot;&quot;&quot;).oneRow
-    if saved.digest != digest: ROLLBACK; fail IDENTITY_CONFLICT
+    if saved.digest != digest:
+        ROLLBACK;
+        fail IDENTITY_CONFLICT
+
     COMMIT
     return saved.result               // no second delta
 // Any SQL error: ROLLBACK; do not advance the source position.
@@ -239,26 +247,49 @@ else:
     final boolean[] done;
     int prefix;
     boolean owned = true;
+
     BatchProgress(long generation, long[] fetched, long batchNext) {
-        if (fetched.length == 0) throw new IllegalArgumentException(&quot;empty&quot;);
+        if (fetched.length == 0) {
+            throw new IllegalArgumentException(&quot;empty&quot;);
+        }
+
         this.generation = generation;
         this.fetched = fetched.clone();
         this.batchNext = batchNext;
         this.done = new boolean[fetched.length];
-        for (int i = 1; i &lt; fetched.length; i++)
-            if (fetched[i] &lt;= fetched[i - 1]) throw new IllegalArgumentException(&quot;order&quot;);
-        if (batchNext &lt;= fetched[fetched.length - 1]) throw new IllegalArgumentException(&quot;next&quot;);
+
+        for (int i = 1; i &lt; fetched.length; i++) {
+            if (fetched[i] &lt;= fetched[i - 1]) {
+                throw new IllegalArgumentException(&quot;order&quot;);
+            }
+        }
+        if (batchNext &lt;= fetched[fetched.length - 1]) {
+            throw new IllegalArgumentException(&quot;next&quot;);
+        }
     }
+
     void complete(long ticketGeneration, int index) {
-        if (!owned || ticketGeneration != generation) return;
+        if (!owned || ticketGeneration != generation) {
+            return;
+        }
+
         done[index] = true;
-        while (prefix &lt; done.length &amp;&amp; done[prefix]) prefix++;
+        while (prefix &lt; done.length &amp;&amp; done[prefix]) {
+            prefix++;
+        }
     }
+
     OptionalLong safeNext() {
-        if (!owned || prefix == 0) return OptionalLong.empty();
+        if (!owned || prefix == 0) {
+            return OptionalLong.empty();
+        }
+
         return OptionalLong.of(prefix == fetched.length ? batchNext : fetched[prefix]);
     }
-    void revoke() { owned = false; }
+
+    void revoke() {
+        owned = false;
+    }
 }</code></pre><div class="bilingual"><div class="lang-zh"><p>工作线程（worker）只发送完成通知，由 poll 线程更新前缀并调用 Kafka API。批次代次 generation 失效或分区被撤回（revoke）后，就不能再提交旧批次。分区暂停期间仍要继续 poll 以维持消费者活性，不能阻塞到超过 max.poll.interval.ms。完整控制循环见<a href="../examples/ch42/consumer.pseudo">consumer.pseudo</a>。本地 generation 只能拒绝迟到通知；新旧消费者处理时间重叠时，仍要依靠前面的持久约束避免业务重复生效。<a href="#ref-2">[2]</a></p></div><div class="lang-en"><p>Workers publish completion notifications; the poll thread updates the prefix and calls Kafka APIs. Invalidate the generation on revoke and stop committing that batch. Continue polling paused partitions to stay within max.poll.interval.ms. See the <a href="../examples/ch42/consumer.pseudo">control-loop contract</a>. Local generations reject stale callbacks; the durable DB constraint still handles overlapping owners. <a href="#ref-2">[2]</a></p></div></div>
 </section>
 
@@ -729,21 +760,32 @@ else:
         <figcaption><span class="lang-zh">重放时保留事件 e7 和业务效果作用范围 effect_scope，并重新确认旧事件在当前状态下仍然合法。新 envelope_id 可以标识审计用的投递封套，但不能作为新的业务身份。</span><span class="lang-en">Replay keeps e7 and effect_scope and revalidates current legality. A new envelope_id may serve audit, not create a new effect identity.</span></figcaption>
       </div>
     </figure><div class="bilingual"><div class="lang-zh"><p>schema 错误、无效身份和非法版本直接隔离；网络抖动或 429 则只有在调用可安全重复、预算也允许时，才进行重试。如果异步任务承诺跨重启最多尝试两次，就必须持久保存尝试次数或领取记录；仅靠内存计数，进程崩溃后就会重新计数。</p><p>图 4 先写入原始数据、事件 e7、来源分区和 offset、schema、错误信息及尝试证据，等收到 DLQ 的持久 ACK 后，才推进源位点。如果 ACK 丢失，就保留源位点，使用原身份再次写入 DLQ。DLQ 故障时要暂停并告警。消息进入 DLQ 只表示修复流程开始，订单履约仍未成功。</p><p><strong>要求实体严格有序时，暂停状态也必须持久保存。</strong>例如 v8 失败后，不能让同一实体的 v9 继续执行。如果仍要推进源记录的提交前缀，就要先持久登记该实体被阻塞及其恢复顺序，并确保进程重启或新消费者接手后加载这些状态；仅在内存中 pause 不够。更简单的选择是保留失败位置不提交，暂停整个分区。重放入口 Replay Gate 完成修复并核对当前业务状态后，再限速重放；事件 e7 和 effect_scope 保持不变，新的 envelope 只用于审计。</p></div><div class="lang-en"><p>Invalid schema/identity/version goes to quarantine. Retry transient networking or 429 only when repetition is safe and budgets allow. A cross-restart two-attempt limit for asynchronous work needs durable attempt/claim records; memory counters reset after crashes.</p><p>Deck 4 persists original data, e7, source partition/offset, schema, error and attempt evidence, then waits for durable DLQ ACK before advancing the source. Lost ACK retains the source position and repeats the original identity. Pause and alert if DLQ fails. Quarantine begins repair; it does not make fulfillment successful.</p><p><strong>Strict entity order needs durable parking.</strong> Do not run v9 after failed v8. To advance the source prefix, first persist entity blocking/recovery order and require restarted/new owners to load it. An in-memory pause is insufficient. Alternatively keep the failing source position uncommitted and park the whole partition. Replay Gate repairs, validates current state and replays at a bounded rate, preserving e7/effect_scope; fresh envelopes serve audit only.</p></div></div><div class="bilingual"><div class="lang-zh"><p>下面的<strong>同步依赖调用退避伪代码</strong>受 A7 中同一个 800 ms 截止时间约束。异步修复任务需要另设业务期限，不能继续沿用已经结束的 HTTP 等待预算。</p><p>可以走一遍正常重试：首次调用因临时故障失败，本地 I/O 已结束，退避时间 delay=60 ms，请求还剩 400 ms。因为 60+250+50≤400，在拿到额外流量令牌（token）后，才允许再试一次。如果错误不可恢复、旧 I/O 仍未结束或重试额度耗尽，就停止；退避前若只剩 300 ms，也容纳不下非零退避、250 ms 尝试和 50 ms 返回预留。</p><p>定时唤醒后和真正发起调用前，都要重新计算剩余时间；不足 250+50=300 ms 时停止。重试预算由该层的准入控制器统一发放。即使按实例分配，各实例额度之和也不能超过这一层的总上限。<a href="#ref-20">[20]</a></p></div><div class="lang-en"><p>This is <strong>synchronous dependency-retry pseudocode</strong> under A7’s original 800ms deadline. Asynchronous repair needs its own business expiry, rather than inheriting an expired HTTP wait. Normal trace: transient failure, old local I/O ended, 60ms delay, 400ms remaining; 60+250+50≤400 permits one retry if an extra-traffic token is granted. Permanent errors, only 300ms left before a nonzero delay, live old I/O or exhausted budget stop it. Recompute time after the timer wakes and immediately before dispatch; stop below the fixed 250ms attempt plus 50ms return reserve. The tier’s admission controller issues that budget; per-instance allocations must sum within the tier limit. <a href="#ref-20">[20]</a></p></div></div><pre data-language="Pseudocode · retry" data-kind="pseudocode" data-source="retry.pseudo"><code>// Same business key; at most 2 TOTAL attempts including the first.
-if permanent_error or unsafe_to_repeat: STOP_OR_RECONCILE
-if attempts_started &gt;= 2: STOP
-if previous_local_io_has_not_terminated: WAIT_WITHIN_DEADLINE_OR_STOP
+if permanent_error or unsafe_to_repeat:
+    STOP_OR_RECONCILE
+if attempts_started &gt;= 2:
+    STOP
+if previous_local_io_has_not_terminated:
+    WAIT_WITHIN_DEADLINE_OR_STOP
+
 delay = uniform_random(0, 100 ms)         // A6/A7 bounded jitter
-if now + delay + 250 ms + 50 ms &gt; original_deadline: STOP
+if now + delay + 250 ms + 50 ms &gt; original_deadline:
+    STOP
 schedule_at(now + delay)                  // do not sleep the poll thread
+
 at scheduled time:
     remaining = original_deadline - now
-    if remaining &lt; 250 ms + 50 ms: STOP
+    if remaining &lt; 250 ms + 50 ms:
+        STOP
+
     recheck business validity
-    if retry_budget has no extra-attempt token: STOP
+    if retry_budget has no extra-attempt token:
+        STOP
+
     reserve one extra-attempt token        // conservative; no refund on rejection
     try nonblocking dependency bulkhead admission; on rejection STOP
     if original_deadline - now &lt; 250 ms + 50 ms:
-        release the unstarted permit; STOP
+        release the unstarted permit;
+        STOP
     start attempt 2 with at most 250 ms; keep 50 ms for return
 // The tier&#x27;s admission controller owns the retry budget, including replay.
 // A token reserves extra traffic; it does not make a write idempotent.</code></pre>
@@ -937,10 +979,13 @@ at scheduled time:
         <figcaption><span class="lang-zh">每秒 100 次调用、平均耗时 80 ms，对应平均 8 个在途调用；耗时增至 2 秒后，需要 200 个，远超 20 个许可的上限。若超时就归还许可，尚未结束的本地 I/O 会使实际在途数突破上限。</span><span class="lang-en">100/s×80 ms gives eight mean active calls; at two seconds it is 200, above cap 20. Early release can exceed the local I/O cap; remote work needs its own admission.</span></figcaption>
       </div>
     </figure><div class="bilingual"><div class="lang-zh"><p>图 5 的 Pool A/B 是 App 内部的逻辑隔离舱，各自拥有许可和独立执行资源。A7 的时间预算为 50+300+100+250+50=750 ms≤800 ms；建立连接、TLS、排队和读取响应，都必须算在尝试预算内。如果三层调用各自最多尝试三次，最坏会放大到 3³=27 倍。本例只在一层重试，并把额外重试量限制为原始流量的 10%，因此每秒 100 次原始请求最多产生每秒 110 次调用。随机抖动只能错开调用时间，无法减少这些工作量。<a href="#ref-4">[4]</a><a href="#ref-20">[20]</a></p><p>A8 按平均值计算：100/s×0.08s=8。平均耗时变成 2 秒后，同样的流量需要 200 个并发调用；20 个许可只能支撑理论平均速率 20÷2=10 次/秒，其余请求要拒绝或延后。Little 模型描述平均值，无法证明 p99 延迟。信号量也不能代替线程和连接隔离：如果 A 已占满共享的执行器或连接池，B 仍会被拖住。<a href="#ref-5">[5]</a></p><p><strong>下面摘自可运行的 Java 17 示例，只限制本进程针对这一个依赖的本地 I/O。</strong>每个隔离舱都有独立执行器 executor，队列长度为 0。<code>actualIo</code> 是同步适配器，只有本地阻塞 I/O 确实结束后才能返回，不能把工作偷偷留给后台子任务。Future 超时只结束调用方的等待；工作线程结束时，才在 finally 中归还许可。<a href="#ref-6">[6]</a><a href="#ref-17">[17]</a></p></div><div class="lang-en"><p>Deck 5’s Pool A/B are logical App bulkheads with independent permits/execution resources. A7 totals 50+300+100+250+50=750ms≤800ms, including connection, TLS, queueing and response time. Three layers with three total attempts each amplify by up to 3³=27. One retrying layer plus ≤10% extras turns 100/s originals into at most 110/s. Jitter spreads timing only. <a href="#ref-4">[4]</a><a href="#ref-20">[20]</a></p><p>A8 uses means: 100/s×0.08s=8; at 2s it needs 200 concurrent calls. Cap 20 has a theoretical mean ceiling of 20÷2=10/s; reject or defer the rest. Little’s model does not prove p99. Semaphores alone do not isolate a shared A-saturated executor/connection pool from B. <a href="#ref-5">[5]</a></p><p><strong>This excerpt from a runnable Java 17 example bounds local I/O for one dependency in one process.</strong> Each bulkhead has its own executor with zero queue. <code>actualIo</code> is a synchronous adapter that returns only after local blocking I/O ended, with no hidden background work. A future timeout completes waiting; the worker’s finally returns the permit. <a href="#ref-6">[6]</a><a href="#ref-17">[17]</a></p></div></div><pre data-language="Java 17 · I/O" data-kind="teaching" data-source="Resilience.java#io"><code>CompletionStage&lt;String&gt; call(Callable&lt;String&gt; actualIo, long deadlineNanos) {
-    if (deadlineNanos - System.nanoTime() &lt;= 0)
+    if (deadlineNanos - System.nanoTime() &lt;= 0) {
         return CompletableFuture.failedFuture(new TimeoutException());
-    if (!permits.tryAcquire())
+    }
+    if (!permits.tryAcquire()) {
         return CompletableFuture.failedFuture(new RejectedExecutionException(&quot;full&quot;));
+    }
+
     var reply = new CompletableFuture&lt;String&gt;();
     try {
         workers.execute(() -&gt; {
@@ -961,6 +1006,7 @@ at scheduled time:
         permits.release(); // no worker started
         reply.completeExceptionally(rejected);
     }
+
     long left = Math.max(0, deadlineNanos - System.nanoTime());
     return reply.orTimeout(left, TimeUnit.NANOSECONDS).minimalCompletionStage();
 }</code></pre><div class="bilingual"><div class="lang-zh"><p>工作正常完成或发生 I/O 异常时，工作线程都只归还一次许可。如果向 executor 提交任务就被拒绝，此时没有工作线程启动，许可由调用线程归还。工作线程开始时会重新检查同一个截止时间，调度已经迟到就不再发起新 I/O。不过，检查之后线程仍可能被抢占，所以这不是硬实时屏障；传输客户端也必须执行剩余时间预算。</p><p>如果调用方已超时，而工作线程仍阻塞在 I/O 上，许可就继续被占用，后续请求会被拒绝。如果 I/O 永不结束，整个隔离舱可能持续耗尽，需要另行设计强制停止或进程恢复策略。<strong>即使本地 socket 已结束，也无法证明远端业务已经停止。</strong>远端仍要有自己的准入、截止时间和业务幂等控制。取消请求无法保证远端回滚；未知写入仍按原业务键查询结果。</p></div><div class="lang-en"><p>Success and I/O failure each release once. Executor rejection starts no worker, so the caller returns that permit. The worker rechecks the same deadline before dispatch and skips expired work. This is not a hard real-time barrier: preemption can follow the check, and the transport client must also enforce remaining budgets.</p><p>If the caller times out while the worker is blocked, its permit remains held and later calls are rejected. Never-ending I/O can exhaust this bulkhead and needs a separate hard-stop/process-recovery policy. <strong>Local socket termination does not prove remote business work stopped.</strong> The receiver still needs admission, deadlines and idempotency. Cancellation is not rollback; query unknown writes with the original key.</p></div></div>
@@ -1249,16 +1295,24 @@ at scheduled time:
       </div>
     </figure><div class="bilingual"><div class="lang-zh"><p>普通 Linux 容器是共享宿主机内核的隔离进程。命名空间 namespaces 限制进程能看到的系统视图，控制组 cgroups 限制资源使用；虚拟机 VM 则拥有客户机内核。一个 Pod 可以包含一个或多个紧密协作的容器，它们共享网络和声明的卷，但默认不会全部共享 PID 空间。运行不可信代码时，仍需按威胁模型选择沙箱或虚拟机。<a href="#ref-9">[9]</a><a href="#ref-10">[10]</a><a href="#ref-11">[11]</a></p><p>图 7 用 API Store 概括 API Server 和持久保存的 API 状态。Controller 通过 API 补齐 Pod 对象，Scheduler 为未绑定的 Pod 选节点并写入 binding，节点上的 kubelet 则观察分配给自己的 spec，通过 CRI 运行时启动容器，再回报状态。这个过程不断重复，使实际状态接近期望状态。containerd 和 CRI-O 都可以作为运行时；Kubernetes 1.24 移除 dockershim 后，兼容的 Docker 镜像仍然可以使用。<a href="#ref-12">[12]</a><a href="#ref-14">[14]</a><a href="#ref-15">[15]</a></p><p>容量只按 Ready 副本计算：3×250=750 次/秒，可以覆盖每秒 600 次的入口流量；少一个副本后，只剩每秒 500 次，须拒绝每秒 100 次请求。如果要求一个独立节点失效后仍满足同一预算，就至少需要 ceil(600÷250)+1=4 个副本，而且必须有实际独立的节点和剩余容量。Running 状态或 desired=3 都不能补足缺失容量。startup、readiness、liveness 探针分别负责启动检查、普通服务端点的流量准入和重启判断；不能让远端数据库故障通过 liveness 探针触发整个 App 层重启。<a href="#ref-13">[13]</a></p><p><strong>排空时先关闭本地准入，不能等路由更新传播完才关门。</strong>下面的伪代码描述应用如何集成排空流程，Kubernetes 控制器的实现不在其中。preStop 可以主动调用与 TERM 相同的幂等 drain 入口。Pod 的退出宽限期包含 preStop 所耗时间，因此应用只能使用预先分配的剩余排空预算，并给关闭连接和退出进程预留时间。端点更新与本地退出会并行进行，无法提供“所有入口都已撤下路由”的统一完成信号；传播期间迟到的流量，由本地准入拒绝。<a href="#ref-19">[19]</a></p></div><div class="lang-en"><p>Ordinary Linux containers are isolated processes sharing the host kernel: namespaces constrain views, cgroups constrain resources, while VMs have guest kernels. A Pod holds one or more cooperating containers with shared networking/declared volumes; PID sharing is not universal by default. Untrusted execution still needs threat-model-based sandbox/VM choices. <a href="#ref-9">[9]</a><a href="#ref-10">[10]</a><a href="#ref-11">[11]</a></p><p>Deck 7’s API Store abstracts the API Server and durable API state. Controller creates objects through the API; Scheduler selects nodes/binds pending Pods; kubelet observes local specs, executes through CRI and reports status. This repeats rather than making Scheduler launch containers. Both containerd and CRI-O are options; 1.24 removed dockershim without invalidating compatible Docker images. <a href="#ref-12">[12]</a><a href="#ref-14">[14]</a><a href="#ref-15">[15]</a></p><p>Count Ready budgets: 3×250=750/s covers 600/s; one lost leaves 500/s and a 100/s deficit. Surviving one independent-node failure under the same budget requires at least ceil(600÷250)+1=4 replicas and actual independent node capacity. Running or desired=3 is not another usable replica. Startup, readiness and liveness govern initialization, normal endpoint admission and restart; a remote DB incident should not restart the entire App tier through liveness. <a href="#ref-13">[13]</a></p><p><strong>Close locally before waiting for routing propagation.</strong> This is application-integration pseudocode, not a Kubernetes controller. preStop may invoke the same idempotent drain entry as TERM. Pod grace includes preStop, so use a preallocated remaining drain budget with time reserved for close/exit. Endpoint updates and local shutdown proceed concurrently; they supply no all-ingress removal barrier. The local gate rejects late traffic. <a href="#ref-19">[19]</a></p></div></div><pre data-language="Pseudocode · drain" data-kind="pseudocode" data-source="drain.pseudo"><code>on preStop drain request or TERM:
     under the same local lock as HTTP admission:
-        if already draining: return existing drain task
-        close admission; fix monotonic drain cutoff once
+        if already draining:
+            return existing drain task
+        close admission;
+        fix monotonic drain cutoff once
+
     report not-ready
     stop dispatching new queue work
     pause every assigned partition           // poll thread only
-    disable new retries; keep existing durable obligations
+    disable new retries;
+    keep existing durable obligations
+
     while before local drain cutoff:
-        poll paused consumer; process completion notifications
+        poll paused consumer;
+        process completion notifications
         commit only safe fetched-record prefixes still owned
-        if actual local I/O == 0 and no dispatched work remains: break
+        if actual local I/O == 0 and no dispatched work remains:
+            break
+
     final bounded commit of safe positions if still assigned
     close consumer within remaining budget
     exit; unfinished effects/unknown commits replay with original keys

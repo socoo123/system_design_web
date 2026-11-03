@@ -263,31 +263,33 @@
     </div>
 <div class="bilingual"><div class="lang-zh"><p>本例选择 PostgreSQL 18 作为单一权威数据库。下面的教学建表语句将唯一性落实为约束：短码 code 使用区分大小写的主键，幂等记录使用 owner/key 复合主键。保存的幂等响应快照保持不变，之后修改目标地址也不会重写它。这段示例没有展开完整的参数化服务、鉴权和迁移工具。</p></div><div class="lang-en"><p>The example uses one authoritative PostgreSQL 18 database. This teaching DDL makes uniqueness concrete: case-sensitive code and composite owner/key keys. The stored idempotent response is immutable even after retargeting. A complete parameterized service, authentication, and migrations are outside the snippet.</p></div></div><pre data-language="SQL teaching schema" data-kind="teaching" data-source="schema.sql"><code>-- PostgreSQL 18 teaching schema; one authoritative database.
 CREATE TABLE Link (
-  code text COLLATE "C" PRIMARY KEY,
-  owner_id bigint NOT NULL,
-  target_url text NOT NULL,
-  status text NOT NULL CHECK (status IN ('active','revoked','blocked','pending')),
-  expires_at timestamptz,
-  created_at timestamptz NOT NULL DEFAULT now(),
-  version bigint NOT NULL CHECK (version &gt; 0)
+    code text COLLATE "C" PRIMARY KEY,
+    owner_id bigint NOT NULL,
+    target_url text NOT NULL,
+    status text NOT NULL CHECK (status IN ('active', 'revoked', 'blocked', 'pending')),
+    expires_at timestamptz,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    version bigint NOT NULL CHECK (version &gt; 0)
 );
+
 CREATE TABLE Idempotency (
-  owner_id bigint NOT NULL,
-  key text COLLATE "C" NOT NULL,
-  request_hash bytea NOT NULL,
-  code text NOT NULL REFERENCES Link(code),
-  response_status integer NOT NULL,
-  response_body jsonb NOT NULL,
-  retain_until timestamptz NOT NULL,
-  PRIMARY KEY (owner_id, key)
+    owner_id bigint NOT NULL,
+    key text COLLATE "C" NOT NULL,
+    request_hash bytea NOT NULL,
+    code text NOT NULL REFERENCES Link(code),
+    response_status integer NOT NULL,
+    response_body jsonb NOT NULL,
+    retain_until timestamptz NOT NULL,
+    PRIMARY KEY (owner_id, key)
 );
+
 CREATE TABLE Outbox (
-  event_id uuid PRIMARY KEY,
-  code text NOT NULL REFERENCES Link(code),
-  version bigint NOT NULL,
-  kind text NOT NULL,
-  delivered_at timestamptz,
-  UNIQUE(code, version)
+    event_id uuid PRIMARY KEY,
+    code text NOT NULL REFERENCES Link(code),
+    version bigint NOT NULL,
+    kind text NOT NULL,
+    delivered_at timestamptz,
+    UNIQUE(code, version)
 );</code></pre>
 <div class="bilingual"><div class="lang-zh"><p>本例也约定了输入限制。目标地址 target_url 按 UTF-8 编码后不得超过 2,048 B，只允许 http/https 协议，并拒绝 URL 中的用户信息部分（userinfo）、控制字符及 CR/LF；服务不会抓取目标页面。自动生成的短码固定为 6 位，字符集为 [0-9a-zA-Z]；自定义别名为 4–32 位，字符集为 [0-9a-zA-Z_-]，同样区分大小写，并保留 v1 等路由名称。校验 code 时，两种格式都要允许。</p><p>新建链接的到期时间必须在未来。不过，若同一请求已有幂等回执，应先回放回执，不能因为重试时链接已经到期就改回 400。幂等键 Idempotency-Key 长 1–128 个 ASCII 字符，创建者身份来自认证上下文；请求摘要 request_hash 覆盖规范化后的 URL、别名和到期时间。</p></div><div class="lang-en"><p>Input limits are teaching choices: target_url is at most 2,048 UTF-8 bytes, only HTTP(S), no userinfo, controls, or CR/LF; the service does not fetch it. Generated codes are six [0-9a-zA-Z] characters; aliases are 4–32 case-sensitive [0-9a-zA-Z_-] characters with routes such as v1 reserved. Code validation admits either shape. Expiry must be future for a new create; replay an existing receipt before that time-sensitive validation, even if its link has since expired. Idempotency-Key is 1–128 ASCII characters and owner comes from authentication; the hash covers canonical URL, alias, and expiry.</p></div></div>    <h3><span class="lang-zh">接口契约：重试和并发竞争时返回什么</span><span class="lang-en">The API contract must settle retries and races</span></h3>
     <pre data-language="HTTP example" data-kind="data"><code>POST /v1/links
@@ -447,40 +449,50 @@ Idempotency-Key: 6fc1…
     </figure>
 
 <h3><span class="lang-zh">创建实现：发生冲突后，先查是否已有同一请求的结果</span><span class="lang-en">Create: recover the same intent before classifying a conflict</span></h3><div class="bilingual"><div class="lang-zh"><p>下面的伪代码对应写入图的第 2–5 帧。先查幂等记录只是快路径，最终写入由 Link、Idempotency 的主键约束和同库事务共同保证。无论候选码来自号段中的下一个 ID，还是均匀随机生成的 base62，都通过同一套条件插入。每次尝试最多消耗一个候选码，允许序列中出现空洞。</p><p>链接的初始状态 initialStatus 由服务端可信的风险准入检查决定：通过时为 active，高风险时为 pending；拒绝创建返回 403，准入依赖不可用返回 503。客户端不能自行指定这个字段，待审状态和幂等回执仍在同一事务中提交。外围错误处理把连接、读取、BEGIN 和发号失败转为 503，并要求客户端用相同幂等键重试。查询成功却没有记录，与查询本身失败，要分别处理。</p></div><div class="lang-en"><p>This implements write frames 2–5. Lookup is a fast path; the Link and Idempotency primary keys plus one database transaction enforce the commit. A range ID or a uniform random base62 candidate uses the same conditional insert. Each attempt can consume one candidate; gaps are allowed. initialStatus comes from trusted server risk admission: approved requests are active, high-risk ones pending, denial returns 403, and unavailable admission returns 503. Clients cannot choose it; pending and the retry receipt commit together. An outer error handler maps connection, read, BEGIN, and allocation failures to 503 with same-key retry; an empty result is distinct from a failed query.</p></div></div><pre data-language="Pseudocode · create" data-kind="pseudocode" data-source="create.pseudo"><code>create(owner, key, request):
-  p = validateSyntaxAndCanonicalize(request) // HTTP(S), alias, expiry shape
-  h = SHA256(canonicalBytes(p))         // all creation fields
-  for attempt in 1..5:
-    old = PRIMARY SELECT * FROM Idempotency WHERE owner_id=:owner AND key=:key
-    if old exists: return old.request_hash == h ? (old.response_status, old.response_body) : 409
-    if p.expiry exists and p.expiry &lt;= now(): return 400
-    initialStatus = trustedRiskAdmission(p) // active/pending; denial=403, error=503
-    code = p.alias ?? nextCandidate()   // segment OR uniform random
-    response = {code, short_url: BASE_URL + code, version: 1, status: initialStatus}
-    BEGIN ISOLATION LEVEL READ COMMITTED
-    try:
-      // SQL values below are bound parameters, never string interpolation.
-      INSERT INTO Link(code, owner_id, target_url, status, expires_at, version)
-        VALUES(code, owner, p.url, initialStatus, p.expiry, 1)
-      INSERT INTO Idempotency(owner_id,key,request_hash,code,response_status,
-                              response_body,retain_until)
-        VALUES(owner,key,h,code,201,response,db_now()+24h)
-      COMMIT                           // only confirmed commit permits 201
-      return 201 with response
-    catch unique_violation(constraint):
-      ROLLBACK                         // before ANY new SQL
-      winner = PRIMARY SELECT * FROM Idempotency WHERE owner_id=:owner AND key=:key
-      if winner exists:
-        return winner.request_hash == h ? (winner.response_status, winner.response_body) : 409
-      if constraint == 'link_pkey' and p.alias exists: return 409
-      if constraint not in {'link_pkey','idempotency_pkey'}: return 503
-      continue                         // generated collision: fresh candidate
-    catch commit_outcome_unknown:
-      discard_connection()             // ROLLBACK cannot undo a commit
-      return 503 {retry_with_same_key:true, outcome:'unknown'}
-    catch database_error:
-      ROLLBACK if connection is usable
-      return 503 {retry_with_same_key:true}
-  return 503 {retry_with_same_key:true}  // never loop without a bound</code></pre><div class="bilingual"><div class="lang-zh"><p><strong>同一别名、同一幂等键的并发请求，也要先恢复已有结果。</strong>两个请求可能都先查不到幂等记录，随后其中一个成功提交别名和幂等行。另一个请求可能先碰到 Link 主键冲突，而非 owner/key 主键冲突。此时应先 ROLLBACK，再向主库发起新语句查询成功者的幂等记录：摘要相同就回放 201，摘要不同返回 409；只有查不到成功者的记录，才把别名占用判为普通的 409。自动生成的短码发生碰撞时，则换一个候选，不能覆盖已有映射。[6][9]</p></div><div class="lang-en"><p><strong>Same-alias, same-key races also need recovery.</strong>Both initial reads may miss. The winner commits the alias and retry identity; the loser can hit the Link key first. ROLLBACK, then read the winner with a new primary statement: replay 201 for the same hash, or 409 for changed parameters. Only without a winner is an alias conflict a plain 409. Generated collisions choose a new candidate; never overwrite a mapping. [6][9]</p></div></div><div class="bilingual"><div class="lang-zh"><p>在 READ COMMITTED 隔离级别下，每条语句都会取得新快照。若改用 ON CONFLICT DO NOTHING，不能假定同一条 CTE 中的 SELECT 一定看得到导致 INSERT 跳过的并发行。唯一约束报错后，当前事务已失败，要先整体回滚再读；另一种做法是显式回滚到保存点（savepoint）后继续。本例采用整体回滚。[9]</p></div><div class="lang-en"><p>READ COMMITTED takes a new snapshot per statement. An ON CONFLICT DO NOTHING variant must not assume a same-statement CTE SELECT sees the concurrent row that blocked insertion. A constraint error aborts the transaction: roll back the transaction, or explicitly roll back a savepoint, before further SQL. This example rolls back the entire transaction. [9]</p></div></div><div class="bilingual"><div class="lang-zh"><p><strong>提交确认丢失时，结果仍然未知。</strong>返回 503 不能证明“确定没有写入”。服务应丢弃连接，客户端继续使用相同幂等键重试。如果旧事务尚未结束，新 INSERT 可能在唯一约束处等待或超时，此时也不能换一个新键。</p><p>幂等记录在 24 小时内不清理。即使链接后来已被撤销，相同创建请求仍回放原来的创建回执，当前状态由读取接口查询。副本同步提交和故障切换策略也必须保住已确认的数据，否则恢复第一次结果的承诺就无法成立。</p></div><div class="lang-en"><p><strong>A lost commit acknowledgement means unknown outcome.</strong>A 503 does not prove rollback. Discard the connection and retry with the same key. If the old transaction is still running, a new INSERT waits or times out at the unique constraint; it must not switch keys. Retain retry rows for at least 24 hours. Replay the original create receipt even if the link was later revoked; read current state separately. Replication and failover must preserve acknowledged commits, or this guarantee is lost too.</p></div></div>    <h3><span class="lang-zh">写入在哪些时刻失败，分别会留下什么</span><span class="lang-en">Three write failure windows</span></h3>
+    p = validateSyntaxAndCanonicalize(request) // HTTP(S), alias, expiry shape
+    h = SHA256(canonicalBytes(p))         // all creation fields
+
+    for attempt in 1..5:
+        old = PRIMARY SELECT * FROM Idempotency WHERE owner_id = :owner AND key = :key
+        if old exists:
+            return old.request_hash == h ? (old.response_status, old.response_body) : 409
+
+        if p.expiry exists and p.expiry &lt;= now():
+            return 400
+        initialStatus = trustedRiskAdmission(p) // active/pending; denial=403, error=503
+        code = p.alias ?? nextCandidate()   // segment OR uniform random
+        response = {code, short_url: BASE_URL + code, version: 1, status: initialStatus}
+
+        BEGIN ISOLATION LEVEL READ COMMITTED
+        try:
+            // SQL values below are bound parameters, never string interpolation.
+            INSERT INTO Link(code, owner_id, target_url, status, expires_at, version)
+                VALUES(code, owner, p.url, initialStatus, p.expiry, 1)
+            INSERT INTO Idempotency(owner_id, key, request_hash, code, response_status,
+                                    response_body, retain_until)
+                VALUES(owner, key, h, code, 201, response, db_now() + 24h)
+
+            COMMIT                           // only confirmed commit permits 201
+            return 201 with response
+        catch unique_violation(constraint):
+            ROLLBACK                         // before ANY new SQL
+
+            winner = PRIMARY SELECT * FROM Idempotency WHERE owner_id = :owner AND key = :key
+            if winner exists:
+                return winner.request_hash == h ? (winner.response_status, winner.response_body) : 409
+            if constraint == 'link_pkey' and p.alias exists:
+                return 409
+            if constraint not in {'link_pkey', 'idempotency_pkey'}:
+                return 503
+            continue                         // generated collision: fresh candidate
+        catch commit_outcome_unknown:
+            discard_connection()             // ROLLBACK cannot undo a commit
+            return 503 {retry_with_same_key: true, outcome: 'unknown'}
+        catch database_error:
+            ROLLBACK if connection is usable
+            return 503 {retry_with_same_key: true}
+
+    return 503 {retry_with_same_key: true}  // never loop without a bound</code></pre><div class="bilingual"><div class="lang-zh"><p><strong>同一别名、同一幂等键的并发请求，也要先恢复已有结果。</strong>两个请求可能都先查不到幂等记录，随后其中一个成功提交别名和幂等行。另一个请求可能先碰到 Link 主键冲突，而非 owner/key 主键冲突。此时应先 ROLLBACK，再向主库发起新语句查询成功者的幂等记录：摘要相同就回放 201，摘要不同返回 409；只有查不到成功者的记录，才把别名占用判为普通的 409。自动生成的短码发生碰撞时，则换一个候选，不能覆盖已有映射。[6][9]</p></div><div class="lang-en"><p><strong>Same-alias, same-key races also need recovery.</strong>Both initial reads may miss. The winner commits the alias and retry identity; the loser can hit the Link key first. ROLLBACK, then read the winner with a new primary statement: replay 201 for the same hash, or 409 for changed parameters. Only without a winner is an alias conflict a plain 409. Generated collisions choose a new candidate; never overwrite a mapping. [6][9]</p></div></div><div class="bilingual"><div class="lang-zh"><p>在 READ COMMITTED 隔离级别下，每条语句都会取得新快照。若改用 ON CONFLICT DO NOTHING，不能假定同一条 CTE 中的 SELECT 一定看得到导致 INSERT 跳过的并发行。唯一约束报错后，当前事务已失败，要先整体回滚再读；另一种做法是显式回滚到保存点（savepoint）后继续。本例采用整体回滚。[9]</p></div><div class="lang-en"><p>READ COMMITTED takes a new snapshot per statement. An ON CONFLICT DO NOTHING variant must not assume a same-statement CTE SELECT sees the concurrent row that blocked insertion. A constraint error aborts the transaction: roll back the transaction, or explicitly roll back a savepoint, before further SQL. This example rolls back the entire transaction. [9]</p></div></div><div class="bilingual"><div class="lang-zh"><p><strong>提交确认丢失时，结果仍然未知。</strong>返回 503 不能证明“确定没有写入”。服务应丢弃连接，客户端继续使用相同幂等键重试。如果旧事务尚未结束，新 INSERT 可能在唯一约束处等待或超时，此时也不能换一个新键。</p><p>幂等记录在 24 小时内不清理。即使链接后来已被撤销，相同创建请求仍回放原来的创建回执，当前状态由读取接口查询。副本同步提交和故障切换策略也必须保住已确认的数据，否则恢复第一次结果的承诺就无法成立。</p></div><div class="lang-en"><p><strong>A lost commit acknowledgement means unknown outcome.</strong>A 503 does not prove rollback. Discard the connection and retry with the same key. If the old transaction is still running, a new INSERT waits or times out at the unique constraint; it must not switch keys. Retain retry rows for at least 24 hours. Replay the original create receipt even if the link was later revoked; read current state separately. Replication and failover must preserve acknowledged commits, or this guarantee is lost too.</p></div></div>    <h3><span class="lang-zh">写入在哪些时刻失败，分别会留下什么</span><span class="lang-en">Three write failure windows</span></h3>
     <table>
       <thead><tr><th><span class="lang-zh">失败时刻</span><span class="lang-en">Failure point</span></th><th><span class="lang-zh">风险</span><span class="lang-en">Risk</span></th><th><span class="lang-zh">处理</span><span class="lang-en">Handling</span></th></tr></thead>
       <tbody>
@@ -636,32 +648,49 @@ Idempotency-Key: 6fc1…
       </div>
     </div>
 <h3><span class="lang-zh">跳转实现：先检查快照新鲜度，再检查链接状态</span><span class="lang-en">Redirect: freshness before a usable target</span></h3><div class="bilingual"><div class="lang-zh"><p>下面的伪代码对应读取图的第 2–5 帧。缓存未命中或不可用时，都可以尝试下一级；只有主库 SELECT 成功返回空行，才建立负缓存。最低版本要求 minimumVersion 默认为 0；创建者查询时可携带创建回执，要求至少读到 version=1，从而绕过 version=0 的负缓存。进程内请求合并（singleflight）和等待队列上限由外层实现，每秒 800 次的回源预算由所有实例合计共享。</p></div><div class="lang-en"><p>This pseudocode follows read frames 2–5. Cache misses and errors may try the next source; only a successful empty primary SELECT creates a negative entry. minimumVersion defaults to zero; an owner read with a create receipt can require version≥1, bypassing version-zero negatives. An outer layer supplies process-local coalescing and bounded waiters; 800/s is the aggregate origin budget.</p></div></div><pre data-language="Pseudocode · redirect" data-kind="pseudocode" data-source="redirect.pseudo"><code>redirect(code, minimumVersion = 0):
-  if not validCodeShape(code): return 404 with no-store
-  if not clockWithinBudget(): return 503 with no-store
-  snapshot = firstUsable(Local[code], Redis[code], minimumVersion)
-  // Usable: now &lt; valid_until AND version &gt;= minimumVersion.
-  if snapshot is absent:
-    if not acquireAggregateOriginBudget(): return 503 with no-store
-    checked_at = wallClockNow()         // before a NEW primary SELECT
-    row = PRIMARY SELECT * FROM Link WHERE code = :code
-    if read failed: return 503 with no-store  // never negative-cache errors
-    snapshot = {row, checked_at,
-                valid_until: checked_at + (row absent ? 1s : 8s)}
-    if row exists and row.version &lt; minimumVersion: return 503 with no-store
-    if wallClockNow() &gt;= snapshot.valid_until: return 503 with no-store
-    bestEffortVersionCheckedFill(Redis, Local, snapshot)
-    // Both tiers retain this SAME deadline; cache failure is not a 404.
-  if not clockWithinBudget(): return 503 with no-store
-  if wallClockNow() &gt;= snapshot.valid_until: return 503 with no-store
-  if snapshot.row absent: return 404 with no-store
-  if snapshot.row.status in {'revoked','blocked'}: return 410 with no-store
-  if snapshot.row.status == 'pending': return 200 review-page with no-store
-  if snapshot.row.status != 'active': return 503 with no-store  // no Location
-  if snapshot.row.expires_at != null and nowUpperBound() + 1s &gt;= snapshot.row.expires_at:
-    return 410 with no-store
-  tryEnqueueBoundedClickEvent()          // allowed to drop; never waits for MQ
-  emit 302 {Location:snapshot.row.target_url, Cache-Control:'no-store'}
-  // Final check → emission &lt;= 1s; recheck if delayed. No expired stale fallback.</code></pre><div class="bilingual"><div class="lang-zh"><p>firstUsable 将负缓存的版本视为 0。普通记录的有效期从权威读取开始时算起，为 8 秒；负缓存为 1 秒。复制到另一层缓存时，两者的截止时刻都不重新计算。</p><p>链接到期与快照变旧需要分开判断：快照仍新鲜，但 active 链接已经到达 expires_at，返回 410；pending 返回不带 Location 的 200 待审说明页；revoked 和 blocked 返回 410。若快照已经陈旧，数据库又不可达，则返回 503，因为服务无法确认链接的到期时间是否后来被延长。expires_at 可以修改，所以本例用当前时间的安全上界，再加 1 秒响应发出预算判断到期。这可能略早拒绝，却能避免检查后因排队而发出已过期的跳转。</p></div><div class="lang-en"><p>firstUsable treats a negative entry as version zero. Positive snapshots retain read-start +8 seconds and negatives +1 second; copying never renews either. Expiry and snapshot age are separate: a fresh expired active record returns 410; pending returns a 200 review page without Location, and revoked/blocked return 410, while an outdated snapshot with an unavailable database yields 503 because expiry might have been extended. For mutable expires_at, the safe clock upper bound plus a one-second emission budget may reject slightly early, avoiding an expired redirect after queueing.</p></div></div>    <h3><span class="lang-zh">301、302、307 怎么选</span><span class="lang-en">Choosing among 301, 302, and 307</span></h3>
+    if not validCodeShape(code):
+        return 404 with no-store
+    if not clockWithinBudget():
+        return 503 with no-store
+
+    snapshot = firstUsable(Local[code], Redis[code], minimumVersion)
+    // Usable: now &lt; valid_until AND version &gt;= minimumVersion.
+    if snapshot is absent:
+        if not acquireAggregateOriginBudget():
+            return 503 with no-store
+
+        checked_at = wallClockNow()         // before a NEW primary SELECT
+        row = PRIMARY SELECT * FROM Link WHERE code = :code
+        if read failed:
+            return 503 with no-store  // never negative-cache errors
+        snapshot = {row, checked_at,
+                    valid_until: checked_at + (row absent ? 1s : 8s)}
+
+        if row exists and row.version &lt; minimumVersion:
+            return 503 with no-store
+        if wallClockNow() &gt;= snapshot.valid_until:
+            return 503 with no-store
+        bestEffortVersionCheckedFill(Redis, Local, snapshot)
+        // Both tiers retain this SAME deadline; cache failure is not a 404.
+
+    if not clockWithinBudget():
+        return 503 with no-store
+    if wallClockNow() &gt;= snapshot.valid_until:
+        return 503 with no-store
+    if snapshot.row absent:
+        return 404 with no-store
+    if snapshot.row.status in {'revoked', 'blocked'}:
+        return 410 with no-store
+    if snapshot.row.status == 'pending':
+        return 200 review-page with no-store
+    if snapshot.row.status != 'active':
+        return 503 with no-store  // no Location
+    if snapshot.row.expires_at != null and nowUpperBound() + 1s &gt;= snapshot.row.expires_at:
+        return 410 with no-store
+
+    tryEnqueueBoundedClickEvent()          // allowed to drop; never waits for MQ
+    emit 302 {Location: snapshot.row.target_url, Cache-Control: 'no-store'}
+    // Final check → emission &lt;= 1s; recheck if delayed. No expired stale fallback.</code></pre><div class="bilingual"><div class="lang-zh"><p>firstUsable 将负缓存的版本视为 0。普通记录的有效期从权威读取开始时算起，为 8 秒；负缓存为 1 秒。复制到另一层缓存时，两者的截止时刻都不重新计算。</p><p>链接到期与快照变旧需要分开判断：快照仍新鲜，但 active 链接已经到达 expires_at，返回 410；pending 返回不带 Location 的 200 待审说明页；revoked 和 blocked 返回 410。若快照已经陈旧，数据库又不可达，则返回 503，因为服务无法确认链接的到期时间是否后来被延长。expires_at 可以修改，所以本例用当前时间的安全上界，再加 1 秒响应发出预算判断到期。这可能略早拒绝，却能避免检查后因排队而发出已过期的跳转。</p></div><div class="lang-en"><p>firstUsable treats a negative entry as version zero. Positive snapshots retain read-start +8 seconds and negatives +1 second; copying never renews either. Expiry and snapshot age are separate: a fresh expired active record returns 410; pending returns a 200 review page without Location, and revoked/blocked return 410, while an outdated snapshot with an unavailable database yields 503 because expiry might have been extended. For mutable expires_at, the safe clock upper bound plus a one-second emission budget may reject slightly early, avoiding an expired redirect after queueing.</p></div></div>    <h3><span class="lang-zh">301、302、307 怎么选</span><span class="lang-en">Choosing among 301, 302, and 307</span></h3>
     <div class="bilingual">
       <div class="lang-zh"><p><strong>301</strong> 表示永久搬迁，RFC 允许启发式缓存。浏览器、代理或搜索引擎可能长期记住目标，因此它不适合作为可撤销短链的默认选择。<strong>302</strong> 表示临时目标，是短链服务的常见选择；本题入口是 GET，历史上对请求方法改写的差异通常不构成问题。<strong>307</strong> 同样表示临时重定向，并明确保留原请求方法和请求体。如果需要支持非 GET 短链，或严格保留方法，可以选择 307。点击统计是否经过源站，最终仍取决于缓存策略和统计放在哪里。</p></div>
       <div class="lang-en"><p><strong>301</strong> declares a permanent move and is heuristically cacheable; browsers, intermediaries, and search engines may retain the target, making it a poor default for revocable links. <strong>302</strong> is temporary and remains the conventional shortener answer; historical method rewriting is normally irrelevant because this path starts with GET. <strong>307</strong> is also temporary but explicitly preserves method and body, useful if non-GET short links are supported. Whether analytics reaches origin still depends on cache policy and event placement—not a memorized status code.</p></div>
@@ -1006,14 +1035,21 @@ Idempotency-Key: 6fc1…
         <p>A11 negative-caches absence for one second and best-effort evicts on create, but that does not guarantee immediate public alias visibility. For strict owner read-after-write, 201 returns code and version; the following API GET supplies the minimum version, bypasses absent or older cache entries, and reads primary. If every unversioned public GET must be immediately visible, remove negative caching or add a creation barrier; a best-effort delete is insufficient.</p></div></div>
 <h3><span class="lang-zh">撤销实现：状态更新和待发事件在同一事务中提交</span><span class="lang-en">Revocation commit: version check and outbox succeed together</span></h3><div class="bilingual"><div class="lang-zh"><p>管理接口 PATCH /v1/links/{code} 要求认证后的创建者身份，并通过 If-Match 携带预期版本。下面使用绑定参数的 SQL 对应撤销图第 1 帧：状态更新和事件插入在同一事务中完成，事件写入失败，整个事务都失败。若更新了 0 行，就不能报告成功；对已经授权的资源，版本不匹配返回 412，资源不存在可返回 404。并发请求使用同一个预期版本时，只允许一个更新成功。</p></div><div class="lang-en"><p>PATCH /v1/links/{code} requires the authenticated owner and an If-Match version. This bound-parameter SQL implements revocation frame 1: state and event share one transaction; event insertion failure aborts both. Zero updated rows is a rejection, not success: for an authorized resource, a failed If-Match returns 412; a missing resource may return 404. Only one concurrent writer can win a given expected version.</p></div></div><pre data-language="SQL teaching transaction" data-kind="teaching" data-source="revoke.sql"><code>-- Bound parameters, authenticated owner; execute in one transaction.
 BEGIN;
+
 WITH changed AS (
-  UPDATE Link SET status = 'revoked', version = version + 1
-  WHERE code = :code AND owner_id = :owner AND version = :expected_version
-  RETURNING code, version
+    UPDATE Link
+    SET status = 'revoked',
+        version = version + 1
+    WHERE code = :code
+        AND owner_id = :owner
+        AND version = :expected_version
+    RETURNING code, version
 )
 INSERT INTO Outbox(event_id, code, version, kind)
-  SELECT :event_id, code, version, 'invalidate' FROM changed
+    SELECT :event_id, code, version, 'invalidate'
+    FROM changed
 RETURNING code, version;
+
 -- Zero rows: no change; report 404/412 after authorization-safe lookup.
 COMMIT;
 -- Confirmed commit: acknowledge. Unknown outcome: GET owner state on primary.

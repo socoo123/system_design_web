@@ -142,20 +142,28 @@
     prior = SELECT binding, outcome, order_id FROM idempotency
             WHERE caller = :trustedCaller AND key = :key
     if prior exists:
-      if prior.binding != binding: ROLLBACK; return KEY_CONFLICT
-      COMMIT; return prior.outcome, prior.order_id
+      if prior.binding != binding:
+        ROLLBACK;
+        return KEY_CONFLICT
+      COMMIT;
+      return prior.outcome, prior.order_id
+
     INSERT idempotency(trustedCaller, key, binding, PENDING, NULL)
     SAVEPOINT effect
     orderId = newId()
     INSERT orders(orderId, trustedCaller, request.delivery_ref)
     outcome = CREATED
+
     for (sku, qty) in sortedLines:
       changed = execute("UPDATE inventory SET on_hand = on_hand - :qty "
                         "WHERE sku = :sku AND on_hand &gt;= :qty", sku, qty)
       if changed != 1:
         ROLLBACK TO effect  # Undo every earlier SKU and the order.
-        outcome = OUT_OF_STOCK; orderId = NULL; break
+        outcome = OUT_OF_STOCK;
+        orderId = NULL;
+        break
       INSERT order_line(orderId, sku, qty)
+
     RELEASE effect
     UPDATE idempotency SET outcome = :outcome, order_id = :orderId
       WHERE caller = :trustedCaller AND key = :key
@@ -910,35 +918,46 @@ RETURNING upload_id, state, object_version;
     </figure><div class="bilingual"><div class="lang-zh"><p><strong>图7把一次分析固定在同一份不可变快照和片段清单（manifest）上。</strong>只读 amount 时，一年的数据量为 1,261,440,000×8 B=10.09152 GB；再读每行 1 B 的 status，合计 11.35296 GB，而读取整行需要 1.89216 TB。1,500÷8=187.5 是原始字节量之比，并非延迟倍数。Dremel 2010 年论文用列条带和执行树进行只读的嵌套数据分析，不能由此推断所有列式产品都不支持更新或事务。<a href="#ref-dremel">[4]</a></p></div><div class="lang-en"><p><strong>Deck 7 pins analysis to one immutable snapshot and manifest.</strong> Annual amount bytes are 1,261,440,000×8 B=10.09152 GB; adding one-byte status gives 11.35296 GB versus 1.89216 TB of full rows. The 187.5=1,500÷8 ratio concerns raw bytes, not latency. Dremel2010 uses column stripes and an execution tree for read-only nested-data analysis; this does not imply every columnar product lacks updates or transactions.<a href="#ref-dremel">[4]</a></p></div></div><h3><span class="lang-zh">关键实现：收齐完整片段，才能返回准确 SUM</span><span class="lang-en">Implementation: exact SUM requires complete fragments</span></h3><div class="bilingual"><div class="lang-zh"><p>下面摘自可运行的 Java 17 示例。可信的 manifest 已经证明片段完整且互不重叠，并固定 query、snapshot、manifestVersion 和各片段的内容 hash。可信叶子节点必须按该查询的过滤条件和算子，读取准确文件并计算部分和。协调代码只检查身份绑定、重复结果是否冲突，以及片段是否完整；单凭一个 hash，无法证明叶子节点算对了。空 manifest 表示已经核实的数据集为空，不能用来代替请求漏传的清单。</p></div><div class="lang-en"><p>This excerpt compiles in the runnable Java17 example. A trusted manifest proves complete, disjoint fragments and pins query/snapshot/manifestVersion/content hashes. Trusted leaves apply the declared query filter/operator to the exact files. This coordinator checks identity, duplicate conflicts and completeness; a hash alone cannot prove a leaf computed correctly. An empty manifest means a verified empty dataset, not omitted request data.</p></div></div><pre data-language="Java17 · sum" data-kind="teaching" data-source="ExactSum.java:aggregate"><code>public record Part(String query, String snapshot, String manifestVersion, String fragment,
                    String contentHash, BigInteger sum) {
     public Part {
-        Objects.requireNonNull(query); Objects.requireNonNull(snapshot);
+        Objects.requireNonNull(query);
+        Objects.requireNonNull(snapshot);
         Objects.requireNonNull(manifestVersion);
-        Objects.requireNonNull(fragment); Objects.requireNonNull(contentHash);
+        Objects.requireNonNull(fragment);
+        Objects.requireNonNull(contentHash);
         Objects.requireNonNull(sum);
     }
 }
+
 public static BigInteger exactSum(String query, String snapshot, String manifestVersion,
-        Map&lt;String, String&gt; manifest, List&lt;Part&gt; replies) {
+                                  Map&lt;String, String&gt; manifest, List&lt;Part&gt; replies) {
     // The trusted manifest is complete and its fragments do not overlap.
-    Objects.requireNonNull(query); Objects.requireNonNull(snapshot);
+    Objects.requireNonNull(query);
+    Objects.requireNonNull(snapshot);
     Objects.requireNonNull(manifestVersion);
     manifest = Map.copyOf(manifest);
+
     Map&lt;String, Part&gt; accepted = new HashMap&lt;&gt;();
     for (Part part : replies) {
-        if (!query.equals(part.query()) || !snapshot.equals(part.snapshot())
+        if (!query.equals(part.query())
+                || !snapshot.equals(part.snapshot())
                 || !manifestVersion.equals(part.manifestVersion())
                 || !part.contentHash().equals(manifest.get(part.fragment()))) {
             throw new IllegalArgumentException("wrong query/snapshot/fragment/hash");
         }
+
         Part previous = accepted.putIfAbsent(part.fragment(), part);
         if (previous != null &amp;&amp; !previous.equals(part)) {
             throw new IllegalArgumentException("conflicting duplicate");
         }
     }
+
     if (!accepted.keySet().equals(manifest.keySet())) {
         throw new IllegalStateException("INCOMPLETE: retry missing fragments only");
     }
+
     BigInteger total = BigInteger.ZERO;
-    for (Part part : accepted.values()) total = total.add(part.sum());
+    for (Part part : accepted.values()) {
+        total = total.add(part.sum());
+    }
     return total;
 }
 </code></pre><div class="bilingual"><div class="lang-zh"><p>正常情况下，A 返回 100 分、B 返回 200 分，总计为 300 分；重复投递相同的 A，结果仍为 300 分。快照错误、manifest 版本错误、未知片段或部分和冲突，都会被拒绝。如果缺少 B，就返回 INCOMPLETE，绝不能把 100 分当成准确总计。代码用 BigInteger 累加来避免 long 溢出，金额单位、符号和范围仍须由上游定义。真实服务还需要截止时间、对缺失片段的有界重试、带版本且完整的 manifest，以及经过验证的叶子回执。</p></div><div class="lang-en"><p>With A=100 cents and B=200 cents, the sum is 300; replaying identical A still gives 300. Reject wrong snapshots/manifest revisions, unknown fragments and conflicting partial sums. Missing B is INCOMPLETE, never an exact 100. BigInteger avoids long overflow, while upstream still defines units/sign/range. A real service also needs deadlines, bounded missing-fragment retries, immutable complete manifests and verified leaf receipts.</p></div></div><div class="bilingual"><div class="lang-zh"><p>数据量小时，可以先在行存中求 SUM。等历史扫描开始与结账争抢 I/O，再导出列文件，并记录导出截止位置和完整 manifest。报表可以接受导出延迟，确认订单的页面却不能沿用这份容忍。选型应依据要读取的字段、范围和更新要求，不能只看“宽表也有列”，或认定“列存一定只读”。</p></div><div class="lang-en"><p>For small data, start with a row-store SUM. Export column files with a cutoff and complete manifest when history scans contend with checkout I/O. Reports may tolerate export lag; confirmation cannot. Fields/ranges and update requirements drive the choice, rather than equating wide-row columns with stripes or assuming all column stores are read-only.</p></div></div></section>

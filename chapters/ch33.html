@@ -428,26 +428,33 @@
     </figure><div class="bilingual"><div class="lang-zh"><p><strong>工单标识 ticket_id 格式合法，仍可能指向其他租户的工单。</strong> 图中的 RESOLVED → SCHEMA_OK 只检查参数结构，SCHEMA_OK → AUTHZ_OK 才检查资源属于哪个租户，以及用户、Agent 和工具策略共同允许什么操作。服务凭据有写入能力，也不能让只读用户获得写权限。Tool API 还要检查业务对象权限，因为网关提前读取一次资源，无法消除后续的并发竞争。</p><p>下面的代码对应第 3 组图的前 3 帧：先限制输入不超过 16 KiB、嵌套不超过 8 层，再解析 JSON、拒绝重复键，并显式检查必填字段、额外字段和类型。JSON Schema 的 properties 只描述字段，本身不会要求字段必填，也不会禁止额外字段。<a href="#ref-5">[5]</a> 本例使用固定的平面 schema，严格区分整数 4、浮点数 4.0、布尔值 true 和字符串“4”。如果要填入默认值或规范化参数，都必须在展示审批内容之前完成。这里的编码只用于本例固定格式，并非通用 JSON 规范化标准。</p></div><div class="lang-en"><p><strong>A valid ticket_id can still identify another tenant’s ticket.</strong> RESOLVED → SCHEMA_OK validates shape; SCHEMA_OK → AUTHZ_OK checks ownership and user∩agent∩tool permissions. A service write credential never upgrades a read-only user. The backend reauthorizes; a gateway pre-read cannot eliminate later races.</p><p>This contract covers the first three admission frames: bound 16 KiB/eight levels, reject duplicate keys and explicitly validate required/extra fields/types. JSON Schema properties alone neither require fields nor close extras. <a href="#ref-5">[5]</a> This fixed flat schema distinguishes 4, 4.0, true and “4”; apply defaults/normalization before displaying approval. Its encoding is domain-specific, not universal JSON canonicalization.</p></div></div><pre data-language="Pseudocode · admission" data-kind="pseudocode" data-source="admission.pseudo"><code>prepare(authenticatedContext, confirmedIntent, rawArguments):
   reject bytes &gt; 16 KiB, nesting &gt; 8, duplicate keys or non-JSON numbers
   args = parse closed schema:
-    ticket_id: ASCII ticket ID; expected_version: positive integer
-    reason: nonempty string &lt;= 160 characters; no extra fields
+    ticket_id: ASCII ticket ID;
+    expected_version: positive integer
+    reason: nonempty string &lt;= 160 characters;
+    no extra fields
   // No coercion: true, 4.0 and &quot;4&quot; are not integer version 4.
   canonicalArgs = UTF8_JSON(sorted keys, exact validated values)
+
   BEGIN IMMEDIATE on ExecutionDB
     key = (auth.tenant, confirmedIntent)
     old = SELECT intent WHERE (tenant, intent_id) = key
     if old exists:
       require old.actor/agent/tool/revision/args == this request
-      COMMIT; return old.state  // retain original route/grant/deadlines
+      COMMIT;
+      return old.state  // retain original route/grant/deadlines
+
     tool = reviewedRegistry[&quot;ticket.close&quot;, &quot;r7&quot;]  // never model URL
     require tool.enabled and caller may use this exact revision
     require resource tenant == auth.tenant
     require userScope AND agentScope AND toolPolicy allow ticket.close
+
     proposal = (auth.tenant, auth.actor, auth.agent, confirmedIntent,
                 tool.name, tool.revision, tool.routeRevision, tool.policy,
                 canonicalArgs, args.ticket_id, args.expected_version)
     now = trustedClockAfterLock()
     snapshot = proposal + (newGrantId, now+5min, now+24h)
     binding = SHA256(versioned stable encoding of snapshot)
+
     INSERT intent(snapshot, binding, state=PENDING)
     INSERT single-use grant(newGrantId, snapshot.key, binding)
     INSERT audit(event_id, snapshot.key, &quot;pending&quot;)
@@ -643,27 +650,41 @@
     </figure><div class="bilingual"><div class="lang-zh"><p><strong>审批者必须看得到这次动作具体会做什么。</strong> Approval UI 从可信网关取得实际动作、生效参数和影响，审批者身份及可批准范围则来自认证会话。grant 绑定租户、操作者、Agent、intent、工具名及版本、目的端版本、规范化参数、资源 ID 及版本、策略、到期时间和单次凭据标识。界面只显示一个 hash，无法让人审阅动作；绑定内容有任何变化，都需要新快照和新批准。</p><p>第 4 组图中，第 3 帧提交批准事务，第 4 帧提交发出事务。两次点击只会消费一个 grant，APPROVED 也还没有产生业务效果。执行器取得权威执行库的锁后，再读取时间、检查当前权限和版本，并更新状态与事件；确认提交之后，才能发出网络请求。如果连提交确认都未收到，就先按原业务键读回记录，不能假定事务没有提交。下面每个 BEGIN 都只覆盖指定的单个数据库，不包含 HTTP 或 MCP 调用。</p></div><div class="lang-en"><p><strong>Approval covers a readable concrete snapshot.</strong> The gateway supplies effective arguments and impact; authenticated sessions supply approver identity/scope. Bind tenant, actor, agent, intent, tool name/revision, route revision, canonical arguments, resource ID/version, policy, expiry and grant identity. A hash alone is not a reviewable action; changed fields need new review.</p><p>Frame 3 commits approval, frame 4 commits dispatch intent. Duplicate clicks consume one grant; APPROVED is not executed. Under the execution database lock, sample time and recheck current permissions/revisions, then update state/events. Send only after confirming commit; ambiguous commit acknowledgements require a same-key readback. Each BEGIN covers one database, never HTTP/MCP.</p></div></div><pre data-language="Pseudocode · approval" data-kind="pseudocode" data-source="approval.pseudo"><code>approve(authenticatedApprover, intentKey, reviewedBinding):
   BEGIN IMMEDIATE on ExecutionDB
     i, g = SELECT intent and grant by intentKey
-    require approver may approve i.tenant; require binding matches i and g
-    if i.state != PENDING: COMMIT; return existing state
+    require approver may approve i.tenant;
+    require binding matches i and g
+    if i.state != PENDING:
+      COMMIT;
+      return existing state
+
     now = trustedClockAfterLock()
     require now &lt; i.expiresAt and current user/agent/tool permission
+
     UPDATE grant SET consumed=1 WHERE grant_id=g.id AND consumed=0
-    require exactly one row; UPDATE intent SET state=APPROVED
+    require exactly one row;
+    UPDATE intent SET state=APPROVED
     INSERT audit(event_id, intentKey, &quot;approved&quot;, approver.id)
   COMMIT
 
 claimForDispatch(authenticatedContext, intentKey):
   BEGIN IMMEDIATE on ExecutionDB
     i = SELECT intent by intentKey
-    require exact caller identity matches i; if state != APPROVED: stop
+    require exact caller identity matches i;
+    if state != APPROVED:
+      stop
+
     now = trustedClockAfterLock()
     if expired, cancelled, revoked, or current tool/route/policy != i:
       UPDATE intent SET state=DENIED, reason=actualReason
-      INSERT audit(event_id, intentKey, &quot;denied&quot;); COMMIT; stop
+      INSERT audit(event_id, intentKey, &quot;denied&quot;);
+      COMMIT;
+      stop
+
     UPDATE intent SET state=DISPATCH_INTENT, epoch=epoch+1
       WHERE key=intentKey AND state=APPROVED
-    require exactly one row; INSERT audit(event_id, intentKey, &quot;dispatch&quot;)
+    require exactly one row;
+    INSERT audit(event_id, intentKey, &quot;dispatch&quot;)
   COMMIT  // no network request before this commit is confirmed/read back
+
   send persisted snapshot and SAME business key through its pinned Adapter
   // Crash here: recovery queries evidence; never assume no send.
   // Epoch fences ExecutionDB writes, not a running remote request.</code></pre><div class="bilingual"><div class="lang-zh"><p>如果批准时工单为 v4，执行时已变成 v5，业务端必须在修改事务中检查 version/If-Match 前置条件。返回 stale_precondition 后应重新审查动作，不能自动把参数换成 v5 重试。<a href="#ref-7">[7]</a> 无条件写入的后端无法保证原快照仍成立，需要改造接口契约，或明确批准一个不依赖该快照的动作。如果还要求“权限撤销后，业务提交时一定不能写入”，就需要业务端的权限版本或屏障机制；网关检查只能保证本地准入时的权限成立。</p><p>5 分钟 grant 到期会阻止新的调用，不会回滚已发出的请求。取消请求与执行器领取动作（claim）在同一库中串行处理：取消先于 claim，就能确定没有发出；claim 之后，只能记录 cancel_requested、尽力向下游传递取消并查询结果。补偿需要作为另一笔业务动作，重新满足授权、批准和幂等要求；重新打开工单并不自动等于原事务回滚。</p></div><div class="lang-en"><p>If approved v4 becomes v5, the backend checks version/If-Match in the modification transaction and returns stale_precondition; do not silently retry v5. <a href="#ref-7">[7]</a> Unconditional backends cannot preserve snapshot assumptions. Stronger commit-time revocation likewise needs backend policy versions/barriers; gateway admission has a local authorization point.</p><p>The five-minute grant blocks new dispatch after expiry, without undoing an issued call. Cancellation serializes with claim: before claim it can prove no dispatch; afterward record cancel_requested, propagate best effort and query evidence. Compensation is another authorized/approved/idempotent action, not automatic rollback.</p></div></div></section>
@@ -865,15 +886,19 @@ claimForDispatch(authenticatedContext, intentKey):
     receipt = SELECT receipt WHERE key=(tenant, intent_id)
     if receipt exists:
       require receipt.snapshot == immutableSnapshot
-      COMMIT; return retained outcome  // no second effect, even after expiry
+      COMMIT;
+      return retained outcome  // no second effect, even after expiry
+
     require current user AND agent permission for resource tenant
+
     changed = UPDATE ticket SET state=CLOSED, version=version+1
       WHERE tenant=:tenant AND id=:ticket AND version=:expected
         AND state=OPEN
     outcome = SUCCEEDED if changed == 1 else FAILED_KNOWN(stale_precondition)
     INSERT receipt(key, snapshot, outcome, result)  // unique key
     // A failure inserting the receipt rolls back the ticket UPDATE too.
-  COMMIT; return outcome
+  COMMIT;
+  return outcome
 
 recordOutcome(key, epoch, authoritativeReceipt):
   BEGIN IMMEDIATE on ExecutionDB
@@ -884,8 +909,10 @@ recordOutcome(key, epoch, authoritativeReceipt):
 
 recover(key):
   query original backend receipt without invoking the effect
-  if matching receipt exists: recordOutcome(key, currentEpoch, receipt)
-  else: retain UNKNOWN  // absence cannot exclude a delayed old request
+  if matching receipt exists:
+    recordOutcome(key, currentEpoch, receipt)
+  else:
+    retain UNKNOWN  // absence cannot exclude a delayed old request
   // Replay can execute a missing operation: allow only with live authority,
   // unexpired approval and verified backend dedupe retention; same key/route.
   // After retention compact bodies, keep key+binding+outcome tombstones.</code></pre><div class="bilingual"><div class="lang-zh"><p>两库之间有两个容易失去证据的时点。第一个是发出决定已提交，进程却在发送前崩溃；仅凭本库记录，无法区分“还没发”和“已发但没收到结果”。第二个是业务已提交，但回包丢失或本地结果写入失败。两种情况都要保留 UNKNOWN 和原 intent，先查询原目的端回执。<strong>查不到回执也不能证明没有副作用</strong>，因为旧请求可能仍在路上。终态只能由可靠证据修复；如果后端既不能查证结果，也不能保证原子幂等，就停止自动重发，接受部分动作无法自动完成。</p><p>沿用同一业务键重放，可能会首次执行一个原先没有送达的动作。因此仍须具备当前授权、未到期且未取消的原批准，以及已验证的下游防重保留期。本例的 5 分钟 grant 比 24 小时防重窗口更早到期，此后只允许查询。旧请求一旦发出仍可能继续，TTL 或租约到期都不能解除 UNKNOWN。响应正文到期后可以压缩，但业务键、绑定关系和已知结果或未决标记要保留为墓碑；如果删除整条唯一记录，同一业务键就可能再次执行。</p><p>第三方接口需要按各自契约适配。例如，<strong>Stripe API v1</strong> 保存首次执行结果，包括 500；至少 24 小时后允许清理，已清理的键再次使用会被当作新请求，参数变更则会报错。该文档另有 API v2 语义，不能把 v1 的约定推广到所有 Stripe API 或所有工具。<a href="#ref-9">[9]</a> 如果还要在业务事务外发邮件或付款，就又增加一个事务边界，需要继续依靠下游防重、结果查证或事务发件箱（outbox）。这里的事务只保证工单行与所在业务库的回执一起提交。</p></div><div class="lang-en"><p>Window 1: dispatch intent commits, then the process crashes before sending; locally this is indistinguishable from a sent call without evidence. Window 2: Business DB commits, but reply/local result persistence fails. Keep UNKNOWN plus intent and query the original backend. <strong>No receipt is not proof of no effect</strong>: an old request may still arrive. Without lookup/atomic deduplication, stop automatic redispatch and accept incomplete work.</p><p>Same-key replay can execute an originally undelivered action. It still needs live authority, unexpired/uncancelled approval and verified backend retention. This example’s five-minute grant closes earlier than its 24-hour dedupe window; afterward only query. Issued requests may continue. Retain key/binding/outcome or unresolved tombstones when compacting bodies; deleting the whole unique record can reauthorize an old action.</p><p>Adapt each provider separately. <strong>Stripe API v1</strong> retains the initial executed result including 500, allows pruning after at least 24 hours, treats reused pruned keys as new requests and rejects changed parameters. The page distinguishes API v2; do not generalize v1 to all Stripe APIs/tools. <a href="#ref-9">[9]</a> Email/payment outside this database adds another boundary needing downstream evidence/deduplication or outbox. This transaction proves only the ticket row and its local receipt.</p></div></div></section>

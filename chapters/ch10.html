@@ -221,30 +221,34 @@ Idempotency-Key: 7c2e9a…
 202 Accepted
 { "notification_id": "ntf_01J", "status": "accepted",
   "requested_channels": ["sms", "push"] }</code></pre><div class="bilingual"><div class="lang-zh"><p>返回字段 requested_channels 表示系统接受了哪些通道的发送意图；是否真正发出，要看后续处理结果。正文非法返回 400，未认证返回 401，越权返回 403，键冲突返回 409，入口配额不足返回带 Retry-After 的 429，存储错误返回 503。调用方通过鉴权后，可用 GET /v1/notifications/{id} 查询当前汇总状态；这不会改写创建时的回执。</p><p>新的一次验证码通知必须使用新键，不能拿手机号或模板名代替通知意图的标识。幂等键至少保留 24 小时，而且要长于重试窗口；本例让它随通知一起保留 30 天，因此不能假定 24 小时后就可复用。</p></div><div class="lang-en"><p>requested_channels describes intent, not sends. Return 400 for malformed input, 401 for missing authentication, 403 for unauthorized use, 409 for key conflict, 429 with Retry-After for admission quota, and 503 for storage errors. Authorized GET /v1/notifications/{id} reads the current aggregate without changing the creation receipt. A new OTP needs a new key; phone/template names are not intent keys. Retain keys beyond retries, at least 24 hours; this example retains them for 30 days with the intent and does not promise reuse after 24 hours.</p></div></div><h3><span class="lang-zh">数据模型：每种记录说明哪一层结果</span><span class="lang-en">Data and outcome boundaries</span></h3><pre data-language="Data model · conceptual" data-kind="data" data-source="model.pseudo"><code>Notification(notification_id PK, tenant_id, idempotency_key, body_hash,
-  receipt_202, channels, recipient_snapshot, encrypted_payload,
-  template_version, not_before, not_after,
-  UNIQUE(tenant_id, idempotency_key))
+    receipt_202, channels, recipient_snapshot, encrypted_payload,
+    template_version, not_before, not_after,
+    UNIQUE(tenant_id, idempotency_key))
 
 Delivery(delivery_id PK, notification_id, channel, endpoint_id,
-  address_snapshot, not_before, not_after, status, uncertain DEFAULT false,
-  lease_owner, lease_epoch DEFAULT 0, lease_until,
-  send_count DEFAULT 0, max_sends, allow_unknown_retry,
-  next_attempt_at, wake_no DEFAULT 0, last_woken_at NOT NULL DEFAULT DB_NOW(),
-  UNIQUE(notification_id, channel, endpoint_id))
+    address_snapshot, not_before, not_after, status, uncertain DEFAULT false,
+    lease_owner, lease_epoch DEFAULT 0, lease_until,
+    send_count DEFAULT 0, max_sends, allow_unknown_retry,
+    next_attempt_at, wake_no DEFAULT 0, last_woken_at NOT NULL DEFAULT DB_NOW(),
+    UNIQUE(notification_id, channel, endpoint_id))
 
 Attempt(attempt_id PK, delivery_id, lease_epoch, provider,
-  attempted_token_version, registration_at, provider_message_id,
-  outcome, started_at, finished_at)
+    attempted_token_version, registration_at, provider_message_id,
+    outcome, started_at, finished_at)
+
 Outbox(outbox_id PK, event_kind, aggregate_id, unique_key UNIQUE,
-  ready_at, publish_epoch, lease_until, published_at NULL)
+    ready_at, publish_epoch, lease_until, published_at NULL)
+
 Receipt(provider, receipt_id, provider_message_id, observed_status, observed_at,
-  PRIMARY KEY(provider, receipt_id))
+    PRIMARY KEY(provider, receipt_id))
 
 Campaign(campaign_id PK, tenant_id, idempotency_key, audience_snapshot_ref,
-  template_version, expansion_cursor, UNIQUE(tenant_id, idempotency_key))
+    template_version, expansion_cursor, UNIQUE(tenant_id, idempotency_key))
+
 Preference(tenant_id, user_id, channel, list_id, marketing_opt_in,
-  quiet_start, quiet_end, tz, version,
-  PRIMARY KEY(tenant_id, user_id, channel, list_id))
+    quiet_start, quiet_end, tz, version,
+    PRIMARY KEY(tenant_id, user_id, channel, list_id))
+
 Device(endpoint_id PK, user_id, platform, token, token_version, registration_at, status)</code></pre>
 <div class="bilingual"><div class="lang-zh"><p>单次通知在接受时固定一小组端点；批量活动则引用<strong>已经持久保存</strong>的受众快照，在展开每位收件人时固定其端点。邮件和短信使用当时保存的地址快照，之后修改用户资料不会改变这些任务；推送则在每次发送时，查询所选 endpoint_id 当前的 token 和版本。</p><p>验证码的加密载荷可以随通知保存在同一数据库中。如果正文或受众快照保存在外部对象存储中，必须先确认对象已持久保存，再在数据库中提交引用。对象写入失败就不接受通知；如果对象写入成功而数据库随后回滚，遗留的孤立对象可以稍后清理。</p></div><div class="lang-en"><p>Freeze a small endpoint set at individual acceptance. Campaigns reference <strong>already durable</strong> audience snapshots and freeze recipient endpoints during expansion. Email/SMS snapshots do not follow profile edits; resolve current push token/version for the selected endpoint. Encrypted OTP content can share the DB transaction. External payload/snapshot references must be durable before acceptance; object-write failure prevents acceptance, and later DB rollback leaves cleanable orphans.</p></div></div><table><thead><tr><th><span class="lang-zh">事实</span><span class="lang-en">Fact</span></th><th><span class="lang-zh">含义</span><span class="lang-en">Meaning</span></th></tr></thead><tbody><tr><td><span class="lang-zh">Notification.accepted</span><span class="lang-en">Notification.accepted</span></td><td><span class="lang-zh">通知意图和后续工作已在本地提交，可以恢复处理；供应商是否接受，要另行确认。</span><span class="lang-en">Intent and work committed locally and recoverably; no external acceptance claimed.</span></td></tr><tr><td><span class="lang-zh">Delivery.provider_accepted</span><span class="lang-en">Delivery.provider_accepted</span></td><td><span class="lang-zh">供应商已明确接受该端点的发送请求，设备是否展示、用户是否已读仍未确认。</span><span class="lang-en">Provider explicitly accepted the endpoint request; display and reading remain unproved.</span></td></tr><tr><td><span class="lang-zh">failed / expired + uncertain</span><span class="lang-en">failed / expired + uncertain</span></td><td><span class="lang-zh">调度已经停止，但之前的尝试可能已被接受。应显示“结果未知，已停止”，不能显示“确定未发送”。</span><span class="lang-en">Scheduling stopped but earlier acceptance remains possible. Show “outcome unknown; stopped,” not “definitely not sent.”</span></td></tr><tr><td><span class="lang-zh">Attempt / Receipt 中的外部证据</span><span class="lang-en">Attempt / Receipt observations</span></td><td><span class="lang-zh">独立保存经过身份验证的外部证据。Receipt 按 (provider, receipt_id) 去重，乱序回执按通道规则归并；delivered 仍不表示已读。</span><span class="lang-en">Store authenticated external evidence separately; dedupe Receipt by (provider,receipt_id) and reconcile ordering by channel rules. Delivered is not read.</span></td></tr></tbody></table><div class="bilingual"><div class="lang-zh"><p>查询结果分别列出<strong>调度状态和外部观察</strong>。例如，任务已处于 failed 或 expired，旧尝试的 accepted 证据才迟到，此时仍要显示“调度已停止；供应商已接受”。查询要呈现这项新证据，同时保持调度已经停止。</p><p>接收回调时，先验证供应商身份，再关联到原来的 Attempt。重复或乱序回执不能按到达先后直接覆盖事实。某个通道没有可靠回执，或回执无法关联时，就保持结果未知；孤立回执留待对账，不能凭手机号和时间猜测属于哪次尝试。</p><p>要认定用户已读，还需要受信客户端报告预先定义的明确用户动作；验证码是否真正使用，则由业务侧的 verify 验证流程判断。</p></div><div class="lang-en"><p>Queries return <strong>scheduling state and external observations separately</strong>. A late accepted Attempt after failed/expired must display the new evidence, “scheduling stopped; provider accepted,” rather than a bare failure, without reopening scheduling. Authenticate callbacks and bind their Attempt; duplicates and reordering must not overwrite facts by arrival order. If reliable receipts or correlation are unavailable, retain unknown and reconcile orphan observations instead of guessing by phone/time. Reading needs a defined user action from a trusted client, while business verify determines OTP use.</p></div></div>
 </section>
@@ -387,41 +391,53 @@ Device(endpoint_id PK, user_id, platform, token, token_version, registration_at,
         <figcaption><span class="lang-zh">最后一帧补上 broker 确认和随后的数据库标记。发布成功后、标记前崩溃，仍会让消息重复入队。生产者幂等只能合并通知意图，worker 还要按 delivery_id 检查哪些端点已经成功，避免再次发送。</span><span class="lang-en">A broker acknowledgment precedes marking publication. A crash between them can enqueue twice; producer idempotency merges intent, while delivery_id suppresses known successful sends.</span></figcaption>
       </div>
     </figure><h3><span class="lang-zh">实现 1：先恢复已有意图，再创建新记录</span><span class="lang-en">Implementation 1: recover before creating</span></h3><pre data-language="Pseudocode · accept" data-kind="pseudocode" data-source="accept.pseudo"><code>accept(authenticated_tenant, key, request_bytes):
-  request = parse_and_authorize(authenticated_tenant, request_bytes)
-  tenant = authenticated_tenant
-  digest = hash(canonical_business_fields(request))
-  saved = PRIMARY.SELECT Notification WHERE (tenant_id, idempotency_key) = (tenant,key)
-  if saved: return saved.body_hash == digest ? saved.receipt_202 : HTTP_409
-  template_version = validate_new_request(request)  # expiry, allowed template / priority
-  endpoints = freeze_small_recipient_snapshot(request)
-  payload = encrypt(request.data)  # persisted in the same DB below
-  not_before = request.not_before or DB_NOW()
-  not_after = request.not_after
-  receipt = immutable_202(new_notification_id(), request.channels)
-  BEGIN READ COMMITTED
-  try:
-    INSERT Notification(receipt.notification_id, tenant, key, digest, receipt,
-                        endpoints, payload, template_version, not_before, not_after)
-    for endpoint in endpoints:
-      delivery_id = new_delivery_id()
-      INSERT Delivery(delivery_id, receipt.notification_id, endpoint, not_before, not_after,
-                      status=queued, lease_epoch=0, next_attempt_at=not_before,
-                      policy_for(endpoint.channel, request), last_woken_at=DB_NOW())
-      INSERT Outbox(delivery_ready, delivery_id, ready_at=not_before,
-                    unique_key=(ready,delivery_id))
-    COMMIT
-    return receipt
-  on UNIQUE_VIOLATION(tenant_id, idempotency_key):
-    ROLLBACK
-    saved = new_PRIMARY_SELECT(tenant, key)  # a new statement / snapshot
-    if not saved: return HTTP_503_RETRY_SAME_KEY
-    return saved.body_hash == digest ? saved.receipt_202 : HTTP_409
-  on COMMIT_OUTCOME_UNKNOWN:
-    discard_connection()  # a rollback cannot prove the commit did not happen
-    return HTTP_503_RETRY_SAME_KEY
-  on other_storage_error:
-    ROLLBACK_if_possible
-    return HTTP_503_RETRY_SAME_KEY</code></pre>
+    request = parse_and_authorize(authenticated_tenant, request_bytes)
+    tenant = authenticated_tenant
+    digest = hash(canonical_business_fields(request))
+
+    saved = PRIMARY.SELECT Notification WHERE (tenant_id, idempotency_key) = (tenant, key)
+    if saved:
+        return saved.body_hash == digest ? saved.receipt_202 : HTTP_409
+
+    template_version = validate_new_request(request)  # expiry, allowed template / priority
+    endpoints = freeze_small_recipient_snapshot(request)
+    payload = encrypt(request.data)  # persisted in the same DB below
+    not_before = request.not_before or DB_NOW()
+    not_after = request.not_after
+    receipt = immutable_202(new_notification_id(), request.channels)
+
+    BEGIN READ COMMITTED
+    try:
+        INSERT Notification(
+            receipt.notification_id, tenant, key, digest, receipt,
+            endpoints, payload, template_version, not_before, not_after
+        )
+        for endpoint in endpoints:
+            delivery_id = new_delivery_id()
+            INSERT Delivery(
+                delivery_id, receipt.notification_id, endpoint, not_before, not_after,
+                status=queued, lease_epoch=0, next_attempt_at=not_before,
+                policy_for(endpoint.channel, request), last_woken_at=DB_NOW()
+            )
+            INSERT Outbox(
+                delivery_ready, delivery_id, ready_at=not_before,
+                unique_key=(ready, delivery_id)
+            )
+
+        COMMIT
+        return receipt
+    on UNIQUE_VIOLATION(tenant_id, idempotency_key):
+        ROLLBACK
+        saved = new_PRIMARY_SELECT(tenant, key)  # a new statement / snapshot
+        if not saved:
+            return HTTP_503_RETRY_SAME_KEY
+        return saved.body_hash == digest ? saved.receipt_202 : HTTP_409
+    on COMMIT_OUTCOME_UNKNOWN:
+        discard_connection()  # a rollback cannot prove the commit did not happen
+        return HTTP_503_RETRY_SAME_KEY
+    on other_storage_error:
+        ROLLBACK_if_possible
+        return HTTP_503_RETRY_SAME_KEY</code></pre>
 <div class="bilingual"><div class="lang-zh"><p>这段伪代码对应第二组图的第 2–4 帧。PostgreSQL 18 主库用 Notification 的租户与幂等键建立唯一索引；Notification、Delivery 和 Outbox 在同一个事务中插入，任一步失败都一起回滚。</p><p>遇到唯一冲突时，先执行 ROLLBACK，再用新的 READ COMMITTED 语句读取成功创建的记录。失败事务已经不能继续查询，同一条 CTE 的旧快照也未必能看到并发请求刚提交的记录。[10] 请求摘要包含收件人、通道、模板标识、参数和时间边界，但不包含重试时新生成的 ID。</p></div><div class="lang-en"><p>This pseudocode implements frames 2–4. A PostgreSQL 18 primary unique index covers tenant/key; Notification, Delivery, and Outbox inserts roll back together. After uniqueness failure, ROLLBACK and read the winner in a new READ COMMITTED statement. Do not query an aborted transaction or assume one CTE snapshot sees a concurrent winner. [10] The digest includes recipient, channels, template identity, parameters, and time bounds, excluding newly generated retry IDs.</p></div></div><div class="bilingual"><div class="lang-zh"><p>COMMIT 的响应丢失时，应用无法确认提交结果。此时要丢弃连接，返回 503，要求客户端用原键重试，再从保存的回执中恢复结果；不能认定事务已经回滚。</p><p>批量活动的接受接口只在同一个事务中创建 Campaign 和展开活动用的 outbox，不在接口内遍历 1,000 万人。后续使用稳定分页，按 (campaign_id, user_id) 去重，并把页游标、收件人意图、端点任务和新 outbox 放在同一个事务中提交。</p></div><div class="lang-en"><p>A lost COMMIT reply is not a known rollback: discard the connection, return 503 for same-key retry, and recover through the receipt. Campaign acceptance instead commits Campaign plus expansion outbox. Stable pages dedupe (campaign_id,user_id) and co-commit the cursor, recipient intents, endpoint tasks, and new outbox.</p></div></div><div class="bilingual"><div class="lang-zh"><p>relay 用短事务、SKIP LOCKED 和发布代次 publish_epoch 领取 outbox，释放行锁后再调用 broker。收到耐久确认后，只能标记自己所领取的同一代次。没有确认时，任务等待租约到期后恢复；收到确认后、标记前崩溃，则可能重复发布同一个 delivery_id。[10][11]</p><p>即使已经标记发布，唤醒消息仍可能因队列保留期或故障而丢失。因此，恢复扫描还必须检查<strong>尚未进入终态的 Delivery</strong>，从中重建唤醒；只扫描未发布的 outbox 还不够。</p></div><div class="lang-en"><p>Relay claims with short transactions, SKIP LOCKED, and publish_epoch, releasing row locks before the broker call. Mark only the same epoch after durable acknowledgment; absent acknowledgment recovers through expiry, while crashing before marking republishes delivery_id. [10][11] Retention or failure may lose a published wake, so repair must scan <strong>unfinished Delivery</strong>, not just unpublished outbox.</p></div></div>
 </section>
 
@@ -531,74 +547,106 @@ Device(endpoint_id PK, user_id, platform, token, token_version, registration_at,
       </div>
     </figure><h3><span class="lang-zh">实现 2：用短事务领取任务，防止旧代次覆盖状态</span><span class="lang-en">Implementation 2: short claims reject stale task writes</span></h3><pre data-language="SQL teaching transaction · claim" data-kind="teaching" data-source="claim.sql"><code>-- PostgreSQL 18; :parameters are bound by the worker, one primary DB.
 BEGIN;
-SELECT delivery_id FROM Delivery
+
+SELECT delivery_id
+FROM Delivery
 WHERE delivery_id = :delivery_id AND (
-  (status IN ('queued', 'retry_wait') AND next_attempt_at &lt;= clock_timestamp())
-  OR (status = 'leased' AND lease_until &lt;= clock_timestamp())
+    (status IN ('queued', 'retry_wait') AND next_attempt_at &lt;= clock_timestamp())
+    OR (status = 'leased' AND lease_until &lt;= clock_timestamp())
 )
 FOR UPDATE SKIP LOCKED;
+
 -- The driver COMMITs and returns NO_CLAIM if SELECT returned no row.
 -- Otherwise it continues on the same connection while holding that row lock:
-UPDATE Attempt SET outcome = 'timeout_unknown'
+UPDATE Attempt
+SET outcome = 'timeout_unknown'
 WHERE delivery_id = :delivery_id AND outcome = 'started';
-UPDATE Delivery SET
-  uncertain = uncertain OR EXISTS (
-    SELECT 1 FROM Attempt WHERE delivery_id = :delivery_id
-      AND outcome = 'timeout_unknown'),
-  status = 'leased', lease_epoch = lease_epoch + 1,
-  lease_owner = :owner, lease_until = clock_timestamp() + INTERVAL '30 seconds'
+
+UPDATE Delivery
+SET
+    uncertain = uncertain OR EXISTS (
+        SELECT 1
+        FROM Attempt
+        WHERE delivery_id = :delivery_id
+            AND outcome = 'timeout_unknown'
+    ),
+    status = 'leased',
+    lease_epoch = lease_epoch + 1,
+    lease_owner = :owner,
+    lease_until = clock_timestamp() + INTERVAL '30 seconds'
 WHERE delivery_id = :delivery_id
 RETURNING *, clock_timestamp() AS claimed_at;
+
 COMMIT;
 -- Install the returned claim only after confirmed COMMIT; unknown =&gt; no send.</code></pre>
 <div class="bilingual"><div class="lang-zh"><p>数据库驱动只有在 SELECT 返回目标行后，才继续执行 UPDATE。数据库报错或 COMMIT 结果未知时必须停止，不能把错误当成“没有可领取的行”。行锁保护 Delivery 以及未完成 Attempt 的归类，提交后即释放；30 秒租约以数据库时间为准，调用供应商时不持行锁。</p><p>重新领取任务时，把遗留的 started 尝试标为未知，因为本地无法区分它是从未调用供应商，还是供应商已经接受。若重复唤醒对应的任务已经终止，或尚未到下次执行时间，可以直接确认这条消息，因为持久计划和恢复扫描仍会继续负责后续工作。[10]</p></div><div class="lang-en"><p>Continue UPDATEs only after SELECT returns a row. DB errors or unknown commits stop processing and are not empty results. The row lock protects Delivery and unfinished Attempt classification until commit. The 30-second lease uses DB time, with no lock across a provider call. Reclaim marks leftover started attempts unknown, since “never called” and “externally accepted” are indistinguishable. Terminal or future duplicate wakes may be ACKed because durable schedules and repair remain. [10]</p></div></div><pre data-language="Pseudocode · send and persist" data-kind="pseudocode" data-source="deliver.pseudo"><code>deliver(wake):
-  d = claim_using_claim_sql(wake.delivery_id)
-  if d == NO_CLAIM: ACK(wake); return  # durable work / repair scan remains
-  ctx = pre_send_gates(d)  # evidence, expiry, consent, quota; resolved send context
-  decision = ctx.decision
-  attempt = NONE
-  if decision == ALLOW:
+    d = claim_using_claim_sql(wake.delivery_id)
+    if d == NO_CLAIM:
+        ACK(wake);
+        return  # durable work / repair scan remains
+
+    ctx = pre_send_gates(d)  # evidence, expiry, consent, quota; resolved send context
+    decision = ctx.decision
+    attempt = NONE
+    if decision == ALLOW:
+        BEGIN
+        current = SELECT Delivery FOR UPDATE WHERE delivery_id = d.delivery_id
+        if current.lease_epoch != d.lease_epoch
+                or current.status != leased
+                or current.lease_until &lt;= DB_NOW():
+            ROLLBACK;
+            return
+
+        if DB_NOW() &gt;= current.not_after:
+            decision = EXPIRED
+        else if current.uncertain and not current.allow_unknown_retry:
+            decision = UNKNOWN_STOP  # no Attempt or count; result transaction stops scheduling
+        else if current.send_count &gt;= current.max_sends:
+            decision = EXHAUSTED
+        else:
+            UPDATE Delivery SET send_count = send_count + 1 WHERE delivery_id = d.delivery_id
+            attempt = INSERT Attempt(
+                new_id(), d.delivery_id, d.lease_epoch, outcome=started,
+                provider=ctx.provider, attempted_token_version=ctx.token_version,
+                registration_at=ctx.registration_at, started_at=DB_NOW()
+            )
+        COMMIT  # unknown / failed commit =&gt; no call and no ACK
+
+        if attempt != NONE:
+            if local_remaining_budget() &lt; HTTP_TIMEOUT + RESULT_BUDGET:
+                decision = NOT_SENT  # definitely no call started by this worker
+            else:
+                decision = ctx.provider.send(ctx.message, timeout=10s)  # timeout =&gt; TIMEOUT_UNKNOWN
+                # APNs 410 =&gt; INVALID_TOKEN only if registration_at + clock_error &lt;= timestamp;
+                # otherwise REGISTRATION_RECHECK. Every re-registration increments version.
+
     BEGIN
     current = SELECT Delivery FOR UPDATE WHERE delivery_id = d.delivery_id
-    if current.lease_epoch != d.lease_epoch or current.status != leased
-       or current.lease_until &lt;= DB_NOW(): ROLLBACK; return
-    if DB_NOW() &gt;= current.not_after: decision = EXPIRED
-    else if current.uncertain and not current.allow_unknown_retry:
-      decision = UNKNOWN_STOP  # no Attempt or count; result transaction stops scheduling
-    else if current.send_count &gt;= current.max_sends:
-      decision = EXHAUSTED
-    else:
-      UPDATE Delivery SET send_count = send_count + 1 WHERE delivery_id = d.delivery_id
-      attempt = INSERT Attempt(new_id(), d.delivery_id, d.lease_epoch, outcome=started,
-                 provider=ctx.provider, attempted_token_version=ctx.token_version,
-                 registration_at=ctx.registration_at, started_at=DB_NOW())
-    COMMIT  # unknown / failed commit =&gt; no call and no ACK
     if attempt != NONE:
-      if local_remaining_budget() &lt; HTTP_TIMEOUT + RESULT_BUDGET:
-        decision = NOT_SENT  # definitely no call started by this worker
-      else:
-        decision = ctx.provider.send(ctx.message, timeout=10s)  # timeout =&gt; TIMEOUT_UNKNOWN
-        # APNs 410 =&gt; INVALID_TOKEN only if registration_at + clock_error &lt;= timestamp;
-        # otherwise REGISTRATION_RECHECK. Every re-registration increments version.
-  BEGIN
-  current = SELECT Delivery FOR UPDATE WHERE delivery_id = d.delivery_id
-  if attempt != NONE:
-    UPDATE Attempt SET outcome=decision, provider_message_id=decision.message_id,
-      finished_at=DB_NOW() WHERE attempt_id=attempt.attempt_id
-    if decision == INVALID_TOKEN:
-      UPDATE Device SET status=inactive WHERE endpoint_id=d.endpoint_id
-        AND token_version=attempt.attempted_token_version
-  if current.lease_epoch == d.lease_epoch and current.status == leased:
-    current.uncertain |= (decision == TIMEOUT_UNKNOWN)
-    next = plan(current, decision, DB_NOW())
-    UPDATE Delivery SET status=next.status, next_attempt_at=next.due,
-                        uncertain=current.uncertain WHERE delivery_id=d.delivery_id
-    if next.status == retry_wait:
-      INSERT Outbox(retry_ready, d.delivery_id, ready_at=next.due, unique_key=(retry,d.delivery_id,d.lease_epoch))
-    if next.reason == EXHAUSTED: INSERT Outbox(dlq, d.delivery_id, ready_at=DB_NOW(),
-                                            unique_key=(dlq,d.delivery_id,d.lease_epoch))
-  COMMIT  # failure =&gt; no ACK; a stale epoch may record only its own Attempt
-  ACK(wake)</code></pre>
+        UPDATE Attempt SET outcome=decision, provider_message_id=decision.message_id,
+            finished_at=DB_NOW() WHERE attempt_id=attempt.attempt_id
+        if decision == INVALID_TOKEN:
+            UPDATE Device SET status=inactive WHERE endpoint_id=d.endpoint_id
+                AND token_version=attempt.attempted_token_version
+
+    if current.lease_epoch == d.lease_epoch and current.status == leased:
+        current.uncertain |= (decision == TIMEOUT_UNKNOWN)
+        next = plan(current, decision, DB_NOW())
+        UPDATE Delivery SET status=next.status, next_attempt_at=next.due,
+            uncertain=current.uncertain WHERE delivery_id=d.delivery_id
+        if next.status == retry_wait:
+            INSERT Outbox(
+                retry_ready, d.delivery_id, ready_at=next.due,
+                unique_key=(retry, d.delivery_id, d.lease_epoch)
+            )
+        if next.reason == EXHAUSTED:
+            INSERT Outbox(
+                dlq, d.delivery_id, ready_at=DB_NOW(),
+                unique_key=(dlq, d.delivery_id, d.lease_epoch)
+            )
+
+    COMMIT  # failure =&gt; no ACK; a stale epoch may record only its own Attempt
+    ACK(wake)</code></pre>
 <div class="bilingual"><div class="lang-zh"><p>发送前，pre_send_gates 先查同一 delivery_id 是否已有供应商接受的 Attempt 证据，再检查有效期、营销同意与静默时段、发送频次和配额。检查结果分别为已接受（ACCEPTED）、无需发送（SUPPRESSED）、推迟处理（DEFERRED）或允许发送（ALLOW）；依赖出错时暂缓处理。DEFERRED 必须给出未来的允许时间 allowed_at，这些结果都通过同一个结果事务保存。</p><p>检查返回的上下文 ctx 还包含按固定版本模板渲染的 message、所选供应商、端点 token 版本和登记时间。供应商适配器负责把网络异常归为结果未知。</p><p>即使检查已返回 ALLOW，worker 在预留新的 Attempt 前，仍要在行锁内读取当前 Delivery。如果此前结果仍未知（uncertain=true），而产品禁止未知结果重试（allow_unknown_retry=false），本次判定就是 UNKNOWN_STOP：不创建尝试、不增加 send_count，也不调用供应商。随后由结果事务判定停止状态：判定时业务期限未到，则保存 failed；期限已到，则保存 expired。两种情况都保留 uncertain，确认提交后才 ACK。</p><p>send_count 限制的是<strong>已经预留的尝试次数</strong>：started 记录提交后，即使 worker 在真正调用前崩溃，也会消耗一次预算。本地可以约束这个上界，但无法据此精确断言外部调用了多少次。</p></div><div class="lang-en"><p>pre_send_gates checks accepted Attempt evidence, expiry, marketing consent/quiet hours, frequency, and quota. It returns ACCEPTED, SUPPRESSED, DEFERRED with a future allowed_at, or ALLOW; dependency errors defer. ctx also carries the fixed-template message, provider, token version, and registration time; the adapter classifies network exceptions as unknown. All outcomes share the result transaction.</p><p>Even after ALLOW, the reservation transaction checks the current Delivery under its row lock. If uncertain is true and allow_unknown_retry is false, it returns the local UNKNOWN_STOP decision without creating an Attempt, incrementing send_count, or calling the provider. The result transaction records failed if its decision is before the business deadline, otherwise expired. Both retain uncertain, and ACK requires a confirmed commit.</p><p>send_count bounds <strong>reserved attempts</strong>: a crash after started commits but before sending consumes a slot, without pretending to know exact external call count.</p></div></div><div class="bilingual"><div class="lang-zh"><p>任意数据库操作失败后，外层处理都要停止新调用，并且不确认队列消息。结果事务将 Attempt、当前代次的 Delivery，以及重试或死信 outbox 一起原子提交。旧代次只允许补记自己的迟到 Attempt，不能覆盖继任者状态。</p><p>后续尝试在发送前查到已接受的证据，就跳过发送；如果继任者的请求已经在途，仍可能产生重复。领取代次 lease_epoch 只保护本地状态，供应商不会验证它，因此它无法作为约束外部发送的 fencing token。[6]</p></div><div class="lang-en"><p>The outer handler starts no new call and sends no ACK after DB failure. The result transaction atomically commits Attempt, current-epoch Delivery, and retry/DLQ outbox. Stale epochs record their own late Attempt but cannot overwrite successors. Future gates skip sending after accepted evidence, although a successor already in flight can duplicate. lease_epoch protects local state; it is not provider-enforced fencing. [6]</p></div></div><div class="bilingual"><div class="lang-zh"><p>本地剩余预算 local_remaining_budget 从<strong>发出领取请求之前</strong>的单调时间起算。根据数据库返回的 claimed_at，把租约截止时间与业务有效期 not_after 中较早的一个换算成本地截止时间，再扣除已耗时间和安全余量；收到领取响应后，不能重新获得完整的 30 秒。这依赖数据库时钟和业务时间之间已知的误差界，无法维持这个前提时就暂停发送。</p><p>本例为 HTTP 调用保留 10 秒，遵循 FCM 至少 10 秒的建议，并另留结果保存的预算。[2] 长任务需要按当前所有权有条件地续租，失去租约后不能开始新调用。不过，最后检查之后进程仍可能暂停，在途请求也可能持续到租约过期；时间预算无法撤回已经产生的外部效果。</p></div><div class="lang-en"><p>Start local_remaining_budget from monotonic time <strong>before sending the claim request</strong>, using claimed_at to bound the earlier lease/business deadline, subtracting elapsed time and margin instead of granting a new 30 seconds on receipt. This requires a known DB/business-clock error bound; pause sending when it cannot be maintained. Reserve ten seconds for HTTP, following FCM’s documented minimum recommendation, plus separate persistence time. [2] Long tasks need conditional renewal; ownership loss stops new calls. A pause after the last check or an in-flight request can outlive the lease. Time budgets cannot recall external effects.</p></div></div><h3><span class="lang-zh">通道适配：根据具体错误决定下一步</span><span class="lang-en">Channel adapters: reasons determine the action</span></h3><table><thead><tr><th><span class="lang-zh">通道</span><span class="lang-en">Channel</span></th><th><span class="lang-zh">如何确认接受，何时停止</span><span class="lang-en">Acceptance and stopping</span></th><th><span class="lang-zh">重试约束</span><span class="lang-en">Retry constraint</span></th></tr></thead><tbody><tr><td><span class="lang-zh">FCM HTTP v1</span><span class="lang-en">FCM HTTP v1</span></td><td><span class="lang-zh">成功响应返回消息资源名 message name；UNREGISTERED 对应 404，只停用本次尝试所用的登记版本。[1][2]</span><span class="lang-en">Success is a message name; UNREGISTERED is 404. Retire only the attempted registration version. [1][2]</span></td><td><span class="lang-zh">所有可重试失败至少等待 10 秒。429 要区分项目、设备和 topic 配额，并遵守 Retry-After；缺失时等 60 秒，整体或 topic 退避至少 1 分钟。503 同样遵守 Retry-After。[2]</span><span class="lang-en">All retryable failures wait at least 10 seconds. For 429, distinguish project/device/topic quota; honor Retry-After or wait 60 seconds if absent, with overall/topic backoff at least one minute. Honor Retry-After for 503 too. [2]</span></td></tr><tr><td><span class="lang-zh">APNs</span><span class="lang-en">APNs</span></td><td><span class="lang-zh">200 表示接受，410 要保留失效时间 timestamp。每次重新登记都递增版本，即使 token 字符串没有变化。[3]</span><span class="lang-en">200 means acceptance; retain the 410 timestamp. Every re-registration increments version even for the same token string. [3]</span></td><td><span class="lang-zh">429 要区分 TooManyRequests 与 TooManyProviderTokenUpdates。5xx 建议 15 分钟后再试，届时有效期为 5 分钟的验证码已经过期。[3]</span><span class="lang-en">429 distinguishes TooManyRequests from TooManyProviderTokenUpdates. Documented 5xx retry delay is 15 minutes, beyond a five-minute OTP. [3]</span></td></tr><tr><td><span class="lang-zh">Email / SMS</span><span class="lang-en">Email / SMS</span></td><td><span class="lang-zh">SMTP 在 DATA 之后返回 250，表示接手投递责任；短信聚合商返回接受，只确认提交成功。[4]</span><span class="lang-en">SMTP 250 after DATA accepts responsibility; SMS aggregator acceptance confirms submission. [4]</span></td><td><span class="lang-zh">明确永久拒绝时停止；网络超时则保留未知。普通短信从 1 秒开始、本地退避上限为 60 秒，只是本例的教学策略，具体供应商约束需另行适配。</span><span class="lang-en">Stop permanent rejects; network timeouts are unknown. The one-second base and 60-second local cap are an ordinary-SMS teaching policy, not universal rules.</span></td></tr></tbody></table><div class="bilingual"><div class="lang-zh"><p>发送超时不能作为删除 token 的依据。适配器只有确认失效结论适用于本次登记，才返回 INVALID_TOKEN：FCM 的 UNREGISTERED 要核对尝试时的登记版本；APNs 还要保存失效时间 timestamp，并在已知时钟误差界内比较登记时间。</p><p>如果同一版本的登记晚于失效时间，或跨系统时钟无法安全比较，就返回 REGISTRATION_RECHECK，停止这条任务并核查，保留该登记。只有证明本次登记确已失效，才按版本条件停用它；所有重新登记都要递增版本。[2][3]</p></div><div class="lang-en"><p>Timeouts must not delete tokens. The adapter emits INVALID_TOKEN only when invalidation applies to the attempted registration. FCM UNREGISTERED checks the attempted version. APNs also retains invalidation timestamp: using a known clock-error bound: if registration is later, or cross-system clock ordering cannot safely be established, return REGISTRATION_RECHECK to stop this task and investigate without retiring the registration. Retire conditionally only after proving applicability, and increment version on every re-registration. [2][3]</p></div></div><div class="bilingual"><div class="lang-zh"><p>当应用能控制通知展示时，可以按 notification_id 去重。但后台 FCM notification 由 SDK 自动展示，应用未必总有机会先拦截；邮件和短信的展示，也无法由本章方案统一去重。[9]</p></div><div class="lang-en"><p>Apps can dedupe notification_id when they control display. Background FCM notification display is SDK-managed, so interception is not universal; this design cannot impose display dedupe on email or SMS either. [9]</p></div></div>
 </section>
 
@@ -924,37 +972,52 @@ COMMIT;
         <figcaption><span class="lang-zh">最后一帧保留通道隔离、重试、过期和重复发送的风险：已经记录成功的 delivery_id 会跳过发送；供应商已接受但本地未保存结果时，恢复仍可能重复发送。一个 sent 标志无法表达这段未知状态。[6]</span><span class="lang-en">The complete drawing retains isolation, retries, expiry, and the duplicate window. Known accepted delivery_ids skip another send, while unrecorded external acceptance may repeat; one sent bit cannot erase this. [6]</span></figcaption>
       </div>
     </figure><h3><span class="lang-zh">实现 3：按最晚允许时间重试，过期后停止</span><span class="lang-en">Implementation 3: latest retry bound, expiry first</span></h3><pre data-language="Pseudocode · backoff and repair" data-kind="pseudocode" data-source="retry.pseudo"><code>plan(d, outcome, now):
-  # Adapter bounds: FCM retryable failures &gt;=10s; 429 uses Retry-After or 60s;
-  # APNs 5xx =&gt; 15min. Neither is capped by the ordinary-SMS local cap below.
-  if outcome == ACCEPTED: return provider_accepted
-  if outcome == SUPPRESSED: return suppressed
-  if now &gt;= d.not_after: return expired
-  if outcome in {PERMANENT_REJECT, INVALID_TOKEN, REGISTRATION_RECHECK}: return failed
-  if outcome == UNKNOWN_STOP or (d.uncertain and not d.allow_unknown_retry):
-    return failed(unknown=true, reason=UNKNOWN_STOP)
-  if outcome == DEFERRED: due = outcome.allowed_at  # no external call counted
-  else:
-    if d.send_count &gt;= d.max_sends: return failed(reason=EXHAUSTED)
-    provider_floor = outcome.provider_not_before  # defaults to now for ordinary SMS
-    if outcome.provider == FCM and outcome.retryable_failure:
-      provider_floor = max(provider_floor, now + 10s)  # now is after the observed failure
-      if outcome.http_status == 429:
-        provider_floor = max(provider_floor, outcome.retry_after or now + 60s)
-        if outcome.quota_kind in {overall, topic}: provider_floor = max(provider_floor, now + 60s)
-    cap = min(60s, 1s * 2 ** max(0, d.send_count - 1))  # ordinary SMS policy
-    due = max(now + uniform(0, cap), provider_floor, d.not_before)
-  if due &gt;= d.not_after: return expired(unknown=d.uncertain)
-  return retry_wait(due)
+    # Adapter bounds: FCM retryable failures &gt;=10s; 429 uses Retry-After or 60s;
+    # APNs 5xx =&gt; 15min. Neither is capped by the ordinary-SMS local cap below.
+    if outcome == ACCEPTED:
+        return provider_accepted
+    if outcome == SUPPRESSED:
+        return suppressed
+    if now &gt;= d.not_after:
+        return expired
+    if outcome in {PERMANENT_REJECT, INVALID_TOKEN, REGISTRATION_RECHECK}:
+        return failed
+    if outcome == UNKNOWN_STOP or (d.uncertain and not d.allow_unknown_retry):
+        return failed(unknown=true, reason=UNKNOWN_STOP)
+
+    if outcome == DEFERRED:
+        due = outcome.allowed_at  # no external call counted
+    else:
+        if d.send_count &gt;= d.max_sends:
+            return failed(reason=EXHAUSTED)
+
+        provider_floor = outcome.provider_not_before  # defaults to now for ordinary SMS
+        if outcome.provider == FCM and outcome.retryable_failure:
+            provider_floor = max(provider_floor, now + 10s)  # now is after the observed failure
+            if outcome.http_status == 429:
+                provider_floor = max(provider_floor, outcome.retry_after or now + 60s)
+                if outcome.quota_kind in {overall, topic}:
+                    provider_floor = max(provider_floor, now + 60s)
+
+        cap = min(60s, 1s * 2 ** max(0, d.send_count - 1))  # ordinary SMS policy
+        due = max(now + uniform(0, cap), provider_floor, d.not_before)
+
+    if due &gt;= d.not_after:
+        return expired(unknown=d.uncertain)
+    return retry_wait(due)
 
 repair_due_work():  # short primary-DB transaction; no network inside
-  BEGIN
-  now = DB_NOW()
-  rows = SELECT Delivery FOR UPDATE SKIP LOCKED
-         WHERE (queued_or_retry_due OR expired_lease) AND last_woken_at &lt; now-30s
-  for d in rows:
-    INSERT Outbox(repair_wake, d.delivery_id, ready_at=now, unique_key=(repair,d.delivery_id,++d.wake_no))
-    UPDATE Delivery SET wake_no=d.wake_no, last_woken_at=now WHERE delivery_id=d.delivery_id
-  COMMIT  # relay later publishes; never reset a terminal status to queued</code></pre>
+    BEGIN
+    now = DB_NOW()
+    rows = SELECT Delivery FOR UPDATE SKIP LOCKED
+        WHERE (queued_or_retry_due OR expired_lease) AND last_woken_at &lt; now-30s
+    for d in rows:
+        INSERT Outbox(
+            repair_wake, d.delivery_id, ready_at=now,
+            unique_key=(repair, d.delivery_id, ++d.wake_no)
+        )
+        UPDATE Delivery SET wake_no=d.wake_no, last_woken_at=now WHERE delivery_id=d.delivery_id
+    COMMIT  # relay later publishes; never reset a terminal status to queued</code></pre>
 <div class="bilingual"><div class="lang-zh"><p>plan 是纯函数，返回的计划由投递事务保存。普通短信最多预留 4 次尝试，即初次尝试加 3 次重试；随机抖动只影响本地退避。只有普通短信没有额外等待约束时，供应商允许的最早时间 provider_not_before 才默认为当前时间 now。</p><p>FCM 的可重试失败，包括没有相关响应头的 500，都至少等待 10 秒；遇到 429，还要与 Retry-After、缺失时的 60 秒，以及整体或 topic 至少 60 秒的要求取更晚时间。结果事务中的 now 晚于观测到失败的时刻，从它开始增加等待是保守做法。取完最大值后，不能再用本地 60 秒上限截短供应商要求的等待。[2]</p><p>如果算出的执行时间 due 已达到或超过 not_after，任务直接过期。plan 在处理 DEFERRED 前，也先检查是否必须因未知结果停止；需要停止时，不再生成重试 outbox。其余暂缓处理的 DEFERRED 必须给出未来的 allowed_at，重新唤醒后再做发送前检查；这种暂缓不会增加外部尝试数。</p></div><div class="lang-en"><p>plan is pure and its result is persisted by the delivery transaction. Ordinary SMS allows four reserved attempts. Jitter affects only local backoff. provider_not_before defaults to now only for ordinary SMS without additional bounds. plan explicitly waits at least 10 seconds for FCM retryable failures, including 500 without headers, then applies any later 429 Retry-After/60-second or overall/topic 60-second bound. Transaction time now follows observed failure, so adding the wait there is conservative. Do not reapply the local 60-second cap after max. [2] Expire when due≥not_after. The unknown-stop policy is checked before DEFERRED and, when it applies, no retry outbox is created. Otherwise DEFERRED requires future allowed_at and rechecks gates without adding an external attempt.</p></div></div><div class="bilingual"><div class="lang-zh"><p>恢复程序 repair 只扫描已经到期的 queued/retry_wait 任务，或租约已过期的 leased 任务，并在<strong>拿到行锁后重新检查</strong>条件。last_woken_at 初始设为接受时间，因此刚入队就丢失的唤醒，也能在 30 秒后进入恢复范围。</p><p>repair 把恢复用的 outbox 和递增的 wake_no 放在同一个事务中提交，relay 只发布 ready_at 已到的消息。恢复程序不会把终态任务重新设为待处理。重复唤醒本来就可能发生，最终由领取事务决定谁能处理。[10]</p></div><div class="lang-en"><p>Repair selects due queued/retry_wait or expired leased work and <strong>rechecks under the row lock</strong>. Initialize last_woken_at at acceptance; even an immediately lost wake recovers after 30 seconds. Co-commit repair outbox and wake_no; relay publishes only due ready_at and never resets terminal states. Repeated wakes are expected; claim transactions resolve them. [10]</p></div></div><table><thead><tr><th><span class="lang-zh">故障发生在哪里</span><span class="lang-en">Window</span></th><th><span class="lang-zh">怎样恢复，要保留什么事实</span><span class="lang-en">Recovery and retained fact</span></th></tr></thead><tbody><tr><td><span class="lang-zh">接受尚未提交 / 已提交但 202 丢失</span><span class="lang-en">Uncommitted acceptance / committed but 202 lost</span></td><td><span class="lang-zh">未提交的事务一起回滚；已经提交的请求用原键恢复回执。客户端仅凭超时无法区分这两种情况。</span><span class="lang-en">Rollback all in the first case; replay the receipt in the second. Client timeout cannot distinguish them.</span></td></tr><tr><td><span class="lang-zh">供应商已接受，结果未落库</span><span class="lang-en">Provider accepted, result not committed</span></td><td><span class="lang-zh">恢复时把遗留的 started 记为 timeout_unknown，并保留 uncertain。如果策略禁止重试，就在预留新尝试前停止，不再调用供应商；如果允许，仍可能重复发送。</span><span class="lang-en">Recover started as timeout_unknown, retaining uncertain. A forbidden retry stops before a new reservation or provider call; an allowed retry may duplicate.</span></td></tr><tr><td><span class="lang-zh">结果已提交，队列确认 ACK 丢失</span><span class="lang-en">Result committed, ACK lost</span></td><td><span class="lang-zh">消息再次到达时，检查终态或已经保存的未来计划，跳过已完成任务，也不提前重试。</span><span class="lang-en">Replay finds terminal state or future scheduling and does not resend or retry early.</span></td></tr><tr><td><span class="lang-zh">预算耗尽 / 业务过期</span><span class="lang-en">Budget exhausted / business expired</span></td><td><span class="lang-zh">两者都停止调度。预算耗尽时写入 DLQ 并告警，业务过期则直接进入终态；同时保留 uncertain。重放 DLQ 仍沿用原意图，并重新检查有效期。</span><span class="lang-en">Stop scheduling; exhaustion writes DLQ/alert, expiry is terminal. Retain uncertain; DLQ replay keeps the original intent and rechecks expiry.</span></td></tr></tbody></table><div class="bilingual"><div class="lang-zh"><p>监控要覆盖本地接受的延迟和错误、各通道最老任务的等待时间、过期率、未知结果比例、同一 delivery_id 的尝试数、DLQ 和供应商配额。供应商接受量与 delivered 回执量分别统计，按设计投递给多个设备不算重复。</p><p>如果产品不允许对未知结果重试，停止后可以查询供应商支持的状态，或交由人工核查。代价是延迟增加或可能漏发；另建一个 notification_id 会丢掉原有恢复依据，不能用它掩盖未知结果。</p></div><div class="lang-en"><p>Monitor acceptance latency/errors, oldest work per channel, expiry, unknown outcomes, attempts per delivery_id, DLQ, and quota. Count acceptance separately from delivered receipts; legitimate multi-device sends are not duplicates. If unknown retries are forbidden, stop and query supported provider status or investigate. The cost is delay/omission, not a new notification_id hiding ambiguity.</p></div></div>
 </section>
 

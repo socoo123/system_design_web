@@ -279,7 +279,9 @@
 <pre data-language="Pseudocode · PG18 create hold" data-kind="pseudocode" data-source="create.pseudo"><code>create(owner, key, intent, admission):                 // authenticated input
   items = normalize_unique_sorted_resources(intent)   // positive integer quantities
   digest = SHA256(canonical(owner, CREATE_HOLD, intent))
-  if gated: require admission binds (owner, key, digest, scope, items[0].q)
+  if gated:
+    require admission binds (owner, key, digest, scope, items[0].q)
+
   BEGIN ISOLATION LEVEL READ COMMITTED
   fence = SELECT * FROM fences WHERE scope=:scope FOR SHARE
   require fence.active AND (not gated OR admission.epoch == fence.epoch)
@@ -288,7 +290,9 @@
   if not inserted:
     r = SELECT * FROM requests WHERE identity=:identity FOR UPDATE // new statement
     require r.digest == digest
-    COMMIT; return r.original_receipt                  // current state: GET /holds/id
+    COMMIT;
+    return r.original_receipt                          // current state: GET /holds/id
+
   SAVEPOINT allocation                               // identity remains claimed
   INSERT hold(state=HELD, expected_items=items, owner=owner, order_id=intent.order_id)
   for item in items:                                 // fixed resource/date order
@@ -299,14 +303,17 @@
       receipt = {http:409, result:REJECTED}
       UPDATE requests SET outcome=REJECTED, original_receipt=:receipt WHERE ...
       INSERT outbox(REQUEST_TERMINAL, receipt(REJECTED, version=1, admission))
-      COMMIT; return receipt
+      COMMIT;
+      return receipt
     INSERT hold_items(hold_id, resource, q) VALUES (...) // immutable ownership
+
   UPDATE holds SET deadline=clock_timestamp()+interval &#x27;15 minutes&#x27; WHERE ...
   receipt = {http:201, hold_id:id, result:HELD, deadline:deadline}
   UPDATE requests SET outcome=CREATED, hold_id=:id, original_receipt=:receipt WHERE ...
   INSERT outbox(HOLD_STATE, event_id=(id,1), state=HELD, version=1, current_epoch=fence.epoch)
   RELEASE SAVEPOINT allocation
-  COMMIT; return receipt
+  COMMIT;
+  return receipt
 // Any unexpected error: ROLLBACK the WHOLE transaction, including identity.
 // COMMIT ACK lost: discard connection; query/retry SAME identity, never restock.
 // Direct hotel path has no token. Only trusted API calls Lua; Redis is not public authority.</code></pre>
@@ -397,23 +404,34 @@
 <pre data-language="Pseudocode · hold terminal transition" data-kind="pseudocode" data-source="finish.pseudo"><code>finish(hold_id, command):                              // internal authenticated command
   require command.kind in {CONFIRM, EXPIRE}
   scope = lookup_immutable_hold_scope(hold_id)          // never take scope from caller
+
   BEGIN
   fence = SELECT * FROM fences WHERE scope=:scope FOR SHARE
-  if not fence.active: ROLLBACK; return PENDING_MAINTENANCE
+  if not fence.active:
+    ROLLBACK;
+    return PENDING_MAINTENANCE
+
   h = SELECT * FROM holds WHERE hold_id=:id FOR UPDATE
   require h exists AND h.scope == fence.scope
   require command.owner == h.owner AND command.order_id == h.order_id
-  if h.state != HELD: COMMIT; return h.state            // never revive a terminal hold
+  if h.state != HELD:
+    COMMIT;
+    return h.state                                    // never revive a terminal hold
+
   now = SELECT clock_timestamp()                      // AFTER waiting for hold lock
   if command.kind == CONFIRM AND now &gt;= h.deadline:
-    COMMIT; return EXPIRED_NOT_CONFIRMED                // Ch18 records refund/review duty
+    COMMIT;
+    return EXPIRED_NOT_CONFIRMED                        // Ch18 records refund/review duty
   if command.kind == EXPIRE AND now &lt; h.deadline:
-    COMMIT; return NOT_DUE
+    COMMIT;
+    return NOT_DUE
+
   target = CONFIRMED if command.kind == CONFIRM else RELEASED
   items = SELECT * FROM hold_items WHERE hold_id=:id ORDER BY resource
   require items == h.expected_items AND all(items.scope == h.scope AND items.q &gt; 0)
   UPDATE holds SET state=:target, version=version+1 WHERE hold_id=:id AND state=HELD
   require affected_rows == 1
+
   for item in items:                                  // same transaction, fixed order
     if target == CONFIRMED:
       UPDATE stock SET reserved=reserved-:q, confirmed=confirmed+:q
@@ -422,9 +440,11 @@
       UPDATE stock SET reserved=reserved-:q, free=free+:q
         WHERE scope=:scope AND resource=:resource AND reserved&gt;=:q
     require affected_rows == 1                        // mismatch aborts, never partial
+
   INSERT outbox(HOLD_STATE, event_id=(id,h.version+1), state=target,
                 version=h.version+1, current_epoch=fence.epoch, token=h.token)
-  COMMIT; return target
+  COMMIT;
+  return target
 // Unexpected error rolls back state, ALL counters, and outbox together.
 // CONFIRM is supplied only after Ch18 validates funds and immutable order binding.
 // Timeout/EXPIRED/RELEASED is not payment failure: Ch18 retains the funds obligation.</code></pre>
@@ -565,39 +585,59 @@
 -- ARGV: epoch, token=SHA256(owner,op,key), principal, intent_digest, quantity.
 local function uint(s, lo, hi)
   local n = tonumber(s)
-  if not n or n ~= math.floor(n) or n &lt; lo or n &gt; hi then return nil end
+  if not n or n ~= math.floor(n) or n &lt; lo or n &gt; hi then
+    return nil
+  end
   return n
 end
+
 local epoch, token, principal, digest = ARGV[1], ARGV[2], ARGV[3], ARGV[4]
 local q = uint(ARGV[5], 1, 10000)
 if #KEYS ~= 1 or #ARGV ~= 5 or not q or not uint(epoch, 1, 1000000000)
-  or not token or #token ~= 64 or token:find(&#x27;[^a-f0-9]&#x27;)
-  or not principal or #principal &lt; 1 or #principal &gt; 128
-  or not digest or #digest ~= 64 or digest:find(&#x27;[^a-f0-9]&#x27;) then
+    or not token or #token ~= 64 or token:find(&#x27;[^a-f0-9]&#x27;)
+    or not principal or #principal &lt; 1 or #principal &gt; 128
+    or not digest or #digest ~= 64 or digest:find(&#x27;[^a-f0-9]&#x27;) then
   return redis.error_reply(&#x27;INVALID_INPUT&#x27;)
 end
+
 local m = redis.call(&#x27;HMGET&#x27;, KEYS[1], &#x27;epoch&#x27;, &#x27;ready&#x27;, &#x27;free&#x27;, &#x27;cap&#x27;, &#x27;sec&#x27;, &#x27;used&#x27;)
-if m[1] ~= epoch or m[2] ~= &#x27;1&#x27; then return {&#x27;CLOSED&#x27;} end
+if m[1] ~= epoch or m[2] ~= &#x27;1&#x27; then
+  return {&#x27;CLOSED&#x27;}
+end
+
 local free, cap, last, used = uint(m[3], 0, 10000), uint(m[4], 1, 10000),
-  uint(m[5], 0, 10000000000), uint(m[6], 0, 500)
+    uint(m[5], 0, 10000000000), uint(m[6], 0, 500)
 if not free or not cap or free &gt; cap or not last or not used then
   return redis.error_reply(&#x27;CORRUPT_GATE&#x27;)
 end
+
 local old = redis.call(&#x27;HGET&#x27;, KEYS[1], &#x27;t:&#x27; .. token)
 if old then
   local ok, r = pcall(cjson.decode, old)
-  if not ok or type(r) ~= &#x27;table&#x27; then return redis.error_reply(&#x27;CORRUPT_TOKEN&#x27;) end
+  if not ok or type(r) ~= &#x27;table&#x27; then
+    return redis.error_reply(&#x27;CORRUPT_TOKEN&#x27;)
+  end
   if r.principal ~= principal or r.digest ~= digest or r.q ~= q then
     return redis.error_reply(&#x27;IDENTITY_CONFLICT&#x27;)
   end
   return {&#x27;REPLAY&#x27;, r.state}                           -- query DB; no new allocation
 end
+
 local sec = math.max(last, tonumber(redis.call(&#x27;TIME&#x27;)[1])) -- clock rollback: fail closed
-if sec &gt; last then used = 0 end
-if used &gt;= 500 then return {&#x27;RATE_LIMITED&#x27;} end
-if free &lt; q then return {&#x27;SOLD_OUT_HINT&#x27;} end
-local record = cjson.encode({principal=principal, digest=digest, q=q, state=&#x27;ADMITTED&#x27;, v=0})
-redis.call(&#x27;HSET&#x27;, KEYS[1], &#x27;free&#x27;, free-q, &#x27;sec&#x27;, sec, &#x27;used&#x27;, used+1, &#x27;t:&#x27;..token, record)
+if sec &gt; last then
+  used = 0
+end
+if used &gt;= 500 then
+  return {&#x27;RATE_LIMITED&#x27;}
+end
+if free &lt; q then
+  return {&#x27;SOLD_OUT_HINT&#x27;}
+end
+
+local record = cjson.encode({
+  principal = principal, digest = digest, q = q, state = &#x27;ADMITTED&#x27;, v = 0
+})
+redis.call(&#x27;HSET&#x27;, KEYS[1], &#x27;free&#x27;, free - q, &#x27;sec&#x27;, sec, &#x27;used&#x27;, used + 1, &#x27;t:&#x27; .. token, record)
 return {&#x27;ADMITTED&#x27;, token, epoch}</code></pre>
 <div class="bilingual"><div class="lang-zh"><p>脚本先读取、校验并编码结果，最后只执行一次 HSET，同时更新库存提示和 token 记录。这样安排，是因为脚本报错不会自动回滚此前写入。这个实现只控制准入，不限制每个账号的购买数量。如果题目要求限购，数据库还要提供“活动×用户”的权威约束，Redis 标记只能提前过滤。酒店的多夜请求，也不能直接套用这个单 SKU 脚本。</p><p><strong>500 是每个 Redis 计时秒内新 token 的上限</strong>，相邻秒的边界仍允许突发，时钟回拨则不会重新打开已用过的时间桶。外层数据库调度器另外限制所有创建尝试，包括重复请求和冲突重试：合计每秒 500 次，确认每秒 200 次，释放每秒 50 次，并设置硬并发上限。这段 Lua 没有实现这套完整调度器。查询和核对还需单独分配预算，预算不足时就减少新准入。500×0.020s=10 仅代表平均在途请求数。首批请求每个 token 对应一件、且没有回补重售时，10,000÷500=20 秒也只是名义稳态等效时长；固定秒窗口可在首尾边界突发，不能据此给出这个墙钟硬下界，累计数据库工作量也可能超过库存件数。</p></div><div class="lang-en"><p>Read, validate, and encode before a final HSET changes both hint and token. A script error does not roll back earlier writes. This example implements admission, not per-account purchase limits; those require an authoritative campaign/user DB constraint, with Redis as a filter. This single-SKU script also does not allocate a multi-night stay.</p><p><strong>500 caps new tokens per Redis-clock second</strong>; adjacent-second boundaries can burst, while clock rollback does not reopen a bucket. An outer DB scheduler separately caps all create attempts, including duplicates/conflict retries, at 500/s, with 200 confirms/s, 50 releases/s, and a hard concurrency limit. Lua does not implement that full scheduler. Budget lookup/reconciliation separately and reduce new admission when necessary. 500×0.020s=10 is only mean in-flight. With one unit/token and no reopened stock, 10,000÷500=20 seconds is only a nominal steady-rate equivalent, not a wall-clock lower bound under fixed-window boundary bursts; cumulative DB work can exceed stock quantity.</p></div></div>
 </section>
@@ -724,13 +764,17 @@ return {&#x27;ADMITTED&#x27;, token, epoch}</code></pre>
     VALUES (...) ON CONFLICT(identity) DO NOTHING
   if inserted:
     INSERT outbox(REQUEST_TERMINAL, receipt(CANCELLED, version=1, token))
-    COMMIT; return CANCELLED                          // durable tombstone closes late CREATE
+    COMMIT;
+    return CANCELLED                                  // durable tombstone closes late CREATE
+
   r = SELECT * FROM requests WHERE identity=:identity FOR UPDATE // new statement
   require r.digest == SHA256(canonical(owner, CREATE_HOLD, exact_intent))
   if r.outcome == CREATED:
     h = SELECT * FROM holds WHERE hold_id=r.hold_id
-    COMMIT; return {original_receipt:r.original_receipt, current_state:h.state}
-  COMMIT; return r.original_receipt                   // existing terminal event is retryable
+    COMMIT;
+    return {original_receipt:r.original_receipt, current_state:h.state}
+  COMMIT;
+  return r.original_receipt                            // existing terminal event is retryable
 // CREATE claims this SAME unique identity before any stock allocation.
 // Its uncommitted claim makes INSERT wait; rollback lets cancel win; commit reveals hold.
 // HELD: wait or call normal expiry. CONFIRMED: no restock. Unknown: keep pending.
@@ -738,43 +782,67 @@ return {&#x27;ADMITTED&#x27;, token, epoch}</code></pre>
 <h3><span class="lang-zh">数据库状态转换与 Redis 回补，分别保证幂等</span><span class="lang-en">Deduplicate DB outcomes and Redis effects separately</span></h3>
 <div class="bilingual"><div class="lang-zh"><p>下面的可执行 Lua 只接收来自<strong>可信数据库 Outbox</strong>的收据，字段包括 epoch、token、principal、digest、q、version 和 state。HELD 只登记状态，CONFIRMED 不增加 free，CANCELLED、REJECTED 或 RELEASED 最多回补一次。即使终态收据先到、HELD 后到，也不能把状态改回去；同版本出现不同状态，或两个终态互相冲突时，脚本报错而不覆盖。没有对应 token 的归属记录，也就没有可回补的数量。</p></div><div class="lang-en"><p>The executable Lua accepts a receipt from a <strong>trusted DB outbox</strong>: epoch, token, principal, digest, q, version, and state. HELD records ownership; CONFIRMED never restores free; CANCELLED/REJECTED/RELEASED restore at most once. A terminal receipt arriving before HELD never regresses. Same-version/different-state or conflicting terminal receipts error rather than overwrite. No token ownership means no quota creation.</p></div></div>
 <pre data-language="Lua · Redis 7+ receipt teaching example" data-kind="teaching" data-source="receipt.lua"><code>-- Trusted DB outbox only. ARGV: epoch, token, principal, digest, q, version, state.
-local terminal = {CONFIRMED=true, RELEASED=true, REJECTED=true, CANCELLED=true}
-local restore = {RELEASED=true, REJECTED=true, CANCELLED=true}
+local terminal = {CONFIRMED = true, RELEASED = true, REJECTED = true, CANCELLED = true}
+local restore = {RELEASED = true, REJECTED = true, CANCELLED = true}
+
 local function uint(s, lo, hi)
   local n = tonumber(s)
-  if not n or n ~= math.floor(n) or n &lt; lo or n &gt; hi then return nil end
+  if not n or n ~= math.floor(n) or n &lt; lo or n &gt; hi then
+    return nil
+  end
   return n
 end
+
 local e, token, p, d, state = ARGV[1], ARGV[2], ARGV[3], ARGV[4], ARGV[7]
-local q, v = uint(ARGV[5],1,10000), uint(ARGV[6],1,2)
+local q, v = uint(ARGV[5], 1, 10000), uint(ARGV[6], 1, 2)
 if #KEYS ~= 1 or #ARGV ~= 7 or not q or not v
-  or not (terminal[state] or state == &#x27;HELD&#x27;)
-  or (state == &#x27;HELD&#x27; and v ~= 1) or (state == &#x27;RELEASED&#x27; and v ~= 2)
-  or (state == &#x27;CONFIRMED&#x27; and v ~= 2)
-  or ((state == &#x27;REJECTED&#x27; or state == &#x27;CANCELLED&#x27;) and v ~= 1) then
+    or not (terminal[state] or state == &#x27;HELD&#x27;)
+    or (state == &#x27;HELD&#x27; and v ~= 1) or (state == &#x27;RELEASED&#x27; and v ~= 2)
+    or (state == &#x27;CONFIRMED&#x27; and v ~= 2)
+    or ((state == &#x27;REJECTED&#x27; or state == &#x27;CANCELLED&#x27;) and v ~= 1) then
   return redis.error_reply(&#x27;INVALID_RECEIPT&#x27;)
 end
-local m = redis.call(&#x27;HMGET&#x27;, KEYS[1], &#x27;epoch&#x27;, &#x27;ready&#x27;, &#x27;free&#x27;, &#x27;cap&#x27;, &#x27;t:&#x27;..token)
-if m[1] ~= e or m[2] ~= &#x27;1&#x27; then return {&#x27;STALE_OR_CLOSED&#x27;} end
-if not m[5] then return {&#x27;NO_OWNERSHIP&#x27;} end          -- never mint quota from nothing
+
+local m = redis.call(&#x27;HMGET&#x27;, KEYS[1], &#x27;epoch&#x27;, &#x27;ready&#x27;, &#x27;free&#x27;, &#x27;cap&#x27;, &#x27;t:&#x27; .. token)
+if m[1] ~= e or m[2] ~= &#x27;1&#x27; then
+  return {&#x27;STALE_OR_CLOSED&#x27;}
+end
+if not m[5] then
+  return {&#x27;NO_OWNERSHIP&#x27;}
+end -- never mint quota from nothing
+
 local ok, r = pcall(cjson.decode, m[5])
-local free, cap = uint(m[3],0,10000), uint(m[4],1,10000)
+local free, cap = uint(m[3], 0, 10000), uint(m[4], 1, 10000)
 if not ok or type(r) ~= &#x27;table&#x27; or not free or not cap or free &gt; cap
-  or not uint(r.v,0,2) or not (r.state == &#x27;ADMITTED&#x27; or r.state == &#x27;HELD&#x27; or terminal[r.state]) then
+    or not uint(r.v, 0, 2)
+    or not (r.state == &#x27;ADMITTED&#x27; or r.state == &#x27;HELD&#x27; or terminal[r.state]) then
   return redis.error_reply(&#x27;CORRUPT_GATE&#x27;)
 end
-if r.principal ~= p or r.digest ~= d or r.q ~= q then return redis.error_reply(&#x27;BINDING&#x27;) end
-if v &lt; r.v then return {&#x27;STALE&#x27;} end
+
+if r.principal ~= p or r.digest ~= d or r.q ~= q then
+  return redis.error_reply(&#x27;BINDING&#x27;)
+end
+if v &lt; r.v then
+  return {&#x27;STALE&#x27;}
+end
 if v == r.v then
-  if state ~= r.state then return redis.error_reply(&#x27;CONFLICT&#x27;) end
+  if state ~= r.state then
+    return redis.error_reply(&#x27;CONFLICT&#x27;)
+  end
   return {&#x27;REPLAY&#x27;}
 end
-if terminal[r.state] then return redis.error_reply(&#x27;TERMINAL_CONFLICT&#x27;) end
+if terminal[r.state] then
+  return redis.error_reply(&#x27;TERMINAL_CONFLICT&#x27;)
+end
+
 local next_free = free + (restore[state] and q or 0)
-if next_free &gt; cap then return redis.error_reply(&#x27;COUNTER_MISMATCH&#x27;) end
+if next_free &gt; cap then
+  return redis.error_reply(&#x27;COUNTER_MISMATCH&#x27;)
+end
+
 r.state, r.v = state, v
 local record = cjson.encode(r)                        -- encode BEFORE the sole write
-redis.call(&#x27;HSET&#x27;, KEYS[1], &#x27;free&#x27;, next_free, &#x27;t:&#x27;..token, record)
+redis.call(&#x27;HSET&#x27;, KEYS[1], &#x27;free&#x27;, next_free, &#x27;t:&#x27; .. token, record)
 return {&#x27;APPLIED&#x27;, state}</code></pre>
 <div class="bilingual"><div class="lang-zh"><p>Redis 的确认回复（ACK）丢失时，重发同一份收据即可。如果数据库不可用、等待锁超时或提交结果未知，就继续保留待核查状态，接受暂时少卖。TTL 删除一个键，不会替另一个计数执行 INCR；键空间通知使用的 Pub/Sub 会在断线时丢事件，过期通知也不保证准时发出 <a href="#ref-5">[5]</a>。若 Redis 整层丢失，孤儿账本也会一起丢失，此时必须走下一节的恢复流程。</p><p>请求身份和取消墓碑，要保留到约定的 24 小时重试窗口结束，并且在途任务已经排空；仍有活跃占用时还要保留更久。本示例<strong>不删除</strong>身份。生产环境若要清理，必须能验证服务端签发的作用域和有效期，让过期旧键只能查询或被拒绝，不能因记录过期而重新创建。15 分钟的预占期限与 24 小时的身份重试窗口，是两项不同的约定。</p></div><div class="lang-en"><p>Lost Redis ACK means replay the same receipt. DB outage, lock timeout, or unknown commit remains unresolved, accepting temporary undersell. Key deletion never INCRs another counter; keyspace Pub/Sub loses disconnected events and expiry notifications are not punctual <a href="#ref-5">[5]</a>. Whole Redis loss also loses orphan records and requires the next recovery protocol.</p><p>Retain identity/tombstones until the 24-hour contractual retry window ends and in-flight work drains; retain live ownership longer. This example <strong>never deletes identities</strong>. Production cleanup must verify server-issued lifetime/scope so expired keys only query or reject, rather than becoming new CREATE operations. The fifteen-minute hold deadline and twenty-four-hour identity window are different contracts.</p></div></div>
 </section>
@@ -905,6 +973,7 @@ return {&#x27;APPLIED&#x27;, state}</code></pre>
   f = SELECT * FROM fences WHERE scope=:scope FOR UPDATE // waits for shared writer locks
   UPDATE fences SET active=false, epoch=epoch+1, recovery_id=:fresh_id WHERE ...
   COMMIT                                             // old entered transitions have drained
+
   snapshot = read_while_paused(scope, f.epoch+1)
   // Cross-check each stock row against ALL HELD + CONFIRMED hold_items.
   // Expired-but-HELD remains occupied. Any mismatch: stay closed and investigate.
@@ -914,11 +983,13 @@ return {&#x27;APPLIED&#x27;, state}</code></pre>
   // Existing key + same snapshot is a read-only replay; never reset a live counter.
   // Same closed partial baseline: retry; corrupt/different snapshot: stay closed, NEW epoch.
   require Redis metadata == (snapshot.epoch, snapshot.snapshot, ready=1)
+
   BEGIN
   f = SELECT * FROM fences WHERE scope=:scope FOR UPDATE
   require not f.active AND f.epoch == snapshot.epoch AND f.recovery_id == fresh_id
   UPDATE fences SET active=true WHERE ...
-  COMMIT; publish_current_epoch_and_open_ingress(snapshot.epoch)
+  COMMIT;
+  publish_current_epoch_and_open_ingress(snapshot.epoch)
 // Old-e7 writes fail the DB fence. Effects for e7 never modify the current e8 key.
 // An e7 hold still HELD is imported; its later transition emits a CURRENT-e8 receipt.
 // Install/ACK unknown: retry the same immutable snapshot; never DEL/reinstall live state.
@@ -929,7 +1000,8 @@ return {&#x27;APPLIED&#x27;, state}</code></pre>
 <pre data-language="Pseudocode · outbox and full-state consumer" data-kind="pseudocode" data-source="delivery.pseudo"><code>relay(delivery):                                     // identity=(event_id,destination)
   event = load_committed_outbox_row(delivery.event_id)
   send(delivery.destination,event)                    // network call outside DB transaction
-  if durable_receiver_ack: mark_delivery_sent(event.id,delivery.destination)
+  if durable_receiver_ack:
+    mark_delivery_sent(event.id,delivery.destination)
   // ACK lost/crash before mark: send the SAME event again; never mark before send.
 
 // Route HOLD_STATE to orders (+ Redis if gated). REQUEST_TERMINAL has NO hold_id:
@@ -939,13 +1011,20 @@ consume_hold_event(event):                             // independent downstream
   require nonempty_string(event.id) AND positive_integer(event.v)
   require event.state in {HELD, CONFIRMED, RELEASED}     // invalid: no inbox commit, NO ACK
   event_hash = SHA256(canonical(event))                // full event, not its intent_digest
+
   BEGIN
   INSERT inbox(consumer,event_id,event_hash) ON CONFLICT DO NOTHING
-  if duplicate: require stored_hash == event_hash; COMMIT; ACK; return
+  if duplicate:
+    require stored_hash == event_hash;
+    COMMIT;
+    ACK;
+    return
+
   INSERT projection(hold_id,version,state) VALUES (...)
     ON CONFLICT(hold_id) DO UPDATE SET version=:v,state=:s
     WHERE projection.version &lt; :v                     // full-state event, stale = no overwrite
-  COMMIT; ACK                                         // inbox and local effect share commit
+  COMMIT;
+  ACK                                                 // inbox and local effect share commit
 // Redis and Order API have separate delivery rows/ACKs, outside the DB state transaction.
 // Expiry scan: fixed cutoff, continuous (deadline,id) pages, restart oldest next pass;
 // failed rows stay HELD/due. finish() rechecks time and state after acquiring the lock.</code></pre>

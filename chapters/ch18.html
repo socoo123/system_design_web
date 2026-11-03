@@ -114,34 +114,40 @@
         <figcaption><span class="lang-zh">这一帧加入响应丢失的故障：主库 Primary 已经提交，但 API → Client 这一跳没有送达。客户端重试时沿用原键，就能找回原订单，库存也只预留一次；超时不能成为再建一单的理由。</span><span class="lang-en">The failure is after Primary committed: Client did not receive the reply. Only the API-to-Client hop failed. Reuse the key on retry so the hold happens once; a timeout must not create another order.</span></figcaption>
       </div>
     </figure><div class="bilingual"><div class="lang-zh"><p><code>POST /orders</code> 用非空的 <code>(user_id, request_key)</code> 标识一次下单。请求意图绑定不可变报价 <code>quote_id</code>、币种、地址版本，以及按 SKU 规范排序的商品数量；计算摘要时，还要包含已认证的用户。相同请求键和相同摘要返回<strong>原始创建回执</strong>，摘要不同则返回 409。报价由服务端定价并绑定用户，创建新单时要校验报价有效期、币种和明细，并检查金额计算是否溢出，不能接受客户端自行修改的价格。之后要查询订单的当前状态，应使用 GET。</p></div><div class="lang-en"><p><code>POST /orders</code> uses a non-null <code>(user_id, request_key)</code>. Intent binds an immutable quote, currency, address version and canonically sorted SKU quantities, with the authenticated user in its digest. Equal intent replays the <strong>original creation receipt</strong>; changed intent returns 409. A server-owned quote binds the user. New checkout validates expiry, currency, items and amount overflow, never client prices. GET retrieves current order state.</p></div></div><pre data-language="Pseudocode · checkout identity and stock" data-kind="pseudocode" data-source="checkout.pseudo"><code>checkout(auth, key, intent):
-  # intent = quote_id, currency, address_version, sorted unique (sku, qty).
-  require authenticated owner, nonempty key, positive integer quantities
-  digest = SHA256(canonical(auth.user_id, intent))
-  BEGIN READ COMMITTED
-  claimed = INSERT Request(user_id,request_key,digest,receipt=NULL)
-            ON CONFLICT(user_id,request_key) DO NOTHING
-  if not claimed:
-    r = SELECT Request WHERE user_id=:auth_user_id AND request_key=:key
-        # A NEW statement snapshot after the conflicting insert finishes.
-    require r.digest == digest else ROLLBACK and return 409
-    COMMIT; return r.receipt              # Original creation result, not live status.
-  q = SELECT immutable Quote WHERE id=intent.quote_id
-  require q.owner=auth.user_id AND q.unexpired AND q.matches(intent)
-  total = sum(q.unit_price[sku] * qty)     # Integer minor units; checked overflow.
-  currency = q.currency
-  o = INSERT Order(owner=auth.user_id,total,currency,pending_pay,expire_at=DB_NOW+900s)
-  for (sku, qty) in intent.items ORDER BY sku:
-    changed = UPDATE Stock SET available=available-qty,reserved=reserved+qty
-              WHERE sku_id=sku AND available&gt;=qty
-    require changed == 1 else ROLLBACK and return out_of_stock
-    INSERT Item(o.id,sku,qty,q.unit_price[sku])
-    INSERT Reservation(o.id,sku,qty,HELD) # PK(order_id,sku_id).
-  INSERT Outbox(event_id,kind=order_created,order_id=o.id,version=1)
-  receipt = {http:201, order_id:o.id, status:pending_pay, total, currency}
-  UPDATE Request SET receipt=:receipt WHERE user_id=:auth_user_id AND request_key=:key
-  COMMIT; return receipt
-  # Any exception before COMMIT rolls back Request/Order/Item/Stock/Hold/Outbox.
-  # Retry the WHOLE transaction on deadlock; a lost commit reply uses the SAME key.</code></pre><div class="bilingual"><div class="lang-zh"><p>数据库通过唯一约束决定哪个并发请求能够创建订单。<code>ON CONFLICT DO NOTHING</code> 没有插入新行后，服务要用<strong>一条新语句</strong>读取已提交的那条请求记录，不能因为原插入快照看不到它，就认定它不存在。PostgreSQL 18 的 Read Committed 支持这里所需的语义 [1]，身份字段则必须设为非空 [2]。创建过程中，回执暂时为空的请求行不会单独提交：库存、订单、明细、预留、事件或回执，任一步失败都会让整笔事务回滚。本例只保存成功下单的请求身份；缺货拒绝会一并回滚请求行，因此同一请求稍后重试时，仍可能创建成功。</p><p>包含多个 SKU 的购物篮始终按相同顺序更新库存，付款或关单等终结路径也按这个顺序取得库存锁。遇到死锁或序列化失败时，要重试整笔事务 [8]。如果事务已经提交，只是响应丢失，就沿用原键找回原单，不能换键再占一份库存。返回创建成功回执，只依赖本地事务提交，不需要等消息送达，也不需要调用支付渠道。</p></div><div class="lang-en"><p>Database uniqueness arbitrates concurrent requests. After <code>ON CONFLICT DO NOTHING</code>, use a <strong>new statement</strong> to read the committed winner; do not infer absence from the insertion snapshot. PostgreSQL 18 Read Committed supports this distinction [1], with non-null identities [2]. A partially built request with an empty receipt never commits separately. Any failure rolls back stock, order, items, holds, event and receipt. This model persists successful identities only, so a rejected out-of-stock request may succeed on a later retry.</p><p>Every basket and finalization path locks stock in the same SKU order; deadlock or serialization failure retries the whole transaction [8]. A lost commit reply reuses the original key and recovers the same order. A successful receipt does not depend on broker delivery or a provider call.</p></div></div>
+    # intent = quote_id, currency, address_version, sorted unique (sku, qty).
+    require authenticated owner, nonempty key, positive integer quantities
+    digest = SHA256(canonical(auth.user_id, intent))
+
+    BEGIN READ COMMITTED
+    claimed = INSERT Request(user_id,request_key,digest,receipt=NULL)
+        ON CONFLICT(user_id,request_key) DO NOTHING
+    if not claimed:
+        r = SELECT Request WHERE user_id=:auth_user_id AND request_key=:key
+            # A NEW statement snapshot after the conflicting insert finishes.
+        require r.digest == digest else ROLLBACK and return 409
+        COMMIT;
+        return r.receipt              # Original creation result, not live status.
+
+    q = SELECT immutable Quote WHERE id=intent.quote_id
+    require q.owner=auth.user_id AND q.unexpired AND q.matches(intent)
+    total = sum(q.unit_price[sku] * qty)     # Integer minor units; checked overflow.
+    currency = q.currency
+    o = INSERT Order(owner=auth.user_id,total,currency,pending_pay,expire_at=DB_NOW+900s)
+
+    for (sku, qty) in intent.items ORDER BY sku:
+        changed = UPDATE Stock SET available=available-qty,reserved=reserved+qty
+            WHERE sku_id=sku AND available&gt;=qty
+        require changed == 1 else ROLLBACK and return out_of_stock
+        INSERT Item(o.id,sku,qty,q.unit_price[sku])
+        INSERT Reservation(o.id,sku,qty,HELD) # PK(order_id,sku_id).
+
+    INSERT Outbox(event_id,kind=order_created,order_id=o.id,version=1)
+    receipt = {http:201, order_id:o.id, status:pending_pay, total, currency}
+    UPDATE Request SET receipt=:receipt WHERE user_id=:auth_user_id AND request_key=:key
+    COMMIT;
+    return receipt
+    # Any exception before COMMIT rolls back Request/Order/Item/Stock/Hold/Outbox.
+    # Retry the WHOLE transaction on deadlock; a lost commit reply uses the SAME key.</code></pre><div class="bilingual"><div class="lang-zh"><p>数据库通过唯一约束决定哪个并发请求能够创建订单。<code>ON CONFLICT DO NOTHING</code> 没有插入新行后，服务要用<strong>一条新语句</strong>读取已提交的那条请求记录，不能因为原插入快照看不到它，就认定它不存在。PostgreSQL 18 的 Read Committed 支持这里所需的语义 [1]，身份字段则必须设为非空 [2]。创建过程中，回执暂时为空的请求行不会单独提交：库存、订单、明细、预留、事件或回执，任一步失败都会让整笔事务回滚。本例只保存成功下单的请求身份；缺货拒绝会一并回滚请求行，因此同一请求稍后重试时，仍可能创建成功。</p><p>包含多个 SKU 的购物篮始终按相同顺序更新库存，付款或关单等终结路径也按这个顺序取得库存锁。遇到死锁或序列化失败时，要重试整笔事务 [8]。如果事务已经提交，只是响应丢失，就沿用原键找回原单，不能换键再占一份库存。返回创建成功回执，只依赖本地事务提交，不需要等消息送达，也不需要调用支付渠道。</p></div><div class="lang-en"><p>Database uniqueness arbitrates concurrent requests. After <code>ON CONFLICT DO NOTHING</code>, use a <strong>new statement</strong> to read the committed winner; do not infer absence from the insertion snapshot. PostgreSQL 18 Read Committed supports this distinction [1], with non-null identities [2]. A partially built request with an empty receipt never commits separately. Any failure rolls back stock, order, items, holds, event and receipt. This model persists successful identities only, so a rejected out-of-stock request may succeed on a later retry.</p><p>Every basket and finalization path locks stock in the same SKU order; deadlock or serialization failure retries the whole transaction [8]. A lost commit reply reuses the original key and recovers the same order. A successful receipt does not depend on broker delivery or a provider call.</p></div></div>
 </section>
 
 <section>
@@ -318,33 +324,43 @@
         <figcaption><span class="lang-zh">再考虑重复投递。reserved ≥ 3 只能说明总预留量足够，不能证明 42 号订单仍占着这 3 件商品。只有本单的 HELD → RELEASED 转换成功，才能把 3 件加回可售库存，避免误释放其他订单的预留。</span><span class="lang-en">Add duplicate delivery. reserved ≥ 3 proves only that an aggregate has enough units, not that order 42 still owns them. Only its HELD-to-RELEASED success returns three, protecting other orders’ holds.</span></figcaption>
       </div>
     </figure><div class="bilingual"><div class="lang-zh"><p>本例选择下单时预留，是因为进入付款流程前，系统已经承诺备齐整篮数量。A9 中，A、R、S 分别表示可售、预留和已售：初始为 A=10、R=0、S=0，预留 3 件后变为 7,3,0；付款分支变为 7,0,3，释放分支则变为 10,0,0。A+R+S=10 只在没有补货、退货的教学窗口内成立。也可以选择付款时才扣库存，并用条件更新防止库存为负；但那样就可能已经收款却没有货，只能再退款。这对应的是另一种业务承诺。</p></div><div class="lang-en"><p>Reserve at checkout because payment entry already promises the whole basket. A9 starts at A=10,R=0,S=0; holding three gives 7,3,0, payment 7,0,3 and release 10,0,0. A+R+S=10 applies only without restock or returns. Guarded stock deduction at payment can prevent negative counters, but captured money may find no goods and need a refund: a different promise.</p></div></div><pre data-language="Pseudocode · owned holds and closing" data-kind="pseudocode" data-source="holds.pseudo"><code>finish_holds_locked(o, target):            # Called INSIDE the caller&#x27;s transaction.
-  require caller holds Order(o.id) FOR UPDATE until COMMIT
-  require target in {COMMITTED, RELEASED}
-  holds = SELECT Reservation WHERE order_id=o.id ORDER BY sku_id FOR UPDATE
-  require holds exactly match persisted Items AND all holds.state == HELD
-  for h in holds ORDER BY sku_id:          # Every stock writer uses this order.
-    if target == COMMITTED:
-      n = UPDATE Stock SET reserved=reserved-h.qty,sold=sold+h.qty
-          WHERE sku_id=h.sku_id AND reserved&gt;=h.qty
-    else:
-      n = UPDATE Stock SET reserved=reserved-h.qty,available=available+h.qty
-          WHERE sku_id=h.sku_id AND reserved&gt;=h.qty
-    require n == 1                        # Corruption/missing row aborts caller.
-    n = UPDATE Reservation SET state=target
-        WHERE order_id=o.id AND sku_id=h.sku_id AND state=HELD
-    require n == 1                        # Never release another order&#x27;s units.
+    require caller holds Order(o.id) FOR UPDATE until COMMIT
+    require target in {COMMITTED, RELEASED}
+
+    holds = SELECT Reservation WHERE order_id=o.id ORDER BY sku_id FOR UPDATE
+    require holds exactly match persisted Items AND all holds.state == HELD
+    for h in holds ORDER BY sku_id:          # Every stock writer uses this order.
+        if target == COMMITTED:
+            n = UPDATE Stock SET reserved=reserved-h.qty,sold=sold+h.qty
+                WHERE sku_id=h.sku_id AND reserved&gt;=h.qty
+        else:
+            n = UPDATE Stock SET reserved=reserved-h.qty,available=available+h.qty
+                WHERE sku_id=h.sku_id AND reserved&gt;=h.qty
+        require n == 1                        # Corruption/missing row aborts caller.
+
+        n = UPDATE Reservation SET state=target
+            WHERE order_id=o.id AND sku_id=h.sku_id AND state=HELD
+        require n == 1                        # Never release another order&#x27;s units.
 
 close(order_id, reason):
-  require reason in {expired, user_cancel} # Cancel also authenticates the owner.
-  BEGIN; o = SELECT Order WHERE id=order_id FOR UPDATE
-  if o.status != pending_pay: COMMIT; return no_change
-  if reason == expired AND o.expire_at &gt; DB_NOW: COMMIT; return not_due
-  UPDATE Order SET status=(closed if expired else cancelled),version=version+1
-    WHERE id=o.id AND status=pending_pay; require affected_rows == 1
-  finish_holds_locked(o, RELEASED)
-  INSERT Outbox(event_id,kind=order_closed,order_id=o.id,version=o.version+1)
-  COMMIT                                 # State, own holds, counters and event.
-  # Any invariant/SQL failure rolls back ALL changes, including the order status.</code></pre><div class="bilingual"><div class="lang-zh"><p><strong>看一个反例：</strong>42 号订单已经释放预留，43 号订单仍预留着 3 件商品，此时聚合条件 reserved≥3 依然成立。如果再次释放 42 号订单，就会把属于 43 号订单的商品加回可售库存。因此，预留记录以 <code>(order_id,sku_id)</code> 为主键，数量必须为正，状态只允许从 HELD 进入 COMMITTED 或 RELEASED。</p><p><code>finish_holds_locked</code> 不会另开事务，而是在调用者已经锁住订单行的事务内，核对完整订单明细、更新库存计数，再转换本单预留的状态。只要出现缺行、更新零行或其他异常，就必须回滚调用者的全部写入。</p></div><div class="lang-en"><p><strong>Counterexample:</strong> order 42 released its units while 43 still holds three. Aggregate reserved≥3 remains true; releasing 42 again returns 43’s goods. Reservations therefore have primary key <code>(order_id,sku_id)</code>, positive quantities and only HELD→COMMITTED/RELEASED. <code>finish_holds_locked</code> opens no transaction: inside its caller’s order lock, it validates the full persisted basket, changes counters and transitions its own holds. Any missing row, zero-row update or exception rolls back all caller writes.</p></div></div><details><summary><span class="lang-zh">热点容量：为什么全站每秒百笔下单，仍可能排队</span> <span class="lang-en">Hot-row capacity: modest aggregate traffic can still queue</span></summary><div class="bilingual"><div class="lang-zh"><p>A11 假设每次修改库存行都持锁 5 ms，那么这一行串行处理的理论上限就是 1 ÷ 0.005 = 200 次修改/秒，而且还没有为排队留下余量。如果峰值请求都集中到同一个 SKU，每秒 116 次预留，再加约 116 次终结，就达到约 232 次修改/秒，已经超过这个假设上限。应先缩短事务，限制热门 SKU 的进入量和未付款订单的占用。如果再考虑库存分桶或拆分库存服务，就要重新定义如何分配库存、哪些动作在同一事务里完成，不能只在图上多加几个框。</p></div><div class="lang-en"><p>A11 assumes 5 ms per locked-row mutation: 1/0.005=200/s theoretically, before queueing headroom. If peak demand hits one SKU, 116 reservations plus roughly 116 finalizations total 232/s, beyond that assumed limit. Shorten transactions and limit hot-SKU admission and unpaid occupancy first. Bucketing or splitting inventory requires changing allocation and transaction boundaries.</p></div></div></details>
+    require reason in {expired, user_cancel} # Cancel also authenticates the owner.
+
+    BEGIN;
+    o = SELECT Order WHERE id=order_id FOR UPDATE
+    if o.status != pending_pay:
+        COMMIT;
+        return no_change
+    if reason == expired AND o.expire_at &gt; DB_NOW:
+        COMMIT;
+        return not_due
+
+    UPDATE Order SET status=(closed if expired else cancelled),version=version+1
+        WHERE id=o.id AND status=pending_pay;
+    require affected_rows == 1
+    finish_holds_locked(o, RELEASED)
+    INSERT Outbox(event_id,kind=order_closed,order_id=o.id,version=o.version+1)
+    COMMIT                                 # State, own holds, counters and event.
+    # Any invariant/SQL failure rolls back ALL changes, including the order status.</code></pre><div class="bilingual"><div class="lang-zh"><p><strong>看一个反例：</strong>42 号订单已经释放预留，43 号订单仍预留着 3 件商品，此时聚合条件 reserved≥3 依然成立。如果再次释放 42 号订单，就会把属于 43 号订单的商品加回可售库存。因此，预留记录以 <code>(order_id,sku_id)</code> 为主键，数量必须为正，状态只允许从 HELD 进入 COMMITTED 或 RELEASED。</p><p><code>finish_holds_locked</code> 不会另开事务，而是在调用者已经锁住订单行的事务内，核对完整订单明细、更新库存计数，再转换本单预留的状态。只要出现缺行、更新零行或其他异常，就必须回滚调用者的全部写入。</p></div><div class="lang-en"><p><strong>Counterexample:</strong> order 42 released its units while 43 still holds three. Aggregate reserved≥3 remains true; releasing 42 again returns 43’s goods. Reservations therefore have primary key <code>(order_id,sku_id)</code>, positive quantities and only HELD→COMMITTED/RELEASED. <code>finish_holds_locked</code> opens no transaction: inside its caller’s order lock, it validates the full persisted basket, changes counters and transitions its own holds. Any missing row, zero-row update or exception rolls back all caller writes.</p></div></div><details><summary><span class="lang-zh">热点容量：为什么全站每秒百笔下单，仍可能排队</span> <span class="lang-en">Hot-row capacity: modest aggregate traffic can still queue</span></summary><div class="bilingual"><div class="lang-zh"><p>A11 假设每次修改库存行都持锁 5 ms，那么这一行串行处理的理论上限就是 1 ÷ 0.005 = 200 次修改/秒，而且还没有为排队留下余量。如果峰值请求都集中到同一个 SKU，每秒 116 次预留，再加约 116 次终结，就达到约 232 次修改/秒，已经超过这个假设上限。应先缩短事务，限制热门 SKU 的进入量和未付款订单的占用。如果再考虑库存分桶或拆分库存服务，就要重新定义如何分配库存、哪些动作在同一事务里完成，不能只在图上多加几个框。</p></div><div class="lang-en"><p>A11 assumes 5 ms per locked-row mutation: 1/0.005=200/s theoretically, before queueing headroom. If peak demand hits one SKU, 116 reservations plus roughly 116 finalizations total 232/s, beyond that assumed limit. Shorten transactions and limit hot-SKU admission and unpaid occupancy first. Bucketing or splitting inventory requires changing allocation and transaction boundaries.</p></div></div></details>
 </section>
 
 <section>
@@ -432,70 +448,92 @@ close(order_id, reason):
         <figcaption><span class="lang-zh">收到回调后，API 先验签，再把完整事件持久保存到 PaymentInbox，提交后才返回 2xx。后台 worker 随后查询渠道事实，处理同一次尝试；主动查单也要经过相同核验。绿色箭头只确认事件已持久接收，不表示已经发货。</span><span class="lang-en">Verify the callback and commit the complete PaymentInbox before 2xx. A worker retrieves canonical evidence and resolves the same attempt. Active queries use the same validation. Green acknowledges durable receipt, not shipping completion.</span></figcaption>
       </div>
     </figure><div class="bilingual"><div class="lang-zh"><p>系统分别保存下单键、商户的付款尝试号 <code>attempt_id</code>、通知事件号 <code>event_id</code> 和真实收款号 <code>capture_id</code>。真实收款在渠道和商户账户的作用域内唯一，测试环境与生产环境也要隔离。同一笔收款可以带来多条事件，但不能因此多次发货；另一笔真实收款也不能因为 order_id 相同，就被去重丢掉。</p><p>创建新的付款尝试前，服务必须在订单行锁内检查：订单仍待支付且未到期，并且满足以下两种情况之一：没有旧尝试，或渠道已经确认旧尝试进入<strong>不可再收款的 NO_CAPTURE 终态</strong>。如果旧尝试处于已准备（PREPARED）、处理中、需要用户操作、结果未知（UNKNOWN）或待核对（OBSERVED_REVIEW），都要阻止新尝试。同步等待满 2 秒、5 秒后首次查询，或 15 分钟到期关单，都不能证明旧尝试已进入这个终态 [5]。</p></div><div class="lang-en"><p>Keep separate checkout keys, merchant <code>attempt_id</code>, notification <code>event_id</code> and real <code>capture_id</code>. Captures are unique within provider and merchant-account scope; test and production are isolated. Multiple events for one capture never ship twice, while another real capture cannot disappear under order-ID deduplication.</p><p>A new attempt passes a gate under the order lock: the order is pending and unexpired, and no previous attempt exists or the provider confirmed an <strong>irreversible NO_CAPTURE terminal state</strong>. PREPARED, processing, customer action, UNKNOWN and OBSERVED_REVIEW all block a new attempt. A 2-second wait, 5-second first query or 15-minute close proves no such terminal state [5].</p></div></div><pre data-language="Pseudocode · attempt gate and unknown results" data-kind="pseudocode" data-source="attempt.pseudo"><code>start_payment(auth, order_id):
-  BEGIN; o = SELECT Order WHERE id=order_id FOR UPDATE
-  require o.owner=auth.user_id AND o.status=pending_pay AND o.expire_at&gt;DB_NOW
-  a = SELECT latest Attempt WHERE order_id=o.id
-  if a exists AND a.state not in {FAILED_NO_CAPTURE, CANCELLED_NO_CAPTURE}:
-    COMMIT; return a                     # PREPARED/IN_FLIGHT/UNKNOWN also block.
-  # Both terminal states require provider evidence of irreversible NO capture.
-  a = INSERT Attempt(order_id=o.id,number=next_number,PSP_key=random_stable_key,
-                     amount=o.total,currency=o.currency,account=CONFIG,
-                     provider_binding=NULL,state=PREPARED)
-  COMMIT                                 # Identity and immutable parameters first.
-  try:
-    result = PSP.call(a.PSP_key, a.immutable_parameters) # OUTSIDE database locks.
-    persist_canonical_evidence(a, result) # Same validation/transition as capture.
-  catch timeout_or_uncertain_500:
-    UPDATE Attempt SET state=UNKNOWN
-      WHERE id=a.id AND state IN {PREPARED, IN_FLIGHT}
-    # Do not overwrite CAPTURED or a later confirmed terminal result.
-  return processing(a.id)
+    BEGIN;
+    o = SELECT Order WHERE id=order_id FOR UPDATE
+    require o.owner=auth.user_id AND o.status=pending_pay AND o.expire_at&gt;DB_NOW
+
+    a = SELECT latest Attempt WHERE order_id=o.id
+    if a exists AND a.state not in {FAILED_NO_CAPTURE, CANCELLED_NO_CAPTURE}:
+        COMMIT;
+        return a                     # PREPARED/IN_FLIGHT/UNKNOWN also block.
+
+    # Both terminal states require provider evidence of irreversible NO capture.
+    a = INSERT Attempt(order_id=o.id,number=next_number,PSP_key=random_stable_key,
+                       amount=o.total,currency=o.currency,account=CONFIG,
+                       provider_binding=NULL,state=PREPARED)
+    COMMIT                                 # Identity and immutable parameters first.
+
+    try:
+        result = PSP.call(a.PSP_key, a.immutable_parameters) # OUTSIDE database locks.
+        persist_canonical_evidence(a, result) # Same validation/transition as capture.
+    catch timeout_or_uncertain_500:
+        UPDATE Attempt SET state=UNKNOWN
+            WHERE id=a.id AND state IN {PREPARED, IN_FLIGHT}
+        # Do not overwrite CAPTURED or a later confirmed terminal result.
+
+    return processing(a.id)
 
 recover(a):
-  if a.provider_binding exists: query THAT object using its configured account
-  else if provider_key_still_retained: retry SAME key and immutable parameters
-  else: keep UNKNOWN; reconcile provider records / operator; do not create anew
-  # A recovery worker scans durable PREPARED/IN_FLIGHT/UNKNOWN/action-required attempts.
-  # A 2s timeout, 5s first query or 15min close is NEVER NO_CAPTURE evidence.</code></pre><div class="bilingual"><div class="lang-zh"><p>调用外部渠道前，先保存稳定的幂等键和不可变参数。如果已知渠道对象 ID，就查询同一个对象；如果首次创建对象的响应丢失，暂时不知道对象 ID，则只能在渠道仍保留幂等键的窗口内，用原键和原参数重试。超出窗口后，继续保留 UNKNOWN 并对账，不能盲目创建新对象。Stripe <strong>API v1</strong> 在端点开始执行后，会保存第一次执行的状态和响应，包括 500；参数相同时可以按原键重放，键在至少保留 24 小时后可以被清理。API v2 的语义不同，不能把这项保证套用到所有 Stripe 接口 [3][5]。本地记录也不能跟着这个窗口一起删除。</p><p>回调入口先用官方 SDK 核验<strong>原始请求体、签名和时间戳</strong>，再检查配置的账户、环境和允许的事件类型 [4]。完整事件持久提交到 PaymentInbox 后，API 才返回 2xx。worker 使用该账户的凭据查询确切的渠道对象，只接受已经实际收款的 capture 证据；仅完成授权或仍在处理中，都不能发货。核验时，金额、币种、服务端设置的 attempt 标记和用户归属都必须与本地不可变的付款尝试一致，不能相信浏览器字段或客户可以修改的 metadata。</p></div><div class="lang-en"><p>Persist the stable key and immutable parameters before calling out. Query the same known provider object. If object creation lost its reply and no ID is known, retry identical parameters/key only within retention; beyond it, retain UNKNOWN and reconcile rather than create blindly. Stripe <strong>API v1</strong> saves the first status/body after execution starts, including 500, replays identical requests and permits pruning after at least 24 hours. API v2 differs, so this is not a universal Stripe guarantee [3][5]. Local identities outlive that window.</p><p>Ingress uses the official SDK to verify the <strong>raw body, signature and timestamp</strong>, checks configured account/environment and allowlisted event types [4], then durably stores the complete PaymentInbox before 2xx. Workers retrieve the exact provider object with that account’s credentials and require captured evidence; authorization or processing cannot ship. Amount, currency, server-set attempt marker and owner must match immutable local intent. Browser fields or customer-editable metadata are insufficient.</p></div></div><pre data-language="Pseudocode · capture ownership and refund obligations" data-kind="pseudocode" data-source="capture.pseudo"><code>apply_capture(e):                         # Verified canonical captured evidence.
-  # Trusted adapter: raw-body signature + timestamp; configured account/environment;
-  # allowlisted event type; authenticated provider query. No browser success input.
-  a0 = SELECT Attempt WHERE provider=e.provider AND account=e.account
-       AND merchant_attempt_id=e.attempt_id
-  BEGIN
-  if a0 exists: o = SELECT Order WHERE id=a0.order_id FOR UPDATE
-  a = SELECT Attempt WHERE id=a0.id if a0 exists else NULL
-  new = INSERT Capture(e.capture_key,e.immutable_fields,outcome=UNDECIDED)
+    if a.provider_binding exists:
+        query THAT object using its configured account
+    else if provider_key_still_retained:
+        retry SAME key and immutable parameters
+    else:
+        keep UNKNOWN;
+        reconcile provider records / operator;
+        do not create anew
+    # A recovery worker scans durable PREPARED/IN_FLIGHT/UNKNOWN/action-required attempts.
+    # A 2s timeout, 5s first query or 15min close is NEVER NO_CAPTURE evidence.</code></pre><div class="bilingual"><div class="lang-zh"><p>调用外部渠道前，先保存稳定的幂等键和不可变参数。如果已知渠道对象 ID，就查询同一个对象；如果首次创建对象的响应丢失，暂时不知道对象 ID，则只能在渠道仍保留幂等键的窗口内，用原键和原参数重试。超出窗口后，继续保留 UNKNOWN 并对账，不能盲目创建新对象。Stripe <strong>API v1</strong> 在端点开始执行后，会保存第一次执行的状态和响应，包括 500；参数相同时可以按原键重放，键在至少保留 24 小时后可以被清理。API v2 的语义不同，不能把这项保证套用到所有 Stripe 接口 [3][5]。本地记录也不能跟着这个窗口一起删除。</p><p>回调入口先用官方 SDK 核验<strong>原始请求体、签名和时间戳</strong>，再检查配置的账户、环境和允许的事件类型 [4]。完整事件持久提交到 PaymentInbox 后，API 才返回 2xx。worker 使用该账户的凭据查询确切的渠道对象，只接受已经实际收款的 capture 证据；仅完成授权或仍在处理中，都不能发货。核验时，金额、币种、服务端设置的 attempt 标记和用户归属都必须与本地不可变的付款尝试一致，不能相信浏览器字段或客户可以修改的 metadata。</p></div><div class="lang-en"><p>Persist the stable key and immutable parameters before calling out. Query the same known provider object. If object creation lost its reply and no ID is known, retry identical parameters/key only within retention; beyond it, retain UNKNOWN and reconcile rather than create blindly. Stripe <strong>API v1</strong> saves the first status/body after execution starts, including 500, replays identical requests and permits pruning after at least 24 hours. API v2 differs, so this is not a universal Stripe guarantee [3][5]. Local identities outlive that window.</p><p>Ingress uses the official SDK to verify the <strong>raw body, signature and timestamp</strong>, checks configured account/environment and allowlisted event types [4], then durably stores the complete PaymentInbox before 2xx. Workers retrieve the exact provider object with that account’s credentials and require captured evidence; authorization or processing cannot ship. Amount, currency, server-set attempt marker and owner must match immutable local intent. Browser fields or customer-editable metadata are insufficient.</p></div></div><pre data-language="Pseudocode · capture ownership and refund obligations" data-kind="pseudocode" data-source="capture.pseudo"><code>apply_capture(e):                         # Verified canonical captured evidence.
+    # Trusted adapter: raw-body signature + timestamp; configured account/environment;
+    # allowlisted event type; authenticated provider query. No browser success input.
+    a0 = SELECT Attempt WHERE provider=e.provider AND account=e.account
+        AND merchant_attempt_id=e.attempt_id
+
+    BEGIN
+    if a0 exists:
+        o = SELECT Order WHERE id=a0.order_id FOR UPDATE
+    a = SELECT Attempt WHERE id=a0.id if a0 exists else NULL
+    new = INSERT Capture(e.capture_key,e.immutable_fields,outcome=UNDECIDED)
         ON CONFLICT(provider,account,capture_id) DO NOTHING
-  if not new:
-    old = SELECT Capture WHERE capture_key=e.capture_key # New statement snapshot.
-    require old.immutable_fields == e.immutable_fields
-    COMMIT; return old.outcome             # Its obligation co-committed, still retryable.
-  valid = a exists AND e.account_environment == a.account_environment
-          AND e.server_set_attempt_marker == a.id AND e.amount == a.amount
-          AND e.currency == a.currency AND e.server_set_owner == o.owner
-  if valid AND a.provider_binding IS NULL:
-    UPDATE Attempt SET provider_binding=e.object_id WHERE id=a.id AND provider_binding IS NULL
-    require affected_rows == 1; a.provider_binding = e.object_id
-  if not valid OR e.object_id != a.provider_binding:
-    outcome = REVIEW; INSERT ReviewTask(e.capture_key,full_evidence=e)
-    INSERT Outbox(event_id,kind=review,capture_key=e.capture_key)
-  else if o.status == pending_pay AND o.accepted_capture IS NULL:
-    UPDATE Order SET status=paid,accepted_capture=e.capture_key,version=version+1
-      WHERE id=o.id AND status=pending_pay; require affected_rows == 1
-    finish_holds_locked(o, COMMITTED)
-    outcome = ACCEPTED
-    INSERT Outbox(event_id,kind=fulfill,order_id=o.id,version=o.version+1)
-  else:
-    outcome = REFUND_DUE                  # Closed/cancelled OR another capture won.
-    INSERT RefundDue(e.capture_key,amount=e.amount,currency=e.currency,state=READY)
-    INSERT Outbox(event_id,kind=refund,capture_key=e.capture_key)
-  UPDATE Capture SET outcome=:outcome WHERE capture_key=e.capture_key
-  if a exists AND outcome != REVIEW: UPDATE Attempt SET state=CAPTURED WHERE id=a.id
-  if a exists AND outcome == REVIEW: UPDATE Attempt SET state=OBSERVED_REVIEW
-                                    WHERE id=a.id AND state != CAPTURED
-  COMMIT                                 # Capture + responsibility + event together.
-  # Normal close conflict chooses REFUND_DUE; it does NOT abort capture evidence.
-  # Actual SQL/invariant failure rolls back; never ACK it as completed work.</code></pre><div class="bilingual"><div class="lang-zh"><p>渠道对象 ID 起初可以为空。服务收到创建响应，或处理第一个已经向渠道查询核实的事件时，要先核对服务端专用的 attempt 标记、账户和环境、金额和币种，以及用户归属，再在同一订单行锁内<strong>只绑定一次</strong>对象 ID。后续证据若指向另一个对象，就进入人工核对状态 REVIEW。这个 attempt 标记只能由支付后端设置，客户端不能修改。找不到本地尝试或字段不匹配时，要留下核对责任；额外收到的一笔钱要留下退款责任，这些情况都不能发货。进入 REVIEW 后，尝试状态改为 OBSERVED_REVIEW，只表示观察到了待核对资金，不能据此允许履约。</p><p>多个事件竞争 Capture 唯一键后，要完整读取已提交的那笔收款记录。同一真实收款的不同 event 复用已经持久保存的处理责任；如果已有 capture 的不可变字段与新证据冲突，则保留完整 inbox 待处理并告警，不能标成 DONE 后丢掉证据。正常的关单竞争失败应进入待退款状态 REFUND_DUE，收款记录仍要提交；只有真正的 SQL 错误或不变量异常，才回滚整笔事务，并让 inbox 保持 READY 以便重试。退款责任按<strong>每笔 capture</strong>唯一保存，再用固定的退款操作 ID 兑现，原始收款记录始终保留 [7]。</p></div><div class="lang-en"><p>The provider object ID may initially be absent. A create response or first authenticated queried event validates a payment-backend-only attempt marker, account/environment, amount/currency and ownership, then <strong>binds once</strong> under the order lock. A later different object enters REVIEW. Clients cannot edit the trusted marker. Missing attempts, mismatches and extra captures leave review or refund obligations and never ship. OBSERVED_REVIEW means money needs investigation, not payment authorization.</p><p>After capture uniqueness arbitration, read the complete winner. Different events for one capture reuse its durable obligation. Conflicting immutable fields preserve the complete inbox as pending and alert instead of marking DONE. An expected close conflict selects REFUND_DUE without discarding capture evidence; a real SQL/invariant failure rolls back the transaction and leaves inbox READY. Refund obligations are unique <strong>per capture</strong> and use a stable refund operation ID. Never delete the original money fact [7].</p></div></div>
+    if not new:
+        old = SELECT Capture WHERE capture_key=e.capture_key # New statement snapshot.
+        require old.immutable_fields == e.immutable_fields
+        COMMIT;
+        return old.outcome             # Its obligation co-committed, still retryable.
+
+    valid = a exists AND e.account_environment == a.account_environment
+        AND e.server_set_attempt_marker == a.id AND e.amount == a.amount
+        AND e.currency == a.currency AND e.server_set_owner == o.owner
+    if valid AND a.provider_binding IS NULL:
+        UPDATE Attempt SET provider_binding=e.object_id WHERE id=a.id AND provider_binding IS NULL
+        require affected_rows == 1;
+        a.provider_binding = e.object_id
+
+    if not valid OR e.object_id != a.provider_binding:
+        outcome = REVIEW;
+        INSERT ReviewTask(e.capture_key,full_evidence=e)
+        INSERT Outbox(event_id,kind=review,capture_key=e.capture_key)
+    else if o.status == pending_pay AND o.accepted_capture IS NULL:
+        UPDATE Order SET status=paid,accepted_capture=e.capture_key,version=version+1
+            WHERE id=o.id AND status=pending_pay;
+        require affected_rows == 1
+        finish_holds_locked(o, COMMITTED)
+        outcome = ACCEPTED
+        INSERT Outbox(event_id,kind=fulfill,order_id=o.id,version=o.version+1)
+    else:
+        outcome = REFUND_DUE                  # Closed/cancelled OR another capture won.
+        INSERT RefundDue(e.capture_key,amount=e.amount,currency=e.currency,state=READY)
+        INSERT Outbox(event_id,kind=refund,capture_key=e.capture_key)
+
+    UPDATE Capture SET outcome=:outcome WHERE capture_key=e.capture_key
+    if a exists AND outcome != REVIEW:
+        UPDATE Attempt SET state=CAPTURED WHERE id=a.id
+    if a exists AND outcome == REVIEW:
+        UPDATE Attempt SET state=OBSERVED_REVIEW
+            WHERE id=a.id AND state != CAPTURED
+    COMMIT                                 # Capture + responsibility + event together.
+    # Normal close conflict chooses REFUND_DUE; it does NOT abort capture evidence.
+    # Actual SQL/invariant failure rolls back; never ACK it as completed work.</code></pre><div class="bilingual"><div class="lang-zh"><p>渠道对象 ID 起初可以为空。服务收到创建响应，或处理第一个已经向渠道查询核实的事件时，要先核对服务端专用的 attempt 标记、账户和环境、金额和币种，以及用户归属，再在同一订单行锁内<strong>只绑定一次</strong>对象 ID。后续证据若指向另一个对象，就进入人工核对状态 REVIEW。这个 attempt 标记只能由支付后端设置，客户端不能修改。找不到本地尝试或字段不匹配时，要留下核对责任；额外收到的一笔钱要留下退款责任，这些情况都不能发货。进入 REVIEW 后，尝试状态改为 OBSERVED_REVIEW，只表示观察到了待核对资金，不能据此允许履约。</p><p>多个事件竞争 Capture 唯一键后，要完整读取已提交的那笔收款记录。同一真实收款的不同 event 复用已经持久保存的处理责任；如果已有 capture 的不可变字段与新证据冲突，则保留完整 inbox 待处理并告警，不能标成 DONE 后丢掉证据。正常的关单竞争失败应进入待退款状态 REFUND_DUE，收款记录仍要提交；只有真正的 SQL 错误或不变量异常，才回滚整笔事务，并让 inbox 保持 READY 以便重试。退款责任按<strong>每笔 capture</strong>唯一保存，再用固定的退款操作 ID 兑现，原始收款记录始终保留 [7]。</p></div><div class="lang-en"><p>The provider object ID may initially be absent. A create response or first authenticated queried event validates a payment-backend-only attempt marker, account/environment, amount/currency and ownership, then <strong>binds once</strong> under the order lock. A later different object enters REVIEW. Clients cannot edit the trusted marker. Missing attempts, mismatches and extra captures leave review or refund obligations and never ship. OBSERVED_REVIEW means money needs investigation, not payment authorization.</p><p>After capture uniqueness arbitration, read the complete winner. Different events for one capture reuse its durable obligation. Conflicting immutable fields preserve the complete inbox as pending and alert instead of marking DONE. An expected close conflict selects REFUND_DUE without discarding capture evidence; a real SQL/invariant failure rolls back the transaction and leaves inbox READY. Refund obligations are unique <strong>per capture</strong> and use a stable refund operation ID. Never delete the original money fact [7].</p></div></div>
 </section>
 
 <section>
@@ -574,20 +612,27 @@ recover(a):
         <figcaption><span class="lang-zh">关单先成功后，系统要同时保留 closed 状态和退款责任。收款证据与退款任务必须在同一事务中落库，提交后才能把对应的 PaymentInbox 工作标为 DONE。HTTP 接收确认只需等待完整事件持久提交到 PaymentInbox，不必等待这一步处理。反过来，如果 paid 先提交，关单条件更新就影响零行，不会归还库存；无论哪条路径成功，都能追查最终结果。</span><span class="lang-en">The durable result is closed plus a refund obligation, not a discarded callback. Payment evidence and the refund task must commit together before the corresponding PaymentInbox work is marked DONE. The HTTP receipt acknowledgement requires only the durable commit of the complete PaymentInbox event; it need not wait for this processing step. If paid wins instead, closing changes zero rows and returns no stock. Both outcomes remain auditable.</span></figcaption>
       </div>
     </figure><div class="bilingual"><div class="lang-zh"><p>如果<strong>付款先提交</strong>，订单变为 paid，本单预留变为 COMMITTED，履约 outbox 也同时写入；之后的关单不会改变状态，更不会归还库存。如果<strong>关单先提交</strong>，订单变为 closed，本单预留变为 RELEASED；迟到的 capture 则把收款证据、RefundDue 和退款 outbox 一起保存，不能重新抢占库存或恢复订单。订单已经 paid 或 shipped 后，若又发现另一笔 capture，也要单独退款，不能用已有的履约结果覆盖这笔钱的处理责任。</p><p>本章选择的政策是：到期时，即使付款仍为 UNKNOWN，也可以先关单释放库存，之后收到迟到的钱再退款。这样能让库存回收，但会牺牲一部分付款体验；本地倒计时不会撤销渠道已经完成的收款。也可以选择延长预留，直到查清付款结果，但那需要为更长时间的库存占用预留预算。</p></div><div class="lang-en"><p><strong>Payment commits first:</strong> paid, owned COMMITTED holds and fulfillment outbox; later close changes nothing and returns no units. <strong>Close commits first:</strong> closed and owned RELEASED holds; a late capture commits capture evidence, RefundDue and refund outbox, never reacquiring stock or reviving. A second real capture after paid/shipped also needs a refund and cannot be overwritten by the existing fulfillment outcome.</p><p>We choose to allow closing while payment remains UNKNOWN, then refund late money. This trades some payment experience for reclaimable stock. A local timer never reverses a provider capture. Keeping stock until uncertainty resolves is another policy with a larger occupancy budget.</p></div></div><pre data-language="Pseudocode · recoverable expiry scan" data-kind="pseudocode" data-source="scan.pseudo"><code>expiry_round():
-  cutoff = DB_NOW; cursor = (-infinity, -infinity)
-  repeat:
-    rows = SELECT expire_at,id FROM Orders
-      WHERE status=pending_pay AND expire_at&lt;=cutoff
-        AND (expire_at,id)&gt;cursor ORDER BY expire_at,id LIMIT 500
-    for row in rows:
-      try: global_rate_limit(100_attempts_per_second); close(row.id,expired)
-      catch transient_database_failure: record_metric_and_continue
-      # Failure leaves pending_pay + expire_at unchanged and discoverable.
-    if rows empty: break
-    cursor = rows.last(expire_at,id)
-  # Next round RESTARTS from oldest due row, never from yesterday&#x27;s final cursor.
-  # Concurrent rounds/delayed messages are safe because close rechecks under row lock.
-  # At 35 new due/s and 70 net completed/s, outage backlog drains at 35/s.</code></pre><div class="bilingual"><div class="lang-zh"><p>创建订单时，服务用服务端时间设置 expire_at；关单事务再按数据库时间判断是否到期，不能相信浏览器倒计时。延迟消息负责尽早触发，扫描负责兜底恢复，查询使用索引 <code>(status,expire_at,order_id)</code>。每轮固定截止时间 cutoff，再按元组游标连续翻页，每单使用独立事务；处理失败的订单仍保留待支付状态和原到期时间。下一轮必须<strong>从最老到期行重启</strong>，不能一直沿用旧游标而永久跳过失败订单。扫描选中待支付订单后，即使付款先提交，关单事务也会在订单锁内重新核验，避免错误释放库存。</p></div><div class="lang-en"><p>Set expire_at from server time at creation and compare database time when closing, never the browser countdown. Delayed messages reduce latency; scans provide recovery with index <code>(status,expire_at,order_id)</code>. Fix a cutoff per round, paginate by tuple and use one transaction per order. Failed work remains pending and expired. The next round <strong>restarts at the oldest due row</strong>, rather than permanently skipping failures. Payment may win after scan selection; the locked recheck still prevents release.</p></div></div><details><summary><span class="lang-zh">扫描吞吐与预留上界：每批能读多少，不等于能恢复多快</span> <span class="lang-en">Scan throughput and occupancy: batch size is not recovery capacity</span></summary><div class="bilingual"><div class="lang-zh"><p>A7 设定每 60 秒启动一轮，每批最多 500 单，但要连续翻页；所有扫描实例和延迟消息处理者共同使用每秒 100 次尝试的预算。如果单笔事务平均耗时为 20 ms，至少要同时处理 2 笔，才可能达到这个尝试上限；净完成 70 单/秒仍然只是待压测的目标。峰值每秒约有 35 单到期，一分钟就新增 2,100 单，需要至少 5 批。按每秒完成 70 单计算，健康情况下这一分钟的积压需要 2,100 ÷ 70 ≈ 30 秒处理。最老到期订单的年龄目标为 ≤120 秒，发现和重试的时间都计入其中。</p><p>如果扫描停止 10 分钟，就会积压 35 × 600 = 21,000 单。恢复时，每秒仍有 35 单新到期，因此净追赶速度是 70 − 35 = 35 单/秒，需要 600 秒清完积压。按 A4，峰值持续 15 分钟且所有订单都未付款时，这 15 分钟内新建的那批订单对应 116 × 900 = 104,400 份预留；如果每单购买 3 件，就是 313,200 件。这些数字只计算这一批新单，不能据此限定全部仍处于 HELD 状态的预留，因为已到期但尚未释放的预留也会继续占用库存。如果全未付的峰值持续，到期流入会接近 116 单/秒，不能沿用前面按 35 单/秒到期、70 单/秒完成制定的释放与恢复规划。实际库存不足时会更早拒单。发现到期年龄超出预算，应告警并限制新增预留，不能提前撤销仍然有效的库存承诺。</p></div><div class="lang-en"><p>A7 starts a round every 60 seconds, continuously pages ≤500 and shares a 100-attempt/s budget across scanners and delayed-message workers. Mean transaction time 20 ms needs at least two in flight for that ceiling; 70 valid completions/s remains a load-test target. At 35 expiries/s, a minute adds 2,100 orders, at least five batches. A healthy minute’s backlog takes 2,100/70≈30 s; oldest due age targets ≤120 s including discovery and retry.</p><p>A ten-minute outage leaves 35×600=21,000 orders. Continued arrivals make net recovery 70−35=35/s, taking 600 seconds. Under A4, a sustained unpaid fifteen-minute peak creates a cohort of 116×900=104,400 new order holds, or 313,200 units for three-unit baskets. These are counts for that new-order cohort, not a bound on total HELD occupancy, which also includes expired holds waiting for release. If the all-unpaid peak continues, expiry arrivals approach 116/s, so the preceding plan of 35 expiries/s and 70 completions/s cannot be reused for release and recovery in that case. Actual shortages reject sooner. Alert and restrict new holds when age exceeds budget; do not revoke valid promises early.</p></div></div></details>
+    cutoff = DB_NOW;
+    cursor = (-infinity, -infinity)
+
+    repeat:
+        rows = SELECT expire_at,id FROM Orders
+            WHERE status=pending_pay AND expire_at&lt;=cutoff
+                AND (expire_at,id)&gt;cursor ORDER BY expire_at,id LIMIT 500
+        for row in rows:
+            try:
+                global_rate_limit(100_attempts_per_second);
+                close(row.id,expired)
+            catch transient_database_failure:
+                record_metric_and_continue
+            # Failure leaves pending_pay + expire_at unchanged and discoverable.
+
+        if rows empty:
+            break
+        cursor = rows.last(expire_at,id)
+    # Next round RESTARTS from oldest due row, never from yesterday&#x27;s final cursor.
+    # Concurrent rounds/delayed messages are safe because close rechecks under row lock.
+    # At 35 new due/s and 70 net completed/s, outage backlog drains at 35/s.</code></pre><div class="bilingual"><div class="lang-zh"><p>创建订单时，服务用服务端时间设置 expire_at；关单事务再按数据库时间判断是否到期，不能相信浏览器倒计时。延迟消息负责尽早触发，扫描负责兜底恢复，查询使用索引 <code>(status,expire_at,order_id)</code>。每轮固定截止时间 cutoff，再按元组游标连续翻页，每单使用独立事务；处理失败的订单仍保留待支付状态和原到期时间。下一轮必须<strong>从最老到期行重启</strong>，不能一直沿用旧游标而永久跳过失败订单。扫描选中待支付订单后，即使付款先提交，关单事务也会在订单锁内重新核验，避免错误释放库存。</p></div><div class="lang-en"><p>Set expire_at from server time at creation and compare database time when closing, never the browser countdown. Delayed messages reduce latency; scans provide recovery with index <code>(status,expire_at,order_id)</code>. Fix a cutoff per round, paginate by tuple and use one transaction per order. Failed work remains pending and expired. The next round <strong>restarts at the oldest due row</strong>, rather than permanently skipping failures. Payment may win after scan selection; the locked recheck still prevents release.</p></div></div><details><summary><span class="lang-zh">扫描吞吐与预留上界：每批能读多少，不等于能恢复多快</span> <span class="lang-en">Scan throughput and occupancy: batch size is not recovery capacity</span></summary><div class="bilingual"><div class="lang-zh"><p>A7 设定每 60 秒启动一轮，每批最多 500 单，但要连续翻页；所有扫描实例和延迟消息处理者共同使用每秒 100 次尝试的预算。如果单笔事务平均耗时为 20 ms，至少要同时处理 2 笔，才可能达到这个尝试上限；净完成 70 单/秒仍然只是待压测的目标。峰值每秒约有 35 单到期，一分钟就新增 2,100 单，需要至少 5 批。按每秒完成 70 单计算，健康情况下这一分钟的积压需要 2,100 ÷ 70 ≈ 30 秒处理。最老到期订单的年龄目标为 ≤120 秒，发现和重试的时间都计入其中。</p><p>如果扫描停止 10 分钟，就会积压 35 × 600 = 21,000 单。恢复时，每秒仍有 35 单新到期，因此净追赶速度是 70 − 35 = 35 单/秒，需要 600 秒清完积压。按 A4，峰值持续 15 分钟且所有订单都未付款时，这 15 分钟内新建的那批订单对应 116 × 900 = 104,400 份预留；如果每单购买 3 件，就是 313,200 件。这些数字只计算这一批新单，不能据此限定全部仍处于 HELD 状态的预留，因为已到期但尚未释放的预留也会继续占用库存。如果全未付的峰值持续，到期流入会接近 116 单/秒，不能沿用前面按 35 单/秒到期、70 单/秒完成制定的释放与恢复规划。实际库存不足时会更早拒单。发现到期年龄超出预算，应告警并限制新增预留，不能提前撤销仍然有效的库存承诺。</p></div><div class="lang-en"><p>A7 starts a round every 60 seconds, continuously pages ≤500 and shares a 100-attempt/s budget across scanners and delayed-message workers. Mean transaction time 20 ms needs at least two in flight for that ceiling; 70 valid completions/s remains a load-test target. At 35 expiries/s, a minute adds 2,100 orders, at least five batches. A healthy minute’s backlog takes 2,100/70≈30 s; oldest due age targets ≤120 s including discovery and retry.</p><p>A ten-minute outage leaves 35×600=21,000 orders. Continued arrivals make net recovery 70−35=35/s, taking 600 seconds. Under A4, a sustained unpaid fifteen-minute peak creates a cohort of 116×900=104,400 new order holds, or 313,200 units for three-unit baskets. These are counts for that new-order cohort, not a bound on total HELD occupancy, which also includes expired holds waiting for release. If the all-unpaid peak continues, expiry arrivals approach 116/s, so the preceding plan of 35 expiries/s and 70 completions/s cannot be reused for release and recovery in that case. Actual shortages reject sooner. Alert and restrict new holds when age exceeds budget; do not revoke valid promises early.</p></div></div></details>
 </section>
 
 <section>
@@ -688,34 +733,39 @@ recover(a):
         <figcaption><span class="lang-zh">这一帧保留了重复投递的故障。按 A8，事件峰值为 1,160 条/秒，停止处理 120 秒会积压 139,200 条。恢复能力虽为 2,000 条/秒，新到事件仍会消耗其中 1,160 条/秒，因此只能净排空 840 条/秒，约需 166 秒清完积压。</span><span class="lang-en">Preserve the duplicate failure. A8 assumes 1,160 events/s; a 120-second stop builds 139,200 events. At 2,000/s recovery throughput, net drain is 840/s and takes about 166 seconds; incoming events still consume capacity.</span></figcaption>
       </div>
     </figure><div class="bilingual"><div class="lang-zh"><p>订单状态和本地 outbox 在同一事务中提交，Relay 只读取已提交行，并在观察到 broker 的持久接收确认后，才标记 sent。如果消息发送成功，但 Relay 在保存标记前崩溃，恢复后仍会重复发送；outbox 消除的是跨系统双写造成的漏发窗口 [6]。sent 只表示 broker 已接受消息，不能证明仓库已经发货。应分别监控尚未发送的 outbox、PaymentInbox、队列，以及履约和退款任务中最老待办的年龄，才能看出处理停在哪一步。</p></div><div class="lang-en"><p>Local outbox and order state commit together. Relay reads committed rows and marks sent only after a durable broker acknowledgement. A crash after sending but before marking still duplicates publication; outbox removes the dual-write loss window [6]. Sent means broker acceptance, not shipment. Monitor oldest unpublished outbox, PaymentInbox, queue, fulfillment and refund work separately.</p></div></div><pre data-language="Pseudocode · durable ingress, relay and downstream jobs" data-kind="pseudocode" data-source="delivery.pseudo"><code>receive_webhook(raw, signature):
-  event = official_SDK.verify_raw_body_and_timestamp(raw,signature,endpoint_secret)
-  require event uses configured provider/account/environment and allowlisted type
-  BEGIN
-  inserted = INSERT PaymentInbox(scope,event.id,raw,verified_metadata,state=READY)
-             ON CONFLICT(scope,event.id) DO NOTHING
-  if not inserted: require persisted immutable event identity matches
-  COMMIT; return 2xx                      # Full input survives before ACK.
-  # Inbox workers fetch canonical evidence, call apply_capture, then mark DONE.
-  # Crash between those commits repeats apply_capture, not a new capture action.
+    event = official_SDK.verify_raw_body_and_timestamp(raw,signature,endpoint_secret)
+    require event uses configured provider/account/environment and allowlisted type
+
+    BEGIN
+    inserted = INSERT PaymentInbox(scope,event.id,raw,verified_metadata,state=READY)
+        ON CONFLICT(scope,event.id) DO NOTHING
+    if not inserted:
+        require persisted immutable event identity matches
+    COMMIT;
+    return 2xx                      # Full input survives before ACK.
+    # Inbox workers fetch canonical evidence, call apply_capture, then mark DONE.
+    # Crash between those commits repeats apply_capture, not a new capture action.
 
 relay(event):
-  row = read COMMITTED Outbox(event.id)     # READY is durable, not an in-memory list.
-  broker.publish(row.event_id,row.payload)
-  if durable broker ACK observed:
-    UPDATE Outbox SET sent=true WHERE event_id=row.event_id
-  # Unknown ACK: retain row and resend SAME id. Never mark before publish.
+    row = read COMMITTED Outbox(event.id)     # READY is durable, not an in-memory list.
+    broker.publish(row.event_id,row.payload)
+    if durable broker ACK observed:
+        UPDATE Outbox SET sent=true WHERE event_id=row.event_id
+    # Unknown ACK: retain row and resend SAME id. Never mark before publish.
 
 consume_fulfillment(event):
-  BEGIN IN FulfillmentDB
-  new = INSERT Inbox(consumer,event.id,event.digest)
+    BEGIN IN FulfillmentDB
+    new = INSERT Inbox(consumer,event.id,event.digest)
         ON CONFLICT(consumer,event.id) DO NOTHING
-  if new:
-    INSERT Job(shipment_id=stable(event.order_id),order_id=event.order_id,state=READY)
-      ON CONFLICT(order_id) DO NOTHING     # One task even if two event IDs describe it.
-  else: require persisted event.digest == event.digest
-  COMMIT; broker.ACK(event)                # Inbox and Job cannot split on crash.
-  # External warehouse/refund RPC is NOT in this transaction. Stable operation ID,
-  # unknown-result queries, durable retry state, and terminal evidence remain needed.</code></pre><div class="bilingual"><div class="lang-zh"><p>消费者在自己的 FulfillmentDB 事务中，保存去重身份 <code>(consumer,event_id)</code> 和按订单唯一的履约任务 Job；两者一起提交后，才向 broker 确认 ACK。只记 event_id 而不记任务，可能丢失工作；先调用外部仓库发货，再记录 inbox，则可能重复发货。这里保证的是<strong>一个持久履约任务</strong>。真正调用仓库 RPC 时，仍要使用稳定的 shipment_id，能查询未知结果，并持久保存重试状态；退款也需要固定操作 ID 和终态证据。如果 inbox 事务提交失败，所有改动都要回滚，因此重试时发现去重身份已存在，才意味着对应任务先前已经一起提交。</p><p>PaymentInbox 接收事件与应用收款证据，刻意分为两个事务：前者保存完整输入，后者原子决定每笔收款的处理责任。如果 worker 在两次提交之间崩溃，恢复后可以重放同一笔 capture。收款结果未知时先查询渠道，身份冲突时保留证据并告警，字段不符时进入人工核对；即使已经达到重试上限，也不能删除尚未兑现的责任。</p></div><div class="lang-en"><p>Within its own FulfillmentDB transaction, the consumer inserts <code>(consumer,event_id)</code> and an order-unique Job, then acknowledges. An event ID alone can swallow work; shipping before recording inbox can repeat it. The promise is <strong>one durable fulfillment task</strong>. A real warehouse RPC still needs stable shipment_id, unknown-result queries and durable retries. Refunds likewise need stable operation IDs and terminal evidence. Inbox transaction failure rolls back everything; an existing identity means its job co-committed.</p><p>PaymentInbox ingress and capture application deliberately use separate transactions: the first preserves full input, the second atomically assigns money responsibility. A worker crash between them replays the same capture. Query unknown money, retain and alert on identity conflicts, review mismatches and preserve obligations beyond exhausted retry limits.</p></div></div><details><summary><span class="lang-zh">事件容量，以及何时需要拆出库存服务</span> <span class="lang-en">Event capacity and when inventory becomes a service</span></summary><div class="bilingual"><div class="lang-zh"><p>A8 保守地按每单 10 条事件估算，峰值就是 116 × 10 = 1,160 条/秒。停止处理 120 秒会积压 139,200 条；恢复后每秒处理 2,000 条，同时仍有新事件进入，净排空速度只有 840 条/秒，约需 166 秒。因此，最老的受影响任务可能累计等待约 286 秒。按 A12，每天 1,000 万条事件、每条 1 KB，约为 10 GB/天；完成的事件保留 7 天、存三份，合计约 210 GB。未完成任务不能按年龄直接删除，已完成任务的身份保留期也要覆盖系统支持的重放窗口。</p><p>如果多仓或独立库存所有权迫使订单与库存拆库，订单就要先进入 creating，并在本地事务中同时写入预留命令 outbox；只有库存服务按订单身份确认预留成功，才能进入 pending_pay。取消意图同样要持久保存，预留成功的消息即使晚到，也必须释放对应库存。每一步都只有本地事务，补偿也可能失败，所以必须能够恢复执行 [7]。Saga 无法提供全局回滚；如果业务不能接受这段中间窗口，就应保留同库，或者明确说明协调事务带来的阻塞代价。</p></div><div class="lang-en"><p>A8 budgets 10 events/order: 116×10=1,160/s. A 120-second outage accumulates 139,200. Recovery at 2,000/s leaves net 840/s after continued arrivals, about 166 seconds to drain; oldest affected work may wait about 286 seconds. A12 gives 10M×1KB≈10GB/day, seven completed days and three copies≈210GB. Unfinished work cannot age out; completed identity retention covers the supported replay window.</p><p>If multiple warehouses or independent ownership force separate stores, begin in creating and locally commit a reservation command outbox. Only an inventory confirmation permits pending_pay. Persist cancellation intent and release late successful holds. Each step has a local transaction; compensation can fail and must resume [7]. Saga supplies no global rollback. Keep the shared store or explain coordination’s blocking costs when that window is unacceptable.</p></div></div></details>
+    if new:
+        INSERT Job(shipment_id=stable(event.order_id),order_id=event.order_id,state=READY)
+            ON CONFLICT(order_id) DO NOTHING     # One task even if two event IDs describe it.
+    else:
+        require persisted event.digest == event.digest
+    COMMIT;
+    broker.ACK(event)                # Inbox and Job cannot split on crash.
+    # External warehouse/refund RPC is NOT in this transaction. Stable operation ID,
+    # unknown-result queries, durable retry state, and terminal evidence remain needed.</code></pre><div class="bilingual"><div class="lang-zh"><p>消费者在自己的 FulfillmentDB 事务中，保存去重身份 <code>(consumer,event_id)</code> 和按订单唯一的履约任务 Job；两者一起提交后，才向 broker 确认 ACK。只记 event_id 而不记任务，可能丢失工作；先调用外部仓库发货，再记录 inbox，则可能重复发货。这里保证的是<strong>一个持久履约任务</strong>。真正调用仓库 RPC 时，仍要使用稳定的 shipment_id，能查询未知结果，并持久保存重试状态；退款也需要固定操作 ID 和终态证据。如果 inbox 事务提交失败，所有改动都要回滚，因此重试时发现去重身份已存在，才意味着对应任务先前已经一起提交。</p><p>PaymentInbox 接收事件与应用收款证据，刻意分为两个事务：前者保存完整输入，后者原子决定每笔收款的处理责任。如果 worker 在两次提交之间崩溃，恢复后可以重放同一笔 capture。收款结果未知时先查询渠道，身份冲突时保留证据并告警，字段不符时进入人工核对；即使已经达到重试上限，也不能删除尚未兑现的责任。</p></div><div class="lang-en"><p>Within its own FulfillmentDB transaction, the consumer inserts <code>(consumer,event_id)</code> and an order-unique Job, then acknowledges. An event ID alone can swallow work; shipping before recording inbox can repeat it. The promise is <strong>one durable fulfillment task</strong>. A real warehouse RPC still needs stable shipment_id, unknown-result queries and durable retries. Refunds likewise need stable operation IDs and terminal evidence. Inbox transaction failure rolls back everything; an existing identity means its job co-committed.</p><p>PaymentInbox ingress and capture application deliberately use separate transactions: the first preserves full input, the second atomically assigns money responsibility. A worker crash between them replays the same capture. Query unknown money, retain and alert on identity conflicts, review mismatches and preserve obligations beyond exhausted retry limits.</p></div></div><details><summary><span class="lang-zh">事件容量，以及何时需要拆出库存服务</span> <span class="lang-en">Event capacity and when inventory becomes a service</span></summary><div class="bilingual"><div class="lang-zh"><p>A8 保守地按每单 10 条事件估算，峰值就是 116 × 10 = 1,160 条/秒。停止处理 120 秒会积压 139,200 条；恢复后每秒处理 2,000 条，同时仍有新事件进入，净排空速度只有 840 条/秒，约需 166 秒。因此，最老的受影响任务可能累计等待约 286 秒。按 A12，每天 1,000 万条事件、每条 1 KB，约为 10 GB/天；完成的事件保留 7 天、存三份，合计约 210 GB。未完成任务不能按年龄直接删除，已完成任务的身份保留期也要覆盖系统支持的重放窗口。</p><p>如果多仓或独立库存所有权迫使订单与库存拆库，订单就要先进入 creating，并在本地事务中同时写入预留命令 outbox；只有库存服务按订单身份确认预留成功，才能进入 pending_pay。取消意图同样要持久保存，预留成功的消息即使晚到，也必须释放对应库存。每一步都只有本地事务，补偿也可能失败，所以必须能够恢复执行 [7]。Saga 无法提供全局回滚；如果业务不能接受这段中间窗口，就应保留同库，或者明确说明协调事务带来的阻塞代价。</p></div><div class="lang-en"><p>A8 budgets 10 events/order: 116×10=1,160/s. A 120-second outage accumulates 139,200. Recovery at 2,000/s leaves net 840/s after continued arrivals, about 166 seconds to drain; oldest affected work may wait about 286 seconds. A12 gives 10M×1KB≈10GB/day, seven completed days and three copies≈210GB. Unfinished work cannot age out; completed identity retention covers the supported replay window.</p><p>If multiple warehouses or independent ownership force separate stores, begin in creating and locally commit a reservation command outbox. Only an inventory confirmation permits pending_pay. Persist cancellation intent and release late successful holds. Each step has a local transaction; compensation can fail and must resume [7]. Saga supplies no global rollback. Keep the shared store or explain coordination’s blocking costs when that window is unacceptable.</p></div></div></details>
 </section>
 
 <section>

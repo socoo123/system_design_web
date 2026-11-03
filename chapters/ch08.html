@@ -135,12 +135,15 @@ reply = SET key owner NX PX 10000           // OK, busy, or unknown/error
 if reply != OK:
     ownerCheckedCleanup(key, owner)         // best effort; no business work
     return NOT_ACQUIRED
+
 remaining = 10000ms - (monotonicNow() - sent) - 200ms
 if remaining &lt;= 0:
     ownerCheckedCleanup(key, owner)
     return EXPIRED_LOCALLY
+
 runWithDeadline(min(8000ms, remaining))      // dispatch budget, not remote rollback
-finally ownerCheckedCleanup(key, owner)     // Lua below; never bare DEL
+finally
+    ownerCheckedCleanup(key, owner)         // Lua below; never bare DEL
 </code></pre>
 <div class="bilingual"><div class="lang-zh"><p><code>ownerCheckedCleanup</code> 对应下面的 Lua 脚本：输入一把锁的键和本次持有者标识，返回 1 表示已删除，返回 0 表示键不存在或标识不匹配。拆开执行会留下故障窗口：如果先 SETNX 再 EXPIRE，进程可能在两步之间崩溃，留下永不过期的键；如果先 GET 再 DEL，锁可能在两步之间过期并交给 B，A 随后的删除就会误删 B 的锁。脚本把比较与删除放在同一个 Redis 实例中原子执行，消除了后一个窗口。<a href="#ref-2">[2]</a></p></div><div class="lang-en"><p><code>ownerCheckedCleanup</code> is the Lua below: one lock key and this owner in, 1 if deleted or 0 if absent/mismatched out. SETNX followed by EXPIRE has a crash window; GET followed by DEL can delete a successor. The script makes this check atomic on one Redis instance. <a href="#ref-2">[2]</a></p></div></div>
 <pre data-language="Lua" data-kind="runnable" data-source="../examples/ch08/release.lua"><code>-- KEYS[1]: one string lock; ARGV[1]: this attempt&#x27;s random owner.
@@ -243,10 +246,13 @@ return 0
     </figure><div class="bilingual"><div class="lang-zh"><p>图 2 展示的顺序是：A 持有 33 后暂停，租约到期，B 获得 34 并完成写入，A 的旧写随后才到达。UUID 只能比较身份是否相同，可靠的 fencing token 则能表示持有的先后顺序。资源端必须在同一个原子决定中完成世代比较、业务变更，以及最大世代号的持久保存，而且所有写入入口都要执行这项检查。<a href="#ref-9">[9]</a></p><p>下面是 PostgreSQL 风格的教学 SQL。假设库存行已经存在，SKU 唯一，qty 非负，并有 <code>last_fence BIGINT NOT NULL DEFAULT 0</code> 这一列；图中的 max_fence 对应这里的 last_fence。调用方需绑定正整数 amount 和正 BIGINT f，本章还限定<strong>每个世代只执行一次变更</strong>。执行后必须检查影响行数，影响 0 行不能算成功。</p></div><div class="lang-en"><p>Deck 2: A pauses with 33, expires, B acquires 34 and writes, then A’s old write arrives. UUIDs support equality; fencing tokens order acquisitions. Every write path must atomically compare, mutate, and durably retain the maximum epoch. <a href="#ref-9">[9]</a></p><p>This PostgreSQL-style teaching statement assumes an existing unique SKU, nonnegative qty, and <code>last_fence BIGINT NOT NULL DEFAULT 0</code>. The diagram’s max_fence is this last_fence column. Bind positive integer amount and positive BIGINT f. We permit <strong>one mutation per epoch</strong>; check affected rows, because zero is not success.</p></div></div>
 <pre data-language="SQL" data-kind="teaching" data-source="../examples/ch08/fence.sql"><code>-- Existing row: sku PRIMARY KEY, qty &gt;= 0, last_fence BIGINT NOT NULL DEFAULT 0.
 -- Positive BIGINT f is bound to a successful acquisition; one mutation per f.
+
 UPDATE inventory
-SET qty = qty - :amount, last_fence = :f
+SET qty = qty - :amount,
+    last_fence = :f
 WHERE sku = :sku
-  AND :amount &gt; 0 AND :f &gt; 0
+  AND :amount &gt; 0
+  AND :f &gt; 0
   AND last_fence &lt; :f
   AND qty &gt;= :amount;
 </code></pre>
@@ -472,9 +478,11 @@ local ttl = tonumber(ARGV[2])
 if not ttl or ttl ~= math.floor(ttl) or ttl &lt; 1 or ttl &gt; 86400000 then
   return redis.error_reply(&#x27;invalid TTL&#x27;)
 end
+
 if redis.call(&#x27;GET&#x27;, KEYS[1]) ~= ARGV[1] then
   return 0
 end
+
 -- Owner comparison and expiry change execute on this Redis instance atomically.
 return redis.call(&#x27;PEXPIRE&#x27;, KEYS[1], ttl)
 </code></pre>
@@ -482,27 +490,46 @@ return redis.call(&#x27;PEXPIRE&#x27;, KEYS[1], ttl)
 <h3><span class="lang-zh">Java 17：计算本地还能派发多久的工作</span><span class="lang-en">Java 17: one lease’s local dispatch budget</span></h3>
 <div class="bilingual"><div class="lang-zh"><p>完整可运行的 <a href="../examples/ch08/LeaseBudget.java">LeaseBudget.java</a> 要求由单一事件循环调用，全部计时都来自同一个 <code>System.nanoTime()</code>。10 秒 TTL 扣除 0.2 秒余量后，本地可用窗口为 9.8 秒；只有明确收到获取成功的 OK，且预算尚未过期，构造器才接受这次获取。</p><p>下面摘录的是同一份源码中的续租状态逻辑：最多允许一个续租请求在途，持有权一旦丢失就不可恢复，续租成功后的预算从发送时刻重新计算。这个类没有连接 Redis，也不能证明远端互斥。</p></div><div class="lang-en"><p>The runnable <a href="../examples/ch08/LeaseBudget.java">LeaseBudget.java</a> uses a single event-loop caller and one <code>System.nanoTime()</code> clock. A 10 s TTL minus 0.2 s margin gives a 9.8 s window. Construction admits only explicit, timely acquisition OK. This source excerpt allows one in-flight renewal, makes loss terminal, and rebases a successful renewal on send time. It is not a Redis client or proof of remote exclusion.</p></div></div>
 <pre data-language="Java 17" data-kind="runnable" data-source="../examples/ch08/LeaseBudget.java"><code>    public boolean usable(long now) {
-        if (now - sent &lt; 0 || now - sent &gt;= WINDOW) held = false;
-        return held;                          // LOST is terminal for this object
+        if (now - sent &lt; 0 || now - sent &gt;= WINDOW) {
+            held = false;
+        }
+
+        return held; // LOST is terminal for this object
     }
+
     public boolean beginRenewal(long now) {
-        if (pending || !usable(now)) return false;
-        renewalSent = now; pending = true;    // at most one renewal in flight
+        if (pending || !usable(now)) {
+            return false;
+        }
+
+        renewalSent = now;
+        pending = true; // at most one renewal in flight
         return true;
     }
+
     public boolean finishRenewal(long now, boolean ok) {
-        if (!pending) throw new IllegalStateException(&quot;no pending renewal&quot;);
+        if (!pending) {
+            throw new IllegalStateException(&quot;no pending renewal&quot;);
+        }
+
         pending = false;
+
         // First check the OLD lease: a late OK must never resurrect it.
-        if (!ok || !usable(now) || now - renewalSent &lt; 0
+        if (!ok
+                || !usable(now)
+                || now - renewalSent &lt; 0
                 || now - renewalSent &gt;= WINDOW) {
             held = false;
             return false;
         }
-        sent = renewalSent;                   // budget from SEND, not reply
+
+        sent = renewalSent; // budget from SEND, not reply
         return true;
     }
-    public void abandon() { held = false; }  // cancellation/unknown renewal
+
+    public void abandon() {
+        held = false;
+    } // cancellation/unknown renewal
 </code></pre>
 <div class="bilingual"><div class="lang-zh"><p>如果获取锁已花费 0.1 秒，那么收到响应时还剩 9.7 秒；再分配最多 8 秒的工作预算，就留下 1.7 秒余量。不能因为 TTL/P99=10/2=5，就认定所有工作都会在租期内完成：p99 不是最大耗时。客户端使用单调时钟，也无法修复服务端 TTL 因墙钟跳变产生的问题；这里的 200 ms 只是教学余量，不能覆盖任意时钟变化。<a href="#ref-11">[11]</a></p><p>例如，一条 SQL 在第 7.9 秒发出，可能到第 12 秒才真正执行。取消 Future、中断线程或断开 HTTP，都不能证明远端已经回滚。因此，租约、本地截止时间和资源端校验分别约束不同层面。运行时应观测 busy、结果未知、续租丢失、剩余时间、fence 拒绝和幂等回放，并演练进程暂停、请求晚到与恢复的过程。</p></div><div class="lang-en"><p>Acquisition uses 0.1 s, leaving 9.7 s on receipt; an 8 s work budget leaves 1.7 s. TTL/P99=10/2=5 is not a maximum-duration proof. Client monotonic time cannot fix server TTL wall-clock shifts; 200 ms is an illustrative margin, not protection against arbitrary clock changes. <a href="#ref-11">[11]</a></p><p>SQL dispatched at 7.9 s may execute at 12 s. Future cancellation, interruption, or HTTP disconnect does not prove remote rollback. Leases, local deadlines, and resource checks constrain different layers. Monitor busy, unknown outcomes, lease loss, remainder, fence rejection, and idempotent replay; exercise pauses, late requests, and recovery.</p></div></div>
 </section>
@@ -595,26 +622,37 @@ return redis.call(&#x27;PEXPIRE&#x27;, KEYS[1], ttl)
     </figure><div class="bilingual"><div class="lang-zh"><p>图 5 把登记 op:7、扣减库存和保存结果放在同一个事务中提交。下面的伪代码明确使用 PostgreSQL 的 READ COMMITTED 隔离级别：争用唯一请求号时，要等待原事务结束；执行 <code>DO NOTHING</code> 之后，另发一条 SELECT，才能获取新语句的快照。调用方必须读取持久回执，并确认它绑定的是同一份原始载荷，不能把唯一约束异常直接当作成功。<a href="#ref-8">[8]</a><a href="#ref-12">[12]</a></p></div><div class="lang-en"><p>Deck 5 commits the op:7 claim, debit, and receipt in one transaction. This pseudocode specifies PostgreSQL READ COMMITTED: uniqueness contention waits for the original transaction; the separate SELECT after <code>DO NOTHING</code> gets a new statement snapshot. Validate the durable receipt and bound payload; a uniqueness exception is not success. <a href="#ref-8">[8]</a><a href="#ref-12">[12]</a></p></div></div>
 <pre data-language="Pseudocode + SQL" data-kind="pseudocode" data-source="../examples/ch08/transaction.txt"><code>// PostgreSQL READ COMMITTED; operation_id PRIMARY KEY; all data in one DB.
 // Validate amount &gt; 0; bind op_id to canonical (sku, amount).
+
 BEGIN
+
 claimed = INSERT operation(op_id, sku, amount)
           VALUES (:op, :sku, :amount)
           ON CONFLICT (op_id) DO NOTHING RETURNING op_id
 if claimed is empty:
     receipt = SELECT sku, amount, result FROM operation WHERE op_id = :op
-    if receipt is missing: ROLLBACK; retry same op within budget
-    if receipt.payload != (sku, amount): ROLLBACK; return PAYLOAD_MISMATCH
-    COMMIT; return receipt.result
+    if receipt is missing:
+        ROLLBACK;
+        retry same op within budget
+    if receipt.payload != (sku, amount):
+        ROLLBACK;
+        return PAYLOAD_MISMATCH
+    COMMIT;
+    return receipt.result
+
 rows = UPDATE inventory SET qty = qty - :amount
        WHERE sku = :sku AND :amount &gt; 0 AND qty &gt;= :amount
 result = (rows == 1 ? SUCCESS : UNAVAILABLE)
 UPDATE operation SET result = :result WHERE op_id = :op
+
 COMMIT                                      // claim + debit + receipt together
 // A lost COMMIT reply is UNKNOWN: query/retry the SAME operation ID.
 </code></pre>
 <div class="bilingual"><div class="lang-zh"><p>任何 SQL 报错都要回滚整个事务。如果查不到回执，只能重新尝试，不能先扣库存再补登记请求号。回执需要保留到约定的重试和对账窗口结束，未提交事务的结果也不能对外返回。如果提交响应丢失，应使用同一个 op_id 查询或重试，不能换新号再扣一次。amount 必须为正，否则负数会把扣减变成增加库存。</p><p>图中的 op:8 是另一个请求，预期 version=12，而当前为 13，所以下面的更新会影响 0 行。重读后能否重试，由业务规则决定，而且仍受总预算限制；同一请求的去重不能替代库存条件检查。</p></div><div class="lang-en"><p>Roll back on every SQL error. A missing receipt requires retry, never debit before claiming. Retain receipts for the retry/reconciliation contract and expose only committed results. A lost commit reply is resolved with the same op_id, never a new debit ID. Require positive amount so subtraction cannot increase stock.</p><p>op:8 is distinct: expected version 12 versus current 13 makes this update affect zero rows. Reread and retry only when the business allows it within the total budget. Deduplicating one operation does not replace the stock predicate.</p></div></div>
 <pre data-language="SQL" data-kind="teaching" data-source="../examples/ch08/version.sql"><code>-- Existing row; amount is a positive integer; version is NOT NULL.
+
 UPDATE inventory
-SET qty = qty - :amount, version = version + 1
+SET qty = qty - :amount,
+    version = version + 1
 WHERE sku = :sku
   AND :amount &gt; 0
   AND version = :expected_version

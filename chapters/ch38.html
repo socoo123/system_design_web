@@ -321,9 +321,14 @@ else:
 now = clock.now()                       # ONE eligibility/budget sample
 if not evidence.canSend(now):
     return error(503, cacheControl=&quot;no-store&quot;)
+
 n = evidence.sharedSeconds(now) # deduct clock + final-send margin
-headers = {CacheControl: &quot;public, max-age=0, s-maxage=&quot; + n + &quot;, must-revalidate&quot;,
-           Vary: &quot;Accept-Language, Accept-Encoding&quot;, ETag: weakTag(evidence, key)}
+headers = {
+    CacheControl: &quot;public, max-age=0, s-maxage=&quot; + n + &quot;, must-revalidate&quot;,
+    Vary: &quot;Accept-Language, Accept-Encoding&quot;,
+    ETag: weakTag(evidence, key)
+}
+
 # RFC parser handles lists, weak comparison and &#x27;*&#x27; for this GET.
 if evidence.exists and ifNoneMatchMatches(request, headers.ETag):
     return response(304, headers, noBody)
@@ -456,19 +461,24 @@ return response(evidence.exists ? 200 : 404, headers, evidence.body)
       </div>
     </figure><div class="bilingual"><div class="lang-zh"><p>改价时，App 在同一个 Store 事务中提交 <code>row.version=2</code> 和 <code>Outbox(event_id,sku,version,targets)</code>。收到确认，只表示权威记录和失效待办已经持久保存。Relay 按目标分别重试：先提高应用缓存的版本下界、撤销填充令牌并删值，再清除 CDN 缓存，减少边缘刚清空又读回旧数据的机会。</p><p><strong>回执表示什么，要以供应商契约为准。</strong>“已接受”不等于所有 POP 都已应用；Relay 要能查询同一请求，或安全地重复 purge，不能把“已经发出”当成完成。处理重复或乱序事件时，版本下界始终取最大值。漏送、L1 未收到通知，以及在途的旧响应，仍由硬期限限制寿命；本例没有承诺写入后全球读取立即线性一致。</p></div><div class="lang-en"><p>A price update commits <code>row.version=2</code> with <code>Outbox(event_id,sku,version,targets)</code> in one Store transaction. Acknowledgement means durable authority and work only. Relay retries per target: raise application-cache floor, revoke fill tokens and evict, then purge CDN to reduce old-origin refill.</p><p><strong>Receipt meaning depends on the provider contract.</strong> Accepted is not applied everywhere. Query the same request or safely repeat purge; sending is insufficient completion. Version maxima absorb duplicate/reordered events. Lost delivery, unnotified L1 and in-flight old replies still need hard age. There is no globally linearizable read-after-write promise.</p></div></div><h3><span class="lang-zh">关键实现：复制数据时保留原 hardExpires</span><span class="lang-en">Implementation: copies preserve hardExpires</span></h3><div class="bilingual"><div class="lang-zh"><p>下面的 Java17 可运行片段在<strong>权威查询开始前</strong>记录 observedAt，并要求查询使用主库的新快照。存在的记录有 20 秒硬期限，确认不存在的记录有 5 秒。L1 副本最长保留 5 秒，同时沿用原来的 hardExpires。构造新 HTTP 响应时，共享新鲜期 n 不超过 10 秒；先从剩余时间扣除 2 秒跨节点时钟差和 1 秒最终发送预算，再向下取整。n=0 表示没有共享新鲜期；这次直接响应能否发送，仍要通过 canSend 检查。</p></div><div class="lang-en"><p>This runnable Java17 excerpt captures observedAt <strong>before</strong> a new primary query: twenty seconds for positive evidence, five for absence. L1 lasts at most five seconds and keeps the original hardExpires. A new HTTP response caps n at ten, subtracts two seconds of cross-node clock difference and one final-send second, then floors. n=0 grants no shared freshness; a direct response still requires canSend.</p></div></div><pre data-kind="runnable" data-language="Java 17" data-source="AgeBudget.java:age"><code>record Evidence(long version, long observedAtMs, long hardExpiresMs) {
     Evidence {
-        if (version &lt; 0 || hardExpiresMs &lt;= observedAtMs)
+        if (version &lt; 0 || hardExpiresMs &lt;= observedAtMs) {
             throw new IllegalArgumentException(&quot;invalid evidence&quot;);
+        }
     }
+
     static Evidence primary(long version, long readStartMs, boolean absent) {
         long life = absent ? 5_000 : 20_000;
         return new Evidence(version, readStartMs, readStartMs + life);
     }
+
     long l1Expires(long nowMs) {
         return Math.min(nowMs + 5_000, hardExpiresMs - SKEW_MS);
     }
+
     boolean canSend(long nowMs) {
         return nowMs + SKEW_MS + SEND_MS &lt; hardExpiresMs;
     }
+
     long sharedSeconds(long nowMs) {
         long remaining = hardExpiresMs - nowMs - SKEW_MS - SEND_MS;
         return Math.max(0, Math.min(10, remaining / 1_000));
@@ -578,26 +588,35 @@ return response(evidence.exists ? 200 : 404, headers, evidence.body)
         <figcaption><span class="lang-zh">拒绝标记表示：迟到的 e7 回填被 Cache tier 拒绝，不能覆盖新令牌 e8 填入的 v2。缓存重启也会更换运行代次 epoch，让旧令牌继续失效；已经发出的 v1 则仍受年龄上限约束。</span><span class="lang-en">The rejection marker means late e7 is refused and cannot overwrite v2 filled by e8. Restart changes epoch so old tokens stay invalid. An already sent v1 still needs an age bound.</span></figcaption>
       </div>
     </figure><div class="bilingual"><div class="lang-zh"><p><strong>这里需要两个不同的保证：</strong>请求合并减少重复工作，回填守卫则拒绝已经失去资格的写入。图中，读取方取得 e7 并读到 v1；写入方提交 v2 后发起失效，缓存在一个原子操作中提高版本下界、撤销 e7 并删值。旧读取方恢复后再做 SET(v1,e7)，就会被拒绝；取得新令牌 e8 的读取方必须重新查询主库。</p><p>只有过期锁还不够：旧持有者暂停到锁过期后，仍可能恢复执行。Redis 用唯一的持有者标识，并在删除前比较，可以避免删掉接任者的锁，却不会自动阻止普通 SET 写入。<a href="#ref-6">[6]</a> Facebook 的 lease 机制把未命中令牌与删除时的撤销联动起来；本例借用这一机制，不沿用其生产测量结果。<a href="#ref-4">[4 §3.2.1]</a></p></div><div class="lang-en"><p><strong>Two guarantees:</strong> singleflight reduces work; guarded fill rejects writers whose eligibility was revoked. Reader e7 obtains v1; writer commits v2, then cache atomically raises floor, revokes e7 and evicts. Resumed SET(v1,e7) is refused. A new e8 must query primary again.</p><p>An expiring lock is insufficient: a paused old owner can resume. Redis unique ownership and compare-before-delete avoid deleting a successor’s lock but do not fence ordinary SET. <a href="#ref-6">[6]</a> Facebook leases connect miss tokens to deletion revocation; we borrow the mechanism rather than extrapolate its measurements. <a href="#ref-4">[4 §3.2.1]</a></p></div></div><h3><span class="lang-zh">关键实现 A：等待者超时，不会取消共享任务</span><span class="lang-en">Implementation A: waiters cannot cancel shared work</span></h3><div class="bilingual"><div class="lang-zh"><p>这段 Java17 代码为每个等待者返回独立的 future。等待者可以让自己的 future 超时或取消，负责查询的共享任务（loader）要到<strong>实际返回</strong>后才从 Group 移除。命中缓存的请求应在加入 Group 前直接处理；合并 key 要包含租户、语言和表示等作用域。一个 Group 只覆盖当前进程，因此 30 个进程仍可能各有一个发起查询的 leader。<a href="#ref-5">[5]</a></p></div><div class="lang-en"><p>This Java17 excerpt returns a private future. A waiter may time out or cancel it; the shared loader stays registered until it <strong>actually returns</strong>. Check cache hits before joining; keys include tenant, language and representation scope. One Group covers one process, so thirty processes may still lead independently. <a href="#ref-5">[5]</a></p></div></div><pre data-kind="runnable" data-language="Java 17" data-source="SingleFlight.java:flight"><code>private final ConcurrentHashMap&lt;String, CompletableFuture&lt;T&gt;&gt; calls =
-    new ConcurrentHashMap&lt;&gt;();
+        new ConcurrentHashMap&lt;&gt;();
 private final Executor executor;
-public SingleFlight(Executor executor) { this.executor = executor; }
+
+public SingleFlight(Executor executor) {
+    this.executor = executor;
+}
 
 public CompletableFuture&lt;T&gt; join(String key, Supplier&lt;T&gt; fetch) {
     var leader = new CompletableFuture&lt;T&gt;();
     var existing = calls.putIfAbsent(key, leader);
     var shared = existing == null ? leader : existing;
+
     if (existing == null) {
         try {
             executor.execute(() -&gt; {
-                try { leader.complete(fetch.get()); }
-                catch (Throwable error) { leader.completeExceptionally(error); }
-                finally { calls.remove(key, leader); }
+                try {
+                    leader.complete(fetch.get());
+                } catch (Throwable error) {
+                    leader.completeExceptionally(error);
+                } finally {
+                    calls.remove(key, leader);
+                }
             });
         } catch (RuntimeException rejected) {
             leader.completeExceptionally(rejected);
             calls.remove(key, leader);
         }
     }
+
     return shared.thenApply(value -&gt; value); // private waiter future
 }</code></pre><div class="bilingual"><div class="lang-zh"><p>loader 必须给实际查询设置期限，或能确认取消已经完成。逻辑超时只表示调用方不再等待，不能证明 SQL 已停止，也不能提前归还 Store 的真实并发名额。依赖仍在执行、结果未知时，要保留在途状态并继续探测；每个等待者最终发送前，还要重新检查数据年龄。</p></div><div class="lang-en"><p>The loader needs a bounded physical query or confirmed cancellation. A logical timeout ends waiting without proving SQL stopped or releasing real Store concurrency permits. Retain and probe unknown in-flight work; each waiter rechecks age before sending.</p></div></div><h3><span class="lang-zh">关键实现 B：在缓存写入口完成原子检查</span><span class="lang-en">Implementation B: atomicity belongs at cache writes</span></h3><div class="bilingual"><div class="lang-zh"><p>下面是<strong>缓存服务事务伪代码</strong>。同源的 <code>cache.py</code> 在同一个 SQLite 文件上用 BEGIN IMMEDIATE 实现它，并由多个独立进程竞争执行。这个示例只验证缓存写入的原子边界，不代表 Redis 集群。领取填充资格（claim）时要重新检查缓存值，拿到写锁后再取当前时间。版本下界、令牌、运行代次和缓存值都由同一个权威端管理，业务 Store 事务另有自己的边界。<a href="#ref-10">[10]</a></p></div><div class="lang-en"><p>This <strong>cache-service transaction pseudocode</strong> is implemented by <code>cache.py</code> using BEGIN IMMEDIATE on one SQLite file, exercised by independent processes. It tests that write boundary, not a Redis cluster. Recheck values during claim and sample time after acquiring the lock. Floors, tokens, epoch and cache values share one authority; business Store transactions are separate. <a href="#ref-10">[10]</a></p></div></div><pre data-kind="pseudocode" data-language="Pseudocode" data-source="cache.pseudo"><code># Cache-service transaction pseudocode; one authority owns metadata per key.
 # Atomic = BEGIN IMMEDIATE / COMMIT in this example&#x27;s shared SQLite file.
@@ -607,7 +626,9 @@ claim(key):
         state = metadata.getOrCreate(key)      # floor persists; value is evictable
         if value[key] exists and value[key].hardExpires &gt; now + 2000ms:
             return HIT(value[key])
-        if state.leaseUntil &gt; now: return WAIT
+        if state.leaseUntil &gt; now:
+            return WAIT
+
         state.ticket = randomUniqueToken()
         state.leaseUntil = now + 1000ms
         return (runtime.epoch, state.ticket)
@@ -616,7 +637,8 @@ invalidate(key, revision):
     atomic:
         state = metadata.getOrCreate(key)
         state.floor = max(state.floor, revision)
-        state.ticket = null; state.leaseUntil = 0
+        state.ticket = null;
+        state.leaseUntil = 0
         delete value[key]
 
 guardedFill(key, token, evidence):
@@ -628,8 +650,10 @@ guardedFill(key, token, evidence):
         require evidence.hardExpires - evidence.observedAt == (evidence.absent ? 5000ms : 20000ms)
         require evidence.observedAt &lt;= now + 2000ms
         require now + 2000ms &lt; evidence.hardExpires
+
         value[key] = evidence                  # keep ORIGINAL hard deadline
-        state.ticket = null; state.leaseUntil = 0
+        state.ticket = null;
+        state.leaseUntil = 0
 # Restart rotates epoch; missing metadata rejects old tokens, never grants them.</code></pre><div class="bilingual"><div class="lang-zh"><p>先确认令牌相等，再执行普通 SET，仍然有竞态，因此检查与写入必须在同一个事务中完成。记录填充资格的元数据不能随缓存值一起被悄悄淘汰：元数据缺失时拒绝旧令牌，重启时更换运行代次。一次成功 fill 会消耗令牌，重复、过期或已撤销的请求都被拒绝。重复的低版本失效事件可能再删一次值，但不能降低版本下界。</p><p><strong>信任与恢复也有前提：</strong>App 取得新令牌后，必须开始新的主库查询，并提供真实版本、原 observedAt 和固定期限；缓存无法识别 App 伪造的版本或时间。证明对象不存在，也要有权威的删除标记或修订号（tombstone/revision），不能在已有更高版本下界时猜 version=0。如果重启丢失了版本下界，就须恢复权威元数据，或更换运行代次并全部重新查询。TTL 只是失效通知遗漏后的后备保护，不能提供即时的全球新鲜度。</p></div><div class="lang-en"><p>Checking a token followed by ordinary SET still races; validation and write must share one transaction. Eligibility metadata cannot silently disappear with value eviction; missing metadata rejects old tokens and restart rotates epoch. Fill consumes a token once, rejecting duplicates, expiry and revocation. A duplicated low-revision invalidation may evict again but cannot lower the floor.</p><p><strong>Trust and recovery:</strong> after a new token, App begins a new primary query and supplies authentic revision, original observedAt and fixed lifetime. Cache cannot detect fabricated versions/timestamps. Absence needs authoritative tombstone/revision rather than guessed zero after a higher floor. Lost floors require restored authority metadata or a new epoch plus new queries; TTL remains a backstop, not immediate global freshness.</p></div></div><details class="fold"><summary><span class="lang-zh">为什么 Write-through / Write-back 不能自动解决竞争</span><span class="lang-en">Why Through / Back do not automatically fix races</span></summary><div class="bilingual"><div class="lang-zh"><p>如果 Write-through 只是先同步写库，再写缓存，旧读取方仍可能回填覆盖新值，两边也可能只有一边成功；因此还需要按版本原子替换，并修复失败。Write-back 则先确认、后刷盘，故障时可能丢失尚未刷出的更新。它可以用于讨论允许丢失的粗略计数，不应默认作为价格或账本的权威方案。强读仍须遵守权威读取契约。</p></div><div class="lang-en"><p>DB-then-cache write-through can still suffer stale reader overwrite and partial failure; it needs versioned replacement and repair. Write-back acknowledges before flushing and can lose unflushed work; discuss it for lossy counters rather than default price/ledger authority. Strong reads use the authoritative contract.</p></div></div></details>
 </section>
 <section>

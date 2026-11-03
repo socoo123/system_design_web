@@ -435,26 +435,38 @@ public final class Capacity {
         int largestLoss = Arrays.stream(perNode).max().orElseThrow();
         return (total - largestLoss) * admittedPerReplica;
     }
+
     static int sameBudgetReplicas(int domains, double peak, double planned) {
         for (int n = 1; ; n++) {
             int largestLoss = (n + domains - 1) / domains;
-            if ((n - largestLoss) * planned &gt;= peak) return n;
+            if ((n - largestLoss) * planned &gt;= peak) {
+                return n;
+            }
         }
     }
+
     public static void main(String[] args) {
         double peak = 20, residence = 8, cap = 4, headroom = 0.8;
         int slots = 32;
+
         System.out.printf(&quot;meanActive=%.0f slotLowerBound=%.0f normal=%.0f%n&quot;,
-            peak * residence, Math.ceil(peak * residence / slots),
-            Math.ceil(peak / (cap * headroom)));
+                peak * residence, Math.ceil(peak * residence / slots),
+                Math.ceil(peak / (cap * headroom)));
         System.out.printf(&quot;nine: rawSurvivor=%.1f plannedSurvivor=%.1f%n&quot;,
-            surviving(new int[]{3, 3, 3}, cap),
-            surviving(new int[]{3, 3, 3}, cap * headroom));
+                surviving(new int[]{3, 3, 3}, cap),
+                surviving(new int[]{3, 3, 3}, cap * headroom));
         System.out.printf(&quot;same-budget N-1 across 3 nodes: %d%n&quot;,
-            sameBudgetReplicas(3, peak, cap * headroom));
-        if (sameBudgetReplicas(3, peak, 3.2) != 11) throw new AssertionError();
-        if (surviving(new int[]{4, 4, 3}, 3.2) &lt; peak) throw new AssertionError();
-        if (surviving(new int[]{4, 3, 3}, 3.2) &gt;= peak) throw new AssertionError();
+                sameBudgetReplicas(3, peak, cap * headroom));
+
+        if (sameBudgetReplicas(3, peak, 3.2) != 11) {
+            throw new AssertionError();
+        }
+        if (surviving(new int[]{4, 4, 3}, 3.2) &lt; peak) {
+            throw new AssertionError();
+        }
+        if (surviving(new int[]{4, 3, 3}, 3.2) &gt;= peak) {
+            throw new AssertionError();
+        }
     }
 }</code></pre><div class="bilingual"><div class="lang-zh"><p><strong>每张 GPU 都要单独核算显存，不能把空闲字节随意相加。</strong>对每张卡，都须满足：权重分片 + 引擎临时空间峰值 + KV 信用 + 安全余量 ≤ 可用显存。教学算例为 80 GiB−40 GiB 权重−8 GiB 临时峰值−8 GiB 余量=24 GiB KV 预算；这里使用 GiB，与前面 40 GB 的磁盘产物是两项独立假设。KV 占用随活跃上下文和模型结构变化，仅限制 32 条序列还无法限定显存。vLLM v0.15.1 分别讨论了序列数、每批 token 数、KV 不足和并行度，但没有提供本章的容量数字。<a href="#ref-6">[6]</a></p><p>异构 GPU 要按运行规格（profile）分别标定精度、上下文范围、容量和临时空间峰值，不能合并两张不兼容设备的空闲显存。张量并行（TP）副本必须一次唯一预留整个设备组，并在整组就绪后报告 READY；本章约定，只要一个并行进程（rank）不可用，整个副本组就不可服务。若副本组跨机器，故障损失应包括所有使用了故障机器的组，不能只数该机器上的 rank。空闲卡和仍在加载的副本，都不计入幸存热容量。</p></div><div class="lang-en"><p><strong>Device memory is not one freely pooled bucket.</strong>Each device must fit its weight shard + peak engine workspace + KV credit + safety reserve. A teaching 80 GiB−40 GiB weights−8 GiB workspace−8 GiB reserve leaves 24 GiB KV; this is independent of the 40-decimal-GB disk artifact. KV depends on live context/model geometry; 32 sequences alone do not bound it. vLLM v0.15.1 separately discusses sequence/batch-token limits, KV pressure and parallelism, not our capacity numbers. <a href="#ref-6">[6]</a></p><p>Benchmark heterogeneous profiles separately for precision/context/capacity/workspace; free bytes on incompatible devices cannot be added. Reserve TP devices as a whole and require whole-group READY; one unavailable rank makes that replica group unavailable in this contract. Node loss removes every group touching that node, not just local ranks. Empty devices/loaders are not surviving warm capacity.</p></div></div></section>
 <section><h2><span class="lang-zh">多维准入：先预占资源，再派发，物理退休后才归还</span><span class="lang-en">Admission: durable multidimensional holds, unique dispatch, physical retirement</span></h2><div class="bilingual"><div class="lang-zh"><p><strong>监控指标帮助路由器选择候选，资源账本决定是否允许预占。</strong>平台同时约束序列数与 KV 信用。可信组件根据分词结果、输出上限、模型结构和运行规格计算 KV 需求，再向上取整到 MiB；这份信用是保守预留量，并非当前已分配的 KV 页。运行规格的可用容量已扣除权重和临时空间峰值；Ch29 仍需在引擎每轮调度时执行批内 token 数与计算预算。拿到准入凭证，也不能让引擎突破显存或调度限制。</p></div><div class="lang-en"><p><strong>Metrics choose candidates; authority decides credit.</strong>Bound both sequences and KV credit, rounded up to MiB from trusted tokenization/output bounds, geometry and device profile. Credit is conservative reservation, not allocated live pages. Profile capacity already subtracts weights/workspace; Ch29 still enforces per-iteration batch-token/compute limits. A platform permit cannot override engine memory/scheduling limits.</p></div></div><figure class="deck">
@@ -604,32 +616,47 @@ def reserve(db, q, clock, fail_after_tenant=False):
     fp = encoded([q[&#x27;body&#x27;], q[&#x27;bundle&#x27;], q[&#x27;profile&#x27;], q[&#x27;kv&#x27;]])
     with write_tx(db):
         now = clock()
-        old = db.execute(&#x27;SELECT * FROM permit WHERE tenant=? AND rid=?&#x27;,
-                         (q[&#x27;tenant&#x27;], q[&#x27;rid&#x27;])).fetchone()
+        old = db.execute(
+            &#x27;SELECT * FROM permit WHERE tenant=? AND rid=?&#x27;,
+            (q[&#x27;tenant&#x27;], q[&#x27;rid&#x27;])
+        ).fetchone()
         if old:
             if old[&#x27;fingerprint&#x27;] != fp:
                 raise Refused(&#x27;same key, different request&#x27;)
             return dict(old) | {&#x27;created&#x27;: False}
+
         r = one(db, &#x27;SELECT * FROM replica WHERE id=?&#x27;, (q[&#x27;replica&#x27;],))
         t = one(db, &#x27;SELECT * FROM tenant WHERE id=?&#x27;, (q[&#x27;tenant&#x27;],))
         s = one(db, &#x27;SELECT * FROM snapshot WHERE rev=?&#x27;, (q[&#x27;rev&#x27;],))
         rev = one(db, &#x27;SELECT rev FROM control WHERE id=1&#x27;)[&#x27;rev&#x27;]
         endpoints = json.loads(s[&#x27;payload&#x27;])[&#x27;endpoints&#x27;]
         exact = [r[&#x27;id&#x27;], r[&#x27;epoch&#x27;], r[&#x27;bundle&#x27;], r[&#x27;profile&#x27;]]
-        if (q[&#x27;kv&#x27;] &lt;= 0 or q[&#x27;rev&#x27;] != rev or now &gt;= s[&#x27;expires&#x27;]
-            or exact not in endpoints or not r[&#x27;ready&#x27;] or r[&#x27;draining&#x27;]
-            or (r[&#x27;bundle&#x27;], r[&#x27;epoch&#x27;], r[&#x27;profile&#x27;], r[&#x27;tier&#x27;]) !=
-               (q[&#x27;bundle&#x27;], q[&#x27;epoch&#x27;], q[&#x27;profile&#x27;], t[&#x27;tier&#x27;])):
+        if (
+            q[&#x27;kv&#x27;] &lt;= 0
+            or q[&#x27;rev&#x27;] != rev
+            or now &gt;= s[&#x27;expires&#x27;]
+            or exact not in endpoints
+            or not r[&#x27;ready&#x27;]
+            or r[&#x27;draining&#x27;]
+            or (r[&#x27;bundle&#x27;], r[&#x27;epoch&#x27;], r[&#x27;profile&#x27;], r[&#x27;tier&#x27;]) != (
+                q[&#x27;bundle&#x27;], q[&#x27;epoch&#x27;], q[&#x27;profile&#x27;], t[&#x27;tier&#x27;]
+            )
+        ):
             raise Refused(&#x27;ineligible or stale&#x27;)
+
         deadline = min(q[&#x27;deadline&#x27;], s[&#x27;expires&#x27;])
         if now &gt;= deadline:
             raise Refused(&#x27;deadline&#x27;)
+
         take(db, &#x27;tenant&#x27;, q[&#x27;tenant&#x27;], q[&#x27;kv&#x27;])
         if fail_after_tenant:
             raise RuntimeError(&#x27;injected before replica charge&#x27;)
         take(db, &#x27;replica&#x27;, q[&#x27;replica&#x27;], q[&#x27;kv&#x27;])
-        values = (q[&#x27;tenant&#x27;], q[&#x27;rid&#x27;], fp, q[&#x27;bundle&#x27;], q[&#x27;replica&#x27;],
-                  q[&#x27;epoch&#x27;], q[&#x27;profile&#x27;], q[&#x27;kv&#x27;], q[&#x27;rev&#x27;], deadline)
+
+        values = (
+            q[&#x27;tenant&#x27;], q[&#x27;rid&#x27;], fp, q[&#x27;bundle&#x27;], q[&#x27;replica&#x27;],
+            q[&#x27;epoch&#x27;], q[&#x27;profile&#x27;], q[&#x27;kv&#x27;], q[&#x27;rev&#x27;], deadline
+        )
         db.execute(&quot;INSERT INTO permit VALUES(?,?,?,?,?,?,?,?,?,?,&#x27;HELD&#x27;)&quot;, values)
         return dict(permit(db, q[&#x27;tenant&#x27;], q[&#x27;rid&#x27;])) | {&#x27;created&#x27;: True}</code></pre><h3><span class="lang-zh">派发：查询到状态，不会重新获得执行权</span><span class="lang-en">Dispatch: observing state does not regrant execution</span></h3><pre data-language="Python · SQLite" data-kind="runnable" data-source="ledger.py#launch"><code>def begin_dispatch(db, tenant, rid, clock):
     with write_tx(db):
@@ -637,14 +664,23 @@ def reserve(db, q, clock, fail_after_tenant=False):
         p = permit(db, tenant, rid)
         if p[&#x27;state&#x27;] != &#x27;HELD&#x27;:
             return False
+
         r = one(db, &#x27;SELECT * FROM replica WHERE id=?&#x27;, (p[&#x27;replica&#x27;],))
         rev = one(db, &#x27;SELECT rev FROM control WHERE id=1&#x27;)[&#x27;rev&#x27;]
-        if (now &gt;= p[&#x27;deadline&#x27;] or p[&#x27;rev&#x27;] != rev or not r[&#x27;ready&#x27;]
-            or r[&#x27;draining&#x27;] or r[&#x27;epoch&#x27;] != p[&#x27;epoch&#x27;]):
+        if (
+            now &gt;= p[&#x27;deadline&#x27;]
+            or p[&#x27;rev&#x27;] != rev
+            or not r[&#x27;ready&#x27;]
+            or r[&#x27;draining&#x27;]
+            or r[&#x27;epoch&#x27;] != p[&#x27;epoch&#x27;]
+        ):
             close_credit(db, p, &#x27;EXPIRED&#x27;)
             return False
-        db.execute(&quot;UPDATE permit SET state=&#x27;DISPATCHING&#x27; WHERE tenant=? AND rid=?&quot;,
-                   (tenant, rid))
+
+        db.execute(
+            &quot;UPDATE permit SET state=&#x27;DISPATCHING&#x27; WHERE tenant=? AND rid=?&quot;,
+            (tenant, rid)
+        )
         return True  # Only this successful caller may send once.
 
 
@@ -653,12 +689,20 @@ def consume(db, tenant, rid, worker, epoch, bundle, clock):
         now = clock()
         p = permit(db, tenant, rid)
         r = one(db, &#x27;SELECT * FROM replica WHERE id=?&#x27;, (worker,))
-        if (p[&#x27;state&#x27;] != &#x27;DISPATCHING&#x27; or now &gt;= p[&#x27;deadline&#x27;]
+        if (
+            p[&#x27;state&#x27;] != &#x27;DISPATCHING&#x27;
+            or now &gt;= p[&#x27;deadline&#x27;]
             or (worker, epoch, bundle) != (p[&#x27;replica&#x27;], p[&#x27;epoch&#x27;], p[&#x27;bundle&#x27;])
-            or r[&#x27;epoch&#x27;] != epoch or r[&#x27;bundle&#x27;] != bundle or not r[&#x27;ready&#x27;]):
+            or r[&#x27;epoch&#x27;] != epoch
+            or r[&#x27;bundle&#x27;] != bundle
+            or not r[&#x27;ready&#x27;]
+        ):
             return False
-        db.execute(&quot;UPDATE permit SET state=&#x27;RUNNING&#x27; WHERE tenant=? AND rid=?&quot;,
-                   (tenant, rid))
+
+        db.execute(
+            &quot;UPDATE permit SET state=&#x27;RUNNING&#x27; WHERE tenant=? AND rid=?&quot;,
+            (tenant, rid)
+        )
         return True  # Only this successful caller may enqueue GPU work once.</code></pre><div class="bilingual"><div class="lang-zh"><p>代码在取得写锁后才调用 <code>clock()</code>，读取权威时间，因此等待写锁期间跨过截止时间，也会被拒绝。只有首次得到 <code>begin_dispatch=True</code> 的原调用者可以发送一次，只有首次得到 <code>consume=True</code> 的原调用者可以把工作放入 GPU 队列一次。如果事务已提交但确认回复丢失，或提交后进程崩溃，后来查询到 DISPATCHING/RUNNING 的调用者也不能补发或补启动。本例选择保留信用，等待核查或隔离，代价是可能无法继续推进，并不保证恰好完成一次。重启时必须先隔离旧进程、旧设备，再启用新的进程/设备代次 epoch；仅靠进程内的 Set 无法恢复这些事实。</p><p>运行中的请求，或派发结果未知的请求取消后，都先进入 RETIRING。<strong>物理退休</strong>要求可信完成适配器确认全部相关 GPU 内核、复制操作和流依赖已结束，或旧进程、设备已被隔离或重置；此后才能把终态与租户、副本两边的信用归还放在同一事务中提交。重复通知或旧代次回执不会重复归还。CUDA event 只证明它所捕获的工作完成，任意一个 event 完成并不代表整张卡都可安全复用。<a href="#ref-12">[12]</a>本例测试只是注入可信完成通知，没有运行 CUDA。只有未派发的 HELD 可以与派发原子竞争并过期；TTL 不能释放 DISPATCHING 或结果未知的占用。执行达到 60 s 时启动终止流程，也不能提前归还信用。</p><p>等待队列另有 40 条硬上限和 200 ms 准入期限；20×0.2=4 只是稳态平均排队数。公平排队要考虑预计工作量，每租户 16 条并发也不能覆盖任意长的上下文。账本拒绝或不可达时，不得发送请求。Ch32 的 token 预留在另一套账本中，拒绝后的释放与后续结算需通过持久、幂等的终态记录或 outbox 恢复，不能把两个数据库说成同一笔事务。</p></div><div class="lang-en"><p>Sample the authority clock after acquiring the writer lock, so a lock wait crossing deadline rejects. Only the original begin_dispatch=True caller may send once; only the original consume=True caller may enqueue once. A lost commit ACK or post-commit crash cannot authorize a later observer to resend/relaunch. This model sacrifices progress, retaining credit for reconciliation/fencing; it does not promise exactly-once completion. Fence old processes/devices before a new epoch; an in-memory Set is insufficient recovery.</p><p>Canceling RUNNING/unknown dispatch enters RETIRING. A trusted adapter must prove all relevant kernels/copies/stream dependencies ended, or fence/reset the old device/process, before terminal state and both refunds commit together. Repeated/old-epoch notices cannot refund twice. CUDA events prove captured work, not all-device safety from an arbitrary event. <a href="#ref-12">[12]</a>The tests inject completion notices and do not run CUDA. Only HELD may expire against dispatch atomically; TTL never refunds DISPATCHING/UNKNOWN. Sixty seconds starts termination, not early reuse.</p><p>The queue separately caps forty with 200-ms admission deadlines. 20×0.2=4 is mean queue occupancy, not a maximum. Fair scheduling estimates work; sixteen concurrent requests do not cover arbitrary contexts. Never send after refusal/unavailable Ledger. Releasing independent Ch32 token holds needs durable idempotent terminal/outbox recovery; two databases are not one transaction.</p></div></div></section>
 <section><h2><span class="lang-zh">租户与 KV 亲和：先满足隔离条件，再考虑缓存命中</span><span class="lang-en">Tenants and KV affinity: isolation before hits</span></h2><div class="bilingual"><div class="lang-zh"><p><strong>路由器先按权限、上线组合、隔离等级、运行规格和期限筛选，再用缓存命中给合格候选加分。</strong>私有资源池满了，就拒绝请求，或选择同等级的私有备用池，不能悄悄转入共享池。若首选执行端因为热点而满载，可以换到同一上线组合的合格执行端，重新计算输入预填充；已经开始输出的流，则继续固定在原执行端与原调用尝试（attempt）上。</p></div><div class="lang-en"><p><strong>Filter authority, bundle, isolation tier, profile and deadline before scoring cache hits.</strong>A full private tier rejects or uses equivalent private backup. A full preferred worker can yield to an eligible same-bundle worker and recompute prefill; an active stream remains pinned to its worker/attempt.</p></div></div><figure class="deck">
       <div class="slide">
@@ -921,31 +965,46 @@ def consume(db, tenant, rid, worker, epoch, bundle, clock):
         </svg>
         <figcaption><span class="lang-zh">假设 30 分钟观察窗结束，就开始排空（drain）：停止旧版本新请求，等在途工作物理退休后再卸载。卸掉 v1 后，保存的产物仍支持恢复，但需要重新加载，已无法保证热回滚。</span><span class="lang-en">Add drain after the assumed thirty-minute window. Stop old admissions, wait for physical retirement, then unload. Retained artifacts permit recovery, not hot rollback; disclose reload time.</span></figcaption>
       </div>
-    </figure><h3><span class="lang-zh">发布事务：快照、幂等结果与审计一起提交</span><span class="lang-en">Commit snapshot, idempotency result and audit together</span></h3><div class="bilingual"><div class="lang-zh"><p>下面的代码检查端点的上线组合、进程/设备代次和运行规格是否完整匹配，是否 READY 且未排空，以及 API 与持久状态结构（schema）是否兼容。多个发布者竞争同一个预期修订号 expected_revision，只有一个能成功；回滚同样发布更高的修订号，只是内容选回旧组合。示例实现的是这些元数据边界，<strong>没有计算生产环境的 SLO 或容量门槛，也没有验证真实预热</strong>。实际发布时，还要把已审核的质量、容量证据绑定到相应部署代次，不能把测试夹具中的 ready=1 当作实测结果。</p></div><div class="lang-en"><p>The code checks exact endpoint bundle/epoch/profile, READY/non-draining state and API/persisted-state schema compatibility. Only one publisher wins expected_revision; rollback selects old content with a higher revision. The model implements these metadata boundaries, <strong>not production SLO/capacity gates or real warmup</strong>. Actual publication must bind approved quality/capacity evidence to matching generations; fixture ready=1 is not a measurement.</p></div></div><pre data-language="Python · SQLite" data-kind="runnable" data-source="ledger.py#publish"><code>def publish(db, key, expected_rev, weights, endpoints, expires, actor,
-            fail_before_audit=False):
+    </figure><h3><span class="lang-zh">发布事务：快照、幂等结果与审计一起提交</span><span class="lang-en">Commit snapshot, idempotency result and audit together</span></h3><div class="bilingual"><div class="lang-zh"><p>下面的代码检查端点的上线组合、进程/设备代次和运行规格是否完整匹配，是否 READY 且未排空，以及 API 与持久状态结构（schema）是否兼容。多个发布者竞争同一个预期修订号 expected_revision，只有一个能成功；回滚同样发布更高的修订号，只是内容选回旧组合。示例实现的是这些元数据边界，<strong>没有计算生产环境的 SLO 或容量门槛，也没有验证真实预热</strong>。实际发布时，还要把已审核的质量、容量证据绑定到相应部署代次，不能把测试夹具中的 ready=1 当作实测结果。</p></div><div class="lang-en"><p>The code checks exact endpoint bundle/epoch/profile, READY/non-draining state and API/persisted-state schema compatibility. Only one publisher wins expected_revision; rollback selects old content with a higher revision. The model implements these metadata boundaries, <strong>not production SLO/capacity gates or real warmup</strong>. Actual publication must bind approved quality/capacity evidence to matching generations; fixture ready=1 is not a measurement.</p></div></div><pre data-language="Python · SQLite" data-kind="runnable" data-source="ledger.py#publish"><code>def publish(
+    db, key, expected_rev, weights, endpoints, expires, actor,
+    fail_before_audit=False
+):
     payload = encoded({&#x27;weights&#x27;: weights, &#x27;endpoints&#x27;: endpoints})
     fp = encoded([expected_rev, payload, expires, actor])
+
     with write_tx(db):
         old = db.execute(&#x27;SELECT * FROM publication WHERE key=?&#x27;, (key,)).fetchone()
         if old:
             if old[&#x27;fingerprint&#x27;] != fp:
                 raise Refused(&#x27;publication key conflict&#x27;)
             return old[&#x27;rev&#x27;]
+
         c = one(db, &#x27;SELECT * FROM control WHERE id=1&#x27;)
-        if c[&#x27;rev&#x27;] != expected_rev or not weights or any(type(w) is not int or w &lt;= 0 for w in weights.values()):
+        if (
+            c[&#x27;rev&#x27;] != expected_rev
+            or not weights
+            or any(type(w) is not int or w &lt;= 0 for w in weights.values())
+        ):
             raise Refused(&#x27;revision or weights&#x27;)
+
         seen = set()
         for identity, epoch, bundle, profile in endpoints:
             r = one(db, &#x27;SELECT * FROM replica WHERE id=?&#x27;, (identity,))
-            m = json.loads(one(db, &#x27;SELECT manifest FROM bundle WHERE hash=?&#x27;,
-                               (bundle,))[&#x27;manifest&#x27;])
-            if (not r[&#x27;ready&#x27;] or r[&#x27;draining&#x27;] or bundle not in weights
+            m = json.loads(one(
+                db, &#x27;SELECT manifest FROM bundle WHERE hash=?&#x27;, (bundle,)
+            )[&#x27;manifest&#x27;])
+            if (
+                not r[&#x27;ready&#x27;]
+                or r[&#x27;draining&#x27;]
+                or bundle not in weights
                 or (r[&#x27;epoch&#x27;], r[&#x27;bundle&#x27;], r[&#x27;profile&#x27;]) != (epoch, bundle, profile)
-                or (m[&#x27;api&#x27;], m[&#x27;state&#x27;]) != (c[&#x27;api&#x27;], c[&#x27;state_schema&#x27;])):
+                or (m[&#x27;api&#x27;], m[&#x27;state&#x27;]) != (c[&#x27;api&#x27;], c[&#x27;state_schema&#x27;])
+            ):
                 raise Refused(&#x27;unready or incompatible bundle&#x27;)
             seen.add(bundle)
         if seen != set(weights):
             raise Refused(&#x27;missing endpoint&#x27;)
+
         rev = expected_rev + 1
         db.execute(&#x27;INSERT INTO snapshot VALUES(?,?,?)&#x27;, (rev, payload, expires))
         db.execute(&#x27;UPDATE control SET rev=? WHERE id=1 AND rev=?&#x27;, (rev, expected_rev))

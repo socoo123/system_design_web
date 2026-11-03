@@ -236,39 +236,44 @@
       </div>
     </figure><div class="bilingual"><div class="lang-zh"><p>评论表保存这些字段：<code>comment(post_id,id,parent_id,root_id,author_id,body,status,version,ever_public,created_at)</code>。一级评论没有父节点，记录 parent_id=NULL、root_id=id；回复则从已完成权限检查的父行继承 root_id，客户端不能自行指定它属于哪一楼。<strong>直接父节点、所属一级楼和排序字段创建后不可变，ID 也不复用。</strong>同一帖子内的复合外键 <code>(post_id,parent_id)</code>、<code>(post_id,root_id)</code> 可以防止跨帖挂接，但仍要检查父节点是否确实属于所记录的一级楼。<a href="#ref-7">[7]</a></p><p>插入回复时，API 要确认回复目标当前可见（visible），且它所属的一级楼曾经公开。创建、编辑、删除和审核都在同一帖子的保护行（post guard）约束下串行提交，避免并发操作改变关系。图中评论 103 的 parent=101、root=100，界面显示“回复 @101”；如果 101 后来被隐藏，就改用通用占位，不再关联读取它的作者、正文或引用摘要。这样的邻接表不需要重写后代，但仍有插入索引的成本。</p></div><div class="lang-en"><p><code>comment(post_id,id,parent_id,root_id,author_id,body,status,version,ever_public,created_at)</code>. Roots have null parent_id and root_id=id. Derive a reply’s root from the authorized parent, never client input. <strong>Parentage and ordering fields are immutable; ids are never reused.</strong> Composite foreign keys (post_id,parent_id) and (post_id,root_id) reject cross-post links, but cannot prove parent/root agreement. <a href="#ref-7">[7]</a></p><p>Creation requires a visible target and a previously public root. Create, edit, delete and moderation share a post guard transaction. Reply 103 has parent=101 and root=100; if its target later disappears, show a generic placeholder without joining withdrawn author, body or quote data. Adjacency avoids descendant rewrites, not index-maintenance cost.</p></div></div><h3><span class="lang-zh">SQL：先取 20 个楼容器，再为每楼取 3 条回复</span><span class="lang-en">SQL: twenty containers, then three replies per root</span></h3><div class="bilingual"><div class="lang-zh"><p>下面的 <strong>PostgreSQL 18 教学 SQL</strong> 假设调用方已通过权限检查，参数也已通过游标签名校验。查询先选 20 个一级楼，再通过 LATERAL 为每楼各取 LIMIT 3；一次网络往返内仍包含最多 20 次索引探测。如果改用全局 <code>root_id IN (…) LIMIT 60</code>，一个热楼就可能占满全部名额。<a href="#ref-2">[2]</a><a href="#ref-3">[3]</a></p></div><div class="lang-en"><p>The <strong>PostgreSQL 18 teaching SQL</strong> assumes authorization and cursor validation. Choose twenty roots, then LATERAL LIMIT 3 for each: one round trip still contains up to twenty probes. Global IN (…) LIMIT 60 can give every slot to one thread. <a href="#ref-2">[2]</a><a href="#ref-3">[3]</a></p></div></div><pre data-language="SQL · PostgreSQL 18 teaching" data-kind="teaching" data-source="page.sql"><code>-- PostgreSQL 18 teaching query; authenticated public post, signed cursor.
 CREATE INDEX root_page ON comment (post_id, created_at DESC, id DESC)
-  WHERE parent_id IS NULL AND ever_public;
+    WHERE parent_id IS NULL AND ever_public;
 CREATE INDEX reply_page ON comment (post_id, root_id, created_at DESC, id DESC)
-  WHERE parent_id IS NOT NULL AND status = 'visible';
+    WHERE parent_id IS NOT NULL AND status = 'visible';
 
 WITH roots AS (
-  SELECT id, created_at,
-         CASE WHEN status = 'visible' THEN 'visible' ELSE 'unavailable' END AS public_state,
-         CASE WHEN status = 'visible' THEN body END AS body,
-         CASE WHEN status = 'visible' THEN author_id END AS author_id
-  FROM comment
-  WHERE post_id = :post AND parent_id IS NULL AND ever_public
-    AND (created_at, id) &lt; (:before_time, :before_id)
-  ORDER BY created_at DESC, id DESC LIMIT 20
+    SELECT id, created_at,
+           CASE WHEN status = 'visible' THEN 'visible' ELSE 'unavailable' END AS public_state,
+           CASE WHEN status = 'visible' THEN body END AS body,
+           CASE WHEN status = 'visible' THEN author_id END AS author_id
+    FROM comment
+    WHERE post_id = :post AND parent_id IS NULL AND ever_public
+        AND (created_at, id) &lt; (:before_time, :before_id)
+    ORDER BY created_at DESC, id DESC
+    LIMIT 20
 )
 SELECT r.*, c.id AS reply_id, c.created_at AS reply_time,
        c.parent_id, c.body AS reply_body, c.author_id AS reply_author
 FROM roots r
 LEFT JOIN LATERAL (
-  SELECT id, created_at, parent_id, body, author_id
-  FROM comment
-  WHERE post_id = :post AND root_id = r.id
-    AND parent_id IS NOT NULL AND status = 'visible'
-  ORDER BY created_at DESC, id DESC LIMIT 3
+    SELECT id, created_at, parent_id, body, author_id
+    FROM comment
+    WHERE post_id = :post AND root_id = r.id
+        AND parent_id IS NOT NULL AND status = 'visible'
+    ORDER BY created_at DESC, id DESC
+    LIMIT 3
 ) c ON true
 ORDER BY r.created_at DESC, r.id DESC, c.created_at DESC, c.id DESC;
+
 -- First page omits the before predicate; never use a made-up max timestamp.
 -- Group by r.id into &lt;=20 containers and &lt;=60 distinct preview bodies.
 -- Never load quote/body/profile fields from a hidden reply target.
 -- Each thread's continuation starts after its LAST PREVIEW, not its root.
-SELECT id, parent_id, created_at, body, author_id FROM comment
+SELECT id, parent_id, created_at, body, author_id
+FROM comment
 WHERE post_id = :post AND root_id = :root AND parent_id IS NOT NULL
-  AND status = 'visible' AND (created_at, id) &lt; (:before_time, :before_id)
-ORDER BY created_at DESC, id DESC LIMIT 20;</code></pre><div class="bilingual"><div class="lang-zh"><p><strong>一级查询还要保留曾经公开的楼容器。</strong>首次审核通过时，ever_public 被设为 true，之后不再清除。曾经公开的一级评论如果当前不可见，公共接口只返回 <code>unavailable</code>、公共结构 ID 和原排序时间，作为不含正文的占位；不返回当前审核状态、正文、作者或引用。从未公开的一级评论，无论处于 pending、rejected 还是 deleted 状态，都不进入公共页。一级评论被删除时，其回复不级联删除，已公开回复仍可留在原楼容器下；编辑后重新审核期间，新旧正文都隐藏。</p><p>因此，首屏最多包含 20 个楼容器和 60 条回复，至多有 80 条正文。按每条 1 KB 计算约为 80 KB，响应包装另计；如果读取一楼的全部 10 万条回复，则约需 50–100 MB。展开时，游标接在<strong>该楼最后一条预览</strong>后，每页再独立取 20 条。满页时可以返回续游标，因此列表末尾允许多一次空查询。可见回复数 reply_count 由带去重的异步投影维护，不统计待审评论，也不保证立即与当前页面中的数量一致。</p></div><div class="lang-en"><p><strong>Root queries must include tombstones:</strong> ever_public becomes true on first approval and never resets. A previously public root that is no longer visible exposes only unavailable, public structural ids and its original ordering time, without current moderation state, body, author or quotes. Never-public roots stay out entirely. Public replies can remain under old containers; deletion does not cascade, and edits hide both old and new bodies during review.</p><p>The screen has at most twenty containers plus sixty replies, hence at most eighty bodies: roughly 80 KB at 1 KB each, before wrappers. Loading a 100,000-reply thread would cost 50–100 MB. Expansion starts after <strong>that thread’s last preview</strong>, with its own twenty-row page. Full pages may issue a cursor and require a final empty query. reply_count is a deduplicated visible-reply projection, excluding pending; it need not immediately equal page membership.</p></div></div></section>
+    AND status = 'visible' AND (created_at, id) &lt; (:before_time, :before_id)
+ORDER BY created_at DESC, id DESC
+LIMIT 20;</code></pre><div class="bilingual"><div class="lang-zh"><p><strong>一级查询还要保留曾经公开的楼容器。</strong>首次审核通过时，ever_public 被设为 true，之后不再清除。曾经公开的一级评论如果当前不可见，公共接口只返回 <code>unavailable</code>、公共结构 ID 和原排序时间，作为不含正文的占位；不返回当前审核状态、正文、作者或引用。从未公开的一级评论，无论处于 pending、rejected 还是 deleted 状态，都不进入公共页。一级评论被删除时，其回复不级联删除，已公开回复仍可留在原楼容器下；编辑后重新审核期间，新旧正文都隐藏。</p><p>因此，首屏最多包含 20 个楼容器和 60 条回复，至多有 80 条正文。按每条 1 KB 计算约为 80 KB，响应包装另计；如果读取一楼的全部 10 万条回复，则约需 50–100 MB。展开时，游标接在<strong>该楼最后一条预览</strong>后，每页再独立取 20 条。满页时可以返回续游标，因此列表末尾允许多一次空查询。可见回复数 reply_count 由带去重的异步投影维护，不统计待审评论，也不保证立即与当前页面中的数量一致。</p></div><div class="lang-en"><p><strong>Root queries must include tombstones:</strong> ever_public becomes true on first approval and never resets. A previously public root that is no longer visible exposes only unavailable, public structural ids and its original ordering time, without current moderation state, body, author or quotes. Never-public roots stay out entirely. Public replies can remain under old containers; deletion does not cascade, and edits hide both old and new bodies during review.</p><p>The screen has at most twenty containers plus sixty replies, hence at most eighty bodies: roughly 80 KB at 1 KB each, before wrappers. Loading a 100,000-reply thread would cost 50–100 MB. Expansion starts after <strong>that thread’s last preview</strong>, with its own twenty-row page. Full pages may issue a cursor and require a final empty query. reply_count is a deduplicated visible-reply projection, excluding pending; it need not immediately equal page membership.</p></div></div></section>
 <section><h2><span class="lang-zh">16.3 · 游标记录位置，审核仍会改变可见内容</span><span class="lang-en">16.3 · A cursor anchors position while visibility changes</span></h2><figure class="deck">
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d3s1t d3s1d">
@@ -490,47 +495,72 @@ ORDER BY created_at DESC, id DESC LIMIT 20;</code></pre><div class="bilingual"><
     </figure><div class="bilingual"><div class="lang-zh"><p><strong>接口接收用户想设置的状态，而不直接执行 INCR。</strong>下面的可执行 Lua 教学示例把每个用户是否已赞的字段 <code>u:user_id=0/1</code>、点赞总数 total 和待入库增量 delta 保存在同一个 Redis 哈希中。脚本校验完成后，只用一次 HSET 更新它们。用户身份取自鉴权结果，不能让客户端冒用 user_id。连续重试同一个目标状态不会重复计数；目标状态不同时，则按服务端执行顺序生效。因此，延迟到达的旧点赞请求可以覆盖较新的取消请求。本章选择“最后收到的状态”；如果要遵循用户操作顺序，还需持久保存每个用户的操作版本，并做条件更新。</p><p>Lua 执行期间不会穿插其他请求，但出错时不提供 SQL 式回滚。所以脚本先检查类型、数字范围和就绪标记 ready，再通过单次 HSET 修改状态，避免先改成员、再执行 INCR 时留下部分结果。<a href="#ref-4">[4]</a> 一个哈希自然位于同一槽；拆成多个键时也必须保证同槽，而单条热评的写入仍会集中在一个槽上。<a href="#ref-5">[5]</a></p></div><div class="lang-en"><p><strong>Use desired state, not a direct INCR.</strong> This executable Lua teaching example stores u:user_id=0/1, total and delta in one comment hash, validates, then performs one HSET. User identity comes from authentication. Consecutive retries do not recount. Different targets follow execution order: a delayed old like can overwrite a later unlike. This chapter chooses last received state; operation-order semantics require durable per-user versions and conditional updates.</p><p>Lua prevents interleaving but does not provide SQL-style rollback. Validate types, numeric bounds and ready before one HSET, avoiding partial membership-then-INCR failure. <a href="#ref-4">[4]</a> One hash naturally occupies one slot; multiple keys must share a slot too. A hot comment remains concentrated. <a href="#ref-5">[5]</a></p></div></div><pre data-language="Lua · Redis 7.2+ teaching example" data-kind="teaching" data-source="like.lua"><code>-- Redis 7.2+ teaching example: one complete, non-expiring comment hash.
 -- KEYS[1]=like:{comment:100}; ARGV=authenticated user id, desired 0/1.
 local key, user, wanted = KEYS[1], ARGV[1], ARGV[2]
+
 if not user or not string.match(user, '^%d+$') or
-   (wanted ~= '0' and wanted ~= '1') then return redis.error_reply('INPUT') end
-if redis.call('TYPE', key).ok ~= 'hash' then return redis.error_reply('NOT_READY') end
+        (wanted ~= '0' and wanted ~= '1') then
+    return redis.error_reply('INPUT')
+end
+if redis.call('TYPE', key).ok ~= 'hash' then
+    return redis.error_reply('NOT_READY')
+end
+
 local v = redis.call('HMGET', key, 'ready', 'total', 'delta', 'u:' .. user)
 local function integer(s)
-  if not s or not string.match(s, '^%-?%d+$') then return nil end
-  local n = tonumber(s)
-  if not n or math.abs(n) &gt; 1000000000000 then return nil end
-  return n
+    if not s or not string.match(s, '^%-?%d+$') then
+        return nil
+    end
+
+    local n = tonumber(s)
+    if not n or math.abs(n) &gt; 1000000000000 then
+        return nil
+    end
+    return n
 end
+
 local total, dirty = integer(v[2]), integer(v[3])
 local old = v[4] or '0'
 if v[1] ~= '1' or not total or total &lt; 0 or not dirty or
-   (old ~= '0' and old ~= '1') then return redis.error_reply('CORRUPT') end
+        (old ~= '0' and old ~= '1') then
+    return redis.error_reply('CORRUPT')
+end
+
 local delta = tonumber(wanted) - tonumber(old)
 local next_total, next_dirty = total + delta, dirty + delta
 if next_total &lt; 0 or next_total &gt; 1000000000000 or
-   math.abs(next_dirty) &gt; 1000000000000 then return redis.error_reply('RANGE') end
+        math.abs(next_dirty) &gt; 1000000000000 then
+    return redis.error_reply('RANGE')
+end
+
 if delta ~= 0 then
-  -- One mutation: no member write followed by a possibly failing INCR.
-  redis.call('HSET', key, 'u:' .. user, wanted,
-             'total', string.format('%.0f', next_total),
-             'delta', string.format('%.0f', next_dirty))
+    -- One mutation: no member write followed by a possibly failing INCR.
+    redis.call('HSET', key, 'u:' .. user, wanted,
+               'total', string.format('%.0f', next_total),
+               'delta', string.format('%.0f', next_dirty))
 end
 return {delta, next_total, next_dirty}</code></pre><div class="bilingual"><div class="lang-zh"><p>只有保存了完整的用户点赞状态，而且它与 total 一致，才能设置就绪标记 ready；新评论可以从全空状态初始化。这个哈希不设 TTL，也不允许单独让成员过期或逐键淘汰；保留值为 0 的用户字段会消耗额外空间。</p><p>重启、故障切换或快照恢复后，入口处的恢复检查必须先暂停所有点赞写入，即使旧哈希仍标着 ready=1，也不能直接恢复服务。如果键丢失、类型损坏或成员不完整，就拒绝写入。<strong>不能只用持久化总数初始化一个空成员集合</strong>，否则以前赞过的用户再次重试，又会被当作新用户加一。</p></div><div class="lang-en"><p>Set ready only with complete membership matching total; a fresh comment can start empty. Use no hash TTL, member expiry or independent key eviction; retained zero fields consume space. After restart, failover or snapshot restore, an entry recovery gate pauses all like writes, even if an old hash still says ready=1. Missing, corrupt or incomplete state refuses writes. <strong>Never combine a saved total with empty membership</strong>: returning users would be counted again.</p></div></div><h3><span class="lang-zh">先冻结增量，再用唯一批号写入数据库</span><span class="lang-en">Freeze a batch, then flush through a unique ledger</span></h3><div class="bilingual"><div class="lang-zh"><p>系统在同一哈希内原子写入 <code>b:UUID=delta</code>，把当前增量冻结为一批，并将当前 delta 清零，让后续点赞继续累积。冻结后的批次不可修改，UUID 永不复用。每条评论同一时间只允许一批尚未确认；确认旧批后，才能冻结下一批，避免取消点赞的减量先于对应加量入库。</p><p>刷库进程 Counter flush 重试时，必须沿用同一批号和同一载荷，收到提交确认后才按该批号清理冻结记录。如果改成“读 delta → 刷库 → 清零”，最后的清零会抹掉中途到达的新点赞。下面的 SQL 把唯一账本和计数增量放进同一事务；出现唯一键冲突后，要重新读取并比较载荷。同一批号却带着不同 delta 时应报错，不能视为已经成功。<a href="#ref-7">[7]</a></p></div><div class="lang-en"><p>Rotate atomically inside the hash: store b:UUID=delta and zero the current delta while new likes continue. Batches are immutable and ids never reused. Allow only one in-flight batch per comment; acknowledge it before rotating the next, so decrements cannot flush ahead of their increments. Flush retries identical id and payload; clear that exact batch only after commit ACK. Read/flush/zero erases intervening changes. The SQL commits the unique ledger and increment together, then rereads and compares payload after conflict. A reused id with changed delta is an error. <a href="#ref-7">[7]</a></p></div></div><pre data-language="SQL · PostgreSQL 18 teaching fragment" data-kind="teaching" data-source="flush.sql"><code>-- PostgreSQL 18 teaching fragment: frozen batch from a trusted flusher.
 -- Ledger PK=(comment_id,batch_id); payload stores immutable delta.
 BEGIN;
+
 WITH first_apply AS (
-  INSERT INTO applied_like_batch(comment_id, batch_id, delta)
-  VALUES (:comment, :batch, :delta)
-  ON CONFLICT (comment_id, batch_id) DO NOTHING
-  RETURNING delta
+    INSERT INTO applied_like_batch(comment_id, batch_id, delta)
+    VALUES (:comment, :batch, :delta)
+    ON CONFLICT (comment_id, batch_id) DO NOTHING
+    RETURNING delta
 )
-UPDATE like_count SET total = total + first_apply.delta
-FROM first_apply WHERE like_count.comment_id = :comment;
+UPDATE like_count
+SET total = total + first_apply.delta
+FROM first_apply
+WHERE like_count.comment_id = :comment;
+
 -- Require a pre-existing count row; on missing row ROLLBACK, never ACK.
 -- Read the ledger in a NEW statement (READ COMMITTED conflict may wait).
-SELECT delta FROM applied_like_batch
+SELECT delta
+FROM applied_like_batch
 WHERE comment_id = :comment AND batch_id = :batch;
+
 -- Require stored delta = :delta; changed payload is an error, ROLLBACK.
 COMMIT;
+
 -- ACK only after commit. An unknown outcome retries this SAME id + delta.
 -- Frozen bytes and ids survive flusher restart; ids never repeat.</code></pre><div class="bilingual"><div class="lang-zh"><p><strong>接收确认不等于持久化保证。</strong>A8 允许丢失内存中的成员状态和未刷批次。10 秒只是正常刷库周期，发生积压时，可能丢失的时间窗口会扩大；副本和 AOF 配置也会改变这个窗口。<a href="#ref-10">[10]</a> 每 10 秒把 1,000 条脏评论的增量写入数据库，约需每秒 100 笔计数事务，但每秒约 5,787 次成员状态更新仍然存在。</p><p>点赞缓存丢失后，系统可以展示最后持久化的计数并标明滞后，同时暂停点赞写入。没有持久化明细，就<strong>无法精确恢复成员或重建总数</strong>。入口恢复检查是部署必须提供的保证，上面的 Lua 不负责检测重启或重建数据。缺少明细时，只能保持只读；或者由产品明确开启新一代，清零计数与成员，并隔离旧批次，不能自动接着写。</p><p>如果要求“已接收的点赞不丢”，就要先把唯一的成员事实和 outbox 持久化提交，再异步生成计数投影。接口确认接收的时点也随之改变。</p></div><div class="lang-en"><p><strong>Accepted does not mean durable:</strong> A8 permits losing memory membership and unflushed batches. Ten seconds is a normal interval; backlog widens the loss window, while replication/AOF choices change it. <a href="#ref-10">[10]</a> 1,000 dirty comments per ten seconds means about 100 count transactions/s, without removing 5,787/s membership updates. After state loss, show the persisted count as stale and pause writes. Without durable facts, <strong>exact membership and totals cannot be rebuilt</strong>. The recovery gate is a deployment contract; this Lua does not detect restarts or rebuild facts. Without facts, stay read-only or explicitly reset the product to a fresh generation with zero count/members and fenced old batches. Never resume automatically. Lossless acceptance requires durable unique membership plus outbox before asynchronous projection.</p></div></div></section>
 <section><h2><span class="lang-zh">16.5 · 审核：先保存投递意图，再拒绝过时结果</span><span class="lang-en">16.5 · Moderation: commit intent, then fence stale decisions</span></h2><figure class="deck">
@@ -634,31 +664,44 @@ COMMIT;
         <figcaption><span class="lang-zh">完整图接上了审核 Worker 及其对 Primary 的条件更新。旧版本的通过结果不能让已删除评论重新公开。按假设，每秒处理 1,000 条、到达约 1,157 条，积压每秒约增加 157 条，需要扩容或收紧写入口。</span> <span class="lang-en">Complete picture: queue has a worker and worker has Primary. A stale approval cannot revive deletion. With assumed service at 1,000/s and arrivals at 1,157/s, backlog grows by about 157/s.</span></figcaption>
       </div>
     </figure><div class="bilingual"><div class="lang-zh"><p>同一帖子分片上的权威库保存评论 Comment、请求回执 Receipt 和待发送消息 Outbox，并预先建立帖子级保护行 post guard。创建、编辑、删除和审核都先锁住这行，直到事务提交，形成明确的串行边界。代价是热门帖的写入会受到限制；如果改成更细的锁或拆分数据库，就要重新证明这些约束仍然成立。请求回执以 <code>(post_id,author_id,request_key)</code> 为唯一键，操作意图包含帖子、回复目标、正文、附件和策略版本。同一个键即使只换回复目标，也要拒绝。</p><p>下面是<strong>事务伪代码</strong>，并非完整后端。relay 只读取已提交的 outbox，确认队列已持久接收后才标记 sent；回包丢失时仍可能重投。Worker 更新评论前，要核对被审内容的版本、摘要和待审状态。可见性事件也随状态变更在同一事务中提交，避免更新状态后发送事件时再次出现双写间隙。<a href="#ref-6">[6]</a></p></div><div class="lang-en"><p>One post-shard authority stores Comment, Receipt and Outbox with a pre-created post guard. Create/edit/delete/moderation lock that row through commit: clear serialization, with a hot-post bottleneck. Finer locks or split stores require new proofs. Receipt uniqueness is (post_id,author_id,request_key); intent binds post, parent, body, attachments and policy version. Changing the target under the same key is rejected.</p><p>This is <strong>transaction pseudocode</strong>, not a complete backend. Relay polls committed outbox and marks sent after durable queue acceptance; lost replies can duplicate delivery. Worker matches reviewed version, digest and pending state. Visibility events commit with state too, avoiding another dual write. <a href="#ref-6">[6]</a></p></div></div><pre data-language="Pseudocode · authority transactions" data-kind="pseudocode" data-source="moderate.pseudo"><code>submit(auth, request_key, post, parent, body):
-  intent = canonical(post, parent, body, attachments, policy_version)
-  transaction on ONE post-shard authority:
-    lock pre-created post guard; authorize(auth, post)
-    old = receipt(post, auth.user, request_key)  # unique within this post
-    if old: require old.intent == intent; return old.result
-    target = resolve_parent_in_this_post(parent)
-    require target is null OR (target.visible AND target.root.ever_public)
-    comment_id = fresh_unique_id()  # never reused
-    root = target.root_id if target else comment_id
-    insert pending(comment_id, post, parent, root, body, digest(body), version=1)
-    insert audit_outbox(comment_id, version=1, immutable_body_digest)
-    insert receipt(post, auth.user, request_key, intent, comment_id)
-  return 202 pending  # unknown commit: retry original key and intent
+    intent = canonical(post, parent, body, attachments, policy_version)
+
+    transaction on ONE post-shard authority:
+        lock pre-created post guard;
+        authorize(auth, post)
+
+        old = receipt(post, auth.user, request_key)  # unique within this post
+        if old:
+            require old.intent == intent;
+            return old.result
+
+        target = resolve_parent_in_this_post(parent)
+        require target is null OR (target.visible AND target.root.ever_public)
+        comment_id = fresh_unique_id()  # never reused
+        root = target.root_id if target else comment_id
+
+        insert pending(comment_id, post, parent, root, body, digest(body), version=1)
+        insert audit_outbox(comment_id, version=1, immutable_body_digest)
+        insert receipt(post, auth.user, request_key, intent, comment_id)
+
+    return 202 pending  # unknown commit: retry original key and intent
 
 apply_decision(trusted_event, approved):
-  transaction on the SAME authority:
-    lock post guard  # edit/delete/approval all use this guard
-    c = comment(trusted_event.post, trusted_event.comment)
-    if c.version != trusted_event.version OR c.status != pending: return NOOP
-    require c.body_digest == trusted_event.reviewed_digest
-    c.status = visible if approved else rejected
-    if approved: c.ever_public = true
-    save(c)
-    insert visibility_outbox(trusted_event.event_id, c.id, c.version, c.status)
-  ACK event only after commit; duplicate decision sees non-pending -&gt; NOOP
+    transaction on the SAME authority:
+        lock post guard  # edit/delete/approval all use this guard
+        c = comment(trusted_event.post, trusted_event.comment)
+        if c.version != trusted_event.version OR c.status != pending:
+            return NOOP
+
+        require c.body_digest == trusted_event.reviewed_digest
+        c.status = visible if approved else rejected
+        if approved:
+            c.ever_public = true
+        save(c)
+        insert visibility_outbox(trusted_event.event_id, c.id, c.version, c.status)
+
+    ACK event only after commit; duplicate decision sees non-pending -&gt; NOOP
+
 # Edit/delete increments content version, changes status, emits outbox together.
 # Deleted: clear body, profile and quote payloads; retain structural ids only.
 # Visibility-count consumers persist (event_id, effect) with increment together.</code></pre><div class="bilingual"><div class="lang-zh"><p><strong>把删除与审核结果的先后顺序各走一次。</strong>如果 approve(v8) 先到，系统先公开 v8，后续删除再把它推进到 deleted(v9)，并清除正文。如果删除先到，旧审核结果的更新条件就不匹配，既不会恢复正文，也不会再次增加可见回复数。重复的通过结果同样无效，因为评论已不再处于 pending。编辑会先把评论改为 pending(v9)，使旧版本结果失效。消费可见性事件来更新回复数时，也必须把唯一 event_id 与增减操作放在同一事务中。</p><p>A9 假设的处理能力为 10×100=1,000 条/秒，低于峰值 1,157.407 条/秒，持续十分钟会积压 (1,157.407−1,000)×600≈94,444 条。若增加到 20 个 Worker，假设总能力为 2,000 条/秒，峰值利用率约为 57.9%。运行时要监控最老待审任务的等待时间、失败重试情况和 outbox 滞后；异常任务进入可追踪的失败状态。如果改为先发后审，虽然减少了等待，却会增加违规内容曝光和撤回成本，需要另行约定产品策略。</p></div><div class="lang-en"><p><strong>Failure trace:</strong> if approve(v8) wins, it publishes before delete advances to deleted(v9) and clears the body. If delete wins, stale approval does not match: no revival or extra visible-reply increment. Duplicate approvals are no-ops after leaving pending. Editing advances to pending(v9), fencing old decisions too. Count consumers commit unique event_id and arithmetic together.</p><p>Ten workers at 100/s provide 1,000/s below the 1,157.407/s peak. Ten-minute backlog is (1,157.407−1,000)×600≈94,444. Twenty assumed workers provide 2,000/s at about 57.9% peak utilization. Monitor oldest pending, retry/failure state and outbox age. Post-publish moderation reduces waiting but adds exposure and withdrawal cost, requiring a different product policy.</p></div></div></section>
@@ -775,30 +818,39 @@ apply_decision(trusted_event, approved):
         <figcaption><span class="lang-zh">完整图中，被拒绝的请求沿红线逐跳返回：API → Edge → Client。获准回源的请求可以正常返回，超额请求则收到 Retry-After 提示。两条分支表示两类请求，不是同一请求同时成功和失败。</span> <span class="lang-en">The red response walks API → Edge → Client. Admitted requests can succeed; excess requests get Retry-After. The two branches represent different requests, not simultaneous success and failure.</span></figcaption>
       </div>
     </figure><div class="bilingual"><div class="lang-zh"><p>整层缓存故障时，每秒约有 8,681 页想回源，相当于 600 页/秒预算的 14.47 倍，数据库无法独自接住。若这些请求都需独立回源，且 600 页/秒的额度全部用满，仍约有 8,081 次/秒因额度不足被拒绝，并收到 Retry-After。600 只是获准回源的上限；放行更少时，额度拒绝会更多，获准后的数据库超时等失败还要另计。同键请求合并（singleflight）只能合并<strong>同一个缓存键</strong>的读取，不同游标的请求仍要各自消耗全局回源配额。跨实例合并需要带代际标记 token 的租约：缓存失效时，在缓存侧原子更换 token 并删除页面；回填时，也要原子完成 token 核对和写入，不能先检查、再单独执行 SET。参考论文支持租约机制，不证明本章的容量目标。<a href="#ref-8">[8]</a></p><p><strong>只删除缓存键，旧正文仍可能回来。</strong>例如，v8 的慢查询尚未返回，删除已提交为 v9，缓存也已清除；随后 v8 查询迟到，又把旧正文填回。代际 token 可以拒绝这次旧回填，但缓存失效消息本身也可能延迟，所以正文还需要绝对截止时间 not_after。它必须从<strong>新的权威查询开始前</strong>起算，不能读取旧事务快照或有复制延迟的副本，也不能在迟到回填时重新设置 TTL。</p></div><div class="lang-en"><p>Whole-cache failure sends about 8,681 pages/s toward a 600 pages/s budget, 14.47× capacity. If each request needs a separate origin read and the full allowance is used, about 8,081/s are rejected as excess with Retry-After. Admitting fewer requests increases quota rejections; admitted reads can also fail. Coalescing merges <strong>one key</strong>; different cursors still consume global quota. Cross-instance leases need generation tokens. Cache-side invalidation rotates token and deletes atomically; fill also checks and writes atomically, never check then separate SET. The lease paper supports this mechanism, not our capacity targets. <a href="#ref-8">[8]</a></p><p><strong>Deleting a key can revive content:</strong> slow v8 query → deletion commits v9 → cache deletion → delayed v8 fill. Tokens fence that fill, but delayed invalidation also requires absolute not_after. Start time <strong>before a fresh authority query</strong>, excluding old transactions and lagging replicas. Late fill must not restart TTL.</p></div></div><pre data-language="Pseudocode · bounded body freshness" data-kind="pseudocode" data-source="cache.pseudo"><code>public_page(auth, query):
-  authorize_post(auth, query.post)  # also required on a cache hit
-  ctx = validate_signed_cursor(query)  # post, scope, order, limit, expiry
-  key = body_slice_key(ctx)  # excludes pending/private author state
-  hit = cache.get(key)
-  if hit and safe_to_send(hit.not_after): return public_projection(hit)
-  lease = cache.try_lease(key)  # OWNER(token), BUSY, or CACHE_UNAVAILABLE
-  if lease == BUSY:
-    page = cache.wait_for_fill(key, bounded_deadline)
-    return public_projection(page) if page and safe_to_send(page.not_after) else 503
-  # Only OWNER or unavailable-cache bypass can consume an origin-page permit.
-  if not global_origin_quota.try_acquire():
-    if lease is OWNER: cache.release_if_current(key, lease.token)
-    return 503 Retry-After
-  started = clock.now()
-  not_after = started + (5 seconds - clock_error_and_send_margin)
-  page = authority.fresh_statement_query(ctx)  # no older transaction/replica
-  if not safe_to_send(not_after): return 503  # never restart the 5 seconds
-  if lease is OWNER:
-    cache.fill_if_current(key, lease.token, page, not_after)
-    # ONE cache-side atomic check+write; invalidation rotates/revokes token.
-  return public_projection(page) if safe_to_send(not_after) else 503
+    authorize_post(auth, query.post)  # also required on a cache hit
+    ctx = validate_signed_cursor(query)  # post, scope, order, limit, expiry
+    key = body_slice_key(ctx)  # excludes pending/private author state
+
+    hit = cache.get(key)
+    if hit and safe_to_send(hit.not_after):
+        return public_projection(hit)
+
+    lease = cache.try_lease(key)  # OWNER(token), BUSY, or CACHE_UNAVAILABLE
+    if lease == BUSY:
+        page = cache.wait_for_fill(key, bounded_deadline)
+        return public_projection(page) if page and safe_to_send(page.not_after) else 503
+
+    # Only OWNER or unavailable-cache bypass can consume an origin-page permit.
+    if not global_origin_quota.try_acquire():
+        if lease is OWNER:
+            cache.release_if_current(key, lease.token)
+        return 503 Retry-After
+
+    started = clock.now()
+    not_after = started + (5 seconds - clock_error_and_send_margin)
+    page = authority.fresh_statement_query(ctx)  # no older transaction/replica
+    if not safe_to_send(not_after):
+        return 503  # never restart the 5 seconds
+
+    if lease is OWNER:
+        cache.fill_if_current(key, lease.token, page, not_after)
+        # ONE cache-side atomic check+write; invalidation rotates/revokes token.
+    return public_projection(page) if safe_to_send(not_after) else 503
 
 invalidate(committed_visibility_event):
-  cache.rotate_token_and_delete(affected_key)  # atomic, repeated is safe
+    cache.rotate_token_and_delete(affected_key)  # atomic, repeated is safe
+
 # Fill rejection may still return a pre-delete snapshot inside its 5 s bound.
 # Lease loss/restart never resets not_after. An unavailable authority fails closed.
 # Requires bounded clock error/output delay; already sent copies cannot be recalled.</code></pre><div class="bilingual"><div class="lang-zh"><p>发送前，safe_to_send 会结合当前时间、绝对截止时间 not_after 和已知输出余量再次检查，并为跨机器时钟误差预留空间；无法满足条件就返回 503。这里的 5 秒，是在时钟与输出预算满足约定时，服务端最后允许发送旧正文的目标，不保证删除客户端已保存的离线副本，也不是本轮实测得到的 SLO。及时失效会让旧内容更早停止使用，失效延迟也不能延长有效期。每次请求都要检查权限；点赞数字可以滞后，过期正文则不能拿来降级兜底。</p><p>按帖子 post_id 分片，可以把回复树、请求回执和审核事务放在同一分片内，但不能消除热帖写入热点。极热帖如果进一步按楼拆分，就要增加楼路由和一级列表合并。小规模系统可以先不加缓存，确认完整页面查询的容量预算后，再判断是否需要。每种替代方案都要重新检查事务边界与故障结果。</p></div><div class="lang-en"><p>safe_to_send checks time, not_after and a known send margin before returning, with cross-machine clock error reserved. Otherwise return 503. Five seconds is the target last server send of stale bodies under those clock/budget contracts, not removal of offline client copies or a measured SLO. Timely invalidation converges earlier; delayed invalidation still cannot renew old data. Authorize each request. Counts may lag; expired bodies cannot be stale fallback.</p><p>Post sharding localizes trees, receipts and moderation transactions without removing hot-post writes. Thread sharding adds routing and root merge. Small installations may omit cache after validating complete page capacity. Re-evaluate transaction boundaries and failure behavior with each alternative.</p></div></div></section>

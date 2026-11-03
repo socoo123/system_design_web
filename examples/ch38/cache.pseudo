@@ -6,7 +6,9 @@ claim(key):
         state = metadata.getOrCreate(key)      # floor persists; value is evictable
         if value[key] exists and value[key].hardExpires > now + 2000ms:
             return HIT(value[key])
-        if state.leaseUntil > now: return WAIT
+        if state.leaseUntil > now:
+            return WAIT
+
         state.ticket = randomUniqueToken()
         state.leaseUntil = now + 1000ms
         return (runtime.epoch, state.ticket)
@@ -15,7 +17,8 @@ invalidate(key, revision):
     atomic:
         state = metadata.getOrCreate(key)
         state.floor = max(state.floor, revision)
-        state.ticket = null; state.leaseUntil = 0
+        state.ticket = null;
+        state.leaseUntil = 0
         delete value[key]
 
 guardedFill(key, token, evidence):
@@ -27,6 +30,8 @@ guardedFill(key, token, evidence):
         require evidence.hardExpires - evidence.observedAt == (evidence.absent ? 5000ms : 20000ms)
         require evidence.observedAt <= now + 2000ms
         require now + 2000ms < evidence.hardExpires
+
         value[key] = evidence                  # keep ORIGINAL hard deadline
-        state.ticket = null; state.leaseUntil = 0
+        state.ticket = null;
+        state.leaseUntil = 0
 # Restart rotates epoch; missing metadata rejects old tokens, never grants them.

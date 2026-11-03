@@ -158,38 +158,61 @@
 <section><h2><span class="lang-zh">数据模型：分清发布代次、内容版本和调用者视图</span><span class="lang-en">Model: generation, content identity and caller view</span></h2>
 <div class="bilingual"><div class="lang-zh"><p><strong>每个 namespace 的并发发布，都围绕同一行 Current 串行处理。</strong>这一行同时保存发布代次 g、稳定版和金丝雀版的 release、灰度比例、salt 以及规则修订号。内容记录 ContentRelease 保持不可变，因此 g=42 选择 R18 后，g=43 也可以选回 R17。新增内容、只改规则、推广到全量和回退，都会推进 g。</p><p>下面这组可执行的 SQLite 约束用于验证本地事务。复合外键保证只能选择本 namespace 的内容；回执由认证主体、namespace 和请求键共同标识；审计、回执和变更记录都关联到同一次发布的 g。生产环境还要限制直接写表的权限，防止绕过受控发布事务。</p></div><div class="lang-en"><p><strong>One Current row defines the concurrency boundary.</strong> It holds g, stable/canary releases, percentage, salt and rule revision. ContentRelease is immutable: g42 may select R18 and g43 may select R17. Content edits, rule-only edits, promotion and rollback all advance g.</p><p>This executable SQLite constraint subset supports local transaction checks. Composite foreign keys scope releases to namespaces. Receipt identity is authenticated principal/namespace/request key, while audit, receipt and change refer to the same publication g. Production must prevent raw writes bypassing the controlled transaction.</p></div></div><pre data-language="SQL · executable SQLite subset" data-kind="runnable" data-source="schema.sql"><code>-- Executable SQLite subset; production write permissions protect these paths.
 PRAGMA foreign_keys = ON;
+
 CREATE TABLE release (
-  namespace TEXT NOT NULL, release_id TEXT NOT NULL,
-  payload TEXT NOT NULL, checksum TEXT NOT NULL,
-  PRIMARY KEY (namespace, release_id)
+    namespace TEXT NOT NULL,
+    release_id TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    checksum TEXT NOT NULL,
+    PRIMARY KEY (namespace, release_id)
 );
+
 CREATE TABLE current (
-  namespace TEXT PRIMARY KEY NOT NULL, generation INTEGER NOT NULL CHECK (generation &gt;= 0),
-  stable TEXT NOT NULL, canary TEXT, percent INTEGER NOT NULL CHECK (percent BETWEEN 0 AND 100),
-  salt TEXT NOT NULL, cluster TEXT NOT NULL, rule_revision INTEGER NOT NULL CHECK (rule_revision &gt;= 0),
-  CHECK (canary IS NOT NULL OR percent = 0),
-  FOREIGN KEY (namespace, stable) REFERENCES release(namespace, release_id),
-  FOREIGN KEY (namespace, canary) REFERENCES release(namespace, release_id)
+    namespace TEXT PRIMARY KEY NOT NULL,
+    generation INTEGER NOT NULL CHECK (generation &gt;= 0),
+    stable TEXT NOT NULL,
+    canary TEXT,
+    percent INTEGER NOT NULL CHECK (percent BETWEEN 0 AND 100),
+    salt TEXT NOT NULL,
+    cluster TEXT NOT NULL,
+    rule_revision INTEGER NOT NULL CHECK (rule_revision &gt;= 0),
+    CHECK (canary IS NOT NULL OR percent = 0),
+    FOREIGN KEY (namespace, stable) REFERENCES release(namespace, release_id),
+    FOREIGN KEY (namespace, canary) REFERENCES release(namespace, release_id)
 );
+
 CREATE TABLE publication (
-  namespace TEXT NOT NULL, generation INTEGER NOT NULL, principal TEXT NOT NULL,
-  request_key TEXT NOT NULL, reason TEXT NOT NULL, previous_generation INTEGER NOT NULL,
-  previous_view TEXT NOT NULL, next_view TEXT NOT NULL,
-  PRIMARY KEY (namespace, generation)
+    namespace TEXT NOT NULL,
+    generation INTEGER NOT NULL,
+    principal TEXT NOT NULL,
+    request_key TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    previous_generation INTEGER NOT NULL,
+    previous_view TEXT NOT NULL,
+    next_view TEXT NOT NULL,
+    PRIMARY KEY (namespace, generation)
 );
+
 CREATE TABLE receipt (
-  principal TEXT NOT NULL, namespace TEXT NOT NULL, request_key TEXT NOT NULL,
-  request_hash TEXT NOT NULL, result_generation INTEGER NOT NULL,
-  PRIMARY KEY (principal, namespace, request_key),
-  FOREIGN KEY (namespace, result_generation) REFERENCES publication(namespace, generation)
+    principal TEXT NOT NULL,
+    namespace TEXT NOT NULL,
+    request_key TEXT NOT NULL,
+    request_hash TEXT NOT NULL,
+    result_generation INTEGER NOT NULL,
+    PRIMARY KEY (principal, namespace, request_key),
+    FOREIGN KEY (namespace, result_generation) REFERENCES publication(namespace, generation)
 );
+
 CREATE TABLE change_log (
-  namespace TEXT NOT NULL, generation INTEGER NOT NULL,
-  PRIMARY KEY (namespace, generation),
-  FOREIGN KEY (namespace, generation) REFERENCES publication(namespace, generation)
+    namespace TEXT NOT NULL,
+    generation INTEGER NOT NULL,
+    PRIMARY KEY (namespace, generation),
+    FOREIGN KEY (namespace, generation) REFERENCES publication(namespace, generation)
 );
+
 CREATE TABLE history_floor (
-  namespace TEXT PRIMARY KEY NOT NULL, compacted_through INTEGER NOT NULL
+    namespace TEXT PRIMARY KEY NOT NULL,
+    compacted_through INTEGER NOT NULL
 );</code></pre><div class="bilingual"><div class="lang-zh"><p>所选视图还要绑定<strong>控制面签发的身份上下文</strong>，包括 namespace、实例，以及标签和凭据的修订信息。服务不能相信请求自行填写的 tag=canary。GET、watch、安全确认和缓存键都要限定作用域，相关请求先完成鉴权。摘要只能检测内容损坏，不能代替 TLS 或读取权限校验。本章规定每键最多 256 KB、整包最多 1 MB，超出时返回 413。</p><p>ETag 包含 g、规则、身份选择上下文、release 和摘要。If-None-Match 与 304 用来判断所选表示是否变化，本身不能证明权威状态仍然新鲜。<a href="#ref-6">[6]</a> 批接口最多接收 10 个 namespace：每包内部一致，跨包不保证来自同一个提交点。即使把大对象放到外部存储，读取时仍要核对摘要和授权。</p></div><div class="lang-en"><p>A selected view also binds a <strong>control-plane-issued identity context</strong>: namespace, instance and label/credential revision. Do not trust self-asserted tag=canary. GET, watch, confirmation and cache keys require scoped authentication first. Digests detect corruption without replacing TLS or read permissions. Our caps are 256 KB/key and 1 MB/bundle, returning 413 above them.</p><p>ETags include g, rule, identity-selection context, release and digest. If-None-Match/304 compare the selected representation; they provide no authority freshness proof. <a href="#ref-6">[6]</a> The batch endpoint accepts at most ten namespaces, each internally consistent without a cross-namespace commit point. External large objects still need digest and authorization checks.</p></div></div><details><summary><span class="lang-zh">展开 HTTP 接口约定；路径表示不等于实现代码</span><span class="lang-en">HTTP contracts; endpoint notation is not the implementation</span></summary><pre data-language="HTTP · teaching interface notation" data-kind="pseudocode" data-source="api.txt"><code>POST /v1/publications  Idempotency-Key: request-7
 { namespace, expected_generation: 41, stable: &quot;R17&quot;, canary: &quot;R18&quot;,
   percent: 5, salt: &quot;s1&quot;, eligible_cluster: &quot;approved&quot;, reason, new_content? }
@@ -318,24 +341,30 @@ POST /v1/confirmations  Cache-Control: no-store
     require authenticated_and_authorized(auth, draft.namespace, &quot;publish&quot;)
     draft = freeze_validated_intent(draft)       // schema, size, ranges, approval
     hash = SHA256(canonical_full_intent(draft))  // include expected g, rule, reason
+
     BEGIN                                      // same authority database
     current = SELECT Current WHERE namespace = draft.namespace FOR UPDATE
     prior = SELECT Receipt WHERE (principal, namespace, key) =
                                  (auth.principal, draft.namespace, requestKey)
     if prior exists:                            // recheck after serialization
         require prior.request_hash == hash else CONFLICT
-        COMMIT; return prior.result              // before checking expected g
+        COMMIT;
+        return prior.result              // before checking expected g
+
     require current.generation == draft.expected_generation else STALE
     if draft has new content:
         INSERT immutable Release                // same ID + different bytes conflicts
     require stable_and_canary_belong_to_namespace(draft)
+
     next = current.generation + 1               // including rule-only / rollback
     UPDATE Current SET generation = next, pointers_and_rule = draft
       WHERE namespace = draft.namespace AND generation = draft.expected_generation
     require affected_rows == 1
+
     INSERT Publication(namespace, next, principal, key, reason, previous_pointers)
     INSERT Receipt(principal, namespace, key, hash, result = next)
     INSERT ChangeLog(namespace, next)
+
     COMMIT                                      // any error rolls back every row
     return 201(next)                             // lost reply: retry same intent/key
 // Relay tails committed ChangeLog per connection owner; hints may repeat.
@@ -429,7 +458,10 @@ POST /v1/confirmations  Cache-Control: no-store
         <figcaption><span class="lang-zh">历史被裁剪后，如果旧游标已无法重放，服务返回 RESET。SDK 沿原有 GET 路径重新获取完整快照，应用后再从该 g 继续 watch；不能只把游标改成“最新”来跳过缺口。</span><span class="lang-en">When retained history no longer covers the cursor, return RESET. Fetch a complete snapshot on the existing GET path, then watch after its generation; do not skip a history gap.</span></figcaption>
       </div>
     </figure><div class="bilingual"><div class="lang-zh"><p>SDK 先获取并应用完整选择视图，记住 g，再发起 watch(g)。服务端按<strong>同一套同步规则</strong>登记等待者、复查代次；relay 更新本地索引和唤醒等待者时，也使用这套规则，才能覆盖“刚检查完就发生发布”的窗口。下面的 Java 代码只保护<strong>一个服务节点上、一个 namespace 的本地等待表</strong>，并不提供跨机器事务。</p><p>节点开始接收 watch 前，要先读取一致快照及其存储修订号 R，重建索引，再追赶 R 之后的变更。etcd watch 的 start_revision 包含起点，所以应从 R+1 开始。如果起点已被裁剪，etcd 会返回 compact_revision 并取消该 watch，不能一直重试同一个旧 revision。<a href="#ref-5">[5]</a> namespace 的发布代次 g 与全局存储修订号 R 是两套编号，由适配层负责映射。</p></div><div class="lang-en"><p>Fetch a complete selected view and g, then watch(g). <strong>Register and recheck under one synchronization rule</strong>; relay index updates and wakeups use the same rule. This covers publication immediately after a check. The Java code protects <strong>one node’s local waiter table for one namespace</strong>, without claiming a cross-machine transaction.</p><p>Before serving watches, load a consistent snapshot and store revision R, rebuild the index and resume changes after R. etcd start_revision is inclusive, so use R+1. A compacted start revision yields compact_revision and cancels the watch; repeatedly retrying that old revision is invalid. <a href="#ref-5">[5]</a> Namespace g and global store R are separate numbers mapped by the adapter.</p></div></div><pre data-language="Java 17 · local watch excerpt" data-kind="teaching" data-source="WatchHub.java" data-snippet="watch"><code>public synchronized CompletableFuture&lt;Hint&gt; watch(long cursor) {
-    if (cursor &lt; 0) throw new IllegalArgumentException(&quot;negative cursor&quot;);
+    if (cursor &lt; 0) {
+        throw new IllegalArgumentException(&quot;negative cursor&quot;);
+    }
+
     var answer = new CompletableFuture&lt;Hint&gt;();
     waiters.add(new Waiter(cursor, answer)); // register before recheck
     recheck();                              // same monitor as relay updates
@@ -437,9 +469,12 @@ POST /v1/confirmations  Cache-Control: no-store
 }
 
 public synchronized void replay(long latest, long floor) {
-    if (latest &lt; generation || floor &lt; compactedThrough || floor &gt; latest)
+    if (latest &lt; generation || floor &lt; compactedThrough || floor &gt; latest) {
         throw new IllegalArgumentException(&quot;replay cannot move backwards&quot;);
-    generation = latest; compactedThrough = floor;
+    }
+
+    generation = latest;
+    compactedThrough = floor;
     recheck();                              // all local connection owners see it
 }
 
@@ -449,8 +484,11 @@ private void recheck() {
         Kind kind = w.cursor() &gt; generation ? Kind.SYNC_REQUIRED
                 : w.cursor() &lt; compactedThrough ? Kind.RESET
                 : w.cursor() &lt; generation ? Kind.CHANGED : null;
-        if (kind != null) ready.add(w);
+        if (kind != null) {
+            ready.add(w);
+        }
     }
+
     waiters.removeAll(ready);                // remove before completing callbacks
     for (Waiter w : ready) {
         Kind k = w.cursor() &gt; generation ? Kind.SYNC_REQUIRED
@@ -548,13 +586,21 @@ private void recheck() {
       </div>
     </figure><div class="bilingual"><div class="lang-zh"><p><strong>SDK 要先准备好资源，再切换视图；收到 JSON 还不算业务生效。</strong>它先构造不可变的待应用视图（staging），核对摘要、schema 和取值范围，并准备所需资源，成功后才执行下面的本地切换。准备失败时保留原来的已应用状态，需要重启才能生效的配置则单独上报 requires_restart。业务每次操作捕获一份引用，旧请求可以继续使用旧视图，新请求读取切换后的新视图。</p><p>身份相同时，SDK 丢弃迟到且 g 更小的响应，把同 g 却内容不同的响应视为分叉；完全相同的重试不会刷新安全证明。身份或标签修订变化时，先清除旧选择和证明，即使 g 没变也要重新选包。否则，旧身份下的慢响应可能让本不属于灰度范围的实例用上金丝雀配置。View 包含作用域 scope、g、规则、release、摘要和验证后的值；下面节选所对应的完整 Java 类可在示例目录中运行。</p></div><div class="lang-en"><p><strong>Prepare before swapping; fetched JSON is not applied behavior.</strong> Build immutable staging, verify digest/schema/ranges and prepare resources before the local transition below. Preparation failure retains old applied; requires_restart is reported separately. Each operation captures one reference. Existing requests may finish on the old view; new requests read the new view.</p><p>For the same identity, discard delayed smaller g and reject same-g content forks. An identical retry does not refresh proof. Identity/label revision changes clear selection and proof, requiring reselection even at the same g. Otherwise an old-context response could move an ineligible instance into canary. View contains scope, g, rule, release, digest and validated values. The full runnable Java class is in the examples directory.</p></div></div><pre data-language="Java 17 · local install excerpt" data-kind="teaching" data-source="ConfigClient.java" data-snippet="install"><code>public synchronized boolean install(View verifiedAndPrepared) {
     View next = verifiedAndPrepared; // adapter verified bytes, schema and resources
-    if (!scope.equals(next.scope())) return false; // delayed old-identity reply
+    if (!scope.equals(next.scope())) {
+        return false; // delayed old-identity reply
+    }
+
     Applied old = state;
-    if (old != null &amp;&amp; next.generation() &lt; old.view().generation()) return false;
+    if (old != null &amp;&amp; next.generation() &lt; old.view().generation()) {
+        return false;
+    }
     if (old != null &amp;&amp; next.generation() == old.view().generation()) {
-        if (!next.equals(old.view())) throw new IllegalStateException(&quot;same-g fork&quot;);
+        if (!next.equals(old.view())) {
+            throw new IllegalStateException(&quot;same-g fork&quot;);
+        }
         return true; // identical retry does not reset proof time
     }
+
     state = new Applied(next, null); // bytes + applied generation + cleared proof
     pending = null;                 // old confirmation cannot qualify new view
     return true;
@@ -562,32 +608,46 @@ private void recheck() {
 
 public synchronized void identityChanged(Scope issuedScope) {
     scope = Objects.requireNonNull(issuedScope);
-    state = null; pending = null;   // same g may now select another release
+    state = null;
+    pending = null;   // same g may now select another release
 }</code></pre><div class="bilingual"><div class="lang-zh"><p>普通配置采用 serve_last 策略，继续使用最后一次成功应用的快照。冷启动时可以读取身份、schema 和摘要都匹配的磁盘正文，但<strong>不能恢复安全证明</strong>。必需键没有安全默认值时，相应功能保持未就绪；关键 allow 缺失时默认拒绝。保存磁盘快照时，先写临时文件并刷新文件，再原子改名，并按文件系统要求刷新目录；写入失败时保留有效的内存快照并报告错误。本章没有实测断电后的磁盘恢复保证。</p><p><strong>安全确认通过专用接口执行不经缓存的权威选择读取。</strong>SDK 发出请求时，记录起始时间和运行时代次（era）。响应必须对应原请求标识 nonce、当前身份和精确的已应用视图，而且从发出请求起经过的时间必须小于 2 秒。证明从这个请求起点计时，年龄小于 30 秒才允许危险动作。应用新视图、认证失效、重启或恢复时，都要清除证明。即使权威端返回 g43，也不能为尚在使用 g42 的客户端续期。</p><p>SDK 每次在锁内观察时钟，如果时钟不可信、era 变化，或相对上次观察发生回拨，就同时清除证明和待确认请求 pending。时钟恢复可信后必须重新发出确认，故障前的 pending 响应不能恢复资格。</p><p>这里注入的 Clock 是可信的经过时间适配器：它必须计入休眠和长暂停，或者在恢复后的任何动作开始前，更换 era 并清除证明。Java nanoTime 适用于同一个 JVM 内的经过时间测量，不提供跨重启的资格，也不自动满足本章对休眠的适配要求。<a href="#ref-10">[10]</a> 本章 Java 验证使用受控时钟，没有进行 OS 暂停实验。</p></div><div class="lang-en"><p>serve_last keeps the last successfully applied good snapshot. A cold start may restore disk bytes matching identity/schema/digest, <strong>never a critical proof</strong>. Mandatory keys without safe defaults leave the function unready; a missing critical allow denies. Write a temporary file, flush, atomically rename and flush the directory as the filesystem requires. Failure retains good memory and reports an error. Power-failure recovery is not experimentally verified here.</p><p><strong>Confirmation is a dedicated uncached authoritative selection read.</strong> Record request-start elapsed time and runtime era. Bind the response to the original nonce, current identity and exact applied view, with elapsed time &lt;2 seconds. Proof ages from request start and allows only while age &lt;30 seconds. New views, auth invalidation, restart and resume clear proof. Every locked clock observation clears both proof and pending on distrust, an era change or regression from the last sample. Recovery requires a new request; a pre-fault pending response cannot qualify it. Unapplied g43 cannot qualify applied g42.</p><p>Clock is an injected trusted elapsed-time adapter: it must count suspension/pauses, or change era and clear proof before any resumed action. Java nanoTime supports elapsed-time measurement within one JVM; it provides neither cross-restart qualification nor our suspension adapter guarantee. <a href="#ref-10">[10]</a> Java checks here use a controlled clock rather than an OS suspension experiment.</p></div></div><pre data-language="Java 17 · local critical gate excerpt" data-kind="teaching" data-source="ConfigClient.java" data-snippet="proof"><code>private Clock observeClock() { // callers hold this SDK monitor
     Clock now = clock.get();
     if (!now.trusted() || (lastClock != null &amp;&amp; (now.era() != lastClock.era()
-            || now.elapsedMs() &lt; lastClock.elapsedMs())))
+            || now.elapsedMs() &lt; lastClock.elapsedMs()))) {
         invalidateProof();    // clears BOTH proof and pending; keeps ordinary view
+    }
+
     lastClock = now;
     return now;
 }
 
 public synchronized Ticket beginConfirmation() {
     Clock now = observeClock();
-    if (state == null || !now.trusted()) throw new IllegalStateException(&quot;unready&quot;);
-    if (pending != null) throw new IllegalStateException(&quot;single flight&quot;);
+    if (state == null || !now.trusted()) {
+        throw new IllegalStateException(&quot;unready&quot;);
+    }
+    if (pending != null) {
+        throw new IllegalStateException(&quot;single flight&quot;);
+    }
+
     return pending = new Ticket(++nextNonce, state.view(), now);
 }
 
 public synchronized boolean confirmed(Ticket request, View selected, boolean authority) {
     Clock now = observeClock(); // a broken clock invalidates even this in-flight reply
-    if (request == null || pending != request) return false; // transport binds nonce
+    if (request == null || pending != request) {
+        return false; // transport binds nonce
+    }
+
     pending = null;                       // consume once, including failed replies
     Applied applied = state;
-    boolean valid = authority &amp;&amp; applied != null &amp;&amp; Objects.equals(selected, request.target())
+    boolean valid = authority &amp;&amp; applied != null
+            &amp;&amp; Objects.equals(selected, request.target())
             &amp;&amp; applied.view().equals(request.target())
             &amp;&amp; fresh(now, request.start(), REQUEST_MS);
-    if (applied != null) state = new Applied(applied.view(), valid ? request : null);
+    if (applied != null) {
+        state = new Applied(applied.view(), valid ? request : null);
+    }
     return valid;                         // mismatch never renews the old allow
 }
 
@@ -596,8 +656,9 @@ public synchronized boolean allowDangerousAction() {
     Applied applied = state;              // same local protection as install
     boolean proofFresh = applied != null &amp;&amp; applied.proof() != null
             &amp;&amp; fresh(now, applied.proof().start(), PROOF_MS);
-    if (applied != null &amp;&amp; applied.proof() != null &amp;&amp; !proofFresh)
+    if (applied != null &amp;&amp; applied.proof() != null &amp;&amp; !proofFresh) {
         state = new Applied(applied.view(), null); // no resurrection after clock fault
+    }
     return applied != null &amp;&amp; Boolean.TRUE.equals(applied.view().allow())
             &amp;&amp; proofFresh;
 }
@@ -698,8 +759,10 @@ private static boolean fresh(Clock now, Clock start, long limitMs) {
     </figure><div class="bilingual"><div class="lang-zh"><p>g42 同时保存 stable=R17、canary=R18 和 5% 的规则。服务根据经过认证的实例身份，按 namespace、salt 和 instance_id 稳定分桶。只有<strong>实例属于批准集群，并且 bucket&lt;5</strong>，才选择 R18；集群条件与比例条件必须同时成立，不能写成 OR。下面的选包函数给字段加上长度前缀，避免拼接歧义；返回值把 g、规则和身份上下文一起绑定到所选 release。</p><p>从 5% 扩到 20% 时保留 salt，原来选中的桶仍在范围内。均匀哈希下，1 万个实例预期选中 500 个，这既不保证精确数量，也不代表 5% 的流量。实例 ID 改变后会重新分桶。保持稳定的实例分组（cohort）是常见的渐进启用方式，但运维开关和发布开关的生命周期各有不同。<a href="#ref-9">[9]</a></p></div><div class="lang-en"><p>g42 holds stable=R17, canary=R18 and a five-percent rule. Bucket authenticated instances by namespace/salt/instance_id. Only <strong>approved cluster AND bucket&lt;5</strong> selects R18; avoid ambiguous OR semantics. The selector uses length prefixes to avoid concatenation ambiguity and returns g/rule/identity context bound to one release.</p><p>Retain salt when expanding five to twenty percent so existing buckets remain included. Under uniform hashing ten thousand instances give an expected five hundred, not an exact count or five percent of traffic. New instance IDs rebucket. Stable cohorts support gradual enablement, while operational and release toggles have different lifecycles. <a href="#ref-9">[9]</a></p></div></div><pre data-language="Java 17 · pure cohort selector excerpt" data-kind="teaching" data-source="Cohort.java" data-snippet="select"><code>public static Selected select(Auth auth, Rule rule) {
     if (!auth.namespace().equals(rule.namespace()) || rule.percent() &lt; 0
             || rule.percent() &gt; 100 || rule.generation() &lt; 0 || rule.revision() &lt; 0
-            || rule.stable() == null || (rule.canary() == null &amp;&amp; rule.percent() != 0))
+            || rule.stable() == null || (rule.canary() == null &amp;&amp; rule.percent() != 0)) {
         throw new IllegalArgumentException(&quot;invalid scope or rule&quot;);
+    }
+
     int bucket = bucket(rule.namespace(), rule.salt(), auth.instanceId());
     boolean canary = auth.cluster().equals(rule.cluster())
             &amp;&amp; rule.canary() != null &amp;&amp; bucket &lt; rule.percent();
@@ -715,6 +778,7 @@ public static int bucket(String namespace, String salt, String instanceId) {
             digest.update(ByteBuffer.allocate(4).putInt(bytes.length).array());
             digest.update(bytes); // length prefixes avoid ambiguous concatenation
         }
+
         long first64 = ByteBuffer.wrap(digest.digest()).getLong();
         return (int) Long.remainderUnsigned(first64, 100);
     } catch (NoSuchAlgorithmException impossible) {

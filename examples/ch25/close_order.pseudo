@@ -2,14 +2,23 @@ close_order(authenticated_tenant, key, order_id, canonical_payload):
   require caller may close this tenant's order and key == 'close:' + order_id
   BEGIN                                    // T2 is ONLY in Order DB
   o = SELECT * FROM orders WHERE tenant=:tenant AND id=order_id FOR UPDATE
-  if o is absent: ROLLBACK; return NOT_FOUND
+  if o is absent:
+    ROLLBACK;
+    return NOT_FOUND
+
   old = SELECT * FROM inbox WHERE tenant=:tenant AND operation_key=key
   if old exists:
-    if old.payload != canonical_payload: ROLLBACK; return CONFLICT
-    COMMIT; return old.result
+    if old.payload != canonical_payload:
+      ROLLBACK;
+      return CONFLICT
+    COMMIT;
+    return old.result
+
   t = SELECT clock_timestamp()              // Order DB judges business deadline
   if o.state == 'UNPAID' and o.close_at > t:
-    ROLLBACK; return RETRY_AT(o.close_at)     // do NOT cache an early no-op receipt
+    ROLLBACK;
+    return RETRY_AT(o.close_at)     // do NOT cache an early no-op receipt
+
   if o.state == 'UNPAID':
     changed = UPDATE orders SET state='CLOSED'
               WHERE tenant=:tenant AND id=order_id AND state='UNPAID'
@@ -17,9 +26,13 @@ close_order(authenticated_tenant, key, order_id, canonical_payload):
     require changed has exactly one row
     result = CLOSED
     INSERT INTO outbox(tenant, event_id, payload) VALUES(:tenant, 'closed:'+o.id, ...)
-  else: result = NOOP_TERMINAL              // paid/closed cannot reopen here
+  else:
+    result = NOOP_TERMINAL              // paid/closed cannot reopen here
+
   INSERT INTO inbox(tenant, operation_key, payload, result) VALUES(...)
-  COMMIT; return result
+  COMMIT;
+  return result
+
   // Any error rolls back order + receipt + event; unknown COMMIT => same-key retry.
   // Worker marks run succeeded only after CLOSED/NOOP_TERMINAL is confirmed.
   // Relay sends committed events, then records delivery; a lost ACK may resend.

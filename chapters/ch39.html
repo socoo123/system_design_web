@@ -456,13 +456,22 @@
       </div>
     </figure><div class="bilingual"><div class="lang-zh"><p>选择后端前，要先按当前成员快照筛选：实例处于 READY，健康且未被摘除，并对应当前服务代次（incarnation）。对于工作量相近的同构短请求，可以采用轮询；异构后端的权重，则应依据同一工作负载和 SLO 下的容量。最少连接算法（least-connection）比较连接数，但一条 HTTP/2 连接可能携带很多 RPC。对于等容量后端，P2C 会随机抽取两个不同候选，再选择观测活跃请求数较少的一个。Envoy 在等权时默认比较两个候选，非等权时另有动态加权分支；下面的示例没有复刻完整产品算法。<a href="#ref-4">[4]</a></p></div><div class="lang-en"><p>Filter the current membership snapshot by READY, healthy/not-ejected status and serving incarnation. Round robin suits comparable short requests; weights require capacity for the same workload/SLO. Least-connections counts connections, which HTTP/2 multiplexing can make misleading. Equal-capacity P2C samples two distinct candidates and chooses fewer observed active requests. Envoy defaults to two for equal weights and uses a different dynamic weighting branch otherwise; this example is narrower. <a href="#ref-4">[4]</a></p></div></div><pre data-language="Java 17 · pick" data-kind="teaching" data-source="LoadBalancing.java#choose"><code>static Endpoint choose(List&lt;Endpoint&gt; snapshot, RandomGenerator random) {
     var available = snapshot.stream()
-        .filter(e -&gt; e.phase() == Phase.READY &amp;&amp; e.healthy()).toList();
+            .filter(e -&gt; e.phase() == Phase.READY &amp;&amp; e.healthy())
+            .toList();
     int n = available.size();
-    if (n == 0) return null; // explicit no-host rejection, no unhealthy fallback
+    if (n == 0) {
+        return null; // explicit no-host rejection, no unhealthy fallback
+    }
+
     int i = random.nextInt(n);
-    if (n == 1) return available.get(i);
+    if (n == 1) {
+        return available.get(i);
+    }
     int j = random.nextInt(n - 1);
-    if (j &gt;= i) j++; // sample two distinct candidates
+    if (j &gt;= i) {
+        j++; // sample two distinct candidates
+    }
+
     var a = available.get(i);
     var b = available.get(j);
     return a.observedActive() &lt;= b.observedActive() ? a : b;
@@ -470,19 +479,34 @@
     lock.lock();
     try {
         long now = clock.getAsLong(); // sample after acquiring the lock
-        if (expectedIncarnation != incarnation || phase != Phase.READY ||
-            now - deadline &gt;= 0 || active.size() &gt;= limit) return null;
+
+        if (expectedIncarnation != incarnation
+                || phase != Phase.READY
+                || now - deadline &gt;= 0
+                || active.size() &gt;= limit) {
+            return null;
+        }
+
         long id = Math.incrementExact(sequence);
-        sequence = id; active.add(id);
+        sequence = id;
+        active.add(id);
+
         return new Permit(this, incarnation, id);
-    } finally { lock.unlock(); }
+    } finally {
+        lock.unlock();
+    }
 }
+
 boolean finish(Permit permit) { // actual handler completion, not caller timeout
     lock.lock();
     try {
-        return permit != null &amp;&amp; permit.owner == this &amp;&amp;
-            permit.incarnation == incarnation &amp;&amp; active.remove(permit.sequence);
-    } finally { lock.unlock(); }
+        return permit != null
+                &amp;&amp; permit.owner == this
+                &amp;&amp; permit.incarnation == incarnation
+                &amp;&amp; active.remove(permit.sequence);
+    } finally {
+        lock.unlock();
+    }
 }</code></pre><div class="bilingual"><div class="lang-zh"><p><code>finish</code> 会核对许可所属的 Gate 和服务代次，并通过从集合中删除许可，保证每份额度只释放一次。本地锁只保护这一台 App，入口观测到的计数也不能充当全局额度分配协议。请求截止时间使用进程本地的单调时钟，必须在拿到锁后再读取当前时间。跨机器应传递剩余预算，并转换到接收进程的时钟域，不能直接比较两台机器的 <code>nanoTime</code>。</p></div><div class="lang-en"><p><code>finish</code> binds Gate/incarnation and removes each permit once. A local lock protects this App only; observed counts are not a distributed reservation protocol. Sample the monotonic clock after acquiring the lock. Convert remaining budgets into each process’s clock domain rather than comparing raw <code>nanoTime</code> values across hosts.</p></div></div><details><summary><span class="lang-zh">展开 A1–A5：容量怎样随故障、重试和请求耗时变化</span><span class="lang-en">A1–A5: normal load, failures, retries and means</span></summary><div class="bilingual"><div class="lang-zh"><p>单个 App 的规划容量为 1,000×60%=600 次/秒，因此正常情况下至少需要 6,000÷600=10 台，才能恰好覆盖峰值。部署在独立机器上的 12 台 App，失去一台后还剩 11×600=6,600 次/秒，峰值约占这份规划容量的 90.9%。如果发布时停一台，又故障一台，就只剩 10×600=6,000 次/秒，没有规划余量。如果改为三台机器、每台四个实例，坏一台机器就只剩 8×600=4,800 次/秒，缺口为 1,200 次/秒，必须增容或拒绝 20% 的原始到达请求。</p><p>如果 10% 的原始请求各增加一次等成本尝试，执行率就变为 6,000×1.1=6,600 次/秒，恰好吃完单台故障后的规划容量。相关失败还会进一步放大重试，因此要限制总重试预算，设置退避，并遵守截止时间。稳态下，Little 定律给出的平均在途请求数为 6,000×0.050=300；这个均值既不能用来直接设置 limit=300，也不能证明 p99&lt;200 ms。并发上限、等待队列和各类资源上限，都要依据实测请求分布决定；本例没有等待队列，饱和时直接拒绝。</p></div><div class="lang-en"><p>Plan 1,000×60%=600/s per App. Normal load needs 6,000/600=10 instances with no planned headroom. Twelve independent machines leave 11×600=6,600/s after a loss, about 90.9% utilized. One rollout exclusion plus a failure leaves 10×600=6,000/s. Four instances on each of three machines leave 8×600=4,800/s after one machine loss: a 1,200/s deficit, or 20% of original arrivals.</p><p>If 10% add one equal-cost attempt, execution is 6,000×1.1=6,600/s, exhausting the single-loss budget. Correlated failures need total retry budgets, backoff and deadlines. Little’s-law mean is 6,000×0.050=300 active; it establishes neither limit=300 nor p99&lt;200 ms. Size admission, queues and other resource bounds for the measured request distribution; this example rejects at saturation without queuing.</p></div></div></details></section>
 <section><h2><span class="lang-zh">健康与排空：先拒绝新工作，再等待已有工作结束</span><span class="lang-en">Health and drain: close locally, retain old work</span></h2><div class="bilingual"><div class="lang-zh"><p><strong>健康检查会滞后，就绪状态（readiness）也不能锁住资源。</strong>计划下线时，状态切换与本地准入必须原子竞争：先进入 DRAINING，拒绝新工作，再发布移除结果，同时保留已有工作。突然故障则要停止选择该实例，但不能保证它完成已经接下的请求。</p></div><div class="lang-en"><p><strong>Health checks lag; readiness is not a resource lock.</strong> Planned drain competes atomically with local admission: enter DRAINING first, then publish removal and retain active work. Sudden failure stops new selection without promising completion.</p></div></div><figure class="deck">
       <div class="slide">
@@ -598,33 +622,58 @@ boolean finish(Permit permit) { // actual handler completion, not caller timeout
     </figure><div class="bilingual"><div class="lang-zh"><p>主动探测要检查实例身份和有代表性的业务操作，被动信号则观察真实请求中的超时与错误；TCP 可达只能证明监听端口还在。<a href="#ref-7">[7]</a> 如果所有实例共用的依赖故障，盲目把它们同时摘除，可能连恢复所需的入口也一并失去。应分层、限频地检查，并区分共同依赖故障与单实例故障。短暂过载优先通过准入拒绝和背压处理，不要把每次 503 都当作进程死亡而重启。</p><p>下面的摘录对应图5中的计划下线分支。<code>beginDrain</code> 先核对命令指定的服务代次，再关闭本地准入；协调器随后发布带成员版本号（revision）的移除结果。<code>acknowledgeRemoval</code> 只接受可信协调器的确认，确认必须覆盖相关入口，并精确对应这次服务代次与成员版本。单纯设置 readiness=false，或等待 Kubernetes EndpointSlice 异步更新，都不等于完成了这项确认。<a href="#ref-12">[12]</a> 如果产品无法提供确认能力，就按截止时间进入明确的强停流程，并承认旧路由仍可能送来请求；等待一段固定时间不能充当移除证据。</p></div><div class="lang-en"><p>Active probes check identity/representative operations; passive signals observe real errors/timeouts. TCP reachability proves only a listener. <a href="#ref-7">[7]</a> Blindly ejecting every instance for one shared dependency failure can remove recovery paths. Layer and rate-limit checks; distinguish shared and per-instance failures. Handle transient overload with admission/backpressure rather than treating every 503 as a dead process.</p><p>This excerpt closes deck 5’s planned branch. <code>beginDrain</code> checks the command’s incarnation and closes locally before the coordinator publishes removal at a revision. <code>acknowledgeRemoval</code> accepts only trusted evidence for the exact incarnation/revision at relevant ingress instances; readiness=false or asynchronous Kubernetes EndpointSlice updates are not that barrier. <a href="#ref-12">[12]</a> Without confirmation support, take an explicit bounded forced path and admit stale-routing risk; sleep is not evidence.</p></div></div><pre data-language="Java 17 · drain" data-kind="teaching" data-source="LoadBalancing.java#drain"><code>long beginDrain(long expectedIncarnation, long revision, long budgetNanos) {
     lock.lock();
     try {
-        if (expectedIncarnation != incarnation) throw new IllegalStateException(&quot;stale incarnation&quot;);
-        if (phase == Phase.DRAINING &amp;&amp; revision == drainRevision) return drainUntil;
-        if (phase != Phase.READY || revision &lt; 1 || budgetNanos &lt; 0 ||
-            budgetNanos &gt;= (1L &lt;&lt; 62)) throw new IllegalStateException();
+        if (expectedIncarnation != incarnation) {
+            throw new IllegalStateException(&quot;stale incarnation&quot;);
+        }
+        if (phase == Phase.DRAINING &amp;&amp; revision == drainRevision) {
+            return drainUntil;
+        }
+        if (phase != Phase.READY || revision &lt; 1 || budgetNanos &lt; 0
+                || budgetNanos &gt;= (1L &lt;&lt; 62)) {
+            throw new IllegalStateException();
+        }
+
         long now = clock.getAsLong();
         phase = Phase.DRAINING; // close locally before publishing removal
         drainRevision = revision;
         drainUntil = now + budgetNanos;
+
         return drainUntil;
-    } finally { lock.unlock(); }
+    } finally {
+        lock.unlock();
+    }
 }
+
 boolean acknowledgeRemoval(long expectedIncarnation, long revision) {
     lock.lock();
     try {
-        if (expectedIncarnation != incarnation || phase != Phase.DRAINING ||
-            revision != drainRevision) return false;
-        removalAck = true; return true;
-    } finally { lock.unlock(); }
+        if (expectedIncarnation != incarnation || phase != Phase.DRAINING
+                || revision != drainRevision) {
+            return false;
+        }
+
+        removalAck = true;
+        return true;
+    } finally {
+        lock.unlock();
+    }
 }
+
 DrainDecision pollDrain() {
     lock.lock();
     try {
-        if (phase != Phase.DRAINING) throw new IllegalStateException();
+        if (phase != Phase.DRAINING) {
+            throw new IllegalStateException();
+        }
+
         long now = clock.getAsLong();
-        if (removalAck &amp;&amp; active.isEmpty()) return DrainDecision.CLEAN_EXIT;
+        if (removalAck &amp;&amp; active.isEmpty()) {
+            return DrainDecision.CLEAN_EXIT;
+        }
         return now - drainUntil &gt;= 0 ? DrainDecision.FORCE_REQUIRED : DrainDecision.WAIT;
-    } finally { lock.unlock(); }
+    } finally {
+        lock.unlock();
+    }
 }</code></pre><div class="bilingual"><div class="lang-zh"><p>重复发起同一次排空时，要保留原截止时间，不能重新延长。<code>CLEAN_EXIT</code> 要求已收到移除确认，且服务端实际执行的工作数 active=0；<code>FORCE_REQUIRED</code> 只是要求外部执行取消、关闭或强杀，不会清空计数，也不能证明操作系统进程已经退出。STOPPED 由外部监督器（supervisor）观察确认。一个服务代次只能从 WARMING 进入 READY 一次，迟到的探测不能让 DRAINING 或 UNHEALTHY 恢复接收请求。恢复应在新进程代次中完成预热，旧路由和旧回调不能影响新的准入机制；也不能在同一进程中另建 Gate，掩盖仍在执行的旧工作。</p><p>L7 可以停止向旧实例分配新 RPC；L4 仅停止把新连接送到旧实例，仍挡不住已有 HTTP/2 连接创建新 stream，因此需要协议端点配合。GOAWAY 的 last-stream-id 标出可能已处理的流范围：更大的 stream ID 可以按协议重试；范围内的流则不能仅凭“没收到回复”就判定未执行。<a href="#ref-2">[2]</a> Envoy 的排空行为取决于协议和网络过滤器，默认执行 shutdown 并不意味着之前已完成优雅排空。<a href="#ref-8">[8]</a></p></div><div class="lang-en"><p>Duplicate drain retains the original cutoff. <code>CLEAN_EXIT</code> requires confirmed removal and actual zero active work; <code>FORCE_REQUIRED</code> asks for cancellation/close/kill without clearing counts or proving OS exit. A supervisor observes STOPPED. An incarnation enters READY only once from WARMING; late probes cannot revive DRAINING/UNHEALTHY. Recovery warms a fresh process incarnation, isolating old routes/completions; replacing a Gate object must never hide old work still running in that process.</p><p>L7 stops assigning new RPCs; L4 refusing new connections still permits new streams on existing HTTP/2 unless protocol endpoints cooperate. GOAWAY’s last-stream-id marks potentially processed streams; larger IDs may retry under the protocol, while a missing reply at or below the bound does not establish nonexecution. <a href="#ref-2">[2]</a> Envoy draining depends on protocol/filter support; default shutdown does not imply a prior graceful drain. <a href="#ref-8">[8]</a></p></div></div><details><summary><span class="lang-zh">展开 A9：4.5 秒探测窗口</span><span class="lang-en">A9: the 4.5-second detection window</span></summary><div class="bilingual"><div class="lang-zh"><p>A9 假设探测按固定开始节拍每 2 s 发起一次，连续两次失败后判定故障，每次超时为 0.3 s。最坏情况下，故障刚好发生在上次成功之后：接下来两次探测约在 t=2 和 t=4 开始，第二次到 t=4.3 超时，再加上最多 0.2 s 的故障结果传播时间，得到 4.5 s。这份预算依赖没有调度抖动、传播确实有上界的前提，不能套用到任意产品。十二台均匀承载时，每台约为 6,000÷12=500 次/秒；按均匀稳态估算，约有 500×4.5=2,250 次初始请求尝试暴露在故障窗口内。这不是随机路由的严格上界，也不能直接当作用户失败数，最终结果还要看有界重试能否成功。</p></div><div class="lang-en"><p>With fixed probe starts every 2 s, two failures and 0.3 s timeouts, a failure immediately after success is probed near t=2 and t=4. The second expires at 4.3 s; propagation≤0.2 gives 4.5 s. This requires no scheduling jitter and a real propagation bound. At 6,000/12=500/s per evenly loaded App, about 500×4.5=2,250 initial attempts are exposed, not necessarily failed user requests after bounded retries.</p></div></div></details><h3><span class="lang-zh">断线后的写入：结果先保留为 UNKNOWN</span><span class="lang-en">Writes after disconnect: retain UNKNOWN</span></h3><div class="bilingual"><div class="lang-zh"><p>订单已经在数据库提交，但 App 还没返回 201，连接就断了。此时即使换成另一个无状态实例，也不能认定这笔写入“没有执行”。业务幂等键必须绑定租户、主体、操作、资源和规范化参数，并与业务写入、结果在同一个数据库事务中提交；记录至少保留到重试与查账窗口结束。之后可以按原键查询，或在防重承诺仍有效时用同一个键重放；同键但参数改变时必须拒绝。外部付款效果不在本库事务范围内，要按 <a href="ch24.html">Ch24</a> 查询权威回执。</p><p>A10 虽然允许至多重试一次，仍要求重试具有安全语义，并遵守原请求的截止时间与预算。RFC 9110 要求代理不得自动重试非幂等请求，因此不能仅因 POST 没收到回复就换机重发。<a href="#ref-9">[9]</a> 关闭 socket 不会收回长流已经输出的 token，也不会回滚已提交的写入；调用方超时同样不能替服务端释放准入额度。</p></div><div class="lang-en"><p>An order commits in the DB, then the connection fails before 201. Another stateless App still cannot infer nonexecution. Bind idempotency to tenant, principal, operation, resource and canonical arguments; commit effect/result together in one database and retain them through the recovery window. Query the original key, or replay that key only under a valid dedupe contract; changed binding conflicts. External payment effects remain outside that transaction and require authoritative receipts as in <a href="ch24.html">Ch24</a>.</p><p>A10’s one retry remains subject to the original deadline/budget and safe retry semantics. RFC 9110 prohibits proxies from automatically retrying non-idempotent requests; a missing POST response is insufficient. <a href="#ref-9">[9]</a> Closing a socket does not retract exposed tokens or committed writes. Caller timeout cannot release the server’s active-work permit.</p></div></div></section>
 <section><h2><span class="lang-zh">Maglev：先查本机连接绑定，未命中才查找表</span><span class="lang-en">Maglev: local bindings first, table on miss</span></h2><div class="bilingual"><div class="lang-zh"><p><strong>图6只说明怎样选择后端，不画 HTTP 响应路径。</strong>应用是否无状态，与 LB 是否保存连接绑定，是两个不同的问题；下一组图再补全 L4/DSR 的数据包路径。</p></div><div class="lang-en"><p><strong>Deck 6 depicts backend selection, not HTTP responses.</strong> Stateless Apps and LB connection tracking are separate contracts; deck 7 shows the full L4/DSR packet path.</p></div></div><figure class="deck">
       <div class="slide">

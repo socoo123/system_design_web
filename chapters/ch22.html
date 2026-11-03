@@ -150,28 +150,38 @@
 <div class="bilingual"><div class="lang-zh"><p>下面是 <strong>PG18 风格伪代码</strong>。输入包括已认证的调用者 principal、初始化返回的 upload_id、冻结清单的摘要，以及可信的 Data 回执。回执由受信服务签发，绑定精确的字节身份、长度、摘要和放置代次；客户端自己声称“已上传”不能作为依据。Data 回执在事务外验证；版本行、current、上传记录和固定结果放在同一分片内提交。数据库事务的原子性不覆盖远端磁盘。<a href="#ref-10">[10]</a></p></div><div class="lang-en"><p>This <strong>PG18-style pseudocode</strong> accepts an authenticated principal, initialized upload id, frozen manifest hash, and trusted Data receipt. Data verification is outside the transaction. Its issuer binds exact bytes, size/digest, and placement generation; a client declaration is insufficient. Version, current, upload, and saved result share a shard. The DB transaction does not include remote disks. <a href="#ref-10">[10]</a></p></div></div>
 <pre data-language="Pseudocode · PG18 publication" data-kind="pseudocode" data-source="publish.pseudo"><code>publish(actor, upload_id, fence, manifest_hash, durable_receipt):
   saved = Metadata.authorized_result(actor, upload_id, manifest_hash)
-  if saved is terminal: return saved.result        // includes REJECTED; even after payload GC
-  proof = Data.verify_receipt(durable_receipt)      // trusted issuer, exact immutable blobs
+  if saved is terminal:
+    return saved.result  // includes REJECTED; even after payload GC
+
+  proof = Data.verify_receipt(durable_receipt)  // trusted issuer, exact immutable blobs
   // Data error: query that same authorized result again; unresolved stays UNKNOWN.
-  BEGIN                                           // one Metadata name shard; no Data RPC inside
-  name = SELECT namespace FOR UPDATE              // tenant + bucket + exact key bytes
-  u = SELECT upload FOR UPDATE                    // fixed lock order: name -&gt; upload
-  authorize(actor, name, &quot;PUT&quot;); require u.owner == actor
-  require u.manifest_hash == manifest_hash         // exact frozen part identities + order
-  if u.saved_result is terminal:                    // result survives cleanup state transitions
-    COMMIT; return u.saved_result                  // original version, never current again
+
+  BEGIN  // one Metadata name shard; no Data RPC inside
+  name = SELECT namespace FOR UPDATE  // tenant + bucket + exact key bytes
+  u = SELECT upload FOR UPDATE  // fixed lock order: name -&gt; upload
+  authorize(actor, name, &quot;PUT&quot;);
+  require u.owner == actor
+  require u.manifest_hash == manifest_hash  // exact frozen part identities + order
+  if u.saved_result is terminal:  // result survives cleanup state transitions
+    COMMIT;
+    return u.saved_result  // original version, never current again
+
   require u.state == FINALIZING and u.fence == fence
   require proof.binds(name, u.version, upload_id, fence, manifest_hash)
   require proof.size == u.expected_size and proof.sha256 == u.expected_digest
-  require proof.meets(u.frozen_policy)             // 3 replicas OR all 6 EC fragments
+  require proof.meets(u.frozen_policy)  // 3 replicas OR all 6 EC fragments
+
   if u.expected_generation != ANY and name.generation != u.expected_generation:
     UPDATE upload SET state=REJECTED, fence=fence+1, saved_result=CONFLICT
-    COMMIT; return CONFLICT                        // durable terminal decision, same retry
+    COMMIT;
+    return CONFLICT  // durable terminal decision, same retry
+
   INSERT version(name, u.version, u.frozen_manifest, state=PUBLISHED)
   UPDATE namespace SET current=u.version, generation=generation+1
   UPDATE upload SET state=COMPLETED, saved_result=(CREATED, u.version)
-  COMMIT                                           // version + current + result are all-or-none
-  return saved_result                              // COMMIT timeout =&gt; UNKNOWN, query same upload</code></pre>
+  COMMIT  // version + current + result are all-or-none
+
+  return saved_result  // COMMIT timeout =&gt; UNKNOWN, query same upload</code></pre>
 <div class="bilingual"><div class="lang-zh"><p><code>authorized_result</code> 从权威 Metadata 查询同一次上传的原结果。它先重新验证租户、存储桶、对象名的权限、上传所有者 owner 和冻结清单摘要，再读取已保存的不可变结果。这个查询不解析 current，也不要求旧版内容仍然存在。因此，即使旧版本已被合法回收，完成请求仍能重放原 version；已经持久保存的 CONFLICT 也会原样返回。</p><p>查询之后，主事务还会重新鉴权，并检查结果、状态 state 和封代次标识 fence，处理查询与提交之间可能发生的竞争。请求身份及其结果至少要保留到承诺的重试窗口结束；身份过期后应拒绝请求，不能把它当作新操作再执行一次。</p></div><div class="lang-en"><p><code>authorized_result</code> is an authoritative Metadata lookup for this upload: reauthorize the full scope, owner, and frozen manifest hash, then read the immutable original result. It neither resolves current nor requires the old payload to survive. After lawful old-version GC, completion still replays the original version; a durable CONFLICT also replays. The transaction rechecks authorization, result, state, and fence. Retain identities/results throughout the promised retry window; reject expired identities rather than treating them as new operations.</p></div></div>
 <div class="bilingual"><div class="lang-zh"><p><strong>要分清两个崩溃窗口。</strong>如果 Data 已持久化而 Metadata 尚未提交，留下的是不可见的候选数据；如果 Metadata 已提交但响应丢失，对象其实已经可见。调用方都应查询同一个 upload/operation，结果未知时继续保持待确认状态，不能换个新身份盲目重传，也不能凭一次空查询就删除候选字节。</p><p>单键强一致读取依赖基于共识的 Metadata 提供权威已提交读，并通过 leader fencing 阻止旧主继续操作；权威不可达时读取失败。公开 S3 的单键原子更新和写后读契约是接口参考，不能拿来证明本示例已经实现了这些保证。<a href="#ref-1">[1]</a></p></div><div class="lang-en"><p><strong>Two crash windows:</strong> durable Data without Metadata commit leaves an invisible candidate; commit with a lost reply leaves a visible object. Resolve the same upload/operation; uncertainty remains pending. Do not blindly create another identity or authorize cleanup from an empty lookup. Strong point reads need authority reads of committed consensus Metadata and fenced leaders, failing on unavailable authority. Public S3 is an API reference, not proof of this implementation. <a href="#ref-1">[1]</a></p></div></div>
 <h3><span class="lang-zh">读取：先鉴权并固定清单，再逐块校验</span><span class="lang-en">Read: authorize and pin the manifest, then verify every block</span></h3>
@@ -181,43 +191,65 @@
     // expected comes from the trusted, pinned manifest, not from the selected replica.
     for (Replica replica : replicas) {
         final Record candidate;
-        try { candidate = replica.fetch(expected.id()); }
-        catch (IOException unavailable) { continue; }
-        if (candidate == null || !expected.id().equals(candidate.id()) || candidate.bytes() == null) continue;
+        try {
+            candidate = replica.fetch(expected.id());
+        } catch (IOException unavailable) {
+            continue;
+        }
+
+        if (candidate == null
+                || !expected.id().equals(candidate.id())
+                || candidate.bytes() == null) {
+            continue;
+        }
+
         byte[] bytes = candidate.bytes().clone();  // never expose unverified mutable input
-        if (bytes.length != expected.size()) continue;
-        if (!MessageDigest.isEqual(sha256(bytes), expected.sha256())) continue;
+        if (bytes.length != expected.size()) {
+            continue;
+        }
+        if (!MessageDigest.isEqual(sha256(bytes), expected.sha256())) {
+            continue;
+        }
+
         return bytes;                            // only now may this block reach the client
     }
     throw new IOException(&quot;No verified replica for the pinned block&quot;);
 }
 
 public static byte[] sha256(byte[] bytes) {
-    try { return MessageDigest.getInstance(&quot;SHA-256&quot;).digest(bytes); }
-    catch (NoSuchAlgorithmException impossible) { throw new AssertionError(impossible); }
+    try {
+        return MessageDigest.getInstance(&quot;SHA-256&quot;).digest(bytes);
+    } catch (NoSuchAlgorithmException impossible) {
+        throw new AssertionError(impossible);
+    }
 }</code></pre>
 <div class="bilingual"><div class="lang-zh"><p>大对象按大小有界的块逐块校验、流式发送，所有块都绑定同一份 manifest。读取中途不能重新解析 current，再把新版字节拼到旧版后面。若只在传输结束时计算整体摘要，就无法撤回前面已经发出的坏字节，因此每块都需要可信摘要。接收端仍应核对最终长度和整对象摘要，传输中断则按未完成处理。</p><p>CRC32C 可以另外用于快速检测偶发损坏，但不能证明身份，也不等于整对象 SHA-256；分块上传的 ETag 同样不能一概当作 MD5。<a href="#ref-6">[6]</a></p></div><div class="lang-en"><p>Stream bounded blocks from one pinned manifest; never re-resolve current and splice a newer version. An end-only hash cannot retract bytes already sent. Use trusted block digests and have the recipient verify final length/object digest, treating interruption as an incomplete transfer. CRC32C may provide fast accidental-corruption detection, not authentication or whole-object SHA-256; a multipart ETag is not universal MD5. <a href="#ref-6">[6]</a></p></div></div>
 <h3><span class="lang-zh">删除与回收：先关闭入口，等已有读写结束，再删除字节</span><span class="lang-en">Deletion and GC: close admission, drain holders, delete exact bytes</span></h3>
 <div class="bilingual"><div class="lang-zh"><p>开启版本保留时，DELETE 发布删除标记。新的无版本 GET 因而看到对象不存在，但已保留的显式版本仍可按权限读取。删除标记本身不授权销毁旧版内容。</p><p>只有保留期结束、版本也不再是 current 后，权威元数据才撤销可读引用，进入 RECLAIMING 并封锁旧代次，拒绝新的解析和续租。此前已经获得读租约的请求可以在有效期内完成。A11 的 60 秒是单次租约的最长时限，长时间读取需要续租，续租失败就必须停止。<a href="#ref-9">[9]</a></p></div><div class="lang-en"><p>With version retention, DELETE publishes a marker: new unversioned GET sees absence, while authorized retained version reads remain possible. It does not authorize payload destruction. Once retention clears and the version is no longer current, authority withdraws readable references, enters RECLAIMING, and fences new resolutions/renewals; preexisting leases may finish. A11’s 60 seconds is a maximum per lease; long reads renew or stop on failure. <a href="#ref-9">[9]</a></p></div></div>
-<pre data-language="Pseudocode · fenced cleanup" data-kind="pseudocode" data-source="gc.pseudo"><code>claim_gc(candidate):                               // absence/elapsed TTL alone never authorizes delete
-  BEGIN; lock namespace, then candidate_authority
+<pre data-language="Pseudocode · fenced cleanup" data-kind="pseudocode" data-source="gc.pseudo"><code>claim_gc(candidate):  // absence/elapsed TTL alone never authorizes delete
+  BEGIN;
+  lock namespace, then candidate_authority
   now = authority_now()
+
   if candidate.kind == UNPUBLISHED_UPLOAD:
     require candidate.state in {OPEN, ABORTED, REJECTED}
     require no_published_manifest_references(candidate)
     require now &gt;= candidate.lease_until and now &gt;= candidate.created_at + quarantine
-  else:                                            // published version or retired layout
+  else:  // published version or retired layout
     require not_current(candidate) and retention_allows_withdrawal(candidate)
     require no_retained_manifest_references(candidate)
+
   UPDATE candidate SET state=RECLAIMING, fence=fence+1
-  COMMIT                                           // publish/renew/resolve must check this same authority
+  COMMIT  // publish/renew/resolve must check this same authority
+
   return (candidate.exact_physical_ids, candidate.fence)
 
-sweep(claim):                                      // separate, retryable Data protocol
-  Data.close_write_generation_and_drain(claim)      // durable fence; old in-flight writes drain first
+sweep(claim):  // separate, retryable Data protocol
+  Data.close_write_generation_and_drain(claim)  // durable fence; old in-flight writes drain first
   wait_until_all_preexisting_read_leases_expire(claim)
   require Data.has_no_old_writer_or_valid_reader(claim)
-  Data.delete_exact_ids(claim)                      // never delete by mutable key or reused pathname
+
+  Data.delete_exact_ids(claim)  // never delete by mutable key or reused pathname
   // Failure keeps RECLAIMING. Retry/scan late debris; never reopen the fenced generation.
   // Unknown Metadata or Data drain state =&gt; leave bytes. A shared pack needs every record clear.</code></pre>
 <div class="bilingual"><div class="lang-zh"><p>未发布候选数据的 10 分钟隔离期只是为了减少无效清扫。真正允许回收的依据，是<strong>同一权威中的状态检查、没有保留引用、租约已过期，并且已经生成新的 fence</strong>。Data 还必须持久关闭旧代次的写入口，等待已接收的写入者结束，再重复清扫残留。旧请求可能较晚才把字节写到磁盘，但不能再登记或发布；如果 Data 无法确认旧写入已经结束，就先保留字节，之后重试。</p><p>普通过期扫描不能接管 FINALIZING。专用恢复者只能沿原来的冻结清单继续执行；若要终止，必须先在权威中显式封锁代次，不能根据 TTL 猜测它已经失败。</p></div><div class="lang-en"><p>A ten-minute unpublished-candidate quarantine reduces wasted cleanup; authorization comes from <strong>one authority state, no retained references, expired leases, and a new fence</strong>. Data durably closes old-generation writes and drains admitted writers before repeated sweeps. Late bytes cannot register or publish. If drain is unknown, keep bytes and retry. Ordinary expiry scans cannot take FINALIZING; dedicated recovery resumes its fixed manifest or explicitly fences it before termination.</p></div></div>
@@ -811,31 +843,47 @@ sweep(claim):                                      // separate, retryable Data p
       </div>
     </figure><div class="bilingual"><div class="lang-zh"><p>分块编号 part_number 只说明位置，不能唯一标识字节。每次上传尝试都分配新的 blob_id，Metadata 通过条件更新推进 part_generation。同编号重传时要核对旧代次，不能混用新旧回执。</p><p>Complete 提交<strong>按编号排序、包含精确身份的分块清单</strong>，并将它原子冻结为 FINALIZING。此后，新分块登记、普通 abort 和普通 GC 都不能改选清单。单次 PUT 使用相同协议，只是清单中只有一个 part。</p></div><div class="lang-en"><p>A part number identifies position, not bytes. Every attempt allocates a fresh blob id; Metadata conditionally advances part_generation. Retrying a number checks its previous generation. Complete supplies an <strong>ordered list of exact part identities</strong> and atomically freezes FINALIZING, blocking reselection by registration, ordinary abort, and ordinary GC. Single PUT uses the same protocol with one part.</p></div></div>
 <pre data-language="Pseudocode · freeze and abort" data-kind="pseudocode" data-source="multipart.pseudo"><code>freeze(actor, upload_id, fence, ordered_parts):
-  BEGIN; lock namespace, then upload              // same shard and lock order as publish
-  authorize(actor, namespace, &quot;PUT&quot;); require upload.owner == actor
-  digest = hash_canonical(ordered_parts)            // number + part generation + blob + size + hash
+  BEGIN;
+  lock namespace, then upload  // same shard and lock order as publish
+  authorize(actor, namespace, &quot;PUT&quot;);
+  require upload.owner == actor
+  digest = hash_canonical(ordered_parts)  // number + part generation + blob + size + hash
+
   if upload.state in {FINALIZING, COMPLETED}:
     require digest == upload.manifest_hash
-    COMMIT; return upload.frozen_manifest           // retry keeps the original selected parts
+    COMMIT;
+    return upload.frozen_manifest  // retry keeps the original selected parts
+
   require upload.state == OPEN and upload.fence == fence
   require authority_now() &lt; upload.lease_until
   require parts_are_unique_and_ordered(ordered_parts)
-  require ordered_parts == registered_parts        // same versions, no missing or extra parts
+  require ordered_parts == registered_parts  // same versions, no missing or extra parts
   require sum(parts.size) == upload.expected_size
+
   UPDATE upload SET state=FINALIZING, manifest_hash=digest, frozen_manifest=ordered_parts
-  COMMIT                                           // blocks part registration, abort, and ordinary GC
+  COMMIT  // blocks part registration, abort, and ordinary GC
+
   // Outside TX: Data verifies checksums/redundancy for this immutable frozen manifest.
   // Call publish(); crashed FINALIZING is recovered using the same manifest, never reselected.
 
 abort(actor, upload_id):
-  BEGIN; lock namespace, then upload
-  authorize(actor, namespace, &quot;PUT&quot;); require upload.owner == actor
-  if upload.state == FINALIZING: ROLLBACK; return CONFLICT
-  if upload.state in {COMPLETED, ABORTED, REJECTED}: COMMIT; return saved_state
+  BEGIN;
+  lock namespace, then upload
+  authorize(actor, namespace, &quot;PUT&quot;);
+  require upload.owner == actor
+
+  if upload.state == FINALIZING:
+    ROLLBACK;
+    return CONFLICT
+  if upload.state in {COMPLETED, ABORTED, REJECTED}:
+    COMMIT;
+    return saved_state
+
   require upload.state == OPEN
   UPDATE upload SET state=ABORTED, fence=fence+1
-  COMMIT                                           // durable sweep scanner will rediscover this row
-  return ABORTED                                   // not a claim that physical bytes are already gone</code></pre>
+  COMMIT  // durable sweep scanner will rediscover this row
+
+  return ABORTED  // not a claim that physical bytes are already gone</code></pre>
 <div class="bilingual"><div class="lang-zh"><p>Metadata 负责检查清单中的编号是否唯一且有序，并与 registered_parts 比较。每项都包含编号、part_generation、blob_id、长度和摘要，必须与冻结前登记的集合完全相同。本章要求选中所有已登记编号，比允许任选部分分块的协议更严格。</p><p>Data 再按顺序验证字节总长与整对象 SHA-256，确认三副本或六个编码块完整后，调用 22.1 的发布流程。两个内容具有相同 SHA-256，不代表它们是同一次操作；不同上传也不会默认跨用户去重。</p></div><div class="lang-en"><p>Metadata validates ordering/uniqueness and compares numbers, part generations, blob ids, lengths, and digests against the registered set. This teaching contract selects every registered number, stricter than a protocol permitting a subset. Data checks ordered total length and whole-object SHA-256, confirms all three replicas or six fragments, then invokes 22.1 publication. Equal content does not equate request identities or imply cross-user deduplication.</p></div></div>
 <div class="bilingual"><div class="lang-zh"><p><strong>恢复时仍使用原清单。</strong>协调者在 FINALIZING 阶段崩溃后，恢复者只能继续处理同一份冻结清单；换清单就应冲突。FINALIZING 本身不表示成功，只有版本、current 和 COMPLETED 原结果在同一事务提交后，上传才成功。</p><p>如果 expected_generation 不匹配，则在同一事务持久保存 REJECTED/CONFLICT。之后重试仍返回这个决定，不能等前提变化后又变成成功。旧版本被合法回收后，完成原结果仍可查询，但这不承诺旧内容永远可读。</p></div><div class="lang-en"><p><strong>Recovery never reselects:</strong> resume the exact frozen manifest after a coordinator crash; a changed manifest conflicts. FINALIZING is not success. Version, current, and saved COMPLETED result commit together; a generation mismatch durably records REJECTED/CONFLICT rather than later succeeding after a precondition change. The original result remains queryable after lawful old-version reclamation, without promising perpetual readability.</p></div></div>
 <div class="bilingual"><div class="lang-zh"><p>Abort 从 OPEN 获胜后，先封锁上传代次。返回 ABORTED 只代表取消决定已经保存到元数据，Data 中此前接收的写入仍可能完成，所以要先关闭写入口、等待在途写入结束，再重复清扫。</p><p>已经完成的上传，也可能留下未被最终清单选中的旧尝试。这些字节应按不可变 blob_id 单独回收，不能按可复用的 part_number 删除，以免误删新版。共享 pack 则必须等所有记录的保留引用和读租约都结束后，才可整文件删除；压缩过程见 22.2。</p></div><div class="lang-en"><p>An abort winning OPEN fences the upload; ABORTED is a metadata decision. Old in-flight Data writes may still land: close admission, drain, and sweep repeatedly. Completed uploads also need cleanup of unselected attempts by immutable blob id, not by a reused part-number path. A shared pack is deleted only after all records’ retained references and read leases clear; see 22.2 compaction.</p></div></div>

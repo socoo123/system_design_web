@@ -1,13 +1,17 @@
 public final class ReadGateProbe {
     private static void expect(boolean ok, String message) {
-        if (!ok) throw new AssertionError(message);
+        if (!ok) {
+            throw new AssertionError(message);
+        }
     }
+
     public static void main(String[] args) {
         var token = new ReadGate.Token("orders", "T", 1042);
         var caughtUp = new ReadGate.FreshView("orders", "T", 1042, true);
         var stale = new ReadGate.FreshView("orders", "T", 1041, true);
         var fork = new ReadGate.FreshView("orders", "U", 9999, true);
         var oldSnapshot = new ReadGate.FreshView("orders", "T", 1020, false);
+
         expect(ReadGate.choose(token, caughtUp, null, true, false) == ReadGate.Route.REPLICA,
                 "normal fresh view includes the commit");
         expect(ReadGate.choose(token, stale, caughtUp, true, true) == ReadGate.Route.WAIT,
@@ -22,6 +26,7 @@ public final class ReadGateProbe {
                 "different cluster cannot satisfy the token");
         expect(!ReadGate.covers(token, new ReadGate.FreshView("orders", "T", 1042, false)),
                 "the conservative contract rejects reuse of an old transaction");
+
         System.out.println("ReadGate: fresh view, stale/fork, snapshot and admission checks passed");
     }
 }

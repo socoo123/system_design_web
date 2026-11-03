@@ -694,10 +694,12 @@ healCart(left, right):
     </figure><div class="bilingual"><div class="lang-zh"><p>SLI 定义怎样测量，SLO 规定目标，SLA 则是包含约定后果的对外协议；三者采用的窗口和排除项可以不同。<a href="#ref-7">[7]</a> 是否纳入统计，必须在知道成败之前确定；支持范围内因过载而被拒绝的旅程也要计入。提交后丢回包，可能同时留下正确的账本和一次未达标的用户旅程。Feed 允许最多 30 秒的旧展示，还需要独立的权限与数据年龄约定，不能据此放松授权或扣款规则。</p></div><div class="lang-en"><p>SLI defines measurement, SLO its target, and SLA an external agreement with consequences; windows/exclusions can differ. <a href="#ref-7">[7]</a> Fix eligibility before outcome, including supported overload refusals. Lost post-commit replies can leave correct ledger state but a bad journey. Feed staleness ≤30 seconds needs a separate permission/age contract, without relaxing authorization/debit rules.</p></div></div><h3><span class="lang-zh">关键实现：保留原始时间、合并重试、等观测期限完整结束</span><span class="lang-en">Implementation: original time, deduplication, complete cohorts</span></h3><div class="bilingual"><div class="lang-zh"><p>Python 接收可信入口记录的 <code>Attempt</code>。记录包含旅程原始开始时间 started_ms、固定的 eligible 标志、结果在用户测量边界实际交付的时间 observed_ms、终态，以及经过独立核实的 correct/durable 标志，不能仅凭 HTTP 200 推断正确和持久。业务入口还要拒绝“同一身份却换了参数”的请求。</p><p>函数按结账身份合并记录后，取 <code>cutoff=now−1000 ms</code>，只统计原始起点位于 <code>(cutoff−W,cutoff]</code> 的旅程。这批旅程（cohort）都已经获得完整的一秒观测期限，所以报表落后一秒。重试如果更改起点或是否纳入统计，就是数据质量错误。在原始一秒期限内，任何已经交付却错误或不持久的 APPROVED/DECLINED 终态，都会否决这次旅程达标，不能靠后续正确重试抵消；更晚出现的业务错误仍要由独立的正确性审计发现。</p></div><div class="lang-en"><p>Trusted ingress <code>Attempt</code> records retain original started_ms, fixed eligibility, actual delivery time observed_ms at the measured user boundary, outcome, and independently verified correct/durable flags; HTTP 200 supplies neither. Business ingress rejects identity reuse with different parameters. Group by id and count original starts in <code>(cutoff−W,cutoff]</code>, where <code>cutoff=now−1000 ms</code>, giving complete cohorts with one-second reporting lag. Changed start/eligibility is a data-quality error. Any exposed incorrect or non-durable APPROVED/DECLINED within the original one-second window vetoes good; later business errors still require separate correctness auditing.</p></div></div><pre data-kind="runnable" data-language="Python 3.10+" data-source="slo.py:count"><code>def counts(attempts, now_ms, window_ms):
     if window_ms &lt;= 0:
         raise ValueError("window must be positive")
+
     cutoff = now_ms - DEADLINE_MS  # complete cohorts; one-deadline lag
     groups = {}
     for a in attempts:
         groups.setdefault(a.checkout_id, []).append(a)
+
     eligible = bad = 0
     for rows in groups.values():
         first = rows[0]
@@ -706,14 +708,20 @@ healCart(left, right):
             raise ValueError("retry changed original start or eligibility")
         if not first.eligible or not cutoff - window_ms &lt; first.started_ms &lt;= cutoff:
             continue
+
         eligible += 1
         # observed_ms means a result actually delivered at the measured boundary.
-        terminal = [r for r in rows if r.outcome in {"APPROVED", "DECLINED"}
-                    and r.observed_ms is not None
-                    and first.started_ms &lt;= r.observed_ms &lt;= first.started_ms + DEADLINE_MS]
+        terminal = [
+            r
+            for r in rows
+            if r.outcome in {"APPROVED", "DECLINED"}
+            and r.observed_ms is not None
+            and first.started_ms &lt;= r.observed_ms &lt;= first.started_ms + DEADLINE_MS
+        ]
         exposed_bad = any(not (r.correct and r.durable) for r in terminal)
         good = any(r.correct and r.durable for r in terminal) and not exposed_bad
         bad += int(not good)
+
     return eligible, bad</code></pre><div class="bilingual"><div class="lang-zh"><p><strong>缺少结果时怎样计数：</strong>即使没有回复，入口记录也必须保留，到期后把旅程计为未达标。丢失入口记录或客户端测量，不能被当作成功，也不能让分母只剩下收到结果的旅程。发布门另外接收 <code>telemetry_complete</code> 判断测量是否完整；零事件表示无数据。本例假设使用同一测量时钟、观测可信，没有实现跨机时钟同步、采样、覆盖率检查或监控存储。如果采用 202 异步旅程，就需要分别定义持久接纳和最终完成期限的 SLI。</p></div><div class="lang-en"><p><strong>Failure boundary:</strong> retain ingress records without replies and count bad at deadline. Missing ingress/client telemetry cannot become successful samples or a denominator containing only replies. The gate separately requires <code>telemetry_complete</code>; zero events means no data. This model assumes one observation clock and trusted data without solving distributed clocks, sampling, coverage, or storage. Async 202 needs separate durable-admission and completion-deadline SLIs.</p></div></div>
 </section>
 
@@ -970,25 +978,36 @@ healCart(left, right):
         raise ValueError("invalid counts")
     if eligible == 0:
         return None  # no data, never 100% success
+
     allowed = eligible * BAD_PPM // SCALE  # maximum whole bad events
-    return {"remaining": allowed - bad, "allowed": allowed,
-            "burn": Fraction(bad * SCALE, eligible * BAD_PPM)}
+    return {
+        "remaining": allowed - bad,
+        "allowed": allowed,
+        "burn": Fraction(bad * SCALE, eligible * BAD_PPM)
+    }
 
 
 def feature_gate(month, windows, telemetry_complete, canary_healthy, reviewed):
     # All inputs use the same SLI, cohort cutoff, and service scope.
     monthly = budget(*month)
-    rates = {name: budget(*windows[name])
-             for name in ("1h", "5m", "6h", "30m")}
+    rates = {
+        name: budget(*windows[name])
+        for name in ("1h", "5m", "6h", "30m")
+    }
+
     if not telemetry_complete or monthly is None or any(v is None for v in rates.values()):
         return "HOLD_NO_DATA"
     if monthly["remaining"] &lt;= 0:
         return "FREEZE_FEATURES"
+
     burn = {name: value["burn"] for name, value in rates.items()}
-    page = ((burn["1h"] &gt; Fraction(72, 5) and burn["5m"] &gt; Fraction(72, 5))
-            or (burn["6h"] &gt; 6 and burn["30m"] &gt; 6))
+    page = (
+        (burn["1h"] &gt; Fraction(72, 5) and burn["5m"] &gt; Fraction(72, 5))
+        or (burn["6h"] &gt; 6 and burn["30m"] &gt; 6)
+    )
     if page:
         return "HOLD_BURN"
+
     if not (canary_healthy and reviewed):
         return "HOLD_REVIEW"
     return "ALLOW_NEXT_CANARY_STEP"  # reviewed repair uses a separate policy path</code></pre><div class="bilingual"><div class="lang-zh"><p><strong>代入一组输入：</strong>月窗口为 (10,000,000,6,000)，预算剩余 4,000。1h/5m 两窗各为 (100,000,1,441)，消耗速率均为 14.41 倍，因此输出 <code>HOLD_BURN</code>，暂停放量。如果只有长窗消耗高、短窗未达标率已经归零，这一档就不会触发；恰好 14.4 倍也不满足严格 &gt; 条件。任一窗口零事件或测量不完整时，返回 <code>HOLD_NO_DATA</code>；月窗口未达标数达到 10,000 时，返回 <code>FREEZE_FEATURES</code>。</p><p><strong>政策与实现边界：</strong>本例选择在整数事件余额 ≤0 时冻结功能发布。引用的公开政策使用四周窗口并列有例外，本章采用 30 天。低流量下，一个失败也可能产生很高的消耗速率，因此需要按业务调整窗口和样本政策；在样本量方面，这个最小模型只检查分母是否为零。函数不执行部署，也不验证数据模式（schema）或外部扣款能否撤销。如果不能安全退回 v7，应关闭相关功能或前向修复。恢复发布前，还要复评修复证据、灰度健康度和余额，不能按日期自动放行。<a href="#ref-10">[10]</a></p></div><div class="lang-en"><p><strong>Inputs:</strong> month (10,000,000,6,000) retains 4,000; 1h/5m each at (100,000,1,441) gives 14.41× and <code>HOLD_BURN</code>. A hot long/recovered short window does not trigger that pair; exactly 14.4 does not exceed the strict threshold. Zero traffic/incomplete telemetry gives <code>HOLD_NO_DATA</code>; month bad 10,000 gives <code>FREEZE_FEATURES</code>.</p><p><strong>Policy/boundary:</strong> freeze features at whole-event balance ≤ 0. The public example uses four weeks and exceptions; this chapter chooses 30 days. One failure can dominate low traffic, requiring tailored window/sample policies; this minimal model checks zero denominators only. It neither deploys nor validates reversibility of schemas/charges. Disable or forward-fix when v7 is unsafe. Review repair evidence, canary health, and balance before reopening, without calendar resets. <a href="#ref-10">[10]</a></p></div></div><div class="bilingual"><div class="lang-zh"><p><strong>运行与源码：</strong>执行 <code>python3 examples/ch36/run.py</code>，只需 Python 3.10+ 标准库。完整实现见 <a href="../examples/ch36/slo.py">slo.py</a>、<a href="../examples/ch36/tradeoffs.py">tradeoffs.py</a> 和 <a href="../examples/ch36/README.md">README</a>。页面四段代码与对应源码逐字核对；这些确定性的本地输入，不能证明真实分布式系统或监控后端的行为。</p></div><div class="lang-en"><p><strong>Run/source:</strong> <code>python 3 examples/ch36/run.py</code>, Python 3.10+ standard library only. See full <a href="../examples/ch36/slo.py">slo.py</a> / <a href="../examples/ch36/tradeoffs.py">tradeoffs.py</a> and <a href="../examples/ch36/README.md">README</a>. All four snippets are checked verbatim. Deterministic local inputs do not prove a real distributed system or monitoring backend.</p></div></div>

@@ -514,35 +514,52 @@
         <figcaption><span class="lang-zh">假设候选独立、均匀地以 0.1% 的概率通过过滤，为得到 k=10，期望检查 10/0.001=10,000 个候选。条件与向量的相关性会破坏这个估算；预算用完时应明确报告结果不足，不能放宽权限。</span><span class="lang-en">At independently uniform 0.1% acceptance, k=10 needs 10,000 candidates in expectation; correlations break this estimate. Exhausted budgets return an explicit shortfall while retaining access scope.</span></figcaption>
       </div>
     </figure><pre data-language="Java 17 · candidate filter" data-kind="teaching" data-source="VectorCandidates.java#select"><code>public static Result select(Schema schema, String queryModel, String tenant,
-    String category, List&lt;Double&gt; query, Map&lt;Key, Point&gt; pinnedLive,
-    List&lt;Candidate&gt; stream, int k, int inspectLimit) {
-  if (!schema.model().equals(queryModel) || k &lt; 1 || k &gt; 100 ||
-      inspectLimit &lt; k || inspectLimit &gt; 100) throw new IllegalArgumentException("request");
-  double[] q = checked(schema, query);
-  Map&lt;Key, Point&gt; live = Map.copyOf(pinnedLive); // one immutable read cut
-  Set&lt;Key&gt; allowed = new HashSet&lt;&gt;();
-  for (Point p : live.values())
-    if (!p.deleted() &amp;&amp; p.key().tenant().equals(tenant) &amp;&amp;
-        p.schemaId().equals(schema.id()) &amp;&amp; p.category().equals(category))
-      allowed.add(p.key());
-  Map&lt;Key, Hit&gt; hits = new HashMap&lt;&gt;();
-  int inspected = 0;
-  for (Candidate c : stream) {
-    if (inspected == inspectLimit) break;
-    inspected++; // denied, stale and duplicate candidates also cost budget
-    if (!schema.id().equals(c.schemaId())) throw new IllegalStateException("mixed schema");
-    Point p = live.get(c.key());
-    if (p == null || !allowed.contains(c.key()) || p.version() != c.version()) continue;
-    if (hits.containsKey(c.key())) continue;
-    double d = distance(schema, q, checked(schema, p.vector()));
-    hits.put(c.key(), new Hit(c.key(), p.version(), d));
-  }
-  List&lt;Hit&gt; ranked = hits.values().stream()
-      .sorted(Comparator.comparingDouble(Hit::distance)
-          .thenComparing(h -&gt; h.key().id())).limit(k).toList();
-  String status = ranked.size() == allowed.size() ? "ALLOWED_SET_EXHAUSTED"
-      : ranked.size() == k ? "K_REACHED" : "APPROX_SHORTFALL";
-  return new Result(ranked, status, inspected);
+                            String category, List&lt;Double&gt; query, Map&lt;Key, Point&gt; pinnedLive,
+                            List&lt;Candidate&gt; stream, int k, int inspectLimit) {
+    if (!schema.model().equals(queryModel) || k &lt; 1 || k &gt; 100
+            || inspectLimit &lt; k || inspectLimit &gt; 100) {
+        throw new IllegalArgumentException("request");
+    }
+
+    double[] q = checked(schema, query);
+    Map&lt;Key, Point&gt; live = Map.copyOf(pinnedLive); // one immutable read cut
+    Set&lt;Key&gt; allowed = new HashSet&lt;&gt;();
+    for (Point p : live.values()) {
+        if (!p.deleted() &amp;&amp; p.key().tenant().equals(tenant)
+                &amp;&amp; p.schemaId().equals(schema.id()) &amp;&amp; p.category().equals(category)) {
+            allowed.add(p.key());
+        }
+    }
+
+    Map&lt;Key, Hit&gt; hits = new HashMap&lt;&gt;();
+    int inspected = 0;
+    for (Candidate c : stream) {
+        if (inspected == inspectLimit) {
+            break;
+        }
+        inspected++; // denied, stale and duplicate candidates also cost budget
+        if (!schema.id().equals(c.schemaId())) {
+            throw new IllegalStateException("mixed schema");
+        }
+        Point p = live.get(c.key());
+        if (p == null || !allowed.contains(c.key()) || p.version() != c.version()) {
+            continue;
+        }
+        if (hits.containsKey(c.key())) {
+            continue;
+        }
+        double d = distance(schema, q, checked(schema, p.vector()));
+        hits.put(c.key(), new Hit(c.key(), p.version(), d));
+    }
+
+    List&lt;Hit&gt; ranked = hits.values().stream()
+            .sorted(Comparator.comparingDouble(Hit::distance)
+                    .thenComparing(h -&gt; h.key().id()))
+            .limit(k)
+            .toList();
+    String status = ranked.size() == allowed.size() ? "ALLOWED_SET_EXHAUSTED"
+            : ranked.size() == k ? "K_REACHED" : "APPROX_SHORTFALL";
+    return new Result(ranked, status, inspected);
 }</code></pre><div class="bilingual"><div class="lang-zh"><p>上面的 Java 17 标准库示例可以运行，摘自 <a href="../examples/ch31/VectorCandidates.java">VectorCandidates.java</a>。它接收受信副本在固定读取位点上的不可变状态 pinnedLive：Key 包含租户和 ID，Point 保存版本、向量规格、元数据和原向量。查询使用的 queryModel 必须匹配服务端规格。checked 拒绝维度不匹配和非有限数值；计算 cosine 时，还会拒绝零向量，并对双方统一归一化。distance 把三种度量都转换成“小为近”的距离，算术溢出也会被拒绝。</p><p>引擎只提供候选的 ID 和版本，其附带数据或分数不能作为权威。代码先检查过滤条件与版本，再读取原向量重算距离。重复、已删除和被拒绝的候选都消耗检查预算，最多重算 100 个。为了便于演示，代码扫描整个 Map 来统计允许点数；亿级生产系统需要同一快照下的标量索引或位图（bitset），不能照搬这种做法。这个示例不执行 HNSW、IVF 或 ACORN，因此不能证明召回水平。</p><p>K_REACHED 表示找到了 k 条结果，仍可能漏掉真正的近邻；只有已返回全部允许点时，才能报告 ALLOWED_SET_EXHAUSTED；其余情况为 APPROX_SHORTFALL。全局状态还要综合各片的搜索状态。允许集本来只有三条、预算不足只找到三条，以及某个分片没有回复，是三种不同的结果。</p><p>图中 A、B 合格，X 不合格；如果剪掉 X 的邻接关系，就会阻断通向 B 的路径。ACORN-1 的邻居扩展思路可以发现此类路径，但不保证任意谓词下都连通 [<a href="#ref-5">5</a>]。服务内部读取 X 的邻接关系，前提是服务可信，而且隔离约定允许这样做；若还需要防范邻接关系带来的侧信道，就应拆分物理索引。本章引用的 pgvector v0.8.0 文档说明了近似扫描后过滤，以及有上限的迭代扫描 [<a href="#ref-6">6</a>]，本图并非它的实现图。</p></div><div class="lang-en"><p>This runnable Java17 standard-library excerpt comes from <a href="../examples/ch31/VectorCandidates.java">VectorCandidates.java</a>. pinnedLive is trusted replica state at a fixed cut. Keys contain tenant/ID; points contain revision, schema, metadata and raw vectors. The server schema must match queryModel. checked validates dimensions/finite values, rejects zero cosine vectors and normalizes consistently. distance converts all three metrics to low-first distances and rejects overflow.</p><p>The engine supplies candidate IDs/versions; its payload/score is not authoritative. Filter/version checks precede raw-vector rescoring. Duplicate, denied and deleted candidates consume inspection budget; at most 100 are rescored. The model counts allowed points by scanning a Map; production needs same-snapshot scalar indexes/bitsets. It executes no HNSW, IVF or ACORN and proves no recall level.</p><p>K_REACHED means k were found, with possible nearest-neighbor misses. ALLOWED_SET_EXHAUSTED requires returning every allowed point; otherwise report APPROX_SHORTFALL. Aggregate per-shard search states globally. A genuinely three-point allowed set, budget-limited three hits and a missing shard are distinct outcomes.</p><p>In the diagram A/B qualify but X fails; pruning its adjacency disconnects B. ACORN-1 motivates expansion without universal predicate-connectivity guarantees [<a href="#ref-5">5</a>]. Reading X adjacency assumes a trusted service and an isolation contract permitting it; use physical separation against adjacency side channels. Pinned pgvector v0.8.0 documents post-scan filtering and capped iterative scans [<a href="#ref-6">6</a>], not this diagram’s implementation.</p></div></div><details><summary><span class="lang-zh">为什么 k/s 只能算期望值</span><span class="lang-en">Why k/s is only an expectation</span></summary><div class="bilingual"><div class="lang-zh"><p>假设每个候选独立、均匀地以 s=0.001 的概率通过过滤，100 个候选平均只能留下 0.1 条；要期望得到 10 条，就要检查 10/0.001=10,000 个。期望值为 10，既不保证实际能凑满 10 条，也不保证召回率。过滤条件如果与向量分布相关，估算还会失效。A7 对 5,000 个允许点做精确扫描要读取 15.36 MB，但随机 I/O 和截止时间仍会影响合适的扫描阈值。</p></div><div class="lang-en"><p>At independently uniform s=0.001, one hundred candidates yield 0.1 match on average; expecting ten takes 10,000. Expectation guarantees neither fill nor recall, and predicate/vector correlation breaks the estimate. A7’s exact scan of 5,000 points reads 15.36 MB; random I/O and deadlines determine the measured threshold.</p></div></div></details></section>
 
 <section><h2><span class="lang-zh">写入：日志持久接收后，还要连续应用才能搜索</span><span class="lang-en">Writes: durable receipt differs from contiguous visibility</span></h2><div class="bilingual"><div class="lang-zh"><p><strong>202 只证明日志已被持久接收；查询只能使用已连续应用、且各项状态都已可搜的日志前缀。</strong>向量、元数据或版本有一项未就绪，就不能越过这条日志的序号（LSN）。持续接收写入的 growing 层、冻结的 sealed 段和单片清单（Manifest），是本章的生命周期设计；下面的 SQLite 示例只验证本地事务边界。</p></div><div class="lang-en"><p><strong>A 202 receipt proves durable acceptance; reads require a contiguous search-ready prefix.</strong> Missing vector, metadata or version state blocks that LSN. Growing, sealed and shard Manifest are this chapter’s design; the SQLite model below verifies only local transaction boundaries.</p></div></div><figure class="deck">
@@ -682,25 +699,41 @@
       </div>
     </figure><pre data-language="Python · SQLite apply" data-kind="teaching" data-source="catalog.py#apply"><code>def apply_next(self, space, shard, fail_before_commit=False):
     with self.tx():  # actual SQLite BEGIN IMMEDIATE / COMMIT
-        p = self.db.execute("SELECT * FROM progress WHERE space=? AND shard=?", (space,shard)).fetchone()
+        p = self.db.execute(
+            "SELECT * FROM progress WHERE space=? AND shard=?", (space, shard)
+        ).fetchone()
         lsn = p["applied"] + 1
-        e = self.db.execute("SELECT body FROM event WHERE space=? AND shard=? AND lsn=?", (space,shard,lsn)).fetchone()
+        e = self.db.execute(
+            "SELECT body FROM event WHERE space=? AND shard=? AND lsn=?", (space, shard, lsn)
+        ).fetchone()
         if e is None:
             return False  # never jump across a hole
+
         body = json.loads(e["body"])
-        old = self.db.execute("SELECT version,body FROM mvcc WHERE space=? AND shard=? AND tenant=? AND id=? ORDER BY version DESC LIMIT 1",
-                              (space,shard,body["tenant"],body["id"])).fetchone()
-        same = self.db.execute("SELECT body FROM seen_version WHERE space=? AND shard=? AND tenant=? AND id=? AND version=?",
-                               (space,shard,body["tenant"],body["id"],body["version"])).fetchone()
+        old = self.db.execute(
+            "SELECT version,body FROM mvcc WHERE space=? AND shard=? AND tenant=? AND id=? ORDER BY version DESC LIMIT 1",
+            (space, shard, body["tenant"], body["id"])
+        ).fetchone()
+        same = self.db.execute(
+            "SELECT body FROM seen_version WHERE space=? AND shard=? AND tenant=? AND id=? AND version=?",
+            (space, shard, body["tenant"], body["id"], body["version"])
+        ).fetchone()
         if same is not None and same["body"] != e["body"]:
             raise Rejected("same version, different payload; stop the prefix")
-        self.db.execute("INSERT OR IGNORE INTO seen_version VALUES (?,?,?,?,?,?)",
-                        (space,shard,body["tenant"],body["id"],body["version"],e["body"]))
+
+        self.db.execute(
+            "INSERT OR IGNORE INTO seen_version VALUES (?,?,?,?,?,?)",
+            (space, shard, body["tenant"], body["id"], body["version"], e["body"])
+        )
         if old is None or body["version"] &gt; old["version"]:
-            self.db.execute("INSERT INTO mvcc VALUES (?,?,?,?,?,?,?)",
-                            (space,shard,lsn,body["tenant"],body["id"],body["version"],e["body"]))
+            self.db.execute(
+                "INSERT INTO mvcc VALUES (?,?,?,?,?,?,?)",
+                (space, shard, lsn, body["tenant"], body["id"], body["version"], e["body"])
+            )
         # A stale event is a deterministic no-op, including an old upsert after delete.
-        self.db.execute("UPDATE progress SET applied=? WHERE space=? AND shard=?", (lsn,space,shard))
+        self.db.execute(
+            "UPDATE progress SET applied=? WHERE space=? AND shard=?", (lsn, space, shard)
+        )
         if fail_before_commit:
             raise Rejected("injected rollback")
     return True  # this transaction committed vector + metadata + version + watermark</code></pre><div class="bilingual"><div class="lang-zh"><p>完整的 <a href="../examples/ch31/catalog.py">catalog.py</a> 中，accept 在一个 BEGIN IMMEDIATE 事务内写入操作标识、规范化正文和 LSN，并推进持久接收位点 durable；事务提交后，才返回 space/epoch/LSN。相同操作标识、相同正文的重试返回原位点；正文不同则报冲突。版本由可信上游提供。旧版本事件不改变当前点状态；同一版本若对应不同正文，则停止连续应用，待源事件修复或按顺序明确处置后才能恢复，不能默默跳过。示例永久保留幂等记录，生产中的保留期必须覆盖重试窗口。</p><p>上面的事务把向量、元数据、版本（包括墓碑）和连续应用位点 applied 一起提交；发生异常时全部回滚 [<a href="#ref-8">8</a>]。SQLite 的 MVCC 行和不可变 JSON 读根用来模拟同一份可读状态，<strong>这个事务并没有包含对独立向量库的写入</strong>。真实引擎必须先让各个结构都完成截至 cut 的写入，再发布共同的不可变根或 MVCC 读视图。中间有缺口时，不能把“最大的单条已完成 LSN”当成连续位点。图中的复制 WAL 还依赖复制协议及其故障约定，本例没有验证节点或磁盘丢失。</p><p>Builder 使用 cut=b 的一致数据构建不可变段，同时继续接收增量写入。核验向量规格、码本和校验和后，目标副本必须实际加载读根，并返回可读回执。回执要绑定读根哈希、cut 和这一次进程实例（incarnation），随后才能替换单片清单。新状态就绪前，旧的 growing/sealed 路径继续服务。生产中，回执过期或已加载资源丢失都要重新验证；读取仍可能失败，一次发布不能保证副本永远可用。</p><p>一次查询不能只固定清单名称，还要把 <code>sealed≤b + delta(b,cut]</code>、有效版本和附带数据一起固定在<strong>实际读取位点 cut</strong>。如果只检查 applied≥cut，随后却读当前仍在变化的增量，同片重试就可能读到不同数据。实现时可以用 MVCC 按 cut 选行，也可以使用写时复制或不可变根。本例的 stage_root 从已应用的历史行中选择 cut，保存独立 JSON，不会冻结后续写入。</p><p>查询覆盖删除令牌后，就不能再返回同 ID 的旧向量；压实只负责回收字节和改善遍历。已固定在删除前快照上的旧查询仍可读取旧状态，因此权限撤销不能只依赖这个快照。写后读令牌规定的是该片至少要包含的位点，并不保证该向量会进入真正的 top-k，也不等于固定快照或跨片事务。Milvus v2.6.x 比较 Guarantee/Service 时间戳的机制，同样区分“更新已包含”和“还需等待追齐” [<a href="#ref-7">7</a>]。</p></div><div class="lang-en"><p>accept in <a href="../examples/ch31/catalog.py">catalog.py</a> commits operation ID/canonical body/LSN and durable progress together with BEGIN IMMEDIATE, then returns space/epoch/LSN. Identical retries return the old position; changed bodies conflict. Trusted upstream supplies revisions. Older events are no-ops; same-version conflicting bodies stop apply until repaired or explicitly resolved in order. Deduplication is retained forever in this model; production retention must cover retries.</p><p>The displayed transaction commits vector, metadata, version/tombstone and applied together or rolls everything back [<a href="#ref-8">8</a>]. SQLite MVCC rows and immutable JSON roots model coherent readable state; <strong>SQLite does not transact independent vector-database writes</strong>. A real engine completes every structure through cut before publishing shared immutable roots/MVCC views. Maximum individually completed LSN is insufficient. Replicated WAL in the diagram additionally depends on its replication/failure contract; node/disk-loss durability was not tested.</p><p>Builder constructs immutable segments from consistent cut b while ingestion continues. After schema/codebook/checksum verification, target replicas load the root and return readiness bound to root hash, cut and process incarnation. Replace the shard manifest only then; keep the old path meanwhile. Revalidate expired receipts or lost resources. Publication cannot keep replicas permanently available.</p><p>Pin the actual cut across <code>sealed≤b + delta(b,cut]</code>, live versions and payload. Checking applied≥cut while reading the current mutable delta produces moving reads on retry. Use MVCC at cut or copy-on-write/immutable roots. stage_root selects historical rows through an applied cut and stores independent JSON while later writes continue.</p><p>After a delete token is covered, older versions cannot return; compaction reclaims bytes and traversal performance. Old pinned queries may retain pre-delete state, so permission revocation needs authority checks. A write token is a shard minimum, not a guarantee of top-k membership, a fixed snapshot or a cross-shard transaction. Milvus v2.6.x compares Guarantee/Service timestamps to wait for included updates [<a href="#ref-7">7</a>].</p></div></div></section>
@@ -825,11 +858,18 @@
             raise Rejected("missing shard or barrier")
         for r in roots:
             epoch, minimum = barrier[r["shard"]]
-            if r["epoch"] != epoch or r["cut"] &lt; minimum or digest(json.loads(r["document"])) != r["hash"]:
+            if (
+                r["epoch"] != epoch
+                or r["cut"] &lt; minimum
+                or digest(json.loads(r["document"])) != r["hash"]
+            ):
                 raise Rejected("stale or corrupt root")
+
         self.db.execute("INSERT OR IGNORE INTO alias VALUES (?,0,NULL)", (alias,))
-        changed = self.db.execute("UPDATE alias SET seq=seq+1,bundle=? WHERE name=? AND seq=?",
-                                  (bundle,alias,expected_seq)).rowcount
+        changed = self.db.execute(
+            "UPDATE alias SET seq=seq+1,bundle=? WHERE name=? AND seq=?",
+            (bundle, alias, expected_seq)
+        ).rowcount
         if changed != 1:
             raise Rejected("publication CAS lost")
         self.db.execute("UPDATE bundle SET published=1 WHERE id=?", (bundle,))

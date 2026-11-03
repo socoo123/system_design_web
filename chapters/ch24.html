@@ -136,23 +136,31 @@ CREATE UNIQUE INDEX financial_effect_identity
   require body.method == quote.authorizedMethod else CONFLICT
   digest = canonicalHash(quote.orderRef, quote.amount, quote.currency,
                          quote.authorizedMethod, quote.authorizedBusinessVersion)
+
   begin transaction
     old = findRequest(merchantScope, &quot;CREATE&quot;, key)
     if old exists:
       require old.digest == digest else CONFLICT
-      commit; return accepted(old.payNo)
+      commit;
+      return accepted(old.payNo)
+
     // UNIQUE arbitrates both request-key and business-intent races.
     payment = insertOrReadIntent(merchantScope, quote.orderRef,
                                 quote.authorizedBusinessVersion, quote.amount, quote.currency)
     require payment.immutableDigest == digest else CONFLICT
+
     if payment was newly inserted:
       a7 = insertAttempt(payment, chosenChannelAccount, freeze(quote))
       insertOutbox(&quot;channel:&quot; + a7, command(a7))
     insertRequest(merchantScope, &quot;CREATE&quot;, key, digest, payment.payNo)
   commit
+
   return 202(payment.payNo)  // acceptance, not capture
+
 on relevant UNIQUE conflict:
-  rollback; restart transaction and compare the winning record
+  rollback;
+  restart transaction and compare the winning record
+
 on lost commit response:
   resolve by the same key/intent on the authoritative DB
   // Never generate a different intent to escape uncertainty.</code></pre>
@@ -230,30 +238,43 @@ on lost commit response:
     </figure><pre data-language="Pseudocode · dispatch and monotone result merge" data-kind="pseudocode" data-source="dispatch.pseudo"><code>dispatchCommittedAttempt(a7):
   begin transaction
     a = lockAttempt(a7)
-    if a.state in {CONFIRMED, DECLINED}: commit; return
+    if a.state in {CONFIRMED, DECLINED}:
+      commit;
+      return
+
     if a.firstSendAt is null:
       a.firstSendAt = databaseNow()
       a.retryBefore = a.firstSendAt + adapter.safeReplayWindow
     if databaseNow() &gt;= a.retryBefore:
-      commit; enqueueResolver(a7); return
+      commit;
+      enqueueResolver(a7);
+      return
+
     a.state = SENT  // commit BEFORE I/O: the request may leave
-    request = a.frozenPayload; key = a.channelKey
+    request = a.frozenPayload;
+    key = a.channelKey
   commit
+
   // Adapter must enforce send deadline and account/operation contract.
   // DB/outbox cannot fence a stale sender at the PSP.
   result = adapter.send(request, key, deadline=a.retryBefore)
+
   if result is authenticated captured evidence:
     postCapture(result)  // same gate as webhook/reconciliation
   else:
     begin transaction
       a = lockAttempt(a7)
-      if a.state in {CONFIRMED, DECLINED}: commit; return
+      if a.state in {CONFIRMED, DECLINED}:
+        commit;
+        return
+
       if result proves final no-charge AND no future execution:
         a.state = DECLINED
       else:
         a.state = UNKNOWN  // includes timeouts and ambiguous 5xx
       saveEvidence(result)
     commit
+
   // A new attempt requires separate authorization and an irrevocably
   // non-chargeable old command/object; elapsed time is not that proof.</code></pre>
 <div class="bilingual"><div class="lang-zh"><p>首次发送时间 firstSendAt 和重试截止时间 retryBefore 都只设置一次，后续重试不能延长截止时间。示例把处理中（pending）、网络中断和无法判定结果的 5xx 都保留为 UNKNOWN；只有渠道明确证明未扣款且以后也不会执行，才记为 DECLINED。如果并发回调已经把 a7 确认为 CONFIRMED，旧后台程序的超时结果就不能再将它改回 UNKNOWN。为此，程序必须在持有数据库锁时比较当前状态，不能仅按最后写入时间决定结果。</p></div><div class="lang-en"><p>Set firstSendAt and retryBefore once; retries never extend them. This model keeps pending, disconnections, and ambiguous 5xx as UNKNOWN; DECLINED requires proof of no charge and no future execution. If a concurrent webhook already confirmed a7, a stale worker timeout cannot overwrite it. Compare state under the DB lock instead of trusting last-write timestamps.</p></div></div>
@@ -333,6 +354,7 @@ on lost commit response:
   event = providerSDK.verify(rawBody, headers, endpointConfig.secret,
                             endpointConfig.timestampTolerance)
   require event.environment/account matches endpointConfig
+
   begin transaction
     old = findInbox(endpointScope, event.id)
     if old exists:
@@ -341,9 +363,15 @@ on lost commit response:
     else:
       insertInbox(endpointScope, event.id, rawBody, state=READY)
   commit
+
   return 2xx  // responsibility accepted, not money posted
-on invalid signature/account: return 400
-on unknown DB commit: return retryable error; same event can redeliver
+
+on invalid signature/account:
+  return 400
+
+on unknown DB commit:
+  return retryable error;
+  same event can redeliver
 
 processInbox(claim):
   evidence = validateOrFetchAuthoritativeObject(claim.event)
@@ -426,29 +454,38 @@ processInbox(claim):
     </figure><pre data-language="Pseudocode · one-full-capture posting transaction" data-kind="pseudocode" data-source="capture.pseudo"><code>postCapture(verifiedEvidence):
   e = verifiedEvidence  // trusted adapter result, never browser input
   key = (e.environment, e.channel, e.account, e.captureId, CAPTURE)
+
   begin transaction
     p = lockPaymentBoundTo(e.attemptId)
     require e.account == p.channelAccount
     require e.amount == p.amount AND e.currency == p.currency
+
     old = findPosting(key)
     if old exists:
       require old.payment/attempt/amount/currency == p/e.attemptId/e.amount/e.currency
-      commit; return old  // different event, same effect
+      commit;
+      return old  // different event, same effect
+
     require p.captured == 0  // this chapter permits one full capture
     require attemptIsBoundToThisPayment(e.attemptId, p)
+
     j = insertPosting(key, p.payNo, e.amount, e.currency)
     appendEntry(j, PSP_RECEIVABLE, DR, e.amount, e.currency)
     appendEntry(j, MERCHANT_PAYABLE, CR, e.amount, e.currency)
     require atLeastTwoEntries(j)
     require sumDebits(j, e.currency) == sumCredits(j, e.currency)
     // All entry currencies/accounts must match this validated template.
+
     p.captured = e.amount
     markAttemptConfirmed(e.attemptId, e.captureId)
     insertOutbox(&quot;paid:&quot; + p.payNo, paymentPaid(p, j))
   commit
+
   return j
+
 on mismatch or a second distinct capture:
-  rollback; retain verified evidence in durable REVIEW
+  rollback;
+  retain verified evidence in durable REVIEW
   // Never discard external money; exceptional suspense handling is separate.</code></pre>
 <div class="bilingual"><div class="lang-zh"><p>这里从平台视角记账，并假设资金尚未结算、也未向商户出款。收款金额为 10,000 个最小货币单位时，借记 PSP 应收资产（PSP receivable）10,000，贷记商户应付负债（merchant payable）10,000。商户资金应记为平台的负债，不是平台收入。科目性质决定借贷方向；借贷差为零只是必要条件，因为两边写成同一个错误金额也能平衡，所以代码先核对真实金额和付款关联。<a href="https://docs.tigerbeetle.com/coding/financial-accounting/" target="_blank" rel="noopener">[9]</a></p></div><div class="lang-en"><p>These simplified platform books precede settlement/payout: captured 10,000 minor units debits the PSP receivable asset and credits the merchant payable liability. Merchant funds are not platform income. Account type determines direction. Zero debit/credit difference is necessary, but equally wrong amounts still balance, so validate amount and binding first. <a href="https://docs.tigerbeetle.com/coding/financial-accounting/" target="_blank" rel="noopener">[9]</a></p></div></div>
 <div class="bilingual"><div class="lang-zh"><p>appendEntry 通过同一个关系数据库连接插入分录。受控的 Posting 流程在一次 COMMIT 前，检查至少有两条分录、每个交易 tx_id 在每种币种 currency 下借贷相等，以及科目模板与业务金额是否匹配。普通的行级 CHECK 无法约束跨行求和。生产中应限制直接写入账本的权限，统一经过该流程，或实现可靠的延迟约束。示例中的 SQLite 触发器只阻止修改和删除历史记录，不能替代完整分录校验。<a href="https://www.postgresql.org/docs/18/ddl-constraints.html" target="_blank" rel="noopener">[6]</a></p></div><div class="lang-en"><p>appendEntry inserts through the same DB connection. The controlled Posting process checks at least two entries, per-transaction/currency balance, account template, and business amount before COMMIT. Row CHECK cannot enforce cross-row SUM. Production must restrict raw journal DML to this process or implement reliable deferred constraints. SQLite example triggers prohibit historical UPDATE/DELETE; they do not establish complete-entry balance by themselves. <a href="https://www.postgresql.org/docs/18/ddl-constraints.html" target="_blank" rel="noopener">[6]</a></p></div></div>
@@ -560,38 +597,52 @@ on mismatch or a second distinct capture:
     </figure><pre data-language="Pseudocode · reserve one keyed refund" data-kind="pseudocode" data-source="reserve_refund.pseudo"><code>reserveRefund(merchantScope, key, payNo, amount, currency):
   require amount is a positive integer minor-unit amount
   digest = canonicalHash(payNo, amount, currency)
+
   begin transaction
     p = lockPaymentOwnedBy(merchantScope, payNo)
     old = findRequest(merchantScope, &quot;REFUND&quot;, key)
     if old exists:
       require old.digest == digest else CONFLICT
-      commit; return accepted(old.refundId)
+      commit;
+      return accepted(old.refundId)
+
     require currency == p.currency
     require amount &lt;= p.captured - p.refunded - p.reserved
+
     r1 = insertRefund(p, amount, currency, state=RESERVED)
     p.reserved += amount
     insertRequest(merchantScope, &quot;REFUND&quot;, key, digest, r1)
     insertOutbox(&quot;refund-command:&quot; + r1, frozenRefundCommand(r1))
   commit
+
   return 202(r1)
-on relevant UNIQUE conflict: rollback; restart and compare winner
+
+on relevant UNIQUE conflict:
+  rollback;
+  restart and compare winner
+
 // Every refund entry point uses this same DB aggregate lock/bound.
 // A crash after commit preserves both reservation and dispatch intent.</code></pre>
 <pre data-language="Pseudocode · resolve one refund atomically" data-kind="pseudocode" data-source="refund_result.pseudo"><code>applyRefundResult(verifiedEvidence):
   e = verifiedEvidence
+
   begin transaction
     p = lockPayment(e.boundPayment)
     r = lockRefund(e.boundLocalRefund)
     require e.account/object/amount/currency matches r and its capture
     if r.state in {SUCCEEDED, FAILED}:
       compareOrRetainContradictoryEvidence(r, e)
-      commit; return  // never release or post twice
+      commit;
+      return  // never release or post twice
+
     if e.provesRefundSuccess:
       j = insertPostingUnique(e.scope, e.refundObjectId, REFUND)
       appendEntry(j, MERCHANT_PAYABLE, DR, r.amount, r.currency)
       appendEntry(j, PSP_RECEIVABLE, CR, r.amount, r.currency)
       require completeValidatedTemplateAndBalanced(j)
-      p.reserved -= r.amount; p.refunded += r.amount
+
+      p.reserved -= r.amount;
+      p.refunded += r.amount
       r.state = SUCCEEDED
       insertOutbox(&quot;refunded:&quot; + r.id, refundSucceeded(r, j))
     else if e.provesFinalNoRefundAndNoFutureExecution:
@@ -599,8 +650,10 @@ on relevant UNIQUE conflict: rollback; restart and compare winner
       r.state = FAILED
     else:
       r.state = UNKNOWN  // pending/timeout retains its reservation
+
     saveEvidence(e)
   commit
+
 // Refund entries assume unsettled PSP receivable, no merchant payout,
 // platform-borne fees, and no returned processing fee.</code></pre>
 <div class="bilingual"><div class="lang-zh"><p>预留事务提交后返回 202 + r1。后台程序读取已提交命令，使用 r1 对应的稳定渠道键、固定金额和原收款对象的绑定关系请求 PSP。收款与退款属于不同 API 操作，身份范围也分开。Stripe 允许针对同一笔扣款多次部分退款，但累计不能超过原金额；本地同样需要额度检查，避免两个并发请求同时用掉最后一份可退金额。<a href="https://docs.stripe.com/refunds" target="_blank" rel="noopener">[5]</a></p></div><div class="lang-en"><p>Reservation returns 202 + r1. The worker uses committed intent, r1’s stable provider key, frozen amount, and original capture binding. Create/refund API operations have different identity scopes. Stripe allows multiple partial refunds within the original total; enforce the bound locally so concurrent requests cannot spend the same remaining capacity. <a href="https://docs.stripe.com/refunds" target="_blank" rel="noopener">[5]</a></p></div></div>
@@ -715,6 +768,7 @@ on relevant UNIQUE conflict: rollback; restart and compare winner
   run = persistRunIdentity(batchHash, revision, rules, internalSnapshotW)
   require verifiedReportCompletenessOrKeepRunOpen(run)
   compare identities/counts/gross/fee/net/currency at matching scope
+
   for difference in run.differences:
     c = upsertCase(run, difference.businessKey, difference.kind)
     if difference is external_only:
@@ -722,9 +776,11 @@ on relevant UNIQUE conflict: rollback; restart and compare winner
       if e is verified capture/refund:
         applyEvidenceThroughPostingGate(e)  // original effect key
         markCaseClosedAfterKnownCommit(c)
-      else: retainReview(c)
+      else:
+        retainReview(c)
     else:
       retainReview(c)  // investigate lateness, cutoffs and mismatches
+
 // A crash after posting but before closing c only repeats the same gate.
 // No reconciliation branch creates another charge or guesses a reversal.
 // Report revisions append evidence; an absent row is not final failure.</code></pre>

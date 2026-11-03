@@ -110,37 +110,57 @@ class Runtime:
             return dict(row) if row else None
 
     def event(self, db, run_id, kind, payload):
-        seq = db.execute("UPDATE runs SET last_seq=last_seq+1 WHERE run_id=? RETURNING last_seq",
-                         (run_id,)).fetchone()[0]
+        seq = db.execute(
+            "UPDATE runs SET last_seq=last_seq+1 WHERE run_id=? RETURNING last_seq",
+            (run_id,)
+        ).fetchone()[0]
         db.execute("INSERT INTO events VALUES(?,?,?,?)", (run_id, seq, kind, encoded(payload)))
 
     def guard(self, db, token, forward=True):
         r = db.execute("SELECT * FROM runs WHERE run_id=?", (token["run_id"],)).fetchone()
         require(r is not None, "missing run")
-        require(all(r[k] == token[k] for k in ("owner", "epoch", "version", "role_rev")), "stale owner/version/role")
+        require(
+            all(r[k] == token[k] for k in ("owner", "epoch", "version", "role_rev")),
+            "stale owner/version/role"
+        )
         require(r["lease_until"] > now(db), "expired lease")
         if forward:
-            require(r["status"] == "RUNNING" and not r["cancelled"] and r["deadline"] > now(db),
-                    "forward work stopped")
+            require(
+                r["status"] == "RUNNING" and not r["cancelled"] and r["deadline"] > now(db),
+                "forward work stopped"
+            )
         return r
 
     def admit(self, tenant, actor, request_key, request):
         with transaction(self.path) as db:
-            old = db.execute("SELECT * FROM runs WHERE tenant=? AND request_key=?", (tenant, request_key)).fetchone()
+            old = db.execute(
+                "SELECT * FROM runs WHERE tenant=? AND request_key=?", (tenant, request_key)
+            ).fetchone()
             if old:
-                require(old["actor"] == actor and old["request_digest"] == digest(request), "request key conflict")
+                require(
+                    old["actor"] == actor and old["request_digest"] == digest(request),
+                    "request key conflict"
+                )
                 return old["run_id"]
+
             run_id = uuid.uuid4().hex
-            db.execute("INSERT INTO runs(run_id,tenant,actor,request_key,request_digest,deadline) VALUES(?,?,?,?,?,?)",
-                       (run_id, tenant, actor, request_key, digest(request), now(db) + 86400))
+            db.execute(
+                "INSERT INTO runs(run_id,tenant,actor,request_key,request_digest,deadline) VALUES(?,?,?,?,?,?)",
+                (run_id, tenant, actor, request_key, digest(request), now(db) + 86400)
+            )
             self.event(db, run_id, "ADMITTED", request)
-            db.execute("INSERT INTO outbox(id,run_id,kind) VALUES(?,?,'READY')", (f"admit:{run_id}", run_id))
+            db.execute(
+                "INSERT INTO outbox(id,run_id,kind) VALUES(?,?,'READY')",
+                (f"admit:{run_id}", run_id)
+            )
             return run_id
 
     def claim(self, run_id, worker, version):
         with transaction(self.path) as db:
-            row = db.execute(Path(__file__).with_name("claim.sql").read_text(),
-                             {"run_id": run_id, "worker": worker, "version": version}).fetchone()
+            row = db.execute(
+                Path(__file__).with_name("claim.sql").read_text(),
+                {"run_id": run_id, "worker": worker, "version": version}
+            ).fetchone()
             if row is None:
                 return None
         return dict(row)
@@ -148,39 +168,81 @@ class Runtime:
     def renew(self, token):
         with transaction(self.path) as db:
             self.guard(db, token, forward=False)
-            db.execute("UPDATE runs SET lease_until=?,version=version+1 WHERE run_id=?", (now(db)+15, token["run_id"]))
-            updated = dict(db.execute("SELECT * FROM runs WHERE run_id=?", (token["run_id"],)).fetchone())
+            db.execute(
+                "UPDATE runs SET lease_until=?,version=version+1 WHERE run_id=?",
+                (now(db) + 15, token["run_id"])
+            )
+            updated = dict(
+                db.execute("SELECT * FROM runs WHERE run_id=?", (token["run_id"],)).fetchone()
+            )
         return updated
 
     def start_step(self, token, immutable_input, reservation=1000):
         with transaction(self.path) as db:
             r = self.guard(db, token)
-            require(not db.execute("SELECT 1 FROM actions WHERE run_id=? AND kind='forward' AND status NOT IN ('SUCCESS','FAILED_KNOWN')",
-                                   (r["run_id"],)).fetchone(), "unresolved action blocks model")
-            step = db.execute("SELECT * FROM steps WHERE run_id=? ORDER BY n DESC LIMIT 1", (r["run_id"],)).fetchone()
+            require(
+                not db.execute(
+                    "SELECT 1 FROM actions WHERE run_id=? AND kind='forward' AND status NOT IN ('SUCCESS','FAILED_KNOWN')",
+                    (r["run_id"],)
+                ).fetchone(),
+                "unresolved action blocks model"
+            )
+            step = db.execute(
+                "SELECT * FROM steps WHERE run_id=? ORDER BY n DESC LIMIT 1", (r["run_id"],)
+            ).fetchone()
             if step:
                 fixed = json.loads(step["input"])
-                require(fixed["role_rev"] == r["role_rev"] and fixed["workflow_rev"] == r["workflow_rev"],
-                        "step revision needs explicit migration")
+                require(
+                    fixed["role_rev"] == r["role_rev"]
+                    and fixed["workflow_rev"] == r["workflow_rev"],
+                    "step revision needs explicit migration"
+                )
             if step and step["output"] is not None:
-                return {"saved": json.loads(step["output"]), "n": step["n"], "input": json.loads(step["input"])}
+                return {
+                    "saved": json.loads(step["output"]),
+                    "n": step["n"],
+                    "input": json.loads(step["input"])
+                }
+
             if step is None:
                 require(r["step_count"] < 12, "step cap")
                 n = r["step_count"] + 1
-                fixed = {**immutable_input, "workflow_rev": r["workflow_rev"], "role_rev": r["role_rev"]}
-                db.execute("INSERT INTO steps VALUES(?,?,?,?,NULL)", (r["run_id"], n, encoded(fixed), digest(fixed)))
+                fixed = {
+                    **immutable_input,
+                    "workflow_rev": r["workflow_rev"],
+                    "role_rev": r["role_rev"]
+                }
+                db.execute(
+                    "INSERT INTO steps VALUES(?,?,?,?,NULL)",
+                    (r["run_id"], n, encoded(fixed), digest(fixed))
+                )
                 db.execute("UPDATE runs SET step_count=step_count+1 WHERE run_id=?", (r["run_id"],))
             else:
                 n, fixed = step["n"], json.loads(step["input"])
-            require(reservation > 0 and r["token_hold"]+r["token_used"]+reservation <= 60000, "token cap")
-            require(db.execute("SELECT count(*) FROM attempts WHERE run_id=? AND n=?", (r["run_id"],n)).fetchone()[0] < 2,
-                    "adapter attempt cap")
+
+            require(
+                reservation > 0 and r["token_hold"] + r["token_used"] + reservation <= 60000,
+                "token cap"
+            )
+            require(
+                db.execute(
+                    "SELECT count(*) FROM attempts WHERE run_id=? AND n=?", (r["run_id"], n)
+                ).fetchone()[0] < 2,
+                "adapter attempt cap"
+            )
             attempt = uuid.uuid4().hex
-            db.execute("INSERT INTO attempts VALUES(?,?,?,?,NULL)", (attempt,r["run_id"],n,reservation))
-            db.execute("UPDATE runs SET token_hold=token_hold+?,version=version+1 WHERE run_id=?", (reservation,r["run_id"]))
-            self.event(db, r["run_id"], "MODEL_ATTEMPT", {"attempt":attempt,"n":n})
-            updated = dict(db.execute("SELECT * FROM runs WHERE run_id=?", (r["run_id"],)).fetchone())
-        return {"n":n,"input":fixed,"attempt":attempt,"token":updated}
+            db.execute(
+                "INSERT INTO attempts VALUES(?,?,?,?,NULL)", (attempt, r["run_id"], n, reservation)
+            )
+            db.execute(
+                "UPDATE runs SET token_hold=token_hold+?,version=version+1 WHERE run_id=?",
+                (reservation, r["run_id"])
+            )
+            self.event(db, r["run_id"], "MODEL_ATTEMPT", {"attempt": attempt, "n": n})
+            updated = dict(
+                db.execute("SELECT * FROM runs WHERE run_id=?", (r["run_id"],)).fetchone()
+            )
+        return {"n": n, "input": fixed, "attempt": attempt, "token": updated}
 
     def usage(self, attempt_id, tokens):
         # Trusted gateway accounting is independent of stale workflow ownership.
@@ -190,28 +252,46 @@ class Runtime:
             if a["usage"] is not None:
                 require(a["usage"] == tokens, "usage conflict")
                 return
-            db.execute("UPDATE attempts SET usage=? WHERE id=?", (tokens,attempt_id))
-            db.execute("UPDATE runs SET token_hold=token_hold-?,token_used=token_used+? WHERE run_id=?",
-                       (a["reserved"],tokens,a["run_id"]))
+
+            db.execute("UPDATE attempts SET usage=? WHERE id=?", (tokens, attempt_id))
+            db.execute(
+                "UPDATE runs SET token_hold=token_hold-?,token_used=token_used+? WHERE run_id=?",
+                (a["reserved"], tokens, a["run_id"])
+            )
 
     def commit_output(self, token, n, output, actions=()):
         with transaction(self.path) as db:
             r = self.guard(db, token)
-            step = db.execute("SELECT * FROM steps WHERE run_id=? AND n=?", (r["run_id"],n)).fetchone()
+            step = db.execute(
+                "SELECT * FROM steps WHERE run_id=? AND n=?", (r["run_id"], n)
+            ).fetchone()
             require(step is not None, "missing step")
             pinned = json.loads(step["input"])
-            require(pinned["role_rev"] == r["role_rev"] and pinned["workflow_rev"] == r["workflow_rev"],
-                    "step revision needs explicit migration")
+            require(
+                pinned["role_rev"] == r["role_rev"]
+                and pinned["workflow_rev"] == r["workflow_rev"],
+                "step revision needs explicit migration"
+            )
             if step["output"] is not None:
                 return json.loads(step["output"])
-            db.execute("UPDATE steps SET output=? WHERE run_id=? AND n=? AND output IS NULL", (encoded(output),r["run_id"],n))
+
+            db.execute(
+                "UPDATE steps SET output=? WHERE run_id=? AND n=? AND output IS NULL",
+                (encoded(output), r["run_id"], n)
+            )
             for a in actions:
-                require(a["binding"]["tenant"] == r["tenant"] and a["binding"]["actor"] == r["actor"]
-                        and a["binding"]["agent"] == r["role"], "action principal mismatch")
-                db.execute("INSERT INTO actions(id,run_id,business_key,binding,status) VALUES(?,?,?,?,'PREPARED')",
-                           (a["id"],r["run_id"],a["key"],encoded(a["binding"])))
+                require(
+                    a["binding"]["tenant"] == r["tenant"]
+                    and a["binding"]["actor"] == r["actor"]
+                    and a["binding"]["agent"] == r["role"],
+                    "action principal mismatch"
+                )
+                db.execute(
+                    "INSERT INTO actions(id,run_id,business_key,binding,status) VALUES(?,?,?,?,'PREPARED')",
+                    (a["id"], r["run_id"], a["key"], encoded(a["binding"]))
+                )
             db.execute("UPDATE runs SET version=version+1 WHERE run_id=?", (r["run_id"],))
-            self.event(db, r["run_id"], "MODEL_OUTPUT", {"n":n,"output":output})
+            self.event(db, r["run_id"], "MODEL_OUTPUT", {"n": n, "output": output})
         return output
 
     def next_step(self, token):
@@ -219,163 +299,340 @@ class Runtime:
         with transaction(self.path) as db:
             r = self.guard(db, token)
             require(r["step_count"] < 12, "step cap")
-            require(not db.execute("SELECT 1 FROM actions WHERE run_id=? AND status NOT IN ('SUCCESS','FAILED_KNOWN')",
-                                   (r["run_id"],)).fetchone(), "unresolved action")
-            previous = db.execute("SELECT * FROM steps WHERE run_id=? AND n=?", (r["run_id"],r["step_count"])).fetchone()
+            require(
+                not db.execute(
+                    "SELECT 1 FROM actions WHERE run_id=? AND status NOT IN ('SUCCESS','FAILED_KNOWN')",
+                    (r["run_id"],)
+                ).fetchone(),
+                "unresolved action"
+            )
+            previous = db.execute(
+                "SELECT * FROM steps WHERE run_id=? AND n=?", (r["run_id"], r["step_count"])
+            ).fetchone()
             require(previous and previous["output"] is not None, "no completed output")
+
             # Copy a supplied event projection in real code; explicit empty input here is test-only.
-            n = r["step_count"]+1
-            fixed = {"previous_output":json.loads(previous["output"]),"workflow_rev":r["workflow_rev"],"role_rev":r["role_rev"]}
-            db.execute("INSERT INTO steps VALUES(?,?,?,?,NULL)", (r["run_id"],n,encoded(fixed),digest(fixed)))
-            db.execute("UPDATE runs SET step_count=?,version=version+1 WHERE run_id=?", (n,r["run_id"]))
-            updated = dict(db.execute("SELECT * FROM runs WHERE run_id=?", (r["run_id"],)).fetchone())
+            n = r["step_count"] + 1
+            fixed = {
+                "previous_output": json.loads(previous["output"]),
+                "workflow_rev": r["workflow_rev"],
+                "role_rev": r["role_rev"]
+            }
+            db.execute(
+                "INSERT INTO steps VALUES(?,?,?,?,NULL)",
+                (r["run_id"], n, encoded(fixed), digest(fixed))
+            )
+            db.execute(
+                "UPDATE runs SET step_count=?,version=version+1 WHERE run_id=?", (n, r["run_id"])
+            )
+            updated = dict(
+                db.execute("SELECT * FROM runs WHERE run_id=?", (r["run_id"],)).fetchone()
+            )
         return updated
 
     def park(self, token, action_id, approval_id):
         pause = uuid.uuid4().hex
         with transaction(self.path) as db:
             r = self.guard(db, token)
-            a = db.execute("SELECT * FROM actions WHERE id=? AND run_id=?", (action_id,r["run_id"])).fetchone()
+            a = db.execute(
+                "SELECT * FROM actions WHERE id=? AND run_id=?", (action_id, r["run_id"])
+            ).fetchone()
             require(a and a["status"] == "PREPARED", "not parkable")
-            db.execute("INSERT INTO pauses VALUES(?,?,?,?,?)", (pause,r["run_id"],action_id,approval_id,a["binding"]))
-            db.execute("UPDATE runs SET status='WAIT_APPROVAL',pause_id=?,owner=NULL,lease_until=0,epoch=epoch+1,version=version+1 WHERE run_id=?",
-                       (pause,r["run_id"]))
-            self.event(db, r["run_id"], "WAIT_APPROVAL", {"pause":pause,"action":action_id})
+
+            db.execute(
+                "INSERT INTO pauses VALUES(?,?,?,?,?)",
+                (pause, r["run_id"], action_id, approval_id, a["binding"])
+            )
+            db.execute(
+                "UPDATE runs SET status='WAIT_APPROVAL',pause_id=?,owner=NULL,lease_until=0,epoch=epoch+1,version=version+1 WHERE run_id=?",
+                (pause, r["run_id"])
+            )
+            self.event(db, r["run_id"], "WAIT_APPROVAL", {"pause": pause, "action": action_id})
         return pause
 
     def resume(self, run_id, pause_id, version, decision):
         # decision must come from authenticated Ch33 lookup, never client approved=true.
         with transaction(self.path) as db:
             r = db.execute("SELECT * FROM runs WHERE run_id=?", (run_id,)).fetchone()
-            p = db.execute("SELECT * FROM pauses WHERE id=? AND run_id=?", (pause_id,run_id)).fetchone()
+            p = db.execute(
+                "SELECT * FROM pauses WHERE id=? AND run_id=?", (pause_id, run_id)
+            ).fetchone()
             require(p is not None, "wrong pause")
-            require(decision["approval_id"] == p["approval_id"] and encoded(decision["binding"]) == p["binding"], "decision binding mismatch")
-            old = db.execute("SELECT * FROM decisions WHERE tenant=? AND id=?", (r["tenant"],decision["id"])).fetchone()
+            require(
+                decision["approval_id"] == p["approval_id"]
+                and encoded(decision["binding"]) == p["binding"],
+                "decision binding mismatch"
+            )
+            old = db.execute(
+                "SELECT * FROM decisions WHERE tenant=? AND id=?", (r["tenant"], decision["id"])
+            ).fetchone()
             if old:
-                require(old["run_id"] == run_id and old["pause_id"] == pause_id and old["binding"] == p["binding"], "decision reuse")
+                require(
+                    old["run_id"] == run_id
+                    and old["pause_id"] == pause_id
+                    and old["binding"] == p["binding"],
+                    "decision reuse"
+                )
                 return "ALREADY_ACCEPTED"
-            require(r["status"] == "WAIT_APPROVAL" and r["pause_id"] == pause_id and r["version"] == version
-                    and not r["cancelled"] and r["deadline"] > now(db), "stale/cancelled/expired pause")
-            require(decision["status"] == "APPROVED" and decision["expires"] > now(db), "not approved or expired")
-            db.execute("INSERT INTO decisions VALUES(?,?,?,?,?)", (r["tenant"],decision["id"],run_id,pause_id,p["binding"]))
-            changed = db.execute("UPDATE runs SET status='READY',version=version+1 WHERE run_id=? AND status='WAIT_APPROVAL' AND pause_id=? AND version=?",
-                                 (run_id,pause_id,version)).rowcount
+
+            require(
+                r["status"] == "WAIT_APPROVAL"
+                and r["pause_id"] == pause_id
+                and r["version"] == version
+                and not r["cancelled"]
+                and r["deadline"] > now(db),
+                "stale/cancelled/expired pause"
+            )
+            require(
+                decision["status"] == "APPROVED" and decision["expires"] > now(db),
+                "not approved or expired"
+            )
+
+            db.execute(
+                "INSERT INTO decisions VALUES(?,?,?,?,?)",
+                (r["tenant"], decision["id"], run_id, pause_id, p["binding"])
+            )
+            changed = db.execute(
+                "UPDATE runs SET status='READY',version=version+1 WHERE run_id=? AND status='WAIT_APPROVAL' AND pause_id=? AND version=?",
+                (run_id, pause_id, version)
+            ).rowcount
             require(changed == 1, "lost resume CAS")
-            db.execute("INSERT INTO outbox(id,run_id,kind) VALUES(?,?,'READY')", (f"resume:{pause_id}",run_id))
-            self.event(db, run_id, "RESUMED", {"pause":pause_id,"decision":decision["id"]})
+            db.execute(
+                "INSERT INTO outbox(id,run_id,kind) VALUES(?,?,'READY')",
+                (f"resume:{pause_id}", run_id)
+            )
+            self.event(db, run_id, "RESUMED", {"pause": pause_id, "decision": decision["id"]})
             return "ACCEPTED"
 
     def dispatch(self, token, action_id):
         with transaction(self.path) as db:
-            a = db.execute("SELECT * FROM actions WHERE id=? AND run_id=?", (action_id,token["run_id"])).fetchone()
+            a = db.execute(
+                "SELECT * FROM actions WHERE id=? AND run_id=?", (action_id, token["run_id"])
+            ).fetchone()
             require(a is not None, "wrong action")
             r = self.guard(db, token, forward=a["kind"] == "forward")
             require(a["status"] == "PREPARED", "already dispatched; reconcile original key")
-            require(not db.execute("SELECT 1 FROM actions WHERE run_id=? AND id<>? AND status IN ('DISPATCHING','UNKNOWN')",
-                                   (r["run_id"],action_id)).fetchone(), "serial run has unresolved dispatch")
+            require(
+                not db.execute(
+                    "SELECT 1 FROM actions WHERE run_id=? AND id<>? AND status IN ('DISPATCHING','UNKNOWN')",
+                    (r["run_id"], action_id)
+                ).fetchone(),
+                "serial run has unresolved dispatch"
+            )
             binding = json.loads(a["binding"])
-            require(binding["tenant"] == r["tenant"] and binding["actor"] == r["actor"]
-                    and binding["agent"] == r["role"], "action role requires Ch33 reauthorization")
+            require(
+                binding["tenant"] == r["tenant"]
+                and binding["actor"] == r["actor"]
+                and binding["agent"] == r["role"],
+                "action role requires Ch33 reauthorization"
+            )
+
             if a["kind"] == "forward":
                 require(r["tool_count"] < 8, "tool cap")
                 p = db.execute("SELECT * FROM pauses WHERE action_id=?", (action_id,)).fetchone()
                 if p:
-                    require(db.execute("SELECT 1 FROM decisions WHERE run_id=? AND pause_id=?", (r["run_id"],p["id"])).fetchone(), "approval missing")
-                db.execute("UPDATE runs SET tool_count=tool_count+1 WHERE run_id=?", (r["run_id"],))
+                    require(
+                        db.execute(
+                            "SELECT 1 FROM decisions WHERE run_id=? AND pause_id=?",
+                            (r["run_id"], p["id"])
+                        ).fetchone(),
+                        "approval missing"
+                    )
+                db.execute(
+                    "UPDATE runs SET tool_count=tool_count+1 WHERE run_id=?", (r["run_id"],)
+                )
             else:
                 require(a["attempts"] < 2 and r["status"] == "COMPENSATING", "recovery cap/state")
                 if a["dependency"]:
-                    require(db.execute("SELECT status FROM actions WHERE id=?", (a["dependency"],)).fetchone()[0] == "SUCCESS", "undo dependency unresolved")
-            db.execute("UPDATE actions SET status='DISPATCHING',attempts=attempts+1 WHERE id=?", (action_id,))
+                    require(
+                        db.execute(
+                            "SELECT status FROM actions WHERE id=?", (a["dependency"],)
+                        ).fetchone()[0] == "SUCCESS",
+                        "undo dependency unresolved"
+                    )
+
+            db.execute(
+                "UPDATE actions SET status='DISPATCHING',attempts=attempts+1 WHERE id=?",
+                (action_id,)
+            )
             db.execute("UPDATE runs SET version=version+1 WHERE run_id=?", (r["run_id"],))
-            self.event(db, r["run_id"], "DISPATCHING", {"action":action_id,"key":a["business_key"]})
-        return {"key":a["business_key"],"binding":json.loads(a["binding"])}
+            self.event(
+                db, r["run_id"], "DISPATCHING", {"action": action_id, "key": a["business_key"]}
+            )
+        return {"key": a["business_key"], "binding": json.loads(a["binding"])}
 
     def cancel(self, run_id):
         with transaction(self.path) as db:
             current = db.execute("SELECT * FROM runs WHERE run_id=?", (run_id,)).fetchone()
             require(current is not None, "missing run")
-            if current["status"] in ("DONE","COMPENSATED","CANCELLED","FAILED"):
+            if current["status"] in ("DONE", "COMPENSATED", "CANCELLED", "FAILED"):
                 return dict(current)
-            outstanding = db.execute("SELECT 1 FROM actions WHERE run_id=? AND status IN ('DISPATCHING','UNKNOWN')", (run_id,)).fetchone()
-            confirmed = db.execute("SELECT 1 FROM actions WHERE run_id=? AND kind='forward' AND status='SUCCESS'", (run_id,)).fetchone()
-            status = "CANCEL_REQUESTED" if outstanding else "COMPENSATING" if confirmed else "CANCELLED"
-            db.execute("UPDATE runs SET cancelled=1,status=?,owner=NULL,lease_until=0,epoch=epoch+1,version=version+1 WHERE run_id=? AND status NOT IN ('DONE','COMPENSATED','CANCELLED')",
-                       (status,run_id))
+
+            outstanding = db.execute(
+                "SELECT 1 FROM actions WHERE run_id=? AND status IN ('DISPATCHING','UNKNOWN')",
+                (run_id,)
+            ).fetchone()
+            confirmed = db.execute(
+                "SELECT 1 FROM actions WHERE run_id=? AND kind='forward' AND status='SUCCESS'",
+                (run_id,)
+            ).fetchone()
+            status = (
+                "CANCEL_REQUESTED" if outstanding else "COMPENSATING" if confirmed else "CANCELLED"
+            )
+            db.execute(
+                "UPDATE runs SET cancelled=1,status=?,owner=NULL,lease_until=0,epoch=epoch+1,version=version+1 WHERE run_id=? AND status NOT IN ('DONE','COMPENSATED','CANCELLED')",
+                (status, run_id)
+            )
             self.event(db, run_id, "CANCEL_REQUESTED", {})
         return self.row(run_id)
 
     def observe(self, token, action_id, receipt):
         with transaction(self.path) as db:
             r = self.guard(db, token, forward=False)
-            a = db.execute("SELECT * FROM actions WHERE id=? AND run_id=?", (action_id,r["run_id"])).fetchone()
-            require(a and receipt["key"] == a["business_key"] and encoded(receipt["binding"]) == a["binding"], "receipt mismatch")
-            require(a["status"] in ("DISPATCHING","UNKNOWN","SUCCESS","FAILED_KNOWN"), "never dispatched")
+            a = db.execute(
+                "SELECT * FROM actions WHERE id=? AND run_id=?", (action_id, r["run_id"])
+            ).fetchone()
+            require(
+                a and receipt["key"] == a["business_key"]
+                and encoded(receipt["binding"]) == a["binding"],
+                "receipt mismatch"
+            )
+            require(
+                a["status"] in ("DISPATCHING", "UNKNOWN", "SUCCESS", "FAILED_KNOWN"),
+                "never dispatched"
+            )
             outcome = receipt["outcome"]
-            require(outcome in ("SUCCESS","FAILED_KNOWN"), "not a known receipt")
-            old = db.execute("SELECT receipt FROM observations WHERE run_id=? AND action_id=?", (r["run_id"],action_id)).fetchone()
+            require(outcome in ("SUCCESS", "FAILED_KNOWN"), "not a known receipt")
+            old = db.execute(
+                "SELECT receipt FROM observations WHERE run_id=? AND action_id=?",
+                (r["run_id"], action_id)
+            ).fetchone()
             if old:
                 require(old[0] == encoded(receipt), "receipt conflict")
                 return
-            db.execute("INSERT INTO observations VALUES(?,?,?)", (r["run_id"],action_id,encoded(receipt)))
-            db.execute("UPDATE actions SET status=?,receipt=? WHERE id=?", (outcome,encoded(receipt),action_id))
+
+            db.execute(
+                "INSERT INTO observations VALUES(?,?,?)", (r["run_id"], action_id, encoded(receipt))
+            )
+            db.execute(
+                "UPDATE actions SET status=?,receipt=? WHERE id=?",
+                (outcome, encoded(receipt), action_id)
+            )
             if outcome == "SUCCESS" and a["kind"] == "forward":
-                db.execute("INSERT INTO effects VALUES(?,?)", (action_id,encoded(receipt)))
+                db.execute("INSERT INTO effects VALUES(?,?)", (action_id, encoded(receipt)))
             if r["cancelled"]:
                 # The adapter's business policy compensates confirmed forward effects.
-                has_pending = db.execute("SELECT 1 FROM actions WHERE run_id=? AND status IN ('DISPATCHING','UNKNOWN')",
-                                         (r["run_id"],)).fetchone()
-                has_effect = db.execute("SELECT 1 FROM actions WHERE run_id=? AND kind='forward' AND status='SUCCESS'", (r["run_id"],)).fetchone()
-                next_status = "CANCEL_REQUESTED" if has_pending else "COMPENSATING" if has_effect else "CANCELLED"
-                db.execute("UPDATE runs SET status=? WHERE run_id=?", (next_status,r["run_id"]))
+                has_pending = db.execute(
+                    "SELECT 1 FROM actions WHERE run_id=? AND status IN ('DISPATCHING','UNKNOWN')",
+                    (r["run_id"],)
+                ).fetchone()
+                has_effect = db.execute(
+                    "SELECT 1 FROM actions WHERE run_id=? AND kind='forward' AND status='SUCCESS'",
+                    (r["run_id"],)
+                ).fetchone()
+                next_status = (
+                    "CANCEL_REQUESTED" if has_pending
+                    else "COMPENSATING" if has_effect
+                    else "CANCELLED"
+                )
+                db.execute("UPDATE runs SET status=? WHERE run_id=?", (next_status, r["run_id"]))
             db.execute("UPDATE runs SET version=version+1 WHERE run_id=?", (r["run_id"],))
-            self.event(db, r["run_id"], "OBSERVED", {"action":action_id,"outcome":outcome})
+            self.event(db, r["run_id"], "OBSERVED", {"action": action_id, "outcome": outcome})
 
     def unknown(self, token, action_id):
         with transaction(self.path) as db:
             r = self.guard(db, token, forward=False)
-            changed = db.execute("UPDATE actions SET status='UNKNOWN' WHERE id=? AND run_id=? AND status='DISPATCHING'", (action_id,r["run_id"])).rowcount
+            changed = db.execute(
+                "UPDATE actions SET status='UNKNOWN' WHERE id=? AND run_id=? AND status='DISPATCHING'",
+                (action_id, r["run_id"])
+            ).rowcount
             require(changed == 1, "not dispatching")
             db.execute("UPDATE runs SET version=version+1 WHERE run_id=?", (r["run_id"],))
-            self.event(db, r["run_id"], "UNKNOWN", {"action":action_id})
+            self.event(db, r["run_id"], "UNKNOWN", {"action": action_id})
 
     def compensate(self, token, original_id, action_id, binding, dependency=None):
         with transaction(self.path) as db:
             r = self.guard(db, token, forward=False)
-            original = db.execute("SELECT * FROM actions WHERE id=? AND run_id=?", (original_id,r["run_id"])).fetchone()
-            require(r["status"] == "COMPENSATING" and original and original["status"] == "SUCCESS", "unknown/non-success cannot be undone")
-            require(binding["tenant"] == r["tenant"] and binding["actor"] == r["actor"]
-                    and binding["agent"] == r["role"], "undo principal mismatch")
-            require(binding["args"]["original_key"] == original["business_key"], "wrong original effect")
+            original = db.execute(
+                "SELECT * FROM actions WHERE id=? AND run_id=?", (original_id, r["run_id"])
+            ).fetchone()
+            require(
+                r["status"] == "COMPENSATING" and original and original["status"] == "SUCCESS",
+                "unknown/non-success cannot be undone"
+            )
+            require(
+                binding["tenant"] == r["tenant"]
+                and binding["actor"] == r["actor"]
+                and binding["agent"] == r["role"],
+                "undo principal mismatch"
+            )
+            require(
+                binding["args"]["original_key"] == original["business_key"], "wrong original effect"
+            )
             if dependency:
-                require(db.execute("SELECT 1 FROM actions WHERE id=? AND run_id=? AND kind='undo'",
-                                   (dependency,r["run_id"])).fetchone(), "undo dependency outside this run")
-            db.execute("INSERT INTO actions(id,run_id,business_key,binding,status,kind,original_id,dependency) VALUES(?,?,?,?,'PREPARED','undo',?,?)",
-                       (action_id,r["run_id"],f"undo:{original_id}",encoded(binding),original_id,dependency))
+                require(
+                    db.execute(
+                        "SELECT 1 FROM actions WHERE id=? AND run_id=? AND kind='undo'",
+                        (dependency, r["run_id"])
+                    ).fetchone(),
+                    "undo dependency outside this run"
+                )
+
+            db.execute(
+                "INSERT INTO actions(id,run_id,business_key,binding,status,kind,original_id,dependency) VALUES(?,?,?,?,'PREPARED','undo',?,?)",
+                (
+                    action_id, r["run_id"], f"undo:{original_id}", encoded(binding),
+                    original_id, dependency
+                )
+            )
             db.execute("UPDATE runs SET version=version+1 WHERE run_id=?", (r["run_id"],))
-            self.event(db, r["run_id"], "UNDO_PREPARED", {"action":action_id,"original":original_id})
+            self.event(
+                db, r["run_id"], "UNDO_PREPARED", {"action": action_id, "original": original_id}
+            )
 
     def escalate(self, token, action_id):
         with transaction(self.path) as db:
             r = self.guard(db, token, forward=False)
-            require(db.execute("SELECT 1 FROM actions WHERE id=? AND run_id=?", (action_id,r["run_id"])).fetchone(), "wrong review action")
+            require(
+                db.execute(
+                    "SELECT 1 FROM actions WHERE id=? AND run_id=?", (action_id, r["run_id"])
+                ).fetchone(),
+                "wrong review action"
+            )
             key = f"case:{r['run_id']}:{action_id}"
-            db.execute("INSERT OR IGNORE INTO outbox(id,run_id,kind) VALUES(?,?,'NEEDS_REVIEW')", (key,r["run_id"]))
-            db.execute("UPDATE runs SET status='NEEDS_REVIEW',version=version+1 WHERE run_id=?", (r["run_id"],))
-            self.event(db, r["run_id"], "NEEDS_REVIEW", {"action":action_id,"case":key})
+            db.execute(
+                "INSERT OR IGNORE INTO outbox(id,run_id,kind) VALUES(?,?,'NEEDS_REVIEW')",
+                (key, r["run_id"])
+            )
+            db.execute(
+                "UPDATE runs SET status='NEEDS_REVIEW',version=version+1 WHERE run_id=?",
+                (r["run_id"],)
+            )
+            self.event(db, r["run_id"], "NEEDS_REVIEW", {"action": action_id, "case": key})
         return key
 
     def acknowledge_case(self, case_key, durable_receipt):
         require(durable_receipt == f"accepted:{case_key}", "missing case receipt")
         with transaction(self.path) as db:
-            db.execute("UPDATE outbox SET acknowledged=1 WHERE id=? AND kind='NEEDS_REVIEW'", (case_key,))
+            db.execute(
+                "UPDATE outbox SET acknowledged=1 WHERE id=? AND kind='NEEDS_REVIEW'", (case_key,)
+            )
 
     def finish_compensation(self, token):
         with transaction(self.path) as db:
             r = self.guard(db, token, forward=False)
             require(r["status"] == "COMPENSATING", "not compensating")
-            require(not db.execute("SELECT 1 FROM actions f LEFT JOIN actions u ON u.original_id=f.id AND u.kind='undo' WHERE f.run_id=? AND f.kind='forward' AND (f.status IN ('UNKNOWN','DISPATCHING') OR (f.status='SUCCESS' AND (u.status IS NULL OR u.status!='SUCCESS')))", (r["run_id"],)).fetchone(), "undo incomplete")
-            db.execute("UPDATE runs SET status='COMPENSATED',version=version+1,owner=NULL,lease_until=0 WHERE run_id=?", (r["run_id"],))
+            require(
+                not db.execute(
+                    "SELECT 1 FROM actions f LEFT JOIN actions u ON u.original_id=f.id AND u.kind='undo' WHERE f.run_id=? AND f.kind='forward' AND (f.status IN ('UNKNOWN','DISPATCHING') OR (f.status='SUCCESS' AND (u.status IS NULL OR u.status!='SUCCESS')))",
+                    (r["run_id"],)
+                ).fetchone(),
+                "undo incomplete"
+            )
+            db.execute(
+                "UPDATE runs SET status='COMPENSATED',version=version+1,owner=NULL,lease_until=0 WHERE run_id=?",
+                (r["run_id"],)
+            )
             self.event(db, r["run_id"], "COMPENSATED", {})
 
 
@@ -402,21 +659,42 @@ class Gateway:
             if old:
                 require(old["binding"] == encoded(binding), "business key conflict")
                 return json.loads(old["receipt"])
+
             amount, tool = binding["args"]["amount"], binding["tool"]
             require(type(amount) is int and amount > 0, "invalid amount")
             if tool == "charge":
-                require(db.execute("UPDATE account SET balance=balance-? WHERE id=1 AND balance>=?", (amount,amount)).rowcount == 1, "insufficient balance")
+                require(
+                    db.execute(
+                        "UPDATE account SET balance=balance-? WHERE id=1 AND balance>=?",
+                        (amount, amount)
+                    ).rowcount == 1,
+                    "insufficient balance"
+                )
             elif tool == "refund":
                 original = self._query(db, binding["args"]["original_key"])
-                require(original and original["binding"]["tool"] == "charge" and original["binding"]["args"]["amount"] == amount, "invalid refund")
+                require(
+                    original and original["binding"]["tool"] == "charge"
+                    and original["binding"]["args"]["amount"] == amount,
+                    "invalid refund"
+                )
                 # One full refund per original transaction in this fixed domain.
                 prior = [json.loads(x[0]) for x in db.execute("SELECT receipt FROM receipts")]
-                require(not any(x["binding"]["tool"] == "refund" and x["binding"]["args"]["original_key"] == original["key"] for x in prior), "already refunded")
+                require(
+                    not any(
+                        x["binding"]["tool"] == "refund"
+                        and x["binding"]["args"]["original_key"] == original["key"]
+                        for x in prior
+                    ),
+                    "already refunded"
+                )
                 db.execute("UPDATE account SET balance=balance+? WHERE id=1", (amount,))
             else:
                 raise Rejected("unsupported fixture tool")
-            receipt = {"key":key,"binding":binding,"outcome":"SUCCESS"}
-            db.execute("INSERT INTO receipts VALUES(?,?,?)", (key,encoded(binding),encoded(receipt)))
+
+            receipt = {"key": key, "binding": binding, "outcome": "SUCCESS"}
+            db.execute(
+                "INSERT INTO receipts VALUES(?,?,?)", (key, encoded(binding), encoded(receipt))
+            )
             return receipt
 
     def _query(self, db, key):
@@ -432,8 +710,15 @@ class Gateway:
             old = db.execute("SELECT decision FROM approvals WHERE id=?", (approval_id,)).fetchone()
             if old:
                 return json.loads(old[0])
-            decision = {"id":uuid.uuid4().hex,"approval_id":approval_id,"binding":binding,"status":"APPROVED","expires":now(db)+300}
-            db.execute("INSERT INTO approvals VALUES(?,?)", (approval_id,encoded(decision)))
+
+            decision = {
+                "id": uuid.uuid4().hex,
+                "approval_id": approval_id,
+                "binding": binding,
+                "status": "APPROVED",
+                "expires": now(db) + 300
+            }
+            db.execute("INSERT INTO approvals VALUES(?,?)", (approval_id, encoded(decision)))
             return decision
 
     def decision(self, approval_id):
@@ -444,5 +729,5 @@ class Gateway:
     def case(self, key):
         with transaction(self.path) as db:
             receipt = f"accepted:{key}"
-            db.execute("INSERT OR IGNORE INTO cases VALUES(?,?)", (key,receipt))
+            db.execute("INSERT OR IGNORE INTO cases VALUES(?,?)", (key, receipt))
             return receipt

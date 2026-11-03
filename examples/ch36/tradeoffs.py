@@ -8,8 +8,12 @@ def cap_trace():
     replicas["A"] = 1  # local write completes and responds OK
     later_read = replicas["B"]
     assert later_read == 0  # violates write-OK-before-read real-time order
-    return {"write": "OK(1)", "later_read": later_read,
-            "strong_read_without_proof": "UNAVAILABLE"}
+
+    return {
+        "write": "OK(1)",
+        "later_read": later_read,
+        "strong_read_without_proof": "UNAVAILABLE"
+    }
 
 
 # BEGIN quorum
@@ -37,5 +41,8 @@ def percentile_example():
     a = [100] + [1] * 99
     b = [1, 100] + [1] * 98
     p99 = lambda values: sorted(values)[ceil(len(values) * .99) - 1]
-    return {"sum_of_p99_ms": p99(a) + p99(b),
-            "p99_of_path_ms": p99([x + y for x, y in zip(a, b)])}
+
+    return {
+        "sum_of_p99_ms": p99(a) + p99(b),
+        "p99_of_path_ms": p99([x + y for x, y in zip(a, b)])
+    }

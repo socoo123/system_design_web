@@ -260,29 +260,40 @@
     <h3><span class="lang-zh">先找到节点位置，再找到负责的物理机器</span><span class="lang-en">Resolve a token, then its physical owner</span></h3>
 <div class="bilingual"><div class="lang-zh"><p>A2 中，排好序的节点位置是 10→S0、40→S1、75→S2。查找时，先找出第一个满足 <strong>token≥hash</strong> 的位置，再读取它对应的物理机器。因此，25 和 40 都归 S1，90 超过最后一个位置后则环回 S0。各段区间左开右闭：S0 负责 (75,99]∪[0,10]，S1 负责 (10,40]，S2 负责 (40,75]。</p><p>下面是可运行示例中的 Java 17 片段。构造环时，先排序，再复制成不可变表；空环和重复节点位置都会被拒绝，已有归属不会被覆盖。环上只有一个节点时，它负责整个空间。代码把 <code>long</code> 当作<strong>无符号 64 位</strong>数比较，避免把最高位为 1 的哈希值排到前面。图中的 0–99 仅用于手算，实际哈希值不会被取模到这 100 个位置中。</p></div><div class="lang-en"><p>A2 sorts 10→S0, 40→S1, 75→S2. Find the first <strong>token≥hash</strong>: 25 and 40 go to S1, while 90 wraps to S0. Intervals are left-open/right-closed: S0 owns (75,99]∪[0,10], S1 (10,40], and S2 (40,75].</p><p>This Java 17 excerpt belongs to the runnable example. Construction sorts and copies an immutable table; empty rings and duplicate tokens are rejected instead of overwriting owners. One token covers the entire ring. Compare <code>long</code> values as <strong>unsigned 64-bit</strong> positions so high-bit hashes do not sort first. The diagram’s 0–99 is for hand calculation; production hashes are not reduced modulo 100.</p></div></div><pre data-language="Java 17 · local ring" data-kind="runnable" data-source="ConsistentRing.java#ring"><code>public record Token(long position, String owner) {
     public Token {
-        if (owner == null || owner.isBlank())
+        if (owner == null || owner.isBlank()) {
             throw new IllegalArgumentException(&quot;empty owner&quot;);
+        }
     }
 }
+
 public record Ring(long epoch, List&lt;Token&gt; tokens) {
     public Ring {
-        if (epoch &lt; 0 || tokens.isEmpty())
+        if (epoch &lt; 0 || tokens.isEmpty()) {
             throw new IllegalArgumentException(&quot;invalid epoch / empty ring&quot;);
+        }
+
         var sorted = new ArrayList&lt;&gt;(tokens);
         sorted.sort((a, b) -&gt; Long.compareUnsigned(a.position(), b.position()));
-        for (int i = 1; i &lt; sorted.size(); i++)
-            if (sorted.get(i - 1).position() == sorted.get(i).position())
+        for (int i = 1; i &lt; sorted.size(); i++) {
+            if (sorted.get(i - 1).position() == sorted.get(i).position()) {
                 throw new IllegalArgumentException(&quot;token collision&quot;);
+            }
+        }
+
         tokens = List.copyOf(sorted);
     }
+
     public String owner(long hash) {
         int lo = 0, hi = tokens.size();
         while (lo &lt; hi) {
             int mid = lo + (hi - lo) / 2;
-            if (Long.compareUnsigned(tokens.get(mid).position(), hash) &lt; 0)
+            if (Long.compareUnsigned(tokens.get(mid).position(), hash) &lt; 0) {
                 lo = mid + 1;
-            else hi = mid;
+            } else {
+                hi = mid;
+            }
         }
+
         return tokens.get(lo == tokens.size() ? 0 : lo).owner();
     }
 }</code></pre><div class="bilingual"><div class="lang-zh"><p>完整源码 <a href="../examples/ch05/ConsistentRing.java">ConsistentRing.java</a> 约定了键的编码和哈希规则：把字符串原样编码为 UTF-8，不做隐含的 Unicode 归一化，再取 SHA-256 摘要的前 8 个字节，按大端顺序解释。例如，<code>abc → ba7816bf8f01cfea</code>。这套协议用于教学，与 Ketama 不兼容。节点位置由权威清单明确给出；如果新位置发生碰撞，控制层负责重新分配并统一发布，Router 不能各自随机重试。两个键的哈希值相同，只会让它们落在同一台机器上，存储仍按完整键区分。</p><p>节点的稳定 ID 要与网络地址（endpoint）分开。机器重启后即使换了 IP，也不应重新生成节点位置。成员版本、哈希协议和序列化规则都属于同一份清单。如果不同 Router 看到的成员版本不同，它们就可能算出不同的负责节点；环上的查找算法无法替它们达成共识。</p></div><div class="lang-en"><p>The full <a href="../examples/ch05/ConsistentRing.java">ConsistentRing.java</a> defines UTF-8 without normalization, then the first eight SHA-256 bytes in big-endian order: <code>abc → ba7816bf8f01cfea</code>. This is a teaching protocol, not Ketama compatibility. Tokens come from an authoritative manifest. The control plane reallocates a colliding new token and publishes one result; Routers must not retry randomly on their own. Colliding key hashes merely colocate full keys, which storage still distinguishes.</p><p>Separate stable node identity from endpoint addresses. An IP change must not regenerate tokens. Membership epoch, hashing protocol, and serialization belong to the manifest. Different epochs may select different owners; the ring does not establish consensus between Routers.</p></div></div>
@@ -388,20 +399,26 @@ public record Ring(long epoch, List&lt;Token&gt; tokens) {
       </div>
     </div>
 <h3><span class="lang-zh">成员快照：让一次请求始终使用同一个版本</span><span class="lang-en">Membership snapshots: one version per request</span></h3><div class="bilingual"><div class="lang-zh"><p>新增 S3 时，先构建完整的 ep8 表，并保留 S0、S1、S2 的旧节点位置；删除物理节点时，则移除它的<strong>全部</strong>节点位置。候选表可以先用来规划迁移范围，只有下文的交接提交后，才能安装为实际处理请求的快照。安装时使用经过验证的权威清单，并把成员版本与内容摘要绑定。本地的比较并交换（CAS）只控制本机更新，不能替代控制层对清单内容的一致决策。</p></div><div class="lang-en"><p>Build the complete ep8 table while preserving old S0/S1/S2 positions. Removing a physical owner filters <strong>all</strong> its tokens. Candidate tables can plan changed ranges, but become serving snapshots only after the handoff commits. Installation consumes a validated authoritative manifest binding epoch to content digest; local CAS cannot replace control-plane agreement.</p></div></div><pre data-language="Java 17 · local snapshot" data-kind="runnable" data-source="ConsistentRing.java#router"><code>public record Route(long epoch, String owner) {}
+
 public static final class Router {
     private final AtomicReference&lt;Ring&gt; current;
+
     public Router(Ring initial) {
         current = new AtomicReference&lt;&gt;(Objects.requireNonNull(initial));
     }
+
     public Route route(long hash) {
         Ring snapshot = current.get();
         return new Route(snapshot.epoch(), snapshot.owner(hash));
     }
+
     // Only consume a validated, committed control-plane manifest.
     public boolean install(long expectedEpoch, Ring next) {
         Ring old = current.get();
-        if (old.epoch() != expectedEpoch || next.epoch() &lt;= old.epoch())
+        if (old.epoch() != expectedEpoch || next.epoch() &lt;= old.epoch()) {
             return false; // stale update, replay or same-epoch fork
+        }
+
         return current.compareAndSet(old, next);
     }
 }</code></pre><div class="bilingual"><div class="lang-zh"><p>路由方法 <code>route</code> 从同一份快照中返回成员版本和负责节点，请求再携带这个版本交给存储层校验。安装方法 <code>install</code> 只接受更高版本，同时要求调用者预期的旧版本仍是当前版本。因此，两个线程都基于 ep7 发布时，最多只有一个成功；失败的一方应重新读取权威清单，不能盲目重试旧提案。Router 可以跳过未见过的中间版本，但必须先验证最新的已提交清单。重复投递同一版本也会返回 false，调用者可以核对内容摘要，确认它是否已经安装；同一版本号下的不同内容不能相互覆盖。</p><p>运行示例时，先执行 <code>javac --release 17 -d /tmp/ch05-java examples/ch05/*.java</code>，再执行 <code>java -cp /tmp/ch05-java ConsistentRingTest</code>。测试覆盖归属枚举、空环、位置碰撞、高位哈希值、环回、不可变性和并发发布。这些检查验证的是本地算法，分布式迁移是否安全仍要另行验证。</p></div><div class="lang-en"><p><code>route</code> returns epoch and owner from one snapshot; send the epoch to storage for validation. <code>install</code> accepts only a higher version while the caller’s expected old epoch is still current. Two publishers based on ep7 have at most one winner; a loser reloads authoritative state instead of blindly resubmitting its proposal. Skipping unseen epochs is allowed only after validating the latest committed manifest. Replays also return false; the caller may compare digests to recognize an already-installed version, never overwrite different content at the same epoch.</p><p>Run <code>javac --release 17 -d /tmp/ch05-java examples/ch05/*.java</code>, then <code>java -cp /tmp/ch05-java ConsistentRingTest</code>. Checks enumerate ownership, empty/colliding rings, high bits, wraparound, immutability, and racing publishers. They verify local algorithms, not distributed migration safety.</p></div></div>    <h3><span class="lang-zh">迁移时间决定扩容要提前多久</span><span class="lang-en">Movement time determines expansion lead time</span></h3>
@@ -619,12 +636,15 @@ public static final class Router {
 handoff(plan, oldEpoch, newEpoch, oldOwner, newOwner):
     require newEpoch &gt; oldEpoch
     require control.CAS(ACTIVE(oldEpoch), COPYING(plan))
+
     newOwner.stage(plan, snapshotAndLogFrom(oldOwner))
+
     # FROZEN is persisted in the SAME serialization order as old reads/writes.
     barrier = oldOwner.freeze(plan, oldEpoch)
     # freeze rejects later old I/O and waits for earlier admitted work to finish.
     newOwner.replayThrough(plan, barrier)  # updates, deletes, retry receipts
     require newOwner.verifyRangeAndBarrier(plan, barrier)
+
     require control.CAS(COPYING(plan), COMMITTED(newEpoch, plan, barrier))
     newOwner.activateOnlyIfCommitted(plan, newEpoch, barrier)
     publishCommittedManifest(newEpoch)   # lagging Routers get RETRY_EPOCH
@@ -636,11 +656,15 @@ serve(range, request):
         guard = lockRangeGuard(range)
         if guard.state != ACTIVE or request.epoch != guard.epoch:
             return RETRY_EPOCH  # applies to reads as well as writes
-        if request.isRead: return readFullKey(request.key)
+
+        if request.isRead:
+            return readFullKey(request.key)
+
         receipt = lookupReceipt(request.operationId)
         if receipt exists:
             require receipt.payloadHash == request.payloadHash
             return receipt.result
+
         result = applyMutation(request.key, request.value)
         saveReceipt(request.operationId, request.payloadHash, result)
         commit mutation and receipt before returning result</code></pre><div class="bilingual"><div class="lang-zh"><p>快照与日志必须对应同一个一致起点，再追到冻结操作返回的最终日志屏障。迁移内容要包括更新、删除墓碑和幂等回执，回执的保留时间也要覆盖约定的重试期限。校验方法 <code>verifyRangeAndBarrier</code> 检查区间清单、内容以及日志位置是否连续。只有复制调用返回成功，还不足以证明数据就绪。控制记录提交后、新节点激活前，请求可能短暂被拒绝；恢复时只能执行与已提交计划匹配的命令，不能因超时就擅自退回旧环。</p><p>每次写入，都要把区间保护记录的校验、数据修改和操作回执放在同一分片事务或同一次串行日志应用中提交，图中的最终增量也必须包含这次提交。读取同样受这份保护记录约束。因此，ep8 的新写成功后，旧 Router 若仍访问 S1，会收到 RETRY_EPOCH，而不会读到旧快照。Router 随后刷新版本并限次重试，写请求保持同一个 operationId 和负载摘要。错误和超时都不能解释为“这个键不存在”。</p></div><div class="lang-en"><p>Snapshot and log need one consistent starting position and replay through the freeze barrier. Transfer updates, deletion tombstones, and idempotency receipts; receipt retention covers the contractual retry period. <code>verifyRangeAndBarrier</code> checks the range manifest, content validation, and continuous log position, not merely a successful copy call. Requests may briefly fail between control commit and destination activation. Only matching-plan commands recover committed state; a timeout never authorizes reverting the ring.</p><p>The write guard check, mutation, and operation receipt commit within one shard transaction or serialized log application; the final delta includes that commit. Reads use the same guard, so an old Router visiting S1 after an ep8 write gets RETRY_EPOCH rather than a stale snapshot. Refresh with bounded retries, preserving operation ID and payload digest for writes. An error or timeout is not “key absent.”</p></div></div><table><thead><tr><th><span class="lang-zh">请求轨迹或失败时机</span><span class="lang-en">Trace / failure window</span></th><th><span class="lang-zh">系统必须怎样处理</span><span class="lang-en">Required behavior</span></th></tr></thead><tbody><tr><td><span class="lang-zh">正常情况：复制 v1 快照后，S1 在冻结前写入 v2</span><span class="lang-en">Normal: snapshot v1; S1 writes v2 before freeze</span></td><td><span class="lang-zh">最终日志屏障必须包含 v2，S3 重放到该位置后才能激活，后续读取应得到 v2。</span><span class="lang-en">The barrier includes v2; S3 replays it before activation and reads v2.</span></td></tr><tr><td><span class="lang-zh">旧写请求先看到 epoch=7，冻结后才尝试提交</span><span class="lang-en">A stale write observes epoch 7, then tries committing after freeze</span></td><td><span class="lang-zh">在提交数据的同一事务中重新校验；如果保护记录已经是 FROZEN，就拒绝该写入，不能只凭先前的检查结果提交。</span><span class="lang-en">Recheck in the committing transaction; FROZEN rejects it. A prior check is insufficient.</span></td></tr><tr><td><span class="lang-zh">ep8 的新写成功后，旧 Router 仍到 S1 读取</span><span class="lang-en">Old Router reads S1 after a successful ep8 write</span></td><td><span class="lang-zh">S1 拒绝旧版本读取，Router 刷新后转向 S3。若只隔离写权限，S1 仍可能返回陈旧数据。</span><span class="lang-en">S1 rejects the read; refresh to S3. Fencing writes alone leaves stale reads.</span></td></tr><tr><td><span class="lang-zh">第二个协调者也提议迁移同一区间</span><span class="lang-en">Second coordinator proposes the same range</span></td><td><span class="lang-zh">只有一个交接计划能通过 CAS。即使两个计划使用不同的新版本号，也不能并行迁移同一区间。</span><span class="lang-en">Only one plan CAS wins; different new epochs do not authorize parallel handoffs.</span></td></tr><tr><td><span class="lang-zh">冻结后失联，或新节点激活的响应丢失</span><span class="lang-en">Lost contact after freeze / activation response lost</span></td><td><span class="lang-zh">保持 FROZEN，读取持久交接计划后恢复；不能直接解冻旧节点，也不能盲目回滚。</span><span class="lang-en">Retain FROZEN and recover durable plan state; no blind unfreeze or rollback.</span></td></tr></tbody></table><div class="bilingual"><div class="lang-zh"><p>如果候选机器在冻结前失败，可以重试准备过程，旧节点继续服务；冻结后失败则要按原计划恢复，暂停时间可能延长。如果旧节点突然丢失且没有副本，环算法无法恢复数据。ep8 已经接收新写后，若要退回 S1，必须再做一次数据迁回和权限交接；旧文件仍在，不代表 S1 仍有写权限。只有新版本稳定、相关请求处理完毕且校验通过后，才能回收旧数据。</p></div><div class="lang-en"><p>A candidate failure before freezing permits retried preparation while the old owner serves. After freezing, recover the same plan and accept a longer pause. Losing the old owner without a replica loses recoverability. Returning to S1 after ep8 accepts writes requires another migration and authority transfer. Retaining old files does not retain authority; reclaim them only after stable activation, draining, and validation.</p></div></div><details><summary><span class="lang-zh">实际系统怎样处理迁移：Redis slots 与 Cassandra</span><span class="lang-en">Product boundaries: Redis slots / Cassandra</span></summary>    <h3><span class="lang-zh">迁移过程需要明确的状态和协议</span><span class="lang-en">Real systems expose migration states</span></h3>

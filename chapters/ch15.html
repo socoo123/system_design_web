@@ -143,24 +143,38 @@
     </figure><h3><span class="lang-zh">元数据的相关变更必须在同一事务中提交</span><span class="lang-en">One atomic boundary belongs to the control plane</span></h3><div class="bilingual"><div class="lang-zh"><p>初始化时，服务端把租户、所有者、文件、父版本、有序块摘要与长度，以及文件总长一起固定下来，对应 <code>(tenant,owner,file,base,ordered[digest,length],size)</code>，并返回持久保存的会话 u42。同一会话不能中途更换清单。Metadata、Block svc 和 GC 虽然是不同进程，<strong>相关元数据却必须保存在同一个权威事务数据库中</strong>：协调行 guard、权限记录 ACL、File、Session/SessionBlock、BlockGeneration、Version/VersionBlock、Receipt、Change 和 Outbox。图中分开的是逻辑服务，不能理解为跨数据库执行 <code>FOR UPDATE</code>。</p><p>教学实现采用 PostgreSQL 18 的 <code>READ COMMITTED</code> 隔离级别。每个租户预先建立一行协调记录 guard；凡是会改变 ACL、目录、会话或 pin、版本引用、配额及 GC 状态的操作，都先通过 <code>SELECT … FOR UPDATE</code> 锁住该行，并持锁到事务结束。<a href="#ref-11">[11]</a> 这样，同一租户的操作会串行执行，便于说明原子边界，代价是热门租户可能形成瓶颈。如果以后细分锁或拆成分片，必须重新证明这些约束仍然成立。</p></div><div class="lang-en"><p>Initialization freezes <code>(tenant,owner,file,base,ordered[digest,length],size)</code> and returns durable session u42. Its manifest cannot change. Metadata, Block svc and GC are processes, but their relevant rows share <strong>one authoritative transactional database</strong>: guard, ACL, File, Session/SessionBlock, BlockGeneration, Version/VersionBlock, Receipt, Change and Outbox. Logical service separation does not imply cross-database <code>FOR UPDATE</code>.</p><p>The teaching implementation uses PostgreSQL 18 <code>READ COMMITTED</code>: pre-create one tenant guard row. Every mutation of ACL, directory, sessions/pins, references, quota or GC first locks it with <code>SELECT … FOR UPDATE</code> through transaction end. <a href="#ref-11">[11]</a> This serializes a tenant for clarity and creates a hot-tenant bottleneck. Finer locking or sharding must re-establish the invariants.</p></div></div><div class="bilingual"><div class="lang-zh"><p><strong>锁住 guard，并不会自动按租户过滤数据。</strong>所有辅助函数和逻辑行键都必须绑定认证结果中的 <code>auth.tenant</code>。读取或修改 File、Session、Version、VersionBlock、Receipt、Change 和 pin 时，要使用完整的租户复合键；SQL 的 UPDATE、DELETE 和扫描也要显式带上 <code>tenant_id</code> 条件。GC 只接收内部可信任务，按 <code>(job.tenant,generation)</code> 读取持久保存的 Job/BlockGeneration，再使用记录中的物理对象键。它不能只凭一个没有租户范围的 ID，或客户端任意指定的租户参数操作对象。</p></div><div class="lang-en"><p><strong>Locking a guard does not filter tenant rows.</strong> Every helper and logical row key binds authenticated <code>auth.tenant</code>. File, Session, Version, VersionBlock, Receipt, Change and pin access uses complete tenant composite keys; SQL UPDATE/DELETE/scans carry explicit <code>tenant_id</code> predicates. Trusted internal GC jobs load durable Job/BlockGeneration rows by <code>(job.tenant,generation)</code>, then use that row’s physical object key, never bare IDs or client-selected tenant scope.</p></div></div><pre data-language="SQL teaching · authority constraints" data-kind="teaching" data-source="schema.sql"><code>-- Teaching shape: PostgreSQL 18; all rows belong to one metadata authority.
 -- Every metadata writer first locks its pre-created tenant_guard row.
 CREATE TABLE tenant_guard (
-  tenant_id TEXT PRIMARY KEY, change_head BIGINT NOT NULL CHECK (change_head &gt;= 0),
-  used_bytes BIGINT NOT NULL CHECK (used_bytes &gt;= 0), quota_bytes BIGINT NOT NULL
+    tenant_id TEXT PRIMARY KEY,
+    change_head BIGINT NOT NULL CHECK (change_head &gt;= 0),
+    used_bytes BIGINT NOT NULL CHECK (used_bytes &gt;= 0),
+    quota_bytes BIGINT NOT NULL
 );
+
 -- The complete schema also contains File, ACL, Session and immutable Manifest.
 CREATE TABLE block_generation (
-  tenant_id TEXT NOT NULL, generation TEXT NOT NULL, digest TEXT NOT NULL,
-  byte_length BIGINT NOT NULL CHECK (byte_length &gt; 0),
-  object_key TEXT NOT NULL UNIQUE, state TEXT NOT NULL,
-  PRIMARY KEY (tenant_id, generation)
+    tenant_id TEXT NOT NULL,
+    generation TEXT NOT NULL,
+    digest TEXT NOT NULL,
+    byte_length BIGINT NOT NULL CHECK (byte_length &gt; 0),
+    object_key TEXT NOT NULL UNIQUE,
+    state TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, generation)
 );
+
 CREATE UNIQUE INDEX one_ready_generation
-  ON block_generation (tenant_id, digest, byte_length) WHERE state = &#x27;READY&#x27;;
+    ON block_generation (tenant_id, digest, byte_length)
+    WHERE state = &#x27;READY&#x27;;
+
 CREATE TABLE commit_receipt (
-  tenant_id TEXT NOT NULL, owner_id TEXT NOT NULL, request_key TEXT NOT NULL,
-  intent_digest TEXT NOT NULL, file_id TEXT NOT NULL, version BIGINT NOT NULL,
-  change_seq BIGINT NOT NULL,
-  PRIMARY KEY (tenant_id, owner_id, request_key)
+    tenant_id TEXT NOT NULL,
+    owner_id TEXT NOT NULL,
+    request_key TEXT NOT NULL,
+    intent_digest TEXT NOT NULL,
+    file_id TEXT NOT NULL,
+    version BIGINT NOT NULL,
+    change_seq BIGINT NOT NULL,
+    PRIMARY KEY (tenant_id, owner_id, request_key)
 );
+
 -- SessionBlock PK=(tenant,session,ordinal), recording generation and proof.
 -- Version PK=(tenant,file,version); VersionBlock PK=(tenant,file,version,ordinal).
 -- Change and Outbox each have PK=(tenant,change_seq).
@@ -330,36 +344,43 @@ CREATE TABLE commit_receipt (
         <figcaption><span class="lang-zh">客户端只补传缺块：256 MiB × 8 ÷ 20 Mb/s ≈ 107 秒，整份重传约需 429 秒，两者都是假设链路上的理想下限。所有块取得可信收据后，仍须提交新文件版本。</span><span class="lang-en">Transfer only missing blocks. 256 MiB × 8 ÷ 20 Mb/s ≈ 107 s, versus ≈429 s for the whole file, both ideal lower bounds on the assumed link. All receipts still require a new-file version commit.</span></figcaption>
       </div>
     </figure><h3><span class="lang-zh">收到 PUT 收据后，还要核验并登记保护记录</span><span class="lang-en">Verification separates a PUT receipt from a trusted pin</span></h3><div class="bilingual"><div class="lang-zh"><p>u42 是持久保存的应用层块会话，与 S3 multipart upload 不同。每块可以处于缺失（missing）、处理中（pending）或已核验并受保护（verified-and-pinned）状态。查询状态时，服务端先确认调用者是会话所有者 owner，再检查当前权限。ACK 丢失后，应以服务端核验状态为准；对象即使存在，只要缺少可信记录，就还要核验，不能凭本地位图或对象名直接标为已持久保存。上传授权到期后，可以在仍有效的会话内刷新；会话本身过期，则必须重新鉴权并新建，不能恢复旧会话。</p><p><strong>预签名 URL 本身不能保证对象不可变。</strong>S3 普通预签 PUT 可以在到期前多次使用，也可以替换同一键下的已有对象。<a href="#ref-12">[12]</a> 因此，客户端只写入开启版本化的暂存区；签发授权前，服务端先登记新的上传尝试 attempt 和租约，绑定会话、块序号、摘要与长度。服务端再按<strong>精确的暂存对象版本 ID（staging version ID）</strong>读取字节，核验摘要和长度，然后写入一个新的最终对象代际，且最终对象只允许服务端写入。最终对象键只创建一次，永不复用，因此客户端即使保留旧上传 URL，也无法修改核验后的最终对象。</p></div><div class="lang-en"><p>u42 is a durable application block session, distinct from S3 multipart. Blocks are missing, pending or verified-and-pinned. Status authenticates the owner and checks permissions. After a lost ACK, reconcile with authority; an object without a trusted record needs verification, not trust in a bitmap or object name. Refresh grants inside a live session; expiry requires a new authorized session rather than revival.</p><p><strong>Presigned URLs do not imply immutability.</strong> Ordinary S3 presigned PUTs can be reused until expiry and replace the same key. <a href="#ref-12">[12]</a> Clients therefore write versioned staging only. Grant issuance first registers a fresh attempt and lease bound to session, ordinal, digest and length. The service reads an <strong>exact staging version ID</strong>, verifies it and writes a fresh final generation using service-only credentials. Creating final keys once without reuse prevents old upload URLs from modifying them.</p></div></div><pre data-language="Pseudocode · verify and pin" data-kind="pseudocode" data-source="pin.pseudo"><code>verify_and_pin(auth, session_id, ordinal, proof):
-  // Session, attempt, source and generation reads all bind auth.tenant.
-  // Init froze ordered (digest,length), file, base, size and owner.
-  expected, attempt = authority.read_bound_attempt(auth, session_id, ordinal)
-  if proof.kind == UPLOAD:
-    // Grant issuance registered attempt + fresh generation + expiry first.
-    bytes = Object.GET(attempt.staging_key, version_id=proof.version_id)
-    require length(bytes) == expected.length and SHA256(bytes) == expected.digest
-    // Only the service writes final keys; a physical key is never reused.
-    final = Object.PUT_IF_ABSENT(attempt.final_key, bytes, checksum=expected.digest)
-    require confirmed_exact_final(final, expected) else RETRY_UNKNOWN_OR_FAIL
-    // This gate inspects a pre-existing key too; unknown never reaches READY.
-  begin Metadata transaction:
-    SELECT tenant_guard WHERE tenant_id=auth.tenant FOR UPDATE
-    s = require_owned_OPEN_session(auth, session_id, db_now())
-    require current_write_acl(auth, s.file_id)
-    require s.manifest[ordinal] == expected
-    if proof.kind == REUSE:
-      source = require_currently_readable_version(auth, proof.file, proof.version)
-      g = source.block_at(proof.ordinal)
-      require g.digest_length == expected and g.state == READY
-    else:
-      require proof.kind == UPLOAD and attempt.still_live_and_UPLOADING(db_now())
-      g = find_READY_generation(auth.tenant, expected)
-      if g is absent: g = promote_verified_attempt_to_READY(attempt)
-      else: mark_unused_attempt_ORPHAN(attempt)
-    UPSERT SessionBlock(auth.tenant, s.id, ordinal, g.generation, proof)
-    // A pin is active only while its owned session is OPEN and unexpired.
-    COMMIT
-  return VERIFIED_AND_PINNED(g.generation)
-  // Any failed requirement aborts: no pin and no file publication.</code></pre><div class="bilingual"><div class="lang-zh"><p>代码对应第 3–4 帧。外部 GET、PUT 在事务外执行；预先登记的上传尝试在有效期内保护正在写入的对象代际。随后，服务端在 guard 锁内重新检查当前权限、会话、上传尝试，以及对象是否仍处于可引用的 READY 状态，写入 SessionBlock 后才算登记了 pin。每个块序号 ordinal 对应的摘要和长度都不能改变。提升为 READY 的辅助操作 promote 只更新同库目录状态，不进行网络 I/O。如果 PUT 结果未知，就检查同一不可变对象键下的长度和显式校验和 checksum；不能把 ETag 当作 SHA-256。核验失败或过期后，只留下待 GC 处理的候选对象，不发布文件。迟到写入即使落到已标为待删除 DELETING 的旧代际，也不能把它改回 READY，后台仍须继续清理孤儿对象。</p><p>复用时，服务端从当前有权读取的 VersionBlock 中取得具体代际，再与会话已固定的清单核对，不能只接受一个摘要作为证明。重复上传可以采用同一个 READY 代际，多余的已核验候选则标为孤儿状态 ORPHAN。为把核验过程讲清楚，本例先读回校验，再写最终对象，这会增加存储内部读写。如果存储支持可信校验和与条件写入，可以优化这一步，但仍须保证核验的是精确对象，且最终对象不可变。</p></div><div class="lang-en"><p>Frames 3–4: external GET/PUT run outside the transaction. The pre-registered live attempt protects its in-progress generation. Under the guard, recheck current permissions, session, attempt and READY state before recording the SessionBlock pin. Ordinal digest/length cannot change. Promotion changes only catalog rows, without network I/O. An unknown PUT inspects the same immutable key’s length and explicit checksum; ETag is not SHA-256. Failures/expiry leave GC candidates, without publication. Late writes to a DELETING generation cannot make it READY again; orphan cleanup retries.</p><p>Reuse takes the generation from a currently readable VersionBlock and matches the frozen manifest, never a bare digest. Duplicate uploads can adopt one READY generation while extra verified candidates become ORPHAN. Read-back verification followed by final-object writing adds internal storage I/O; trusted checksums and conditional writes may optimize it while preserving exact-object and immutability boundaries.</p></div></div><h3><span class="lang-zh">续传能省多少，与具体协议有什么区别</span><span class="lang-en">Resume savings and protocol boundaries</span></h3><div class="bilingual"><div class="lang-zh"><p>1 GiB 文件的 256 块中，若已经确认 192 块，就还剩 64×4 MiB=256 MiB。在 20 Mb/s 链路上，理想传输下限为 107.37 秒，整份重传则为 429.50 秒，因此少传了 75% 的字节。客户端仍要限制并发，并在重试时采用退避和随机抖动，避免多个在途块挤满弱网。第 5 帧只展示补传 PUT，全部传完后仍须核验、登记 pin，再提交版本。</p><p>tus 1.0.0 核心协议用 HEAD 读取 Upload-Offset，再通过 PATCH 按顺序续传；偏移不匹配时返回 409。<a href="#ref-4">[4]</a> multipart 则先上传带编号的分片 part，再用 complete 组装为一个对象。它的 ETag 不保证是 MD5，遗留分片需要通过 complete、abort 或生命周期规则清理。<a href="#ref-5">[5]</a> S3 要求非末尾 part 至少为 5 MiB，因此不能直接把本章的 4 MiB 逻辑块当作该分片；本章对每块执行的是普通独立对象 PUT。<a href="#ref-6">[6]</a></p><p>按 A11，1 PB/天×1% 放弃=10 TB/天，48 小时约积累 20 TB，尚未计入冗余。24 小时会话到期，只表示停止受理，并结束会话 pin 的保护；对象最终能否删除，仍由 GC 判断。24 小时和 48 小时都是本例假设，单靠这两个时间不能证明回收安全。</p></div><div class="lang-en"><p>After verifying 192 of 256 blocks in 1 GiB, 64×4 MiB=256 MiB remains. At 20 Mb/s, ideal transfer is 107.37 s versus 429.50 s for the whole file, saving 75%. Bound concurrency and use backoff with jitter. Frame 5 shows replacement PUTs; all still need verification/pins and commit.</p><p>tus 1.0.0 core reads Upload-Offset with HEAD and resumes sequential PATCH, returning 409 for an offset mismatch. <a href="#ref-4">[4]</a> Multipart uploads numbered parts then completes one object; ETag need not be MD5 and leftover parts require completion/abort or lifecycle cleanup. <a href="#ref-5">[5]</a> S3 requires at least 5 MiB for nonfinal parts, unlike these independent ordinary 4 MiB object PUTs. <a href="#ref-6">[6]</a></p><p>A11 gives 1 PB/day×1% abandoned=10 TB/day, or about 20 TB over 48 h before redundancy. A 24 h session expiry closes admission/pins; GC determines deletion. Those timings are assumptions, not a safety proof.</p></div></div>
+    // Session, attempt, source and generation reads all bind auth.tenant.
+    // Init froze ordered (digest,length), file, base, size and owner.
+    expected, attempt = authority.read_bound_attempt(auth, session_id, ordinal)
+    if proof.kind == UPLOAD:
+        // Grant issuance registered attempt + fresh generation + expiry first.
+        bytes = Object.GET(attempt.staging_key, version_id=proof.version_id)
+        require length(bytes) == expected.length and SHA256(bytes) == expected.digest
+
+        // Only the service writes final keys; a physical key is never reused.
+        final = Object.PUT_IF_ABSENT(attempt.final_key, bytes, checksum=expected.digest)
+        require confirmed_exact_final(final, expected) else RETRY_UNKNOWN_OR_FAIL
+        // This gate inspects a pre-existing key too; unknown never reaches READY.
+
+    begin Metadata transaction:
+        SELECT tenant_guard WHERE tenant_id=auth.tenant FOR UPDATE
+        s = require_owned_OPEN_session(auth, session_id, db_now())
+        require current_write_acl(auth, s.file_id)
+        require s.manifest[ordinal] == expected
+
+        if proof.kind == REUSE:
+            source = require_currently_readable_version(auth, proof.file, proof.version)
+            g = source.block_at(proof.ordinal)
+            require g.digest_length == expected and g.state == READY
+        else:
+            require proof.kind == UPLOAD and attempt.still_live_and_UPLOADING(db_now())
+            g = find_READY_generation(auth.tenant, expected)
+            if g is absent:
+                g = promote_verified_attempt_to_READY(attempt)
+            else:
+                mark_unused_attempt_ORPHAN(attempt)
+
+        UPSERT SessionBlock(auth.tenant, s.id, ordinal, g.generation, proof)
+        // A pin is active only while its owned session is OPEN and unexpired.
+        COMMIT
+
+    return VERIFIED_AND_PINNED(g.generation)
+    // Any failed requirement aborts: no pin and no file publication.</code></pre><div class="bilingual"><div class="lang-zh"><p>代码对应第 3–4 帧。外部 GET、PUT 在事务外执行；预先登记的上传尝试在有效期内保护正在写入的对象代际。随后，服务端在 guard 锁内重新检查当前权限、会话、上传尝试，以及对象是否仍处于可引用的 READY 状态，写入 SessionBlock 后才算登记了 pin。每个块序号 ordinal 对应的摘要和长度都不能改变。提升为 READY 的辅助操作 promote 只更新同库目录状态，不进行网络 I/O。如果 PUT 结果未知，就检查同一不可变对象键下的长度和显式校验和 checksum；不能把 ETag 当作 SHA-256。核验失败或过期后，只留下待 GC 处理的候选对象，不发布文件。迟到写入即使落到已标为待删除 DELETING 的旧代际，也不能把它改回 READY，后台仍须继续清理孤儿对象。</p><p>复用时，服务端从当前有权读取的 VersionBlock 中取得具体代际，再与会话已固定的清单核对，不能只接受一个摘要作为证明。重复上传可以采用同一个 READY 代际，多余的已核验候选则标为孤儿状态 ORPHAN。为把核验过程讲清楚，本例先读回校验，再写最终对象，这会增加存储内部读写。如果存储支持可信校验和与条件写入，可以优化这一步，但仍须保证核验的是精确对象，且最终对象不可变。</p></div><div class="lang-en"><p>Frames 3–4: external GET/PUT run outside the transaction. The pre-registered live attempt protects its in-progress generation. Under the guard, recheck current permissions, session, attempt and READY state before recording the SessionBlock pin. Ordinal digest/length cannot change. Promotion changes only catalog rows, without network I/O. An unknown PUT inspects the same immutable key’s length and explicit checksum; ETag is not SHA-256. Failures/expiry leave GC candidates, without publication. Late writes to a DELETING generation cannot make it READY again; orphan cleanup retries.</p><p>Reuse takes the generation from a currently readable VersionBlock and matches the frozen manifest, never a bare digest. Duplicate uploads can adopt one READY generation while extra verified candidates become ORPHAN. Read-back verification followed by final-object writing adds internal storage I/O; trusted checksums and conditional writes may optimize it while preserving exact-object and immutability boundaries.</p></div></div><h3><span class="lang-zh">续传能省多少，与具体协议有什么区别</span><span class="lang-en">Resume savings and protocol boundaries</span></h3><div class="bilingual"><div class="lang-zh"><p>1 GiB 文件的 256 块中，若已经确认 192 块，就还剩 64×4 MiB=256 MiB。在 20 Mb/s 链路上，理想传输下限为 107.37 秒，整份重传则为 429.50 秒，因此少传了 75% 的字节。客户端仍要限制并发，并在重试时采用退避和随机抖动，避免多个在途块挤满弱网。第 5 帧只展示补传 PUT，全部传完后仍须核验、登记 pin，再提交版本。</p><p>tus 1.0.0 核心协议用 HEAD 读取 Upload-Offset，再通过 PATCH 按顺序续传；偏移不匹配时返回 409。<a href="#ref-4">[4]</a> multipart 则先上传带编号的分片 part，再用 complete 组装为一个对象。它的 ETag 不保证是 MD5，遗留分片需要通过 complete、abort 或生命周期规则清理。<a href="#ref-5">[5]</a> S3 要求非末尾 part 至少为 5 MiB，因此不能直接把本章的 4 MiB 逻辑块当作该分片；本章对每块执行的是普通独立对象 PUT。<a href="#ref-6">[6]</a></p><p>按 A11，1 PB/天×1% 放弃=10 TB/天，48 小时约积累 20 TB，尚未计入冗余。24 小时会话到期，只表示停止受理，并结束会话 pin 的保护；对象最终能否删除，仍由 GC 判断。24 小时和 48 小时都是本例假设，单靠这两个时间不能证明回收安全。</p></div><div class="lang-en"><p>After verifying 192 of 256 blocks in 1 GiB, 64×4 MiB=256 MiB remains. At 20 Mb/s, ideal transfer is 107.37 s versus 429.50 s for the whole file, saving 75%. Bound concurrency and use backoff with jitter. Frame 5 shows replacement PUTs; all still need verification/pins and commit.</p><p>tus 1.0.0 core reads Upload-Offset with HEAD and resumes sequential PATCH, returning 409 for an offset mismatch. <a href="#ref-4">[4]</a> Multipart uploads numbered parts then completes one object; ETag need not be MD5 and leftover parts require completion/abort or lifecycle cleanup. <a href="#ref-5">[5]</a> S3 requires at least 5 MiB for nonfinal parts, unlike these independent ordinary 4 MiB object PUTs. <a href="#ref-6">[6]</a></p><p>A11 gives 1 PB/day×1% abandoned=10 TB/day, or about 20 TB over 48 h before redundancy. A 24 h session expiry closes admission/pins; GC determines deletion. Those timings are assumptions, not a safety proof.</p></div></div>
 </section><section><h2><span class="lang-zh">15.4 · 发布与冲突：比较父版本，保留未能提交的编辑</span><span class="lang-en">15.4 · Publication and conflicts: compare the parent</span></h2>
 <figure class="deck">
       <div class="slide">
@@ -433,44 +454,51 @@ CREATE TABLE commit_receipt (
         <figcaption><span class="lang-zh">等冲突副本持久保存后，服务端才返回“已保存”（saved）。保留两份能够保护已经成功存下的编辑；设备尚未上传的内容，仍须由客户端在本地持久保存。</span><span class="lang-en">Wait for the conflict copy to persist before replying saved. Keeping both protects successfully stored edits, not an absolute no-loss promise; not-yet-uploaded content still needs local persistence.</span></figcaption>
       </div>
     </figure><h3><span class="lang-zh">完成事务：先查询已提交结果，再比较父版本</span><span class="lang-en">One completion transaction: replay before comparing the parent</span></h3><div class="bilingual"><div class="lang-zh"><p>下面的完成事务对应第 2–3 帧，用于更新<strong>已有目标文件，标识为 file_id</strong>。服务端持有 guard 时，同一租户的其他元数据写入必须等待。回执按租户、所有者和请求键唯一标识，对应 <code>(tenant,owner,key)</code>；请求意图包含不可变的会话 ID 和清单摘要。会话已经固定目标文件 file、父版本 base、长度和有序块清单，调换顺序、更换父版本或改用另一个文件，都必须新建会话。同一键不能用于不同意图；同一会话即使用另一个键重试，也只能有一个结果。</p></div><div class="lang-en"><p>Frames 2–3: this pseudocode updates an <strong>existing target file_id</strong>. The guard excludes other tenant metadata writers. Receipt uniqueness is <code>(tenant,owner,key)</code>; intent includes the immutable session ID and manifest digest, which bind file, base, size and ordered blocks. Changed order, base or file requires a new session. Reject changed intent under one key; one session has one result even with another key.</p></div></div><pre data-language="Pseudocode · conditional complete" data-kind="pseudocode" data-source="complete.pseudo"><code>complete(auth, session_id, request_key, manifest_digest):
-  // All helpers and logical row keys are scoped to authenticated auth.tenant.
-  intent = SHA256(canonical(auth.tenant, auth.user, session_id, manifest_digest))
-  begin Metadata transaction:
-    SELECT tenant_guard WHERE tenant_id=auth.tenant FOR UPDATE
-    prior = Receipt[auth.tenant, auth.user, request_key]
-    if prior exists:
-      require prior.intent_digest == intent else KEY_REUSED
-      return COMMIT_AND_REPLY(prior.minimal_status) // no manifest or URLs
-    s = require_owned_session(auth, session_id)
-    require s.manifest_digest == manifest_digest else INTENT_CHANGED
-    if s.result exists:
-      INSERT Receipt(auth.tenant, auth.user, request_key, intent, s.result)
-      return COMMIT_AND_REPLY(s.minimal_status)
-    require s.state == OPEN and s.expires_at &gt; db_now() else EXPIRED
-    require current_write_acl(auth, s.file_id) and not File[auth.tenant,s.file_id].deleted
-    require all_REUSE_proofs_still_readable(auth, s)
-    require every ordinal has a pin to a READY matching generation else INCOMPLETE
-    require File[auth.tenant,s.file_id].head == s.base_version else PRECONDITION_FAILED_412
-    require used_bytes + s.size &lt;= quota_bytes else QUOTA_EXCEEDED
-    v = checked_add(s.base_version, 1)
-    INSERT Version(auth.tenant, s.file_id, v, s.immutable_manifest)
-    INSERT VersionBlock(auth.tenant, s.file_id, v)
-      SELECT ordered generations FROM SessionBlock[auth.tenant,s.id]
-    UPDATE File SET head=v
-      WHERE tenant_id=auth.tenant AND id=s.file_id AND head=s.base_version
-    require affected_rows == 1
-    UPDATE tenant_guard SET used_bytes=used_bytes+s.size,
-                            change_head=checked_add(change_head,1)
-      WHERE tenant_id=auth.tenant
-    seq = TenantGuard[auth.tenant].change_head
-    INSERT Change(auth.tenant, seq, s.file_id, v); INSERT Outbox(auth.tenant, seq, hint_only)
-    INSERT Receipt(auth.tenant, auth.user, request_key, intent, s.file_id, v, seq)
-    UPDATE Session SET state=COMMITTED, result=(v,seq)
-      WHERE tenant_id=auth.tenant AND id=s.id
-    DELETE SessionBlock WHERE tenant_id=auth.tenant AND session=s.id
-    COMMIT
-  return SAVED(v, seq)
-  // All failures roll back; unknown COMMIT outcome retries the same key.</code></pre><div class="bilingual"><div class="lang-zh"><p><strong>完成事务不跨越对象存储：</strong>外部字节此时已经存好，事务只检查同库中的 READY 状态、pin 和 ACL，然后一起提交版本引用、当前版本 head、配额用量、Change、Outbox、回执及会话关闭状态。所有复用证明 REUSE 都要在锁内重查读取权限，防止登记 pin 后源版本权限被撤销。任何检查失败，整笔事务都回滚，候选对象和会话留下待后续处理。因为所有保留版本都按完整逻辑长度计入配额，这里要增加 s.size，之后清除历史时才扣减。</p><p>同一键并发重试，只会产生一个新提交。若成功后 ACK 丢失，重试应先返回原来的最小回执，不能因为 head 已变为 8，就把原本成功的请求误报为 412。客户端遇到未知结果时，必须先查询，再决定是否另存冲突副本。最小回执只返回调用者自己提交的版本 version、变更位置 seq 和状态 status，不含清单或 URL；即使后来撤权或会话过期，调用者仍可查询这份回执。任何内容读取和新提交则都要检查当前 ACL。本例不回收回执和会话终态，不能仅凭“客户端只重试 24 小时”就删除服务端的去重证据。</p></div><div class="lang-en"><p><strong>No cross-storage transaction:</strong> bytes already exist. Completion checks same-database READY/pin/ACL state, creates version references, advances head, charges quota, writes Change/Outbox/Receipt and closes the session atomically. Recheck read rights for every REUSE proof under the lock. Any failed check rolls everything back, preserving candidates for retry. Retained logical versions charge their full size, so add s.size; pruning later releases that charge.</p><p>Concurrent retries make one new commit. A lost success ACK replays its receipt before checking parent=7 against head=8; query unknown status before creating a conflict copy. Minimal replay returns only the caller’s own version/seq/status, without manifests or URLs, even after revocation/session expiry. Content reads and new commits check current ACL. This example retains receipts and terminal session state; a client’s 24 h retry policy cannot justify deleting dedup evidence.</p></div></div><h3><span class="lang-zh">两台设备都基于 v7 编辑，未能提交的一方怎样另存</span><span class="lang-en">Two parent=7 writers: preserve the losing edit</span></h3><div class="bilingual"><div class="lang-zh"><p>A 先提交 v8 后，B 在原子比较父版本时失败。若用强 If-Match 表达条件，本章返回 412。RFC 9110 要求条件不成立时不执行修改，也允许服务端在确认请求先前已经成功后返回成功。<a href="#ref-7">[7]</a> 如果业务使用 JSON 版本协议，可以另外定义 409，但要说清采用的是哪一层协议。内容寻址存储（content-addressable storage）用摘要命名字节，比较并交换（compare-and-swap）则比较并推进当前版本 head；两者虽然都叫 CAS，解决的问题不同。</p><p>第 4–5 帧把 B 的编辑另存为 f99，当前版本从 head=1 开始。新建操作使用独立且持久保存的幂等键，在同一 guard 事务内分配名称、重查目标目录权限和配额、转入同一所有者仍有效的已核验 pin，并写入日志和回执。重复请求必须返回同一个 f99，不能每超时一次就多创建一份。上面的伪代码没有展开这套创建或移动接口。删除标记 tombstone、重命名、移动和 ACL 变更，也都要在 guard 下按条件更新；离线旧会话不能无条件恢复已删除的文件。尚未上传的字节仍须保存在客户端本地。</p></div><div class="lang-en"><p>A commits v8 first; B’s atomic parent condition fails. This chapter chooses 412 for strong If-Match. RFC 9110 forbids applying a false condition and permits success for a recognized already-applied request. <a href="#ref-7">[7]</a> A JSON version protocol may define 409 separately. Content-addressable storage names bytes; compare-and-swap advances head, despite sharing the abbreviation CAS.</p><p>Frames 4–5 create f99 at head=1. Creation uses a separate durable key and one guard transaction for name allocation, current destination-directory permission/quota, transfer of the same owner’s still-live verified pins, log and receipt. Retries return the same f99. That create/move API is not expanded above. Tombstones, renames, moves and ACL changes likewise use guarded conditional updates. Offline sessions must not resurrect deleted files unconditionally; unuploaded bytes still require local persistence.</p></div></div>
+    // All helpers and logical row keys are scoped to authenticated auth.tenant.
+    intent = SHA256(canonical(auth.tenant, auth.user, session_id, manifest_digest))
+
+    begin Metadata transaction:
+        SELECT tenant_guard WHERE tenant_id=auth.tenant FOR UPDATE
+        prior = Receipt[auth.tenant, auth.user, request_key]
+        if prior exists:
+            require prior.intent_digest == intent else KEY_REUSED
+            return COMMIT_AND_REPLY(prior.minimal_status) // no manifest or URLs
+
+        s = require_owned_session(auth, session_id)
+        require s.manifest_digest == manifest_digest else INTENT_CHANGED
+        if s.result exists:
+            INSERT Receipt(auth.tenant, auth.user, request_key, intent, s.result)
+            return COMMIT_AND_REPLY(s.minimal_status)
+
+        require s.state == OPEN and s.expires_at &gt; db_now() else EXPIRED
+        require current_write_acl(auth, s.file_id) and not File[auth.tenant,s.file_id].deleted
+        require all_REUSE_proofs_still_readable(auth, s)
+        require every ordinal has a pin to a READY matching generation else INCOMPLETE
+        require File[auth.tenant,s.file_id].head == s.base_version else PRECONDITION_FAILED_412
+        require used_bytes + s.size &lt;= quota_bytes else QUOTA_EXCEEDED
+
+        v = checked_add(s.base_version, 1)
+        INSERT Version(auth.tenant, s.file_id, v, s.immutable_manifest)
+        INSERT VersionBlock(auth.tenant, s.file_id, v)
+            SELECT ordered generations FROM SessionBlock[auth.tenant,s.id]
+        UPDATE File SET head=v
+            WHERE tenant_id=auth.tenant AND id=s.file_id AND head=s.base_version
+        require affected_rows == 1
+
+        UPDATE tenant_guard SET used_bytes=used_bytes+s.size,
+                                change_head=checked_add(change_head,1)
+            WHERE tenant_id=auth.tenant
+        seq = TenantGuard[auth.tenant].change_head
+        INSERT Change(auth.tenant, seq, s.file_id, v);
+        INSERT Outbox(auth.tenant, seq, hint_only)
+        INSERT Receipt(auth.tenant, auth.user, request_key, intent, s.file_id, v, seq)
+        UPDATE Session SET state=COMMITTED, result=(v,seq)
+            WHERE tenant_id=auth.tenant AND id=s.id
+        DELETE SessionBlock WHERE tenant_id=auth.tenant AND session=s.id
+        COMMIT
+
+    return SAVED(v, seq)
+    // All failures roll back; unknown COMMIT outcome retries the same key.</code></pre><div class="bilingual"><div class="lang-zh"><p><strong>完成事务不跨越对象存储：</strong>外部字节此时已经存好，事务只检查同库中的 READY 状态、pin 和 ACL，然后一起提交版本引用、当前版本 head、配额用量、Change、Outbox、回执及会话关闭状态。所有复用证明 REUSE 都要在锁内重查读取权限，防止登记 pin 后源版本权限被撤销。任何检查失败，整笔事务都回滚，候选对象和会话留下待后续处理。因为所有保留版本都按完整逻辑长度计入配额，这里要增加 s.size，之后清除历史时才扣减。</p><p>同一键并发重试，只会产生一个新提交。若成功后 ACK 丢失，重试应先返回原来的最小回执，不能因为 head 已变为 8，就把原本成功的请求误报为 412。客户端遇到未知结果时，必须先查询，再决定是否另存冲突副本。最小回执只返回调用者自己提交的版本 version、变更位置 seq 和状态 status，不含清单或 URL；即使后来撤权或会话过期，调用者仍可查询这份回执。任何内容读取和新提交则都要检查当前 ACL。本例不回收回执和会话终态，不能仅凭“客户端只重试 24 小时”就删除服务端的去重证据。</p></div><div class="lang-en"><p><strong>No cross-storage transaction:</strong> bytes already exist. Completion checks same-database READY/pin/ACL state, creates version references, advances head, charges quota, writes Change/Outbox/Receipt and closes the session atomically. Recheck read rights for every REUSE proof under the lock. Any failed check rolls everything back, preserving candidates for retry. Retained logical versions charge their full size, so add s.size; pruning later releases that charge.</p><p>Concurrent retries make one new commit. A lost success ACK replays its receipt before checking parent=7 against head=8; query unknown status before creating a conflict copy. Minimal replay returns only the caller’s own version/seq/status, without manifests or URLs, even after revocation/session expiry. Content reads and new commits check current ACL. This example retains receipts and terminal session state; a client’s 24 h retry policy cannot justify deleting dedup evidence.</p></div></div><h3><span class="lang-zh">两台设备都基于 v7 编辑，未能提交的一方怎样另存</span><span class="lang-en">Two parent=7 writers: preserve the losing edit</span></h3><div class="bilingual"><div class="lang-zh"><p>A 先提交 v8 后，B 在原子比较父版本时失败。若用强 If-Match 表达条件，本章返回 412。RFC 9110 要求条件不成立时不执行修改，也允许服务端在确认请求先前已经成功后返回成功。<a href="#ref-7">[7]</a> 如果业务使用 JSON 版本协议，可以另外定义 409，但要说清采用的是哪一层协议。内容寻址存储（content-addressable storage）用摘要命名字节，比较并交换（compare-and-swap）则比较并推进当前版本 head；两者虽然都叫 CAS，解决的问题不同。</p><p>第 4–5 帧把 B 的编辑另存为 f99，当前版本从 head=1 开始。新建操作使用独立且持久保存的幂等键，在同一 guard 事务内分配名称、重查目标目录权限和配额、转入同一所有者仍有效的已核验 pin，并写入日志和回执。重复请求必须返回同一个 f99，不能每超时一次就多创建一份。上面的伪代码没有展开这套创建或移动接口。删除标记 tombstone、重命名、移动和 ACL 变更，也都要在 guard 下按条件更新；离线旧会话不能无条件恢复已删除的文件。尚未上传的字节仍须保存在客户端本地。</p></div><div class="lang-en"><p>A commits v8 first; B’s atomic parent condition fails. This chapter chooses 412 for strong If-Match. RFC 9110 forbids applying a false condition and permits success for a recognized already-applied request. <a href="#ref-7">[7]</a> A JSON version protocol may define 409 separately. Content-addressable storage names bytes; compare-and-swap advances head, despite sharing the abbreviation CAS.</p><p>Frames 4–5 create f99 at head=1. Creation uses a separate durable key and one guard transaction for name allocation, current destination-directory permission/quota, transfer of the same owner’s still-live verified pins, log and receipt. Retries return the same f99. That create/move API is not expanded above. Tombstones, renames, moves and ACL changes likewise use guarded conditional updates. Offline sessions must not resurrect deleted files unconditionally; unuploaded bytes still require local persistence.</p></div></div>
 </section><section><h2><span class="lang-zh">15.5 · 多端同步：通知可以丢失，设备靠持久日志补齐</span><span class="lang-en">15.5 · Sync: lossy hints, durable change history</span></h2>
 <figure class="deck">
       <div class="slide">
@@ -581,24 +609,27 @@ CREATE TABLE commit_receipt (
         <figcaption><span class="lang-zh">Client B 本地已有 hA、hC，所以只下载 hD。客户端先核验、写入临时文件并持久保存，再原子替换本地文件，最后把已应用游标推进到 cursor=102。如果先推进游标再崩溃，之后补拉就可能跳过尚未落盘的版本。</span><span class="lang-en">With hA and hC local, fetch only hD. Verify, write temporary bytes, atomically replace, then advance applied cursor to 102. Advancing first can skip an unapplied version after a crash.</span></figcaption>
       </div>
     </figure><h3><span class="lang-zh">变更编号必须反映提交顺序</span><span class="lang-en">Change positions must follow commit order</span></h3><div class="bilingual"><div class="lang-zh"><p>第 1 帧中的事件 event 102 已与 v8 一起提交。每次改变目录、版本或可见性时，事务都持有 guard，先递增<strong>普通数据库行</strong>中的 change_head，再插入 Change 和 Outbox；事务回滚时，这个编号也一起回滚。后一个事务只能等前一个结束后再分配编号，因此不会出现“103 已可见，102 却更晚提交，结果被游标跳过”的情况。不能把它换成 nextval 分配的序号：数据库序列 sequence 即使能原子分配编号，也不能保证编号顺序等于提交顺序，事务中止后也不会收回已分配的号。<a href="#ref-11">[11]</a></p><p>Relay 只发送已经提交的 outbox 记录，等通知系统持久接受后才标记为已发送。若发送成功后、标记前崩溃，之后就可能重复发送。通知系统到设备的消息仍允许丢失或重复，设备需要周期性拉取日志来补齐。outbox 消除了数据库写入与直接推送之间无法恢复的双写窗口，但不能让网络传输恰好发生一次。<a href="#ref-8">[8]</a></p></div><div class="lang-en"><p>Frame 1’s event 102 committed with v8. Each directory/version/visibility mutation holds the guard and updates the <strong>ordinary</strong> change_head row before Change/Outbox insertion; abort rolls the counter back too. A following transaction allocates only after its predecessor ends, preventing visible 103 from causing a later-committing 102 to be skipped. External nextval is unsuitable: atomic sequence allocation is not commit order, and abort does not reclaim values. <a href="#ref-11">[11]</a></p><p>Relay releases committed outbox rows and marks sent after durable notification-system acceptance. Crash after publish but before marking can duplicate. Device hints may be lost/repeated; periodic log pull repairs them. Outbox closes the database/direct-push dual-write gap without providing exactly-once transport. <a href="#ref-8">[8]</a></p></div></div><pre data-language="Pseudocode · bounded change pages" data-kind="pseudocode" data-source="changes.pseudo"><code>changes(auth, cursor, bound_or_empty, acl_epoch):
-  // Guard values, membership, epoch and floor are for auth.tenant only.
-  begin short Metadata transaction:
-    SELECT tenant_guard WHERE tenant_id=auth.tenant FOR UPDATE
-    require current_membership(auth)
-    require acl_epoch == current_acl_epoch(auth) else RESET_REQUIRED
-    require retention_floor &lt;= cursor &lt;= tenant_guard.change_head else RESET_REQUIRED
-    H = tenant_guard.change_head if bound_or_empty is NONE else bound_or_empty
-    require cursor &lt;= H &lt;= tenant_guard.change_head
-    rows = SELECT Change WHERE tenant_id=auth.tenant AND cursor &lt; seq AND seq &lt;= H
-      ORDER BY seq LIMIT 100
-    // Walk raw rows, then authorize; do not paginate the filtered result.
-    visible = currently_authorized_events_or_removal_markers(auth, rows)
-    next = rows.last.seq if rows else H
-    COMMIT
-  return (visible, next, H, acl_epoch)
-  // Token binds tenant,user,H,epoch; client cannot supply another scope.
-  // Persist received work + next together locally. applied_cursor advances
-  // only after the full returned prefix has been applied or safely omitted.</code></pre><div class="bilingual"><div class="lang-zh"><p>代码对应第 4 帧。第一次读取时，服务端取得已经提交的日志上界 H，之后每一页都固定在这个上界内。每页先扫描最多 100 条<strong>原始日志</strong>，再按权限过滤；返回的 next 表示最后扫描的位置，所以一页没有可见事件，并不代表已经读到末尾。服务端把用户、租户、H 和权限代次 ACL epoch 绑定到 token，客户端不能自行更换访问范围。ACL 发生变化时，租户的可见性代次随之递增，旧分页请求明确返回 RESET_REQUIRED，要求重建同步状态，避免新授权的内容藏在已经扫描过的位置。这个简化策略也会让未受影响的设备重建，后续可以通过更细的权限日志优化。</p><p>本例使用数字游标，是为了说明教学协议。Google Drive 公开了保存 page token 后检索 changes 的机制，但没有说明这种不透明 token 的内部就是整数。<a href="#ref-9">[9]</a> 它的 changes 通知也不包含文件内容，客户端仍须读取变更。<a href="#ref-10">[10]</a> 如果游标已落到日志保留下界 floor 之前，应先保留本地未提交编辑，再获取<strong>同一快照边界下的目录和结束位置 H</strong>，之后补拉 H 之后的日志。快照即使分多页返回，清单也必须固定，并受读取 pin 保护，不能一边扫描仍在变化的目录，一边直接把游标跳到当前值。</p></div><div class="lang-en"><p>Frame 4: first obtain committed H, then page within that bound. Scan 100 <strong>raw log</strong> rows before authorization filtering; next is the last scanned position, so an empty visible page does not imply completion. Server-bound tokens include user, tenant, H and ACL epoch. ACL changes increment tenant visibility epoch, forcing old pages to RESET_REQUIRED; new grants cannot hide behind a previously scanned position. This simple policy also resets unaffected devices; finer permission logs can optimize it.</p><p>The integer cursor is a teaching protocol. Google Drive exposes stored page tokens for retrieving changes, without documenting integer token internals. <a href="#ref-9">[9]</a> Its changes notifications omit file contents and require later reads. <a href="#ref-10">[10]</a> Below the retention floor, preserve unsent edits and obtain a <strong>directory snapshot and H from the same snapshot boundary</strong>, then replay later history. Freeze and read-pin paged snapshots instead of scanning a changing directory then jumping to the current cursor.</p></div></div><h3><span class="lang-zh">用持久待办恢复本地替换和游标更新之间的中断</span><span class="lang-en">Close the local replace/cursor gap with recoverable ordering</span></h3><div class="bilingual"><div class="lang-zh"><p>第 5 帧只下载缺少的 hD，然后按清单顺序重组文件，核验长度和摘要。客户端先写临时文件并持久化，在同一文件系统内通过 rename 替换目标文件，再持久化目录，最后写入本地状态和连续的已应用游标 applied_cursor。文件系统 rename 与本地数据库<strong>不在同一个事务中</strong>，所以处理前要把事件、next 和目标版本记录为持久待办，替换完成后再标记完成。如果替换后掉电、游标还没写入，恢复时可以重做；客户端必须扫描持久待办和目标版本，不能只依赖内存状态。具体 fsync、rename 能提供什么保证，取决于操作系统和文件系统；本例没有实现设备存储层。</p><p>同一文件 file_id 的事件要串行应用，避免旧版本覆盖新版本。本地有未提交编辑时，应先保留候选文件，再处理远端替换。即使并发下载，也只能在所有较早事件都已完成，或根据权限可以安全省略后，推进连续水位。每次重新签发清单或 URL 都要重查 ACL。签名 URL 是短期持有者凭证（bearer capability），应用层撤权可以停止续签，但无法收回用户已经保存的字节；已签地址在存储策略允许的剩余窗口内仍可能可用。<a href="#ref-12">[12]</a> 要立即阻止后续读取，还需要在线鉴权，并协调在途请求的边界，仅修改一行 ACL 并不足够。</p></div><div class="lang-en"><p>Frame 5 fetches only hD, reconstructs manifest order and verifies lengths/digests. Persist a temporary file, rename on the same filesystem, persist its directory, then update local state and the contiguous applied_cursor. Filesystem rename and the local database <strong>are not one transaction</strong>: persist event/next/target work first and complete it after replacement. Crash after replacement but before the cursor causes replay. Recovery inspects durable work and target versions rather than memory. Actual fsync/rename guarantees depend on OS/filesystem; the device storage layer is not implemented here.</p><p>Serialize application per file_id and reject rollback to an older version. Preserve unsent local edits before remote replacement. Parallel downloads advance only a fully completed or safely omitted authorized prefix. Manifest/URL grants recheck ACL. Signed URLs are short-lived bearer capabilities: application revocation stops new grants but cannot retract saved bytes, and issued grants have a storage-policy access window. <a href="#ref-12">[12]</a> Immediate denial needs online authorization and an in-flight request barrier, beyond an ACL row update.</p></div></div>
+    // Guard values, membership, epoch and floor are for auth.tenant only.
+    begin short Metadata transaction:
+        SELECT tenant_guard WHERE tenant_id=auth.tenant FOR UPDATE
+        require current_membership(auth)
+        require acl_epoch == current_acl_epoch(auth) else RESET_REQUIRED
+        require retention_floor &lt;= cursor &lt;= tenant_guard.change_head else RESET_REQUIRED
+
+        H = tenant_guard.change_head if bound_or_empty is NONE else bound_or_empty
+        require cursor &lt;= H &lt;= tenant_guard.change_head
+        rows = SELECT Change WHERE tenant_id=auth.tenant AND cursor &lt; seq AND seq &lt;= H
+            ORDER BY seq LIMIT 100
+
+        // Walk raw rows, then authorize; do not paginate the filtered result.
+        visible = currently_authorized_events_or_removal_markers(auth, rows)
+        next = rows.last.seq if rows else H
+        COMMIT
+
+    return (visible, next, H, acl_epoch)
+    // Token binds tenant,user,H,epoch; client cannot supply another scope.
+    // Persist received work + next together locally. applied_cursor advances
+    // only after the full returned prefix has been applied or safely omitted.</code></pre><div class="bilingual"><div class="lang-zh"><p>代码对应第 4 帧。第一次读取时，服务端取得已经提交的日志上界 H，之后每一页都固定在这个上界内。每页先扫描最多 100 条<strong>原始日志</strong>，再按权限过滤；返回的 next 表示最后扫描的位置，所以一页没有可见事件，并不代表已经读到末尾。服务端把用户、租户、H 和权限代次 ACL epoch 绑定到 token，客户端不能自行更换访问范围。ACL 发生变化时，租户的可见性代次随之递增，旧分页请求明确返回 RESET_REQUIRED，要求重建同步状态，避免新授权的内容藏在已经扫描过的位置。这个简化策略也会让未受影响的设备重建，后续可以通过更细的权限日志优化。</p><p>本例使用数字游标，是为了说明教学协议。Google Drive 公开了保存 page token 后检索 changes 的机制，但没有说明这种不透明 token 的内部就是整数。<a href="#ref-9">[9]</a> 它的 changes 通知也不包含文件内容，客户端仍须读取变更。<a href="#ref-10">[10]</a> 如果游标已落到日志保留下界 floor 之前，应先保留本地未提交编辑，再获取<strong>同一快照边界下的目录和结束位置 H</strong>，之后补拉 H 之后的日志。快照即使分多页返回，清单也必须固定，并受读取 pin 保护，不能一边扫描仍在变化的目录，一边直接把游标跳到当前值。</p></div><div class="lang-en"><p>Frame 4: first obtain committed H, then page within that bound. Scan 100 <strong>raw log</strong> rows before authorization filtering; next is the last scanned position, so an empty visible page does not imply completion. Server-bound tokens include user, tenant, H and ACL epoch. ACL changes increment tenant visibility epoch, forcing old pages to RESET_REQUIRED; new grants cannot hide behind a previously scanned position. This simple policy also resets unaffected devices; finer permission logs can optimize it.</p><p>The integer cursor is a teaching protocol. Google Drive exposes stored page tokens for retrieving changes, without documenting integer token internals. <a href="#ref-9">[9]</a> Its changes notifications omit file contents and require later reads. <a href="#ref-10">[10]</a> Below the retention floor, preserve unsent edits and obtain a <strong>directory snapshot and H from the same snapshot boundary</strong>, then replay later history. Freeze and read-pin paged snapshots instead of scanning a changing directory then jumping to the current cursor.</p></div></div><h3><span class="lang-zh">用持久待办恢复本地替换和游标更新之间的中断</span><span class="lang-en">Close the local replace/cursor gap with recoverable ordering</span></h3><div class="bilingual"><div class="lang-zh"><p>第 5 帧只下载缺少的 hD，然后按清单顺序重组文件，核验长度和摘要。客户端先写临时文件并持久化，在同一文件系统内通过 rename 替换目标文件，再持久化目录，最后写入本地状态和连续的已应用游标 applied_cursor。文件系统 rename 与本地数据库<strong>不在同一个事务中</strong>，所以处理前要把事件、next 和目标版本记录为持久待办，替换完成后再标记完成。如果替换后掉电、游标还没写入，恢复时可以重做；客户端必须扫描持久待办和目标版本，不能只依赖内存状态。具体 fsync、rename 能提供什么保证，取决于操作系统和文件系统；本例没有实现设备存储层。</p><p>同一文件 file_id 的事件要串行应用，避免旧版本覆盖新版本。本地有未提交编辑时，应先保留候选文件，再处理远端替换。即使并发下载，也只能在所有较早事件都已完成，或根据权限可以安全省略后，推进连续水位。每次重新签发清单或 URL 都要重查 ACL。签名 URL 是短期持有者凭证（bearer capability），应用层撤权可以停止续签，但无法收回用户已经保存的字节；已签地址在存储策略允许的剩余窗口内仍可能可用。<a href="#ref-12">[12]</a> 要立即阻止后续读取，还需要在线鉴权，并协调在途请求的边界，仅修改一行 ACL 并不足够。</p></div><div class="lang-en"><p>Frame 5 fetches only hD, reconstructs manifest order and verifies lengths/digests. Persist a temporary file, rename on the same filesystem, persist its directory, then update local state and the contiguous applied_cursor. Filesystem rename and the local database <strong>are not one transaction</strong>: persist event/next/target work first and complete it after replacement. Crash after replacement but before the cursor causes replay. Recovery inspects durable work and target versions rather than memory. Actual fsync/rename guarantees depend on OS/filesystem; the device storage layer is not implemented here.</p><p>Serialize application per file_id and reject rollback to an older version. Preserve unsent local edits before remote replacement. Parallel downloads advance only a fully completed or safely omitted authorized prefix. Manifest/URL grants recheck ACL. Signed URLs are short-lived bearer capabilities: application revocation stops new grants but cannot retract saved bytes, and issued grants have a storage-policy access window. <a href="#ref-12">[12]</a> Immediate denial needs online authorization and an in-flight request barrier, beyond an ACL row update.</p></div></div>
 </section><section><h2><span class="lang-zh">15.6 · 回收：删除一个文件，为什么不能直接删除它的块</span><span class="lang-en">15.6 · Reclamation: shared bytes outlive individual files</span></h2>
 <figure class="deck">
       <div class="slide">
@@ -694,34 +725,39 @@ CREATE TABLE commit_receipt (
         <figcaption><span class="lang-zh">红线表示必须拒绝的做法：用户删除一个文件后，直接删除它引用的块。COW 让多个版本共享字节，也要求回收时保护这些共享引用。无法确认栅栏有效时，就保留候选块，暂时多占一些空间。</span><span class="lang-en">The red rejected path is “delete a file, immediately delete its blocks.” Shared COW bytes are precisely why reclamation needs care. Without a valid fence, retain candidates and spend temporary space.</span></figcaption>
       </div>
     </figure><h3><span class="lang-zh">标记只用于找候选，DELETING 才能阻止新增引用</span><span class="lang-en">Mark finds candidates; DELETING closes the adoption race</span></h3><div class="bilingual"><div class="lang-zh"><p>删除文件时，服务端先在 guard 事务中写入删除标记 tombstone 和变更日志。只要当前版本、30 天保留历史、回收站或冲突副本仍然有效，对应的 VersionBlock 就是回收必须保护的根引用；活跃会话和读取 pin 也会保护具体对象代际。标记阶段 mark 可以慢慢扫描候选，但真正删除前，必须在 guard 内<strong>重新</strong>检查完整的权威引用，不能只相信之前的扫描结果或对象年龄。</p><p>48 小时宽限期 grace 只留出故障恢复时间，不能阻止并发采用。第 3 帧的栅栏 fence，是把候选代际持久标记为 DELETING，同时写入删除任务 DeleteJob；所有新增采用和版本完成操作都必须要求对象为 READY。如果登记 pin 先完成，GC 会看到保护而拒绝删除；如果 GC 先完成栅栏，新 pin 就不能再引用旧代际。数据库锁不会一直持有到外部 DELETE 结束，其他对象代际仍可正常发布。</p></div><div class="lang-en"><p>Deletion first commits a guarded tombstone and change. VersionBlock roots cover current versions, retained history, trash and conflict copies; live sessions/read pins also protect generations. Slow marking can find candidates, but final deletion must <strong>recheck</strong> complete authoritative references under the guard, never trust an old scan or object age.</p><p>Grace of 48 h gives recovery time, not exclusion. Frame 3’s fence durably changes the candidate generation to DELETING and writes DeleteJob; every adoption/completion requires READY. If pinning wins, GC sees protection and refuses. If GC wins, new pins reject the old generation. No lock spans the external DELETE; other generations can publish.</p></div></div><pre data-language="Pseudocode · generation-fenced GC" data-kind="pseudocode" data-source="gc.pseudo"><code>fence_candidate(tenant, generation):
-  // Trusted GC worker scope; every helper binds this tenant, never bare IDs.
-  begin Metadata transaction:
-    SELECT tenant_guard WHERE tenant_id=tenant FOR UPDATE
-    g = BlockGeneration[tenant, generation]
-    require g.state in {READY, ORPHAN, UPLOADING}
-    require g.age &gt;= grace and not live_upload_attempt(g, db_now())
-    require no_retained_VersionBlock(g) and no_active_session_or_read_pin(g)
-    UPDATE BlockGeneration SET state=DELETING
-      WHERE tenant_id=tenant AND generation=g.generation
-    INSERT DeleteJob(tenant, g.generation, g.exact_object_key) ON CONFLICT DO NOTHING
-    COMMIT
+    // Trusted GC worker scope; every helper binds this tenant, never bare IDs.
+    begin Metadata transaction:
+        SELECT tenant_guard WHERE tenant_id=tenant FOR UPDATE
+        g = BlockGeneration[tenant, generation]
+        require g.state in {READY, ORPHAN, UPLOADING}
+        require g.age &gt;= grace and not live_upload_attempt(g, db_now())
+        require no_retained_VersionBlock(g) and no_active_session_or_read_pin(g)
+
+        UPDATE BlockGeneration SET state=DELETING
+            WHERE tenant_id=tenant AND generation=g.generation
+        INSERT DeleteJob(tenant, g.generation, g.exact_object_key) ON CONFLICT DO NOTHING
+        COMMIT
 
 sweep(job):
-  job = require_durable_job(job.tenant, job.generation)
-  // Outside the DB transaction; retries always target this physical key.
-  result = Object.DELETE(job.exact_object_key, version_id=job.version_if_enabled)
-  if not confirmed_deleted_or_absent(result): return RETRY_SAME_JOB
-  // Timeout stays DELETING: never fall through to the terminal update.
-  begin Metadata transaction:
-    SELECT tenant_guard WHERE tenant_id=job.tenant FOR UPDATE
-    require job still targets the same DELETING generation
-    UPDATE BlockGeneration SET state=DELETED
-      WHERE tenant_id=job.tenant AND generation=job.generation
-    UPDATE DeleteJob SET complete=true
-      WHERE tenant_id=job.tenant AND generation=job.generation
-    COMMIT
-  // Retain the terminal generation fence. Never rebuild its physical key.
-  // Identical content can enter a fresh generation and be adopted normally.</code></pre><div class="bilingual"><div class="lang-zh"><p>代码对应第 4 帧。DeleteJob 按 <code>(tenant,generation)</code> 唯一标识，每项任务固定指向精确的物理对象键；删除超时后，也只重试原来的目标。同摘要内容重新上传时使用新代际，因此<strong>旧 DELETE 即使晚到，也删不到新对象</strong>。DELETING、DELETED 永远不能回到 READY，也不能在终态 TTL 到期后复用物理对象键。如果对象存储开启了版本化，删除还必须指定精确 version ID，因为普通 DELETE 可能只增加删除标记 delete marker。<a href="#ref-13">[13]</a></p><p>签发上传授权前，服务端先登记状态为 UPLOADING 的上传尝试，其租约和会话到期时间都参与同一 guard 检查。过期后迟到的 PUT 不能重新发布已关闭的代际，孤儿扫描仍要继续删除遗留对象。读取 pin 还必须覆盖已签发 URL 和有界的在途读取，等下载会话排空后才能释放；URL 到期并不代表所有在途 GET 已经结束，S3 可以允许到期前开始的下载继续进行。<a href="#ref-12">[12]</a> 本例只说明 GC 必须遵守的元数据判定约定，没有实现下载租约排空。</p><p>回收失败会暂时多占空间，错误回收却会丢失内容。因此，无法查全根引用、无法取得 guard，或无法确认精确对象代际时，都不删除候选。COW 也不保证存储成本接近一个版本：十次全块修改仍需要 10×12=120 MiB。因此，保留时间、保留份数和逻辑配额要一起设定。</p></div><div class="lang-en"><p>Frame 4: DeleteJob is unique by <code>(tenant,generation)</code> and targets one exact physical key. Unknown deletion retries that target. Reuploading identical content uses a fresh generation, so <strong>a delayed old DELETE cannot remove the new object</strong>. DELETING/DELETED never return to READY; terminal expiry never permits physical-key reuse. In versioned storage, delete exact version IDs: an ordinary DELETE may add only a delete marker. <a href="#ref-13">[13]</a></p><p>Grants first register UPLOADING attempts whose leases/session expiry share guarded checks. Late PUTs cannot republish dead generations; orphan cleanup retries. Read pins must cover issued URLs and bounded in-flight reads, releasing only after download-session drain. URL expiry alone does not finish every active GET: S3 can continue a download started before expiry. <a href="#ref-12">[12]</a> This example specifies the GC metadata contract without implementing download-lease draining.</p><p>Failed GC costs space; incorrect GC loses content. Without complete roots, the guard or exact-generation evidence, retain the candidate. COW does not force one-version storage cost: ten full-block rewrites still need 10×12=120 MiB. Set retention age/count and logical quotas together.</p></div></div>
+    job = require_durable_job(job.tenant, job.generation)
+    // Outside the DB transaction; retries always target this physical key.
+    result = Object.DELETE(job.exact_object_key, version_id=job.version_if_enabled)
+    if not confirmed_deleted_or_absent(result):
+        return RETRY_SAME_JOB
+    // Timeout stays DELETING: never fall through to the terminal update.
+
+    begin Metadata transaction:
+        SELECT tenant_guard WHERE tenant_id=job.tenant FOR UPDATE
+        require job still targets the same DELETING generation
+
+        UPDATE BlockGeneration SET state=DELETED
+            WHERE tenant_id=job.tenant AND generation=job.generation
+        UPDATE DeleteJob SET complete=true
+            WHERE tenant_id=job.tenant AND generation=job.generation
+        COMMIT
+
+    // Retain the terminal generation fence. Never rebuild its physical key.
+    // Identical content can enter a fresh generation and be adopted normally.</code></pre><div class="bilingual"><div class="lang-zh"><p>代码对应第 4 帧。DeleteJob 按 <code>(tenant,generation)</code> 唯一标识，每项任务固定指向精确的物理对象键；删除超时后，也只重试原来的目标。同摘要内容重新上传时使用新代际，因此<strong>旧 DELETE 即使晚到，也删不到新对象</strong>。DELETING、DELETED 永远不能回到 READY，也不能在终态 TTL 到期后复用物理对象键。如果对象存储开启了版本化，删除还必须指定精确 version ID，因为普通 DELETE 可能只增加删除标记 delete marker。<a href="#ref-13">[13]</a></p><p>签发上传授权前，服务端先登记状态为 UPLOADING 的上传尝试，其租约和会话到期时间都参与同一 guard 检查。过期后迟到的 PUT 不能重新发布已关闭的代际，孤儿扫描仍要继续删除遗留对象。读取 pin 还必须覆盖已签发 URL 和有界的在途读取，等下载会话排空后才能释放；URL 到期并不代表所有在途 GET 已经结束，S3 可以允许到期前开始的下载继续进行。<a href="#ref-12">[12]</a> 本例只说明 GC 必须遵守的元数据判定约定，没有实现下载租约排空。</p><p>回收失败会暂时多占空间，错误回收却会丢失内容。因此，无法查全根引用、无法取得 guard，或无法确认精确对象代际时，都不删除候选。COW 也不保证存储成本接近一个版本：十次全块修改仍需要 10×12=120 MiB。因此，保留时间、保留份数和逻辑配额要一起设定。</p></div><div class="lang-en"><p>Frame 4: DeleteJob is unique by <code>(tenant,generation)</code> and targets one exact physical key. Unknown deletion retries that target. Reuploading identical content uses a fresh generation, so <strong>a delayed old DELETE cannot remove the new object</strong>. DELETING/DELETED never return to READY; terminal expiry never permits physical-key reuse. In versioned storage, delete exact version IDs: an ordinary DELETE may add only a delete marker. <a href="#ref-13">[13]</a></p><p>Grants first register UPLOADING attempts whose leases/session expiry share guarded checks. Late PUTs cannot republish dead generations; orphan cleanup retries. Read pins must cover issued URLs and bounded in-flight reads, releasing only after download-session drain. URL expiry alone does not finish every active GET: S3 can continue a download started before expiry. <a href="#ref-12">[12]</a> This example specifies the GC metadata contract without implementing download-lease draining.</p><p>Failed GC costs space; incorrect GC loses content. Without complete roots, the guard or exact-generation evidence, retain the candidate. COW does not force one-version storage cost: ten full-block rewrites still need 10×12=120 MiB. Set retention age/count and logical quotas together.</p></div></div>
 </section><section><h2><span class="lang-zh">面试追问：把限制落实为明确的处理行为</span><span class="lang-en">Follow-ups and failure-prone answers</span></h2>
 <details><summary><span class="lang-zh">展开跨地域、热门分享和缩短历史的追问</span><span class="lang-en">Expand regional, hot-sharing and retention follow-ups</span></summary><div class="bilingual"><div class="lang-zh"><p>如果被问到“为什么不一开始做跨地域双活”，先确认单地域故障时的恢复目标。要让元数据的当前版本 head 保持强一致，跨洋同步会增加写入延迟；改用异步复制，切主时又可能丢失最近的提交。字节已经复制到多个地域，也不会自动解决目录竞争。如果两个地域都接受同一文件 file_id 的写入，还需要额外仲裁或明确冲突如何处理。先写清恢复目标和允许丢失的提交时间窗口，再讨论扩展；本章的逻辑 Primary 没有承诺跨地域零丢失。</p></div><div class="lang-en"><p>For multi-region active-active, establish recovery targets first. Synchronous metadata heads add intercontinental latency; asynchronous replication can lose recent commits on failover. Replicating bytes does not resolve directory races; concurrent regional writers need arbitration or conflict semantics. State the tolerated loss window before extending the design. This chapter’s logical Primary does not promise zero-loss regional failover.</p></div></div><div class="bilingual"><div class="lang-zh"><p>如果热门文件被大量分享，下载仍应走经过授权的对象路径。可以缓存不可变块或文件导出物，但私有内容还要考虑权限和短期地址的有效期。私有文件同步通常不能直接套用公开视频分发方案，把所有对象无条件放进共享 CDN。对象存储热点、同一租户的大量缺块查询、巨型目录和同一文件的写入竞争，要分别寻找扩展办法。全站平均每秒约 231 次文件保存，仍可能掩盖单个热门文件的局部瓶颈。</p></div><div class="lang-en"><p>For popular shared files, downloads stay on authorized object paths; cache immutable blocks or exports with permission and grant lifetime semantics. Private sync is not automatically public video distribution. Scale storage hot spots, tenant lookup storms, huge directories and contention on one file separately. The average of 231 file saves/s can hide a local hot-file bottleneck.</p></div></div><div class="bilingual"><div class="lang-zh"><p>如果空间紧张、需要缩短历史保留时间，先通过元数据事务修改保留策略，并生成设备能够补拉的变更，再让 GC 按新的根引用集合回收，不能直接按对象年龄删除。用户读取旧版本时，可以持有短期读取租约，但其保护范围必须与下载授权一致。历史版本、配额、回收站和冲突副本都对用户可见；后台节省空间时，不能让仍显示为可恢复的版本突然变成缺块文件。</p></div><div class="lang-en"><p>When shortening history, first transactionally change retention metadata and expose relevant changes, then reclaim from the new roots; do not delete by object age. A historical reader may hold a short read lease aligned with download authorization. History, quota, trash and conflict copies are user-visible contracts; background space savings must not silently corrupt versions advertised as recoverable.</p></div></div></details></section><section><h2><span class="lang-zh">面试收尾：沿四个确认点讲清主流程</span><span class="lang-en">Close: explain four confirmation points</span></h2><div class="bilingual"><div class="lang-zh"><p>先分清三个口径：平均每秒约 231.5 次文件保存、峰值每秒约 1.5 万次块 PUT，以及峰值约 463 Gb/s 的字节流量。再沿<strong>可信对象 → 受 pin 保护 → 按条件提交版本 → 设备按序连续应用</strong>讲解。共享 hA、hC 不代表获得读取权限；比较父版本不能证明字节完整；设备仍要用日志补齐通知遗漏；回收也必须建立代际栅栏，不能只等宽限期。最后用 ACK 丢失、两台设备都以 parent=7 提交、权限撤销，以及旧 DELETE 迟到这四种情况检查方案。</p></div><div class="lang-en"><p>Distinguish about 231.5 file saves/s, 15K peak block PUTs/s and 463 Gb/s. Then explain <strong>trusted objects → protected pins → conditional version commit → contiguous device application</strong>. Shared bytes grant no read rights, parent CAS does not verify integrity, hints do not replace history, and grace does not replace generation fencing. Rehearse lost ACKs, two parent=7 writers, revocation and delayed DELETEs.</p></div></div></section><section><h2><span class="lang-zh">参考资料：分清外部机制和本章假设</span><span class="lang-en">References: distinguish mechanisms from assumptions</span></h2>
 <ol class="references"><li id="ref-1">[1] Sean Quinlan & Sean Dorward, <a href="https://www.usenix.org/legacy/events/fast02/quinlan/quinlan_html/"><em>Venti: a new approach to archival storage</em></a>, 2002. <span class="lang-zh">介绍内容摘要标识、不可变块和共享机制；本章不采用其性能数据或历史哈希参数。</span><span class="lang-en">Content-addressed immutable blocks and sharing; no historical performance or hash parameters are adopted.</span></li>

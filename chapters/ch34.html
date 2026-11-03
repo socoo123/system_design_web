@@ -166,14 +166,19 @@
 -- READY starts forward work; expired active owners may only reconcile first.
 WITH clock(now) AS (SELECT unixepoch(&#x27;now&#x27;))
 UPDATE runs
-SET owner = :worker, epoch = epoch + 1, version = version + 1,
+SET owner = :worker,
+    epoch = epoch + 1,
+    version = version + 1,
     lease_until = (SELECT now FROM clock) + 15,
     status = CASE WHEN status = &#x27;READY&#x27; THEN &#x27;RUNNING&#x27; ELSE status END
-WHERE run_id = :run_id AND version = :version
-  AND ((status = &#x27;READY&#x27; AND cancelled = 0
-        AND deadline &gt; (SELECT now FROM clock))
-    OR (status IN (&#x27;RUNNING&#x27;, &#x27;CANCEL_REQUESTED&#x27;, &#x27;COMPENSATING&#x27;)
-        AND lease_until &lt;= (SELECT now FROM clock)))
+WHERE run_id = :run_id
+    AND version = :version
+    AND (
+        (status = &#x27;READY&#x27; AND cancelled = 0
+            AND deadline &gt; (SELECT now FROM clock))
+        OR (status IN (&#x27;RUNNING&#x27;, &#x27;CANCEL_REQUESTED&#x27;, &#x27;COMPENSATING&#x27;)
+            AND lease_until &lt;= (SELECT now FROM clock))
+    )
 RETURNING *;
 -- Zero rows: lost the race / not runnable. Do not invoke anything.
 -- COMMIT acknowledgment must be known before dispatch; otherwise read back.</code></pre><div class="bilingual"><div class="lang-zh"><p>这条 SQL 的原子边界是同一个数据库内的条件更新。先 SELECT、再无条件 UPDATE，并不等于比较并交换（CAS）；即使用生产数据库的行锁，也必须检查实际影响的行数。<a href="#ref-7">[7]</a> 此后每次提交结果，都要重新检查租约代次 epoch、状态版本 version、角色版本 role_revision、租约有效期和运行状态。Run Store 无法写入时，停止发起新调用。有复制延迟的副本只能展示已标明陈旧的进度，不能据此批准动作、领取任务或判定运行已完成（DONE）。</p></div><div class="lang-en"><p>This is a single-database conditional update. A SELECT followed by an unconditional UPDATE is not CAS; inspect affected rows with production row locks too. <a href="#ref-7">[7]</a> Outcome commits recheck epoch, version, role revision, lease and status. Stop new calls if authority cannot be written. A stale replica may display labelled progress, never decide claim, approval or DONE.</p></div></div></section>
@@ -285,35 +290,58 @@ RETURNING *;
         <figcaption><span class="lang-zh">最后加入停止分支。参数相同而业务版本在推进，可能只是正常轮询；只有规范化指纹连续重复 3 次且没有进展，才触发停止检测。停止状态（STOPPED）会保留原因和未结清的副作用，并不表示已经回滚。</span><span class="lang-en">Add stopping. Repeated arguments with state progress may be valid polling; three unchanged canonical fingerprints without progress trigger the heuristic. STOPPED preserves effects.</span></figcaption>
       </div>
     </figure><div class="bilingual"><div class="lang-zh"><p><strong>一个模型步骤（step）是一次逻辑调用，一次尝试（attempt）才是物理请求。</strong> 调用前的事务先占用一个步骤名额，并固定模型、工具和工作流的版本，以及按权限投影的消息、检索结果、已记录的时间和随机值。恢复时仍读取这些输入。如果输出已经提交，就直接复用，不能为了“回放”再问一次模型；如果输出尚未保存，可以重新请求，结果也可能不同，但要另记费用，并且只允许一个通过 CAS 检查的提交结果固定后续动作。</p><p>下面的代码对应图 2 的预算门和 Commit 提交点。运行时要先验证输出结构（schema）、工作流允许的转换，以及 tool_call 数量。稳定的业务意图（business intent）来自可信业务交互，不能用模型生成的 call_id 或参数哈希重新定义。模型请求发生在两个本库事务之间；用一个 transaction 包住网络调用，也无法让网络和数据库提交变成原子操作。</p></div><div class="lang-en"><p><strong>A model step is logical; an attempt is physical.</strong> Admission reserves one step and pins model/tool/workflow revisions, authorized messages, retrieved evidence and recorded time/random values. Recovery reads the same input. Reuse committed output; missing output may be regenerated and differ, but charge the attempt and let only a valid CAS winner pin actions.</p><p>This contract covers deck 2’s budget gate and Commit. Validate output schema, legal workflow edges and call count. Trusted business interaction defines intent; model call IDs or argument hashes do not. External requests sit between two local transactions; no transaction makes the network atomic.</p></div></div><pre data-language="Pseudocode · step" data-kind="pseudocode" data-source="step.pseudo"><code>advance(run, owner, epoch, roleRevision, expectedVersion):
-  BEGIN RunStore transaction; lock run
-    require current owner/epoch/roleRevision, version=expectedVersion, live lease
-    require RUNNING, not cancelled, before deadline
-    if unresolved action exists: COMMIT; return RECONCILE_OR_WAIT
-    step = current logical step
-    if step exists: require matching revisions, or perform explicit migration
-    if step exists and step.output is stored: COMMIT; return stored output + actions
-    if step does not exist:
-      require step_count &lt; 12; increment step_count
-      INSERT step with workflow/model/tool revisions, messages,
-        retrieved evidence, recorded time/random values, input hash
-    require physical attempt and token reservation within remaining caps
-    INSERT attempt; reserve input + max_output tokens; bump run version
-    attemptVersion = updated run.version; retain exact owner/epoch/role token
-  COMMIT; on uncertain acknowledgment, read step/attempt before sending
-  output, usage = LLM_GW.call(step.immutableInput, attempt.id)  // outside TX
-  record trusted usage by attempt.id; missing usage keeps its reservation
-  proposals = validate(output, pinned schema and allowed workflow edge)
-  BEGIN RunStore transaction; lock run and step
-    require current owner/epoch/roleRevision, version=attemptVersion, live lease
-    require RUNNING, not cancelled, before deadline
-    if step exists and step.output is stored: COMMIT; return stored output + actions
-    UPDATE step SET output = proposals WHERE output IS NULL
-    INSERT exact actions with stable business intent, binding and PREPARED
-    INSERT checkpoint + next-state event; bump run version
-  COMMIT; only the committed winner may advance
-  // Tool dispatch separately checks state, budget, approval and Ch33 contract.
-  // Renewal/version changes require revalidation; never reuse the old entry version.
-  // No saved output: a new attempt may differ/cost more; never replace an intent.</code></pre><div class="bilingual"><div class="lang-zh"><p>因为一次模型响应可能提出多个工具调用，12 次模型调用之外，还要分别限制 8 个前向动作、120 秒活跃时间和 60,000 token，并管理费用预算。每个物理尝试都要持久预留“已知输入加最大输出”的 token，再按可信用量（usage）结算；如果用量缺失，就保留这份占用。暂停和角色交接都不清零预算。供应商重试由 Ch32 负责，运行时不再在外面套一层无界重试。ReAct 的行动与观察交织，以及 AI SDK 的 stopWhen/prepareStep，只用于说明机制，不能替代持久状态和硬预算，也不要求保存模型的私有思考。<a href="#ref-2">[2]</a><a href="#ref-5">[5]</a></p><p>同一工具、规范化参数和业务版本连续重复 3 次且没有进展，只是判断运行卡住的启发式规则；业务版本在推进的轮询应允许继续。STOPPED 仍保留停止原因和未清义务。复用已保存输出是<strong>本设计的契约</strong>，不能泛化为所有框架的行为：LangGraph 从旧检查点显式回放（replay）时，会重新执行之后的 LLM/API/interrupt 调用；sync、async、exit 的持久化时机也不同。因此，同样叫作 checkpoint，不代表都提供本章的保证。<a href="#ref-11">[11]</a></p></div><div class="lang-en"><p>Twelve model steps cannot cap a multi-tool response; separately bound eight forward actions, 120 active seconds and 60,000 tokens/cost. Persist reservations per physical attempt and settle trusted usage; missing usage retains the hold. Pause/handoff never resets budgets. Ch32 owns supplier retries. ReAct and AI SDK stopWhen/prepareStep illustrate control, not durability or hard admission, and do not require private reasoning storage. <a href="#ref-2">[2]</a><a href="#ref-5">[5]</a></p><p>Three repeated tool/argument/business-revision fingerprints without progress are only a stuck heuristic; versioned polling may progress. STOPPED retains reasons/obligations. Stored-output reuse is <strong>this design’s contract</strong>: explicit LangGraph replay from an older checkpoint re-executes later LLM/API/interrupt calls, and sync/async/exit persist at different times. <a href="#ref-11">[11]</a></p></div></div></section>
+    BEGIN RunStore transaction;
+        lock run
+        require current owner/epoch/roleRevision, version=expectedVersion, live lease
+        require RUNNING, not cancelled, before deadline
+        if unresolved action exists:
+            COMMIT;
+            return RECONCILE_OR_WAIT
+
+        step = current logical step
+        if step exists:
+            require matching revisions, or perform explicit migration
+        if step exists and step.output is stored:
+            COMMIT;
+            return stored output + actions
+        if step does not exist:
+            require step_count &lt; 12;
+            increment step_count
+            INSERT step with workflow/model/tool revisions, messages,
+                retrieved evidence, recorded time/random values, input hash
+
+        require physical attempt and token reservation within remaining caps
+        INSERT attempt;
+        reserve input + max_output tokens;
+        bump run version
+        attemptVersion = updated run.version;
+        retain exact owner/epoch/role token
+    COMMIT;
+    on uncertain acknowledgment, read step/attempt before sending
+
+    output, usage = LLM_GW.call(step.immutableInput, attempt.id)  // outside TX
+    record trusted usage by attempt.id;
+    missing usage keeps its reservation
+    proposals = validate(output, pinned schema and allowed workflow edge)
+
+    BEGIN RunStore transaction;
+        lock run and step
+        require current owner/epoch/roleRevision, version=attemptVersion, live lease
+        require RUNNING, not cancelled, before deadline
+        if step exists and step.output is stored:
+            COMMIT;
+            return stored output + actions
+
+        UPDATE step SET output = proposals WHERE output IS NULL
+        INSERT exact actions with stable business intent, binding and PREPARED
+        INSERT checkpoint + next-state event;
+        bump run version
+    COMMIT;
+    only the committed winner may advance
+
+    // Tool dispatch separately checks state, budget, approval and Ch33 contract.
+    // Renewal/version changes require revalidation; never reuse the old entry version.
+    // No saved output: a new attempt may differ/cost more; never replace an intent.</code></pre><div class="bilingual"><div class="lang-zh"><p>因为一次模型响应可能提出多个工具调用，12 次模型调用之外，还要分别限制 8 个前向动作、120 秒活跃时间和 60,000 token，并管理费用预算。每个物理尝试都要持久预留“已知输入加最大输出”的 token，再按可信用量（usage）结算；如果用量缺失，就保留这份占用。暂停和角色交接都不清零预算。供应商重试由 Ch32 负责，运行时不再在外面套一层无界重试。ReAct 的行动与观察交织，以及 AI SDK 的 stopWhen/prepareStep，只用于说明机制，不能替代持久状态和硬预算，也不要求保存模型的私有思考。<a href="#ref-2">[2]</a><a href="#ref-5">[5]</a></p><p>同一工具、规范化参数和业务版本连续重复 3 次且没有进展，只是判断运行卡住的启发式规则；业务版本在推进的轮询应允许继续。STOPPED 仍保留停止原因和未清义务。复用已保存输出是<strong>本设计的契约</strong>，不能泛化为所有框架的行为：LangGraph 从旧检查点显式回放（replay）时，会重新执行之后的 LLM/API/interrupt 调用；sync、async、exit 的持久化时机也不同。因此，同样叫作 checkpoint，不代表都提供本章的保证。<a href="#ref-11">[11]</a></p></div><div class="lang-en"><p>Twelve model steps cannot cap a multi-tool response; separately bound eight forward actions, 120 active seconds and 60,000 tokens/cost. Persist reservations per physical attempt and settle trusted usage; missing usage retains the hold. Pause/handoff never resets budgets. Ch32 owns supplier retries. ReAct and AI SDK stopWhen/prepareStep illustrate control, not durability or hard admission, and do not require private reasoning storage. <a href="#ref-2">[2]</a><a href="#ref-5">[5]</a></p><p>Three repeated tool/argument/business-revision fingerprints without progress are only a stuck heuristic; versioned polling may progress. STOPPED retains reasons/obligations. Stored-output reuse is <strong>this design’s contract</strong>: explicit LangGraph replay from an older checkpoint re-executes later LLM/API/interrupt calls, and sync/async/exit persist at different times. <a href="#ref-11">[11]</a></p></div></div></section>
 <section><h2><span class="lang-zh">路径已知时：由代码固定工作流的业务转换</span><span class="lang-en">Known workflows: code owns business edges</span></h2><figure class="deck">
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d3s1t d3s1d">
@@ -588,35 +616,50 @@ RETURNING *;
         <figcaption><span class="lang-zh">最后看旧持有者的提交如何被拒绝。Run Store 检查 epoch、version 和 status；远端则用 k9 原子防重。仅在本库保存隔离代次（fencing）字段，无法拦住 A 已经发出的网络请求。</span><span class="lang-en">Complete the graph with stale-owner rejection. Run Store checks epoch/version/status; backend k9 deduplicates effects. A local fencing field cannot stop an already-sent remote call.</span></figcaption>
       </div>
     </figure><div class="bilingual"><div class="lang-zh"><p><strong>图 4 的关键窗口是：Business DB 已提交 k9，Run Store 中的动作却仍待确认。</strong> 接管者先读取原动作的业务键、完整绑定信息（binding）和参数，再向 Ch33 查询权威回执；确认成功后，才补写一次工具观察结果。查不到回执，也可能是旧请求仍在传输，不能据此认定动作没有执行。只有防重契约仍有效时，才允许按同一业务键有界重放；否则保留 UNKNOWN，并转入 NEEDS_REVIEW。不能改业务键、换目的端 route，或让模型重新生成动作。</p><p>运行记录 Run 保存运行状态、节点和角色版本、持有者、租约代次、租约期限、状态版本，以及全局预算。步骤记录 Step 保存固定输入与输出；动作记录 Action 保存业务意图、工具与目的端、参数、资源和策略版本、动作状态及回执。动作结果、消息索引、检查点末序号和后续事件在同库事务中提交，唯一的工具观察结果记录防止本地重复推进。</p><p>大文本可保存为不可变对象引用，但提交引用前必须确认对象可读。恢复时用快照加连续增量重建状态，发现序号缺口就停止。线程检查点与跨线程存储 store 承担不同职责，不能混为一谈。<a href="#ref-3">[3]</a></p></div><div class="lang-en"><p><strong>Deck 4’s critical gap: Business DB committed k9 while Run Store remains pending.</strong> A new owner reads the original key, full binding and arguments, then queries Ch33 receipts. Confirm success before inserting one observation. Absence may mean an old request is still in flight. Bounded same-key replay requires a still-valid dedupe contract; otherwise retain UNKNOWN/NEEDS_REVIEW, never change key/route or regenerate the action.</p><p>Run holds state, node/role revisions, ownership and budgets; Step pins input/output; Action holds intent, tool/route/arguments/resource/policy revisions, status and receipt. Commit outcome, message index, checkpoint sequence and next event in one database transaction. Unique observations prevent duplicate progression. Large content uses acknowledged immutable objects; snapshot-plus-deltas recovery stops at gaps. Thread checkpoints and cross-thread stores have different roles. <a href="#ref-3">[3]</a></p></div></div><pre data-language="Pseudocode · recovery" data-kind="pseudocode" data-source="recover.pseudo"><code>recover(run, action, newOwnerEpoch):
-  // Claim first; retain original action key, binding, budgets and revisions.
-  receipt = Ch33.query(action.key, action.exactBinding)  // outside RunStore TX
-  if receipt is absent or inconclusive:
-    if not cancelled and contract permits bounded same-key replay now:
-      BEGIN RunStore transaction; lock run and action
-        require recovery owner/epoch/version, live lease, not cancelled, before deadline
-        INSERT bounded replay attempt referencing original key and binding
-      COMMIT; confirm acknowledgment before sending
-      retry original action through Ch33; never change key/route/arguments
+    // Claim first; retain original action key, binding, budgets and revisions.
+    receipt = Ch33.query(action.key, action.exactBinding)  // outside RunStore TX
+
+    if receipt is absent or inconclusive:
+        if not cancelled and contract permits bounded same-key replay now:
+            BEGIN RunStore transaction;
+                lock run and action
+                require recovery owner/epoch/version, live lease, not cancelled, before deadline
+                INSERT bounded replay attempt referencing original key and binding
+            COMMIT;
+            confirm acknowledgment before sending
+
+            retry original action through Ch33;
+            never change key/route/arguments
+        else:
+            persist UNKNOWN + NEEDS_REVIEW + escalation outbox;
+            return
     else:
-      persist UNKNOWN + NEEDS_REVIEW + escalation outbox; return
-  else:
-    BEGIN RunStore transaction; lock run and action
-      require current recovery owner/epoch/version and live lease
-      INSERT observation UNIQUE(run_id, action_id), or read matching prior one
-      UPDATE action with authenticated known outcome and receipt
-      if success: INSERT confirmed effect ledger entry
-      if cancelled: preserve cancel flag; never schedule a new model step
-      INSERT checkpoint + next legal recovery event; bump run version
-    COMMIT
-  if cancelled and confirmed effects require undo:
-    choose next action from persisted business dependencies
-    persist stable compensation key linked to original effect
-    dispatch through Ch33 with its own approval and bounded recovery budget
-    // UNKNOWN compensation blocks dependents; query the same compensation key.
-  if undo cannot safely finish:
-    persist NEEDS_REVIEW + stable case_key + outbox
-    relay to case system; checkpoint relay cursor only after durable case receipt
-  // COMPENSATED is a recovered business failure, never successful DONE.</code></pre><div class="bilingual"><div class="lang-zh"><p>B 取得 epoch 8 后，图中 epoch 7 的 A 就不能继续推进本库状态。B 仍沿用 k9，也不重置步数。<strong>本库的隔离检查挡不住已经发出的远端请求。</strong> 远端必须原子检查原业务键、完整绑定信息和业务条件，并在同一事务中保存业务效果与回执；如果采用租约代次隔离（epoch fence），也必须由受保护的资源验证。<a href="#ref-10">[10]</a> 尚未发出的意图可以因到期而被拒绝；结果为 UNKNOWN 的动作即使到期，仍须保留身份和核查义务，不能因 TTL 到期删除记录，再据此发起新写入。</p></div><div class="lang-en"><p>Epoch 7 cannot advance local state after epoch 8; B keeps k9 and budgets. <strong>Local fencing cannot stop an already-sent packet.</strong> The backend must atomically check key/binding and business conditions and store effect plus receipt; any epoch fence must be enforced by the protected resource. <a href="#ref-10">[10]</a> Expired undispatched intents may be denied. Expired UNKNOWN retains identity and reconciliation obligations; TTL deletion never authorizes a new write.</p></div></div></section>
+        BEGIN RunStore transaction;
+            lock run and action
+            require current recovery owner/epoch/version and live lease
+            INSERT observation UNIQUE(run_id, action_id), or read matching prior one
+            UPDATE action with authenticated known outcome and receipt
+            if success:
+                INSERT confirmed effect ledger entry
+            if cancelled:
+                preserve cancel flag;
+                never schedule a new model step
+            INSERT checkpoint + next legal recovery event;
+            bump run version
+        COMMIT
+
+    if cancelled and confirmed effects require undo:
+        choose next action from persisted business dependencies
+        persist stable compensation key linked to original effect
+        dispatch through Ch33 with its own approval and bounded recovery budget
+        // UNKNOWN compensation blocks dependents; query the same compensation key.
+
+    if undo cannot safely finish:
+        persist NEEDS_REVIEW + stable case_key + outbox
+        relay to case system;
+        checkpoint relay cursor only after durable case receipt
+
+    // COMPENSATED is a recovered business failure, never successful DONE.</code></pre><div class="bilingual"><div class="lang-zh"><p>B 取得 epoch 8 后，图中 epoch 7 的 A 就不能继续推进本库状态。B 仍沿用 k9，也不重置步数。<strong>本库的隔离检查挡不住已经发出的远端请求。</strong> 远端必须原子检查原业务键、完整绑定信息和业务条件，并在同一事务中保存业务效果与回执；如果采用租约代次隔离（epoch fence），也必须由受保护的资源验证。<a href="#ref-10">[10]</a> 尚未发出的意图可以因到期而被拒绝；结果为 UNKNOWN 的动作即使到期，仍须保留身份和核查义务，不能因 TTL 到期删除记录，再据此发起新写入。</p></div><div class="lang-en"><p>Epoch 7 cannot advance local state after epoch 8; B keeps k9 and budgets. <strong>Local fencing cannot stop an already-sent packet.</strong> The backend must atomically check key/binding and business conditions and store effect plus receipt; any epoch fence must be enforced by the protected resource. <a href="#ref-10">[10]</a> Expired undispatched intents may be denied. Expired UNKNOWN retains identity and reconciliation obligations; TTL deletion never authorizes a new write.</p></div></div></section>
 <section><h2><span class="lang-zh">角色交接：角色变了，运行与未清义务仍保留</span><span class="lang-en">Handoff: change role, retain run and obligations</span></h2><figure class="deck">
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s1t d5s1d">
@@ -898,31 +941,46 @@ RETURNING *;
         <figcaption><span class="lang-zh">最后看旧事件如何被拒绝。取消和恢复竞争同一 version/status，取消先成功时，迟到批准不能让运行重新启动。明确拒绝要记录为已知策略结果；重新规划也不能自动重复同一被拒写动作。</span><span class="lang-en">Complete with stale-event rejection. Cancel/resume race on one version/status; a winning cancel prevents revival. Denial is known policy outcome; replanning cannot automatically repeat the denied action.</span></figcaption>
       </div>
     </figure><div class="bilingual"><div class="lang-zh"><p><strong>PENDING 不代表成功，批准也不代表动作已经执行。</strong> 暂停时，运行时在同一事务中保存 pause_id、approval_id、精确动作绑定信息和检查点，把状态改为 WAIT_APPROVAL，并释放持有权。确认提交后，才归还活跃槽位。批准可能早于暂停发生，因此暂停提交后应立即重读 Ch33 的决定，后台还要扫描等待记录。webhook 只是加快恢复，不能作为唯一唤醒证据。重复通知由唯一 decision_id 和针对同一状态、版本的 CAS 消化。</p><p>审批必须绑定租户 tenant、操作者 actor、Agent、业务意图 intent、工具及版本、目的端 route、规范化参数、资源 ID 及版本、策略和期限；审批界面要把动作展示成可读内容。金额、资源或主体变化时，必须产生新版本。Resume API 读取权威决定，不接受客户端自报 approved=true。运行回到 READY 后，工作进程仍要重新领取，Ch33 的执行门也要复查当前权限、资源和批准凭据。本章示例适配器假设在批准时签发有效期为 5 分钟的凭据。如果直接接入 Ch33 的示例实现，则须沿用它已持久保存的到期时间 expires，不因批准、恢复或排队重新计时；执行前已过期，就重新审查。</p></div><div class="lang-en"><p><strong>PENDING is not success; approval is not execution.</strong> Commit pause/approval IDs, exact binding, checkpoint, WAIT_APPROVAL and released ownership before returning the active slot. Approval can beat parking: reread Ch33 after parking and scan waiting rows. Webhooks accelerate recovery. Unique decision IDs and state/version CAS absorb duplicate notifications.</p><p>Bind tenant, actor, agent, intent, tool/revision, route, canonical arguments, resource ID/version, policy and expiry; show readable actions. Changes require a new revision. Resume API reads authoritative decisions rather than caller-supplied approved=true. READY still requires claim and Ch33’s execution-time recheck. Five-minute grants begin at approval; expiry while queued requires review.</p></div></div><pre data-language="Pseudocode · resume" data-kind="pseudocode" data-source="resume.pseudo"><code>park(run, action, ownerEpoch, expectedVersion):
-  BEGIN RunStore transaction; lock run
-    require current ownerEpoch/version, RUNNING and live lease
-    require exact action still PREPARED; create stable pause_id
-    INSERT pause(pause_id, approval_id, action.binding)
-    UPDATE run SET status=WAIT_APPROVAL, owner=NULL, lease_until=0,
-      epoch=epoch+1, version=version+1
-    INSERT checkpoint + waiting event
-  COMMIT; only then release the active slot
-  reread Ch33 decision now; periodically scan waiting rows as a backstop
+    BEGIN RunStore transaction;
+        lock run
+        require current ownerEpoch/version, RUNNING and live lease
+        require exact action still PREPARED;
+        create stable pause_id
+
+        INSERT pause(pause_id, approval_id, action.binding)
+        UPDATE run SET status=WAIT_APPROVAL, owner=NULL, lease_until=0,
+            epoch=epoch+1, version=version+1
+        INSERT checkpoint + waiting event
+    COMMIT;
+    only then release the active slot
+
+    reread Ch33 decision now;
+    periodically scan waiting rows as a backstop
 
 resume(run, pause_id, expectedVersion, notification):
-  decision = Ch33.readAuthoritativeDecision(notification.approval_id)
-  BEGIN RunStore transaction; lock run and pause
-    if decision_id was accepted for this run/pause/binding: COMMIT; return saved result
-    require WAIT_APPROVAL, matching pause, version=expectedVersion, not cancelled
-    require run deadline is in the future
-    require decision is APPROVED and grant is still valid
-    require exact tenant/actor/Agent/intent/tool/route/args/resource/policy binding
-    INSERT accepted_decision with UNIQUE(tenant, decision_id)
-    UPDATE run SET status=READY, version=version+1
-      WHERE status=WAIT_APPROVAL AND pause_id=:pause AND version=:expectedVersion
-    require affected_rows = 1; INSERT READY outbox event
-  COMMIT; a later worker must claim, then Ch33 rechecks at dispatch
-  // Any failure rolls back this one database transaction.
-  // DENIED/expired means replan or review, never silently APPROVED.</code></pre><div class="bilingual"><div class="lang-zh"><p>取消和恢复竞争同一状态及版本。取消先成功时，迟到批准只留作审计；恢复先成功但尚未派发动作时，取消仍可在下一道执行门拦住它。动作已持久记录为派发后，取消只能尽力终止，不能据此宣称远端没有产生效果。LangGraph 恢复 interrupt 所在节点时，会从节点开头重新执行，interrupt 之前的代码可能再次运行。因此，持久暂停并不保证进程栈停在原来那一行。<a href="#ref-4">[4]</a></p><p>每秒 6 次暂停，平均等待 300 秒，就得到 6×300=1,800 次平均待批运行。它们消耗持久记录和查询能力，不占用 320 个活跃槽位。如果审批处理能力跟不上，这个稳态平均值就不再成立；此时应限制每个租户的待批数量，并观察最老待批任务的年龄，以及到达率减去处理率后的积压增长速度。</p></div><div class="lang-en"><p>Cancel/resume contend on the same state/version. A winning cancel makes late approval audit-only; cancellation after resume but before dispatch can still win the next gate. After durable dispatch, termination is best effort and remote effects remain possible. LangGraph resumes interrupt nodes from the beginning, so earlier code may rerun; a pause is not a suspended process stack. <a href="#ref-4">[4]</a></p><p>Six pauses/s × 300 seconds gives 1,800 mean parked runs using storage/query capacity rather than 320 active slots. If review falls behind, bound tenant backlog and monitor oldest age and arrival-minus-completion rate.</p></div></div></section>
+    decision = Ch33.readAuthoritativeDecision(notification.approval_id)
+
+    BEGIN RunStore transaction;
+        lock run and pause
+        if decision_id was accepted for this run/pause/binding:
+            COMMIT;
+            return saved result
+
+        require WAIT_APPROVAL, matching pause, version=expectedVersion, not cancelled
+        require run deadline is in the future
+        require decision is APPROVED and grant is still valid
+        require exact tenant/actor/Agent/intent/tool/route/args/resource/policy binding
+
+        INSERT accepted_decision with UNIQUE(tenant, decision_id)
+        UPDATE run SET status=READY, version=version+1
+            WHERE status=WAIT_APPROVAL AND pause_id=:pause AND version=:expectedVersion
+        require affected_rows = 1;
+        INSERT READY outbox event
+    COMMIT;
+    a later worker must claim, then Ch33 rechecks at dispatch
+
+    // Any failure rolls back this one database transaction.
+    // DENIED/expired means replan or review, never silently APPROVED.</code></pre><div class="bilingual"><div class="lang-zh"><p>取消和恢复竞争同一状态及版本。取消先成功时，迟到批准只留作审计；恢复先成功但尚未派发动作时，取消仍可在下一道执行门拦住它。动作已持久记录为派发后，取消只能尽力终止，不能据此宣称远端没有产生效果。LangGraph 恢复 interrupt 所在节点时，会从节点开头重新执行，interrupt 之前的代码可能再次运行。因此，持久暂停并不保证进程栈停在原来那一行。<a href="#ref-4">[4]</a></p><p>每秒 6 次暂停，平均等待 300 秒，就得到 6×300=1,800 次平均待批运行。它们消耗持久记录和查询能力，不占用 320 个活跃槽位。如果审批处理能力跟不上，这个稳态平均值就不再成立；此时应限制每个租户的待批数量，并观察最老待批任务的年龄，以及到达率减去处理率后的积压增长速度。</p></div><div class="lang-en"><p>Cancel/resume contend on the same state/version. A winning cancel makes late approval audit-only; cancellation after resume but before dispatch can still win the next gate. After durable dispatch, termination is best effort and remote effects remain possible. LangGraph resumes interrupt nodes from the beginning, so earlier code may rerun; a pause is not a suspended process stack. <a href="#ref-4">[4]</a></p><p>Six pauses/s × 300 seconds gives 1,800 mean parked runs using storage/query capacity rather than 320 active slots. If review falls behind, bound tenant backlog and monitor oldest age and arrival-minus-completion rate.</p></div></div></section>
 <section><h2><span class="lang-zh">取消与补偿：先查发生了什么，再决定怎么修</span><span class="lang-en">Cancel and compensate: establish effects before repairing</span></h2><figure class="deck">
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d7s1t d7s1d">

@@ -18,10 +18,12 @@ CREATE TABLE IF NOT EXISTS cache_value (
   hard INTEGER NOT NULL, absent INTEGER NOT NULL, body TEXT NOT NULL);
 """
 
+
 @dataclass(frozen=True)
 class Token:
     epoch: str
     ticket: str
+
 
 @dataclass(frozen=True)
 class Evidence:
@@ -34,6 +36,7 @@ class Evidence:
     @classmethod
     def primary(cls, version, started, absent=False, body=""):
         return cls(version, started, started + (5000 if absent else 20000), absent, body)
+
 
 class Cache:
     def __init__(self, file, clock=None):
@@ -59,19 +62,29 @@ class Cache:
             self.db.execute("INSERT OR IGNORE INTO metadata(key) VALUES (?)", (key,))
             val = self.db.execute("SELECT * FROM cache_value WHERE key=?", (key,)).fetchone()
             if val is not None and val["hard"] > now + 2000:
-                return "HIT", Evidence(val["version"], val["observed"], val["hard"], bool(val["absent"]), val["body"])
+                return "HIT", Evidence(
+                    val["version"], val["observed"], val["hard"], bool(val["absent"]), val["body"]
+                )
+
             state = self.db.execute("SELECT * FROM metadata WHERE key=?", (key,)).fetchone()
             if state["lease_until"] > now:
                 return "WAIT", None
+
             ticket = uuid.uuid4().hex
-            self.db.execute("UPDATE metadata SET ticket=?,lease_until=? WHERE key=?", (ticket, now + 1000, key))
+            self.db.execute(
+                "UPDATE metadata SET ticket=?,lease_until=? WHERE key=?", (ticket, now + 1000, key)
+            )
             epoch = self.db.execute("SELECT epoch FROM runtime WHERE id=1").fetchone()[0]
+
             return "LEADER", Token(epoch, ticket)
 
     def invalidate(self, key, version):
         with self.atomic():
             self.db.execute("INSERT OR IGNORE INTO metadata(key) VALUES (?)", (key,))
-            self.db.execute("UPDATE metadata SET floor=max(floor,?),ticket=NULL,lease_until=0 WHERE key=?", (version, key))
+            self.db.execute(
+                "UPDATE metadata SET floor=max(floor,?),ticket=NULL,lease_until=0 WHERE key=?",
+                (version, key)
+            )
             self.db.execute("DELETE FROM cache_value WHERE key=?", (key,))
 
     def fill(self, key, token, evidence):
@@ -81,14 +94,21 @@ class Cache:
             epoch = self.db.execute("SELECT epoch FROM runtime WHERE id=1").fetchone()[0]
             if state is None or token.epoch != epoch or token.ticket != state["ticket"]:
                 return False
+
             life = 5000 if evidence.absent else 20000
-            if (now >= state["lease_until"] or evidence.version < state["floor"]
+            if (now >= state["lease_until"]
+                or evidence.version < state["floor"]
                 or evidence.hard - evidence.observed != life
-                or evidence.observed > now + 2000 or now + 2000 >= evidence.hard):
+                or evidence.observed > now + 2000
+                or now + 2000 >= evidence.hard):
                 return False
-            self.db.execute("INSERT OR REPLACE INTO cache_value VALUES (?,?,?,?,?,?)", (key,
-                evidence.version, evidence.observed, evidence.hard, evidence.absent, evidence.body))
+
+            self.db.execute(
+                "INSERT OR REPLACE INTO cache_value VALUES (?,?,?,?,?,?)",
+                (key, evidence.version, evidence.observed, evidence.hard, evidence.absent, evidence.body)
+            )
             self.db.execute("UPDATE metadata SET ticket=NULL,lease_until=0 WHERE key=?", (key,))
+
             return True
 
     def restart(self):

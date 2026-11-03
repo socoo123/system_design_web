@@ -91,10 +91,14 @@ class Scheduler(Database):
         # Fixture for an already authenticated, validated and durable definition.
         if type(lateness_ms) is not int or lateness_ms < 0:
             raise ValueError('lateness must be a nonnegative integer in milliseconds')
+
         with self.tx():
-            self.db.execute('INSERT INTO job(id,version,next_at,interval_ms,payload,effect_key,policy,lateness_ms)'
-                            ' VALUES(?,1,?,?,?,?,?,?)',
-                            (job_id, fire, interval, canonical(payload or {'order_id': 'o7'}), key, policy, lateness_ms))
+            self.db.execute(
+                'INSERT INTO job(id,version,next_at,interval_ms,payload,effect_key,policy,lateness_ms)'
+                ' VALUES(?,1,?,?,?,?,?,?)',
+                (job_id, fire, interval, canonical(payload or {'order_id': 'o7'}),
+                 key, policy, lateness_ms)
+            )
 
     def run(self, run_id):
         row = self.db.execute('SELECT * FROM run WHERE id=?', (run_id,)).fetchone()
@@ -105,11 +109,15 @@ class Scheduler(Database):
 
     def _insert(self, j, fire, window=None):
         payload = canonical({'input': json.loads(j['payload']), 'window': window})
-        self.db.execute('INSERT INTO run(id,job_id,version,fire,payload,effect_key) VALUES(?,?,?,?,?,?)'
-                        ' ON CONFLICT(job_id,version,fire) DO NOTHING',
-                        (str(uuid.uuid4()), j['id'], j['version'], fire, payload, j['effect_key']))
-        old = self.db.execute('SELECT * FROM run WHERE job_id=? AND version=? AND fire=?',
-                              (j['id'], j['version'], fire)).fetchone()
+        self.db.execute(
+            'INSERT INTO run(id,job_id,version,fire,payload,effect_key) VALUES(?,?,?,?,?,?)'
+            ' ON CONFLICT(job_id,version,fire) DO NOTHING',
+            (str(uuid.uuid4()), j['id'], j['version'], fire, payload, j['effect_key'])
+        )
+        old = self.db.execute(
+            'SELECT * FROM run WHERE job_id=? AND version=? AND fire=?',
+            (j['id'], j['version'], fire)
+        ).fetchone()
         if old['payload'] != payload or old['effect_key'] != j['effect_key']:
             raise ValueError('occurrence input changed')
         return old['id']
@@ -117,18 +125,24 @@ class Scheduler(Database):
     def materialize(self, hint=None, fail=False):
         with self.tx():
             t = self.now()  # Actual SQLite lock is acquired before this read.
-            jobs = self.db.execute('SELECT * FROM job WHERE enabled=1 AND next_at<=?'
-                                   ' ORDER BY next_at,id LIMIT 100', (t,)).fetchall()
+            jobs = self.db.execute(
+                'SELECT * FROM job WHERE enabled=1 AND next_at<=?'
+                ' ORDER BY next_at,id LIMIT 100', (t,)
+            ).fetchall()
             ids = []
             for j in jobs:
                 if hint and hint != (j['id'], j['version'], j['next_at']):
                     continue
                 # Fixture has no calendar parser: old cron fires go to recovery.
-                if j['cutoff'] is not None or (j['interval_ms'] and j['next_at'] < t-j['lateness_ms']):
+                if j['cutoff'] is not None or (
+                    j['interval_ms'] and j['next_at'] < t - j['lateness_ms']
+                ):
                     continue
+
                 ids.append(self._insert(j, j['next_at']))
                 if fail:
                     raise RuntimeError('crash after INSERT before cursor')
+
                 next_at = j['next_at'] + j['interval_ms'] if j['interval_ms'] else None
                 self.db.execute('UPDATE job SET next_at=? WHERE id=?', (next_at, j['id']))
         return ids
@@ -139,6 +153,7 @@ class Scheduler(Database):
             t = self.now()
             if not j or not j['enabled'] or not j['interval_ms'] or j['next_at'] is None:
                 return []
+
             step = j['interval_ms']
             start = j['next_at']
             if j['cutoff'] is not None:
@@ -148,27 +163,33 @@ class Scheduler(Database):
                 if start >= missed_before:  # Equality remains live in BOTH paths.
                     return []
                 # Preserve original phase; do not discard still-live late fires.
-                cutoff = start + ((missed_before-start+step-1)//step)*step
+                cutoff = start + ((missed_before - start + step - 1) // step) * step
             if start >= cutoff:
                 return []
+
             ids = []
             if j['policy'] == 'catch_up':
-                fires = range(start, min(cutoff, start + 100*step), step)
+                fires = range(start, min(cutoff, start + 100 * step), step)
                 ids = [self._insert(j, fire) for fire in fires]
-                next_at = start + len(ids)*step
+                next_at = start + len(ids) * step
             elif j['policy'] == 'coalesce':
-                ids = [self._insert(j, cutoff-step, [start, cutoff])]
+                ids = [self._insert(j, cutoff - step, [start, cutoff])]
                 next_at = cutoff
             elif j['policy'] == 'skip':
                 next_at = cutoff
             else:
                 raise ValueError('bad policy')
-            self.db.execute('INSERT INTO audit VALUES(?,?,?,?,?)',
-                            (job_id, j['version'], start, next_at, j['policy']))
+
+            self.db.execute(
+                'INSERT INTO audit VALUES(?,?,?,?,?)',
+                (job_id, j['version'], start, next_at, j['policy'])
+            )
             if fail:
                 raise RuntimeError('crash in recovery page')
-            self.db.execute('UPDATE job SET next_at=?,cutoff=? WHERE id=?',
-                            (next_at, cutoff if next_at < cutoff else None, job_id))
+            self.db.execute(
+                'UPDATE job SET next_at=?,cutoff=? WHERE id=?',
+                (next_at, cutoff if next_at < cutoff else None, job_id)
+            )
         return ids
 
     def claim(self, run_id, owner):
@@ -177,18 +198,26 @@ class Scheduler(Database):
             t = self.now()
             if not r or r['cancel_requested']:
                 return None
-            eligible = (r['state'] == 'ready' or
-                        (r['state'] == 'retry_wait' and r['retry_at'] <= t) or
-                        (r['state'] == 'running' and r['lease_until'] <= t))
+
+            eligible = (
+                r['state'] == 'ready'
+                or (r['state'] == 'retry_wait' and r['retry_at'] <= t)
+                or (r['state'] == 'running' and r['lease_until'] <= t)
+            )
             if not eligible:
                 return None
             if r['attempts'] == 5:
-                self.db.execute("UPDATE run SET state='review',owner=NULL,lease_until=NULL,"
-                                'effect_unknown=1 WHERE id=?', (run_id,))
+                self.db.execute(
+                    "UPDATE run SET state='review',owner=NULL,lease_until=NULL,"
+                    'effect_unknown=1 WHERE id=?', (run_id,)
+                )
                 return None
-            self.db.execute("UPDATE run SET state='running',attempts=attempts+1,"
-                            'generation=generation+1,owner=?,lease_until=?,retry_at=NULL,'
-                            'effect_unknown=1 WHERE id=?', (owner, t+30000, run_id))
+
+            self.db.execute(
+                "UPDATE run SET state='running',attempts=attempts+1,"
+                'generation=generation+1,owner=?,lease_until=?,retry_at=NULL,'
+                'effect_unknown=1 WHERE id=?', (owner, t + 30000, run_id)
+            )
             token = self.run(run_id)
         return token
 
@@ -198,6 +227,7 @@ class Scheduler(Database):
             t = self.now()
             if not r:
                 return 'NOT_FOUND'
+
             if action == 'cancel':
                 r['cancel_requested'] = 1
                 if r['state'] == 'ready' and r['attempts'] == 0:
@@ -209,9 +239,12 @@ class Scheduler(Database):
                     return 'NO_CHANGE'
                 self._retry(r, t)
             else:
-                if (r['state'] != 'running' or r['owner'] != owner or
-                        r['generation'] != gen or r['lease_until'] <= t):
+                if (
+                    r['state'] != 'running' or r['owner'] != owner
+                    or r['generation'] != gen or r['lease_until'] <= t
+                ):
                     return 'STALE'
+
                 if action == 'heartbeat':
                     r['lease_until'] = t + 30000
                 elif action == 'complete':
@@ -223,11 +256,14 @@ class Scheduler(Database):
                     self._retry(r, t)
                 else:
                     raise ValueError('bad action')
+
             if r['state'] != 'running':
                 r.update(owner=None, lease_until=None)
-            self.db.execute('UPDATE run SET state=:state,owner=:owner,lease_until=:lease_until,'
-                            'retry_at=:retry_at,cancel_requested=:cancel_requested,'
-                            'effect_unknown=:effect_unknown,result=:result WHERE id=:id', r)
+            self.db.execute(
+                'UPDATE run SET state=:state,owner=:owner,lease_until=:lease_until,'
+                'retry_at=:retry_at,cancel_requested=:cancel_requested,'
+                'effect_unknown=:effect_unknown,result=:result WHERE id=:id', r
+            )
         return 'OK'
 
     @staticmethod
@@ -235,7 +271,10 @@ class Scheduler(Database):
         r['effect_unknown'] = 1
         r['state'] = 'review' if r['cancel_requested'] or r['attempts'] == 5 else 'retry_wait'
         # Deterministic fixture; production adds bounded jitter under a shared budget.
-        r['retry_at'] = t + min(60000, 1000*2**(r['attempts']-1)) if r['state'] == 'retry_wait' else None
+        r['retry_at'] = (
+            t + min(60000, 1000 * 2 ** (r['attempts'] - 1))
+            if r['state'] == 'retry_wait' else None
+        )
 
 
 class OrderStore(Database):
@@ -249,28 +288,39 @@ class OrderStore(Database):
         # Authenticated/authorized tenant is a trusted fixture input, not raw HTTP.
         if key != 'close:' + order:
             raise ValueError('wrong operation key')
+
         payload = canonical(payload or {'action': 'close', 'order_id': order})
         with self.tx():
-            o = self.db.execute('SELECT * FROM orders WHERE tenant=? AND id=?', (tenant, order)).fetchone()
+            o = self.db.execute(
+                'SELECT * FROM orders WHERE tenant=? AND id=?', (tenant, order)
+            ).fetchone()
             if not o:
                 return 'NOT_FOUND'
-            old = self.db.execute('SELECT * FROM inbox WHERE tenant=? AND op_key=?', (tenant, key)).fetchone()
+            old = self.db.execute(
+                'SELECT * FROM inbox WHERE tenant=? AND op_key=?', (tenant, key)
+            ).fetchone()
             if old:
                 if old['payload'] != payload:
                     return 'CONFLICT'
                 return old['result']
+
             t = self.now()
             if o['state'] == 'UNPAID' and o['close_at'] > t:
                 return 'RETRY_AT'  # transaction has no writes and saves no receipt
             if o['state'] == 'UNPAID':
-                changed = self.db.execute("UPDATE orders SET state='CLOSED' WHERE tenant=? AND id=?"
-                                          " AND state='UNPAID' AND close_at<=?", (tenant, order, t)).rowcount
+                changed = self.db.execute(
+                    "UPDATE orders SET state='CLOSED' WHERE tenant=? AND id=?"
+                    " AND state='UNPAID' AND close_at<=?", (tenant, order, t)
+                ).rowcount
                 assert changed == 1
                 result = 'CLOSED'
-                self.db.execute('INSERT INTO outbox(tenant,event_id,payload) VALUES(?,?,?)',
-                                (tenant, 'closed:'+order, payload))
+                self.db.execute(
+                    'INSERT INTO outbox(tenant,event_id,payload) VALUES(?,?,?)',
+                    (tenant, 'closed:' + order, payload)
+                )
             else:
                 result = 'NOOP_TERMINAL'
+
             self.db.execute('INSERT INTO inbox VALUES(?,?,?,?)', (tenant, key, payload, result))
             if fail:
                 raise RuntimeError('crash after business update and receipt')
@@ -281,9 +331,12 @@ class OrderStore(Database):
             sink.receive(e['tenant'], e['event_id'], e['payload'])
             if lose_ack:
                 raise RuntimeError('event applied, relay ACK lost')
+
             with self.tx():
-                self.db.execute('UPDATE outbox SET delivered=1 WHERE tenant=? AND event_id=?',
-                                (e['tenant'], e['event_id']))
+                self.db.execute(
+                    'UPDATE outbox SET delivered=1 WHERE tenant=? AND event_id=?',
+                    (e['tenant'], e['event_id'])
+                )
 
 
 class Sink(Database):
@@ -292,12 +345,15 @@ class Sink(Database):
 
     def receive(self, tenant, event_id, payload, fail=False):
         with self.tx():
-            old = self.db.execute('SELECT payload FROM inbox WHERE tenant=? AND event_id=?',
-                                  (tenant, event_id)).fetchone()
+            old = self.db.execute(
+                'SELECT payload FROM inbox WHERE tenant=? AND event_id=?',
+                (tenant, event_id)
+            ).fetchone()
             if old:
                 if old[0] != payload:
                     raise ValueError('event identity changed payload')
                 return
+
             self.db.execute('INSERT INTO inbox VALUES(?,?,?)', (tenant, event_id, payload))
             self.db.execute('INSERT INTO effect VALUES(?,?)', (tenant, event_id))
             if fail:

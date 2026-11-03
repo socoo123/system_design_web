@@ -1,4 +1,5 @@
 reject missing, empty or noncanonical scope/event/account as PERMANENT_SCHEMA_ERROR
+
 BEGIN IMMEDIATE                       // one SQLite write transaction
 claimed = SQL("""
   INSERT INTO inbox(scope, event_id, digest, result)
@@ -6,13 +7,17 @@ claimed = SQL("""
   ON CONFLICT(scope, event_id) DO NOTHING
   RETURNING event_id
 """)
+
 if claimed has one row:
     SQL("INSERT INTO ledger VALUES (:scope, :event, :account, :delta)")
     changed = SQL("""
       UPDATE account SET balance = balance + :delta
       WHERE account_id = :account
     """).rowCount
-    if changed != 1: ROLLBACK; fail MISSING_ACCOUNT
+    if changed != 1:
+        ROLLBACK;
+        fail MISSING_ACCOUNT
+
     COMMIT                            // inbox + ledger + balance + result
     return APPLIED
 else:
@@ -20,7 +25,10 @@ else:
       SELECT digest, result FROM inbox
       WHERE scope = :scope AND event_id = :event
     """).oneRow
-    if saved.digest != digest: ROLLBACK; fail IDENTITY_CONFLICT
+    if saved.digest != digest:
+        ROLLBACK;
+        fail IDENTITY_CONFLICT
+
     COMMIT
     return saved.result               // no second delta
 // Any SQL error: ROLLBACK; do not advance the source position.

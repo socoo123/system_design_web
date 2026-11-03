@@ -271,16 +271,28 @@
         <figcaption><span class="lang-zh">如果 v8 已提交但回复丢失，重试同一个 k42 时就读取同事务保存的结果，返回原修改回执；同键更换参数要拒绝。版本用于防止丢失更新，请求身份用于避免重复执行业务。</span><span class="lang-en">If v8 committed but the response was lost, retry k42 returns its atomic stored result. Reject a changed payload. Versions prevent lost updates; identity prevents repeated execution.</span></figcaption>
       </div>
     </figure><div class="bilingual"><div class="lang-zh"><p>D2 中，订单聚合根 Order Root 与明细 Lines 共同保证：<strong>总额等于各行快照单价×数量之和，而且只有 draft 状态允许编辑。</strong>这类每次提交时都必须成立的业务规则，就是聚合的不变量。一个聚合可以存入多张表，但所有写入方都要执行完整规则。Vernon 的示例用持久化版本拒绝旧对象覆盖，并通过身份引用外部聚合。<a href="#ref-1">[1]</a><a href="#ref-2">[2]</a><a href="#ref-3">[3]</a></p></div><div class="lang-en"><p>D2 puts Order Root and Lines behind two rules: <strong>total equals the sum of snapshot price×quantity, and only draft is editable.</strong> Several tables may represent the aggregate, but every writer must enforce its rules. Vernon uses persisted versions to reject stale objects and identities for external aggregates. <a href="#ref-1">[1]</a><a href="#ref-2">[2]</a><a href="#ref-3">[3]</a></p></div></div><h3><span class="lang-zh">聚合根方法：先构造符合规则的候选状态</span><span class="lang-en">Root method: build a valid candidate before commit</span></h3><div class="bilingual"><div class="lang-zh"><p>下面摘录自一个只依赖标准库、可运行的 Java 17 示例。<code>Money</code> 不可变，金额与币种绑定，并使用 <code>Math.addExact/multiplyExact</code> 检查算术溢出。聚合根复制明细集合，构造器再复核总额与 SKU 唯一性。将 sku1 的数量改为 3，得到版本 v8、总额 10999 分；数量≤0、SKU 未知、订单已冻结或运算溢出时都会拒绝，原对象保持不变。</p></div><div class="lang-en"><p>This excerpt comes from a runnable Java17 example using only the standard library. Immutable Money binds currency and uses Math.addExact/multiplyExact; the root copies its lines, and construction checks total and unique SKUs. sku1/3 yields v8 and 10999. Nonpositive quantity, unknown SKU, frozen state or overflow rejects without changing the original.</p></div></div><pre data-language="Java 17" data-kind="teaching" data-source="DomainModel.java#edit"><code>Order editQuantity(String sku, int quantity) {
-    if (state != State.DRAFT) throw new IllegalStateException("FROZEN");
-    if (quantity &lt;= 0) throw new IllegalArgumentException("QUANTITY");
+    if (state != State.DRAFT) {
+        throw new IllegalStateException("FROZEN");
+    }
+    if (quantity &lt;= 0) {
+        throw new IllegalArgumentException("QUANTITY");
+    }
+
     List&lt;Line&gt; changed = new ArrayList&lt;&gt;(lines);
     int index = -1;
-    for (int i = 0; i &lt; lines.size(); i++)
-        if (lines.get(i).sku.equals(sku)) index = i;
-    if (index &lt; 0) throw new IllegalArgumentException("SKU");
+    for (int i = 0; i &lt; lines.size(); i++) {
+        if (lines.get(i).sku.equals(sku)) {
+            index = i;
+        }
+    }
+    if (index &lt; 0) {
+        throw new IllegalArgumentException("SKU");
+    }
+
     Line old = lines.get(index);
     changed.set(index, new Line(old.sku, quantity, old.unitPrice));
     Money nextTotal = sum(changed, total.currency); // exact integer arithmetic
+
     return new Order(tenant, id, Math.incrementExact(version), State.DRAFT,
             changed, nextTotal, null, null); // candidate, not a committed result
 }</code></pre><div class="bilingual"><div class="lang-zh"><p>只有数据库提交成功，才能把候选状态作为成功结果返回。A、B 同时读到 v7 后，只有一个数据库 <code>WHERE version=7</code> 条件更新能成功；影响 0 行时要报告冲突，不能提前把候选写入缓存。版本防止旧写覆盖，k42/hash/result 则用于找回“已经提交、响应却丢失”的原命令结果。即使订单后来已到 v9，重试 k42 仍返回原来的 v8 回执。<a href="#ref-8">[8]</a></p></div><div class="lang-en"><p>A candidate is not a successful receipt. If A and B read v7, only one database WHERE version=7 can win. Zero rows means conflict; do not publish a candidate into cache. Version prevents stale writes; k42/hash/result recovers a committed command after a lost response. Even when a later edit reached v9, replaying k42 returns the original v8 receipt. <a href="#ref-8">[8]</a></p></div></div><pre data-language="Pseudocode" data-kind="pseudocode" data-source="edit.pseudo"><code># Pseudocode: authenticated tenant/order, one authoritative local database.
@@ -288,6 +300,7 @@ edit(auth, order_id, key, expected_version, sku, quantity):
   authorize(auth, order_id)                       # also on a replay
   hash = canonical_hash("edit-v1", auth.tenant, order_id,
                         expected_version, sku, quantity)
+
   BEGIN
   inserted = INSERT command_result(tenant, order_id, key, hash, result=NULL)
              ON CONFLICT (tenant, order_id, key) DO NOTHING
@@ -296,17 +309,21 @@ edit(auth, order_id, key, expected_version, sku, quantity):
     ROLLBACK
     require saved.hash == hash                    # otherwise KEY_REUSE
     return saved.result                          # immutable original receipt
+
   before = SELECT root + lines WHERE tenant = auth.tenant AND id = order_id
   require before.version == expected_version     # otherwise ROLLBACK / CONFLICT
   next = before.editQuantity(sku, quantity)        # failure =&gt; ROLLBACK
+
   changed = UPDATE orders SET total=next.total, version=next.version
             WHERE tenant=:tenant AND id=:order_id
               AND version=:expected_version AND state='draft'
   require changed == 1                           # otherwise ROLLBACK / CONFLICT
+
   UPDATE order_lines SET quantity=:quantity
     WHERE tenant=:tenant AND order_id=:order_id AND sku=:sku
   UPDATE command_result SET result=:receipt_for_next
     WHERE tenant=:tenant AND order_id=:order_id AND key=:key
+
   COMMIT                                         # never commit result=NULL
   return receipt_for_next
 # SQL/domain failure before commit =&gt; ROLLBACK; bounded whole-TX retry only
@@ -773,17 +790,24 @@ edit(auth, order_id, key, expected_version, sku, quantity):
       </div>
     </figure><div class="bilingual"><div class="lang-zh"><p>D6 是状态图。有效收款处理与到期任务同时对 <code>pending_pay v9</code> 做条件更新，最多只有一个能提交成功。收款先提交，得到 paid v10；到期先提交，得到 closed v10，之后的迟到收款不能重新打开订单。图中的两条箭头表示互斥结果。</p></div><div class="lang-en"><p>D6 is a state diagram. Valid capture and expiry race on pending_pay v9; at most one transition commits. Capture first gives paid v10; expiry first gives closed v10, and late capture cannot revive it. The arrows are alternative results, not unconditional writes.</p></div></div><h3><span class="lang-zh">聚合根返回决定与事件，网络调用留在根外</span><span class="lang-en">Return decisions and events without network I/O in the root</span></h3><div class="bilingual"><div class="lang-zh"><p>下面的 Java 17 摘录接收已经过来源认证和业务绑定校验的 Capture。pending_pay 状态接纳收款；已 paid 且重复收到 p9 时，返回原结论；closed 收到 p9，或已 paid 后又收到 p10 时，产生退款候选，保留原订单。Money、不可变 Order、Decision 和事件类型均定义在完整源码中。此时所有结果都只是候选，数据库事务失败后，必须丢弃全部候选事件。</p></div><div class="lang-en"><p>This Java17 excerpt takes an authenticated, binding-validated Capture. pending_pay accepts; paid/p9 returns the prior decision; closed/p9 or paid/p10 produces a refund candidate while preserving the order. The full source defines Money, immutable Order, Decision and events. These are candidates: discard every event when persistence fails.</p></div></div><pre data-language="Java 17" data-kind="teaching" data-source="DomainModel.java#capture"><code>Decision capture(Capture fact) {
     // Adapter already authenticated source and verified Pay's attempt binding.
-    if (!tenant.equals(fact.tenant) || !id.equals(fact.orderId)
-            || !Objects.equals(attempt, fact.attempt) || !total.equals(fact.amount))
+    if (!tenant.equals(fact.tenant)
+            || !id.equals(fact.orderId)
+            || !Objects.equals(attempt, fact.attempt)
+            || !total.equals(fact.amount)) {
         throw new IllegalArgumentException("CAPTURE_CONTRACT");
-    if (state == State.DRAFT) throw new IllegalStateException("NOT_CHECKED_OUT");
-    if (state == State.PAID &amp;&amp; acceptedPayment.equals(fact.paymentId))
+    }
+    if (state == State.DRAFT) {
+        throw new IllegalStateException("NOT_CHECKED_OUT");
+    }
+    if (state == State.PAID &amp;&amp; acceptedPayment.equals(fact.paymentId)) {
         return new Decision(this, Outcome.ALREADY_ACCEPTED, List.of());
+    }
     if (state == State.CLOSED || state == State.PAID) {
         var event = new RefundRequired(tenant, id, fact.paymentId, fact.amount,
                 state == State.CLOSED ? "LATE_CAPTURE" : "EXTRA_CAPTURE");
         return new Decision(this, Outcome.REFUND_REQUIRED, List.of(event));
     }
+
     Order paid = new Order(tenant, id, Math.incrementExact(version), State.PAID,
             lines, total, attempt, fact.paymentId);
     return new Decision(paid, Outcome.ACCEPTED,
@@ -792,13 +816,17 @@ edit(auth, order_id, key, expected_version, sku, quantity):
 # One full capture per payment_id. All SQL below uses one Order DB TX.
 consume(message):
   fact = strict_translate_v1(message)             # invalid =&gt; durable quarantine, then ACK
+
   BEGIN
   inserted = INSERT inbox(consumer, source, event_id, payload_hash, outcome=NULL)
              ON CONFLICT (consumer, source, event_id) DO NOTHING
   if not inserted:
     saved = SELECT inbox WHERE (consumer, source, event_id) = delivery_identity
     require saved.payload_hash == message.hash  # changed payload =&gt; ROLLBACK, quarantine
-    ROLLBACK; ACK; return saved.outcome           # prior committed decision
+    ROLLBACK;
+    ACK;
+    return saved.outcome                         # prior committed decision
+
   fresh = INSERT capture_result(tenant, payment_id, fact_hash, outcome=NULL)
           ON CONFLICT (tenant, payment_id) DO NOTHING
   if not fresh:
@@ -808,23 +836,30 @@ consume(message):
   else:
     before = SELECT root + lines WHERE tenant=:tenant AND id=:order_id
     decision = before.capture(fact)              # immutable candidate + domain events
+
     if decision.next != before:
       changed = UPDATE orders SET state='paid', accepted_payment=:payment_id,
                                   version=:next_version
                 WHERE tenant=:tenant AND id=:order_id
                   AND state='pending_pay' AND version=:before_version
       require changed == 1                      # 0 =&gt; ROLLBACK, bounded reload/retry
+
     for event in decision.events:
       if event is RefundRequired:
         work = INSERT refund_work(tenant, payment_id, refund_id, amount, state='pending')
           # UNIQUE(tenant,payment_id); stable refund_id r17 bound to these parameters
         public = RefundRequested(work.refund_id, event.payment_id, event.amount)
-      else: public = translate_OrderPaid(event)
+      else:
+        public = translate_OrderPaid(event)
       INSERT outbox(event_id, public, state='pending')
+
     outcome = decision.outcome
     UPDATE capture_result SET outcome=:outcome WHERE identity=:fact_identity
+
   UPDATE inbox SET outcome=:outcome WHERE identity=:delivery_identity
-  COMMIT; ACK                                    # no network calls inside this TX
+
+  COMMIT;
+  ACK                                            # no network calls inside this TX
 # Any failure before commit rolls back inbox, state, result, refund work and outbox.
 # Unknown commit =&gt; do not ACK; redelivery re-enters the same durable identities.</code></pre><div class="bilingual"><div class="lang-zh"><p>inbox 的主键为 <code>(consumer,source,event_id)</code>，capture_result 的主键为 <code>(tenant,payment_id)</code>，两者都保存摘要和不可变的处理结论。业务事实摘要 fact_hash 不包含投递 event_id，因此可以识别由不同事件描述的同一次收款。关联信息必须从可信的持久化映射中成功读出，不能把“查不到关联”与“读取失败”混为一谈。</p><p>更新聚合根时，如果 CAS 影响 0 行，就整笔回滚并重载；有界重试耗尽后仍不能 ACK。在本例的接纳与到期模型中，closed/paid 都是终态。退款分支即使不修改订单，也要把退款工作、处理结果和 Outbox 一起提交。</p></div><div class="lang-en"><p>Inbox uses (consumer,source,event_id); capture_result uses (tenant,payment_id). Both retain hashes and immutable outcomes, with delivery event_id excluded from fact_hash. Binding reads must succeed against a trusted durable mapping; distinguish a missing binding from a failed read. CAS=0 rolls back everything before bounded reload, with no ACK on exhaustion. closed/paid are terminal for this acceptance/expiry model; refund branches without an order change still commit work, results and outbox together.</p></div></div><div class="bilingual"><div class="lang-zh"><p>可以用这个反例检查恢复能力：先提交 inbox，再通过内存发起退款，进程一旦崩溃，就可能留下“消息已处理、却无人退款”的结果。本例把 inbox、拒收结论、r17 和 RefundRequested Outbox 放在同一事务中，提交后才确认消费。Order 保证关闭的订单不再进入履约，Pay 另行保证退款不超额，两边各有自己的规则与提交边界。一个补偿函数无法自动回滚两个系统。</p></div><div class="lang-en"><p>The key counterexample commits inbox, then sends an in-memory refund: a crash leaves processed input and no refund owner. This model commits inbox, rejection, r17 and RefundRequested outbox together before acknowledging. Order prevents resurrection; Pay separately prevents excess refunds. One compensation function cannot automatically roll back both.</p></div></div></section>
 <section><h2><span class="lang-zh">7 · 退款与恢复：结果未知时，继续保存并跟进</span> <span class="lang-en">7 · Refund and recovery: own unknown outcomes</span></h2><figure class="deck">

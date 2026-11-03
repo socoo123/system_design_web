@@ -182,20 +182,27 @@ PUT(key, m, deadline):
     epoch, owners = placement.snapshot(key)  # distinct physical A, B, C
     send APPLY(epoch, key, m) to ALL owners in parallel
     acked = set()
+
     while before(deadline):
         reply = await_next_reply(deadline)
-        if reply == TIMEOUT: break
+        if reply == TIMEOUT:
+            break
         if reply.matches(epoch, key, m.id) and reply.durable:
-            if reply.node in owners: acked.add(reply.node)
+            if reply.node in owners:
+                acked.add(reply.node)
         if size(acked) &gt;= 2:
             return ACKNOWLEDGED(m.version)  # not &quot;m must be the winner&quot;
+
     return UNKNOWN  # never roll back remotely applied mutations
 
 APPLY(epoch, key, m):
     with local_key_serialization_and_membership_guard(epoch, key):
         # validate ownership/epoch; reject obsolete routing before writing
         next = winner(read_all_local_versions(key), m)  # reject conflicts first
-        WAL.append(m); WAL.sync()  # I/O failure: no durable ACK
+
+        WAL.append(m);
+        WAL.sync()  # I/O failure: no durable ACK
+
         visible[key] = next
         # recovery replays WAL through this same winner rule
         return DURABLE_ACK(node_id, epoch, key, m.id)</code></pre>
@@ -339,16 +346,24 @@ GET(key, deadline):
     targets = choose_two_distinct(owners)
     send READ(epoch, key) to targets in parallel
     replies = map()  # one valid response per physical replica
+
     while size(replies) &lt; 2 and before(deadline):
         reply = await_next_reply(deadline)
-        if reply == TIMEOUT: break
+        if reply == TIMEOUT:
+            break
         if reply.valid_for(epoch, key) and reply.node in targets:
             replies[reply.node] = reply.record  # absence is a valid result
-    if size(replies) &lt; 2: return UNAVAILABLE  # do not claim NOT_FOUND
+
+    if size(replies) &lt; 2:
+        return UNAVAILABLE  # do not claim NOT_FOUND
+
     best = fold(winner, replies.values, ABSENT)
     enqueue_bounded_repairs(key, best, replies)  # original version, no wait
-    if best == ABSENT: return NOT_FOUND
-    if best.deleted: return NOT_FOUND(best.version)  # retain tombstone
+
+    if best == ABSENT:
+        return NOT_FOUND
+    if best.deleted:
+        return NOT_FOUND(best.version)  # retain tombstone
     return VALUE(best.value, best.version)</code></pre>
 <div class="bilingual"><div class="lang-zh"><p>副本处理 READ 时要校验成员版本，并从一致的本地快照中返回比较后最大的版本，或确认不存在；不能随意挑一张 SSTable 作为结果。后台读修复复用 APPLY，保留原版本。若修复队列已满或修复失败，就不能声称副本已经收敛，后续仍需由反熵补齐。</p><p>NOT_FOUND 可能表示本地没有记录，也可能来自胜出的删除墓碑；后一种情况要保留墓碑版本。如果协调层没有收齐 R 份有效响应，应返回 UNAVAILABLE，不能据此认定键不存在。</p></div><div class="lang-en"><p>READ returns the reconciled maximum version or absence from a consistent local snapshot and validates the epoch; it does not pick an arbitrary SSTable. Background repair reuses APPLY with the original version. Queue overflow or repair failure does not imply convergence; anti-entropy must cover it. NOT_FOUND may result from a winning tombstone whose version is retained. Fewer than R replies means UNAVAILABLE.</p></div></div>
 <h3><span class="lang-zh">关键反例：即使 2+2&gt;3，两次读取仍可能从新版本退回旧版本</span><span class="lang-en">Counterexample: 2+2&gt;3 can still read new, then old</span></h3>
@@ -652,53 +667,83 @@ GET(key, deadline):
 <div class="bilingual"><div class="lang-zh"><p>下面节选自<strong>可运行的 Java 17 示例</strong>，需要放入完整类中编译。纯函数接收同一个键的两条不可变写入记录，返回其中的胜者。写入 ID 使用 ASCII 字符，必须全局唯一，同一 ID 对应的记录内容不能改变；若两个版本相同却内容不同，函数直接拒绝。按 <code>(timestamp,id)</code> 排序是本章自定规则，与 Cassandra 处理相同时间戳的具体规则不能混为一谈。Cassandra 按单元格比较版本，本例按整个值比较。<a href="#ref-2">[2]</a></p></div><div class="lang-en"><p>This is a <strong>pure-function excerpt from the runnable Java 17 example</strong> (compile it inside the complete class): two immutable mutations for one key produce one winner. ASCII mutation IDs must be globally unique and cannot change content; equal versions with unequal content are rejected. Ordering by <code>(timestamp,id)</code> is our rule, not Cassandra’s equal-timestamp behavior. Cassandra reconciles cells; this example reconciles a whole value. <a href="#ref-2">[2]</a></p></div></div>
 <pre data-kind="teaching" data-language="Java 17 · example excerpt" data-source="VersionedKv.java:lww"><code>record Mutation(long timestamp, String id, String value, boolean deleted) {
     Mutation {
-        if (timestamp &lt; 0 || id == null || !id.matches(&quot;[A-Za-z0-9_-]+&quot;))
+        if (timestamp &lt; 0 || id == null || !id.matches(&quot;[A-Za-z0-9_-]+&quot;)) {
             throw new IllegalArgumentException(&quot;invalid version&quot;);
-        if (deleted != (value == null)) throw new IllegalArgumentException(&quot;value/tombstone&quot;);
+        }
+        if (deleted != (value == null)) {
+            throw new IllegalArgumentException(&quot;value/tombstone&quot;);
+        }
     }
 }
+
 static Mutation winner(Mutation a, Mutation b) {
-    if (a == null) return b;  // null means absence, not deletion
-    if (b == null) return a;
+    if (a == null) {
+        return b;  // null means absence, not deletion
+    }
+    if (b == null) {
+        return a;
+    }
+
     int order = Long.compare(a.timestamp(), b.timestamp());
-    if (order == 0) order = a.id().compareTo(b.id()); // canonical ASCII IDs
-    if (order == 0 &amp;&amp; !a.equals(b))
+    if (order == 0) {
+        order = a.id().compareTo(b.id()); // canonical ASCII IDs
+    }
+    if (order == 0 &amp;&amp; !a.equals(b)) {
         throw new IllegalArgumentException(&quot;same version, different mutation&quot;);
+    }
+
     return order &gt;= 0 ? a : b;
 }</code></pre>
 <div class="bilingual"><div class="lang-zh"><p>正常情况下，winner(v1@100,v2@200)=v2；重复重放同一条写入记录，结果不变；DEL@300 也会胜过 PUT@200。图中 X 的真实时间为 1000、时间戳为 1200，Y 的真实时间和时间戳都是 1100，所以较晚写入的 Y 输掉比较。增加 W 或 R 无法修正这个排序。</p><p>再看一次业务冲突：两个客户端都先读到 10，然后各自写入 11，LWW 最后仍只保留 11，不会自动合成 12。因此，覆盖写入不能当作原子加一。<strong>副本最终选中同一个值，不等于保留了因果顺序，也不等于保留了每次业务操作的意图。</strong></p></div><div class="lang-en"><p>Normally winner(v1@100,v2@200)=v2; repeating a mutation is idempotent and DEL@300 beats PUT@200. In the diagram X occurs at real time 1000 with timestamp 1200; later Y at 1100 has timestamp 1100 and loses. W/R cannot correct ordering. Two clients that read 10 and each write 11 leave 11, not an atomic increment to 12. <strong>Convergence is neither causal safety nor preservation of business intent.</strong></p></div></div>
 <h3><span class="lang-zh">实现二：保留并发版本，再携带上下文写回</span><span class="lang-en">Implementation 2: retain siblings and write with context</span></h3>
 <div class="bilingual"><div class="lang-zh"><p>如果不能静默丢掉并发版本，可以换用 <code>get → siblings + context</code> 和 <code>put(value,context)</code> 这组接口：读取返回并发的兄弟版本及已读版本上下文（context），写入时再带上这份上下文。比较两个版本向量时，只有前者的每个分量都不大于后者、且至少一个分量更小，前者才是后者的祖先。例如 [A:2] 与 [A:1,B:1] 无法相互比较，应同时保留并返回。</p><p>应用决定合并后的值，合并上下文时对每个分量取最大值，再加入一个新的写入事件。这套协议是 LWW 的替代选择，不能把两种规则混用于同一条记录。<a href="#ref-1">[1]</a></p></div><div class="lang-en"><p>If silently losing concurrent versions is unacceptable, use <code>get → siblings + context</code> and <code>put(value,context)</code>. A vector is an ancestor only when every component is ≤ and at least one is smaller. [A:2] and [A:1,B:1] are incomparable and both survive. The application chooses a merged value, joins context componentwise and adds a new event. This is an alternative to LWW, not a second rule mixed into the same record. <a href="#ref-1">[1]</a></p></div></div>
 <pre data-kind="teaching" data-language="Java 17 · example excerpt" data-source="VersionedKv.java:siblings"><code>record Version(Map&lt;String, Long&gt; clock, String value) {
-    Version { clock = Map.copyOf(clock); Objects.requireNonNull(value);
-        if (clock.values().stream().anyMatch(n -&gt; n &lt; 0))
-            throw new IllegalArgumentException(&quot;negative counter&quot;); }
+    Version {
+        clock = Map.copyOf(clock);
+        Objects.requireNonNull(value);
+
+        if (clock.values().stream().anyMatch(n -&gt; n &lt; 0)) {
+            throw new IllegalArgumentException(&quot;negative counter&quot;);
+        }
+    }
 }
+
 static boolean before(Version a, Version b) {
     Set&lt;String&gt; actors = new HashSet&lt;&gt;(a.clock().keySet());
     actors.addAll(b.clock().keySet());
     boolean strict = false;
+
     for (String actor : actors) {
         long x = a.clock().getOrDefault(actor, 0L);
         long y = b.clock().getOrDefault(actor, 0L);
-        if (x &gt; y) return false;
+        if (x &gt; y) {
+            return false;
+        }
         strict |= x &lt; y;
     }
+
     return strict; // a is an ancestor only if &lt;= everywhere and &lt; somewhere
 }
+
 static List&lt;Version&gt; siblings(List&lt;Version&gt; versions) {
-    return versions.stream().distinct()
-        .filter(a -&gt; versions.stream().noneMatch(b -&gt; before(a, b))).toList();
+    return versions.stream()
+            .distinct()
+            .filter(a -&gt; versions.stream().noneMatch(b -&gt; before(a, b)))
+            .toList();
 }
+
 // Actor is one causal writer; context includes all of its own prior events.
 // Concurrent writers need distinct actors, not a shared coordinator ID.
 static Version resolved(List&lt;Version&gt; context, String actor,
                         long reservedCounter, String applicationValue) {
     Map&lt;String, Long&gt; joined = new HashMap&lt;&gt;();
-    for (Version v : context)
+    for (Version v : context) {
         v.clock().forEach((k, n) -&gt; joined.merge(k, n, Math::max));
-    if (reservedCounter &lt;= joined.getOrDefault(actor, 0L))
+    }
+    if (reservedCounter &lt;= joined.getOrDefault(actor, 0L)) {
         throw new IllegalArgumentException(&quot;counter must advance context&quot;);
+    }
+
     joined.put(actor, reservedCounter);
     return new Version(joined, applicationValue);
 }</code></pre>

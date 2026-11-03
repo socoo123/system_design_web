@@ -1,8 +1,14 @@
 # Teaching pseudocode: Attempt + SettlementOutbox share one authoritative DB.
 reject_unstarted(owner, status, reason):
-  BEGIN; row = SELECT Attempt WHERE id=owner.attempt FOR UPDATE
-  if row.state == TERMINAL: COMMIT; return row.saved_http_result
-  if row.owner != owner or row.state != ASSIGNED: COMMIT; return PENDING
+  BEGIN;
+  row = SELECT Attempt WHERE id=owner.attempt FOR UPDATE
+  if row.state == TERMINAL:
+    COMMIT;
+    return row.saved_http_result
+  if row.owner != owner or row.state != ASSIGNED:
+    COMMIT;
+    return PENDING
+
   UPDATE Attempt SET state=TERMINAL, saved_http_result=(status, reason)
     WHERE id=:attempt_id AND owner=:owner AND state=ASSIGNED
   require affected_rows == 1

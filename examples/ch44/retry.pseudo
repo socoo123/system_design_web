@@ -1,15 +1,27 @@
 readStock(request, D):                         # D: local monotonic deadline
   for attempt in [1, 2]:                      # Order is the only retry owner
     if attempt == 2:
-      if not previous.transient or not previous.local_io_terminal: STOP
+      if not previous.transient or not previous.local_io_terminal:
+        STOP
       sleep_cancellable(random(0, 40ms), D - 140ms)
-    if cancelled or D - now() < 100ms + 140ms: STOP
+    if cancelled or D - now() < 100ms + 140ms:
+      STOP
+
     slot = inventory_slots.tryAcquire()       # local bounded I/O; no wait queue
-    if slot is empty: STOP
+    if slot is empty:
+      STOP
     ticket = inventory_breaker.tryAcquire()   # OPEN rejects; HALF_OPEN: one probe
-    if ticket is empty: release(slot); STOP
+    if ticket is empty:
+      release(slot);
+      STOP
+
     attempt_end = min(now() + 220ms, D - 140ms)
-    submit worker (on rejection: finish(ticket, IGNORED); release(slot); STOP):
+    submit worker (
+      on rejection:
+        finish(ticket, IGNORED);
+        release(slot);
+        STOP
+    ):
       outcome = NOT_DISPATCHED
       try:                                   # covers ALL owned-resource paths
         if not cancelled and attempt_end - now() >= 100ms:
@@ -26,12 +38,18 @@ readStock(request, D):                         # D: local monotonic deadline
       catch unexpected_local_error:
         outcome = LOCAL_FAILURE              # quota/parse/SDK errors included
       finally:
-        try: finish(ticket, IGNORED)          # once-only ticket ignores fallback
-        finally: release(slot)               # after quota/local I/O really exits
+        try:
+          finish(ticket, IGNORED)            # once-only ticket ignores fallback
+        finally:
+          release(slot)                     # after quota/local I/O really exits
       report outcome with local_io_terminal=true
+
     previous = await worker result only until attempt_end
-    if caller wait timed out: request cancellation; STOP
-    if previous.success: return previous     # then <=140ms finishing allowance
+    if caller wait timed out:
+      request cancellation;
+      STOP
+    if previous.success:
+      return previous                        # then <=140ms finishing allowance
   return failure_or_explicit_stale_read       # never invent stock/paid success
 # spend_once admits <=20 extras per fixed second across ALL callers in A7.
 # Its quota I/O must honor quota_end/cancellation; unknown may waste a token.

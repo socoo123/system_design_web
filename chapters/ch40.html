@@ -294,12 +294,17 @@
             throw new IllegalArgumentException("invalid budget");
         }
     }
+
     long downstreamNanos(long nowNanos) {
         long elapsed = nowNanos - startedNanos;
-        if (elapsed &lt; 0) throw new IllegalArgumentException("non-monotonic clock");
+        if (elapsed &lt; 0) {
+            throw new IllegalArgumentException("non-monotonic clock");
+        }
+
         long usable = totalNanos - returnReserveNanos;
         return elapsed &gt;= usable ? 0 : usable - elapsed;
     }
+
     boolean canStart(int attemptsStarted, boolean retrySafe, long nowNanos) {
         return attemptsStarted &gt;= 0 &amp;&amp; attemptsStarted &lt; 2
                 &amp;&amp; (attemptsStarted == 0 || retrySafe)
@@ -606,7 +611,11 @@
 // LogView is a coherent view: all [oldest, high] entries are retained.
 // Empty log: oldest = high + 1. Values are nonnegative, below Long.MAX_VALUE.
 record LogView(String scope, String epoch, long oldest, long high) {}
-enum Resume { REPLAY_AFTER, RESET, INVALID_CURSOR }
+
+enum Resume {
+    REPLAY_AFTER, RESET, INVALID_CURSOR
+}
+
 static Resume resume(Cursor applied, LogView log, boolean authorized) {
     if (!authorized || !log.scope().equals(applied.scope())) {
         throw new SecurityException("scope not authorized");
@@ -615,10 +624,20 @@ static Resume resume(Cursor applied, LogView log, boolean authorized) {
             || log.oldest() &lt; 1 || log.oldest() &gt; log.high() + 1) {
         throw new IllegalArgumentException("invalid retained range");
     }
-    if (applied.seq() &lt; 0) return Resume.INVALID_CURSOR;
-    if (!log.epoch().equals(applied.epoch())) return Resume.RESET;
-    if (applied.seq() &gt; log.high()) return Resume.INVALID_CURSOR;
-    if (applied.seq() &lt; log.oldest() - 1) return Resume.RESET;
+
+    if (applied.seq() &lt; 0) {
+        return Resume.INVALID_CURSOR;
+    }
+    if (!log.epoch().equals(applied.epoch())) {
+        return Resume.RESET;
+    }
+    if (applied.seq() &gt; log.high()) {
+        return Resume.INVALID_CURSOR;
+    }
+    if (applied.seq() &lt; log.oldest() - 1) {
+        return Resume.RESET;
+    }
+
     return Resume.REPLAY_AFTER; // Read seq &gt; applied.seq(), then tail SAME log.
 }
 </code></pre>
@@ -760,37 +779,69 @@ static Resume resume(Cursor applied, LogView log, boolean authorized) {
 <h3><span class="lang-zh">关键实现：限制待发字节，并检测写入是否停滞</span><span class="lang-en">Implementation: bounded payload and no-progress timing</span></h3>
 <div class="bilingual"><div class="lang-zh"><p>下面的 Java 17 摘录来自由单个事件循环独占的 BoundedWriter，构造参数为 65,536 B 和 2,000,000,000 ns；队列、计数器及 closed 的完整定义见<a href="../examples/ch40/ProtocolContracts.java">源码</a>。offer 成功后，数组的独占所有权转交给写入器，生产者不能再修改它；缓冲溢出时直接关闭并清空队列，不能静默丢弃需要可靠传递的数据。队列为空时不计算停滞时间，首字节入队后开始计时；只有实际写入了正数字节，才重新计时，零写入和继续入队都不能延长时限。</p></div><div class="lang-en"><p>This Java17 excerpt belongs to a BoundedWriter owned by one event loop, constructed with 65,536 B and 2,000,000,000 ns. See the <a href="../examples/ch40/ProtocolContracts.java">source</a> for its queue, counters and closed state. Successful offer transfers exclusive array ownership; the producer cannot mutate it afterward. Overflow closes and clears instead of silently dropping durable bytes. An empty queue has no stall timer; the first pending byte starts it. Only positive writes reset it, never zero writes or new queued bytes.</p></div></div>
 <pre data-kind="runnable" data-language="Java 17" data-source="ProtocolContracts.java:writer"><code>boolean offer(byte[] owned, long now) {
-    if (!tick(now)) return false;
-    if (owned.length &gt; capacity - pending) { abort(); return false; }
-    if (owned.length == 0) return true;
-    if (pending == 0) progressedAt = now;
+    if (!tick(now)) {
+        return false;
+    }
+    if (owned.length &gt; capacity - pending) {
+        abort();
+        return false;
+    }
+    if (owned.length == 0) {
+        return true;
+    }
+
+    if (pending == 0) {
+        progressedAt = now;
+    }
     queue.add(ByteBuffer.wrap(owned)); // Success transfers exclusive ownership.
     pending += owned.length;
+
     return true;
 }
+
 boolean flush(NonBlockingSink sink, long now) throws IOException {
-    if (!tick(now)) return false;
-    if (pending == 0) return true;
+    if (!tick(now)) {
+        return false;
+    }
+    if (pending == 0) {
+        return true;
+    }
+
     ByteBuffer head = queue.peek();
     int before = head.remaining();
     try {
         int n = sink.write(head); // One nonblocking write; zero is no progress.
         if (n &lt; 0 || n &gt; before || before - head.remaining() != n) {
-            abort(); throw new IllegalStateException("sink contract violated");
+            abort();
+            throw new IllegalStateException("sink contract violated");
         }
+
         if (n &gt; 0) {
             pending -= n;
             progressedAt = now;
-            if (!head.hasRemaining()) queue.remove();
+            if (!head.hasRemaining()) {
+                queue.remove();
+            }
         }
         return true;
-    } catch (IOException failure) { abort(); throw failure; }
+    } catch (IOException failure) {
+        abort();
+        throw failure;
+    }
 }
+
 boolean tick(long now) { // Run even when the socket is not writable.
-    if (!closed &amp;&amp; pending &gt; 0 &amp;&amp; now - progressedAt &gt;= stallNanos) abort();
+    if (!closed &amp;&amp; pending &gt; 0 &amp;&amp; now - progressedAt &gt;= stallNanos) {
+        abort();
+    }
     return !closed;
 }
-void abort() { closed = true; queue.clear(); pending = 0; }
+
+void abort() {
+    closed = true;
+    queue.clear();
+    pending = 0;
+}
 </code></pre>
 <div class="bilingual"><div class="lang-zh"><p><strong>适配器必须满足的约定：</strong>sink.write 必须非阻塞，按返回的字节数推进 ByteBuffer，而且背后不能藏着无界的应用或框架队列。普通 gRPC write 返回时，可能只是框架已经接收数据，并不证明数据已经发到网络上。<a href="#ref-16">[16]</a> 适配器要按剩余容量从上游拉取，最多暂存一个有界数据块，例如 4 KiB，缓冲满了就停止拉取。即使没有可写回调，也要定时调用 tick。返回 false 或抛出异常后，要沿 Edge → Gateway → App 取消并清理资源。坏连接上可能连 error 也发不出去，但没有 done 仍不能视为成功。</p><p>A9 的 12.5 MiB 只计算队列中的数据载荷，暂存块、TLS、内核、模型状态和对象都要另算。连续无进展恰好达到 2 秒时就终止；如果每次只写出一点字节，仍可能避开停滞检测，因此还要另设整体运行截止时间或最低吞吐策略。三个摘录与源码逐字同步，依赖和运行方式见<a href="../examples/ch40/README.md">示例说明</a>。本地模拟的 sink 只能验证这些策略，不等于真实代理、TLS 或弱网实验。</p></div><div class="lang-en"><p><strong>Adapter contract:</strong> sink.write is nonblocking, advances ByteBuffer by its return value, and hides no unbounded application/framework queue. A gRPC write return can mean framework acceptance rather than network delivery. <a href="#ref-16">[16]</a> Pull upstream according to capacity with at most one bounded staging chunk, such as 4 KiB, and stop pulling when full. Call tick even without writable callbacks. False/exception propagates abort Edge → Gateway → App and cleanup. A broken channel may not carry error; missing done still cannot mean success.</p><p>A9's 12.5 MiB covers queued payload only; staging, TLS, kernel, model state and objects are extra. Exactly 2 s without progress aborts. A byte trickle can evade stall detection, requiring a separate overall deadline/minimum throughput policy. Three excerpts exactly match source; see <a href="../examples/ch40/README.md">dependencies and running instructions</a>. A local simulated sink is not a real proxy, TLS or impaired-network experiment.</p></div></div>
 </section>

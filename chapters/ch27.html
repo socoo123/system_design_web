@@ -274,7 +274,9 @@ CREATE UNIQUE INDEX event_identity ON outbox(event_key);
     old = SELECT attempt WHERE id = attemptId
     if old exists:
       require old binds (orderId, expectedGeneration, courierId) else CONFLICT
-      commit; return old.offerReceipt, currentSnapshot(o) // no new occupation
+      commit;
+      return old.offerReceipt, currentSnapshot(o) // no new occupation
+
     c = SELECT courier_capacity FOR UPDATE             // same authority in all zones
     now = SELECT clock_timestamp()                     // after both locks, not now()
     require o.state == pending_match and o.currentAttempt == null else CONFLICT
@@ -283,6 +285,7 @@ CREATE UNIQUE INDEX event_identity ON outbox(event_key);
     require point exists and now &lt;= point.validUntil else REMATCH
     require not c.paused and c.occupied &lt; c.capacity else REMATCH
     require courierId not in this order&#x27;s persisted cooldown set else REMATCH
+
     slot = smallest unused slot in [0, c.capacity)
     deadline = min(now + 20 seconds, o.matchDeadline)
     INSERT attempt(attemptId, orderId, o.generation, courierId, deadline, offered)
@@ -291,7 +294,8 @@ CREATE UNIQUE INDEX event_identity ON outbox(event_key);
     UPDATE order SET state = offered, currentAttempt = attemptId,
                      attemptCount = attemptCount + 1
     INSERT outbox(eventKey = &quot;offer:&quot; + attemptId, immutableOfferPayload)
-  commit; return offerReceipt, currentSnapshot(o)
+  commit;
+  return offerReceipt, currentSnapshot(o)
   // Any statement/constraint failure rolls back every write; do not send yet.
   // Retry deadlock/serialization aborts with the same identity and fresh reads.</code></pre>
 <div class="bilingual"><div class="lang-zh"><p>无论哪个区域借用 B，都必须向同一个容量权威申请槽位。offer 提交时已经占用名额，接单确认不再加一，只有完成履约或合法释放时才减一。使用固定 attempt 重试，会返回原回执和当前快照，已经过期的 offer 不会因此恢复。满足硬性条件后，可以用等待时长打破同分，兼顾公平；一秒的批量匹配窗口也可能改善贪心选择，但这段等待同样要计入 120 秒匹配期限。</p></div><div class="lang-en"><p>Borrowed B always uses the same capacity authority. Offer consumes a slot; accept does not add another. Completion or valid release decrements once. Same-attempt retries return the original receipt and current snapshot without reviving an expired offer. Fairness can tie-break by age; a one-second batch can improve greedy matching but consumes the 120 s budget.</p></div></div>
@@ -423,13 +427,17 @@ CREATE UNIQUE INDEX event_identity ON outbox(event_key);
     o = SELECT order FOR UPDATE
     a = SELECT attempt WHERE id = attemptId
     require a binds (orderId, generation) else CONFLICT
-    if op in {ACCEPT, REJECT}: require a.courier == authenticatedCourier else FORBIDDEN
+    if op in {ACCEPT, REJECT}:
+      require a.courier == authenticatedCourier else FORBIDDEN
     if op == ACCEPT and a.acceptReceipt exists:
-      commit; return a.acceptReceipt, currentSnapshot(o) // historical, no reactivation
+      commit;
+      return a.acceptReceipt, currentSnapshot(o) // historical, no reactivation
+
     require o.currentAttempt == a.id and o.generation == generation else STALE
     require o.state == offered and a.result == offered else STALE
     c = SELECT courier_capacity WHERE id = a.courier FOR UPDATE
     now = SELECT clock_timestamp()
+
     if op == ACCEPT:
       require now &lt; a.deadline else CONFLICT
       receipt = fixedAcceptReceipt(a)
@@ -446,7 +454,8 @@ CREATE UNIQUE INDEX event_identity ON outbox(event_key);
       INSERT outbox(keyFor(orderId, generation + 1, next), nextWorkOrFailure)
       // Persist courier cooldown with the retry work; retries do not reset budgets.
       receipt = fixedDecisionReceipt(a, op)
-  commit; return receipt, currentSnapshot(o)
+  commit;
+  return receipt, currentSnapshot(o)
   // Only this offered branch expires. Assigned/picked_up keep their slot.</code></pre>
 <div class="bilingual"><div class="lang-zh"><p>如果接单事务先成功，订单从 offered 变为 assigned，这笔单仍占一个槽位，后续到期扫描不能再释放它。如果本例中的到期事务先成功，a1 变为 expired，订单回到 pending_match，代次由 v7 推进到 v8；同一事务只释放一次槽位，并保存重匹配事件，旧 a1/v7 接单则返回冲突。每次新派单都要使用新的 attempt。三次各 20 秒的等待只计入了 60 秒，召回、计算路耗和排队也会消耗原有匹配期限。</p></div><div class="lang-en"><p>Acceptance first changes offered→assigned, keeps one occupied slot and makes expiry a no-op. Expiry first marks a1 expired, releases once, advances 7→8 and persists rematching; old a1/v7 conflicts. New dispatch gets a new attempt. Three 20 s waits consume 60 s before recall, routing and queue time.</p></div></div>
 <h3><span class="lang-zh">取消和改派必须先确认实物归属</span><span class="lang-en">Cancellation and reassignment require custody control</span></h3>
@@ -460,25 +469,33 @@ CREATE UNIQUE INDEX event_identity ON outbox(event_key);
     require authorizedActorAndEvidence(action, authenticatedActor, o, a, verifiedEvidence) else FORBIDDEN
     if storedReceipt(action, a) exists:
       require same evidence binding else CONFLICT
-      commit; return storedReceipt, currentSnapshot(o)
+      commit;
+      return storedReceipt, currentSnapshot(o)
+
     require o.currentAttempt == a.id and o.generation == generation else STALE
+
     if action == PICKUP:
       require o.state == assigned else CONFLICT
       UPDATE order, attempt SET state/result = picked_up
     else:
-      if action == DELIVER: require o.state == picked_up and deliveryProof else CONFLICT
-      if action == CANCEL: require o.state == offered else CONTROLLED_HANDOFF_REQUIRED
+      if action == DELIVER:
+        require o.state == picked_up and deliveryProof else CONFLICT
+      if action == CANCEL:
+        require o.state == offered else CONTROLLED_HANDOFF_REQUIRED
       if action == REASSIGN:
         require o.state in {assigned, picked_up} and verifiedCustodyClear else REVIEW
+
       c = SELECT courier_capacity WHERE id = a.courier FOR UPDATE
       DELETE active_slot WHERE attempt_id = a.id         // require one deleted row
       UPDATE courier_capacity SET occupied = occupied - 1 WHERE id = a.courier
       UPDATE attempt SET result = terminalResult(action)
       next = action == REASSIGN ? pending_match : terminalResult(action)
       UPDATE order SET state = next, currentAttempt = null, generation = generation + 1
+
     INSERT operation_receipt(action, a.id, evidenceBinding, fixedReceipt)
     INSERT outbox(fixedEventKey(action, a.id), stateOrRematchIntent)
-  commit; return fixedReceipt, currentSnapshot(o)
+  commit;
+  return fixedReceipt, currentSnapshot(o)
   // Verified custody evidence is a trusted operations dependency, never stale GPS.</code></pre>
 <div class="bilingual"><div class="lang-zh"><p>本地事务可以把凭据去重、状态变更、槽位释放和持久事件一并提交，但数据库本身无法证明现实中的餐已经交接。本例要求适配层按明确契约提供可信凭据。派单尝试、原始回执和 generation 不能随短期 TTL 一起清除；归档后遇到无法识别的旧身份，也只能查询或拒绝，避免备份恢复、迟到命令把旧工作当成新任务。</p></div><div class="lang-en"><p>The transaction binds evidence deduplication, state, release and durable event; it cannot itself prove a physical handoff. Trusted evidence is an explicit adapter dependency. Do not expire attempt identities, original receipts or generations with short TTLs. Archived unknown old identities must query/reject rather than become new work after delayed commands or backup restoration.</p></div></div>
 </section>
@@ -578,11 +595,14 @@ CREATE UNIQUE INDEX event_identity ON outbox(event_key);
     </figure><div class="bilingual"><div class="lang-zh"><p>服务端单调递增地分配 epoch，会话代次记录的保留时间超过位置点 TTL。每次重连都换发新 epoch，清除旧点后重新采样。断线事件也必须带 epoch 做条件更新，防止旧连接迟到的断线消息关闭新会话。序号只在当前会话内比较，客户端不能自行选择更大的 epoch。业务是否可接单、连接是否存活，以及 GPS 是否新鲜，应分别记录。</p><p>下面的伪代码通过存储事务或 CAS 更新单名骑手的会话记录。重复或较旧的 seq 返回当前序号，<strong>不改 captured_at、received_at 或 TTL</strong>；即使 seq 更大，只要采集点已过期，也要拒绝。进入这一步前，先按骑手与区域限流，并为业务控制动作留出独立配额。静止心跳只能维持连接存活，不能把旧 GPS 变成新采样。</p></div><div class="lang-en"><p>The server durably advances epoch beyond point TTL. Every reconnect gets a new epoch, clears the old point and requires a new sample. Disconnect updates match epoch, so an old delayed disconnect cannot close the new session. Sequence ordering applies within the current session; clients cannot select epochs. Business availability, connection liveness and GPS freshness are separate fields.</p><p>This pseudocode uses a per-courier storage transaction/CAS. Duplicate or older sequences return the current sequence <strong>without changing capture/receipt time or TTL</strong>. A higher sequence with stale capture also fails. Apply courier/zone throttling before this step and isolate control quotas. Stationary heartbeats maintain liveness without refreshing old GPS.</p></div></div>
 <pre data-language="Pseudocode · location session transaction" data-kind="pseudocode" data-source="location.pseudo"><code>startSession(authenticatedCourier, trustedClockBound):
   begin location-store transaction
-    INSERT empty session if absent; on an identified unique race restart transaction
+    INSERT empty session if absent;
+    on an identified unique race restart transaction
     s = SELECT session FOR UPDATE
+
     UPDATE session SET epoch = s.epoch + 1, connected = true,
                        seq = -1, point = null, clockBounded = trustedClockBound
-  commit; return serverIssuedEpoch                       // retained beyond point TTL
+  commit;
+  return serverIssuedEpoch                       // retained beyond point TTL
 
 applyPoint(authenticatedCourier, inputEpoch, inputSeq, inputPoint):
   begin location-store transaction
@@ -590,15 +610,20 @@ applyPoint(authenticatedCourier, inputEpoch, inputSeq, inputPoint):
     now = authoritativeTimeAfterLock()
     require s.epoch == inputEpoch and s.connected else STALE_SESSION
     require inputSeq &gt;= 0 and LocationGate.fresh(now, inputPoint, s.clockBounded) else INVALID
-    if inputSeq &lt;= s.seq: commit; return s.seq            // no timestamp/TTL refresh
+    if inputSeq &lt;= s.seq:
+      commit;
+      return s.seq            // no timestamp/TTL refresh
+
     UPDATE session SET seq = inputSeq, point = inputPoint, receivedAt = now, expiresAt = now + 60s
     // Index delivery may be lossy; periodic reconciliation repairs omissions.
-  commit; return inputSeq
+  commit;
+  return inputSeq
 
 disconnect(inputCourier, inputEpoch):
   UPDATE session SET connected = false, point = null
     WHERE courier_id = inputCourier AND epoch = inputEpoch
   // An old disconnect cannot invalidate a newer session. Reconnect gets a new epoch.
+
 candidate(s, now):
   return s.connected and now &lt; s.expiresAt
          and LocationGate.fresh(now, s.point, s.clockBounded)
@@ -607,12 +632,17 @@ candidate(s, now):
 <div class="bilingual"><div class="lang-zh"><p>A6 假设采集端时钟相对服务端的误差有可信的 ±5 秒界限。因此，采集年龄的保守上界为 <code>now−captured+5s</code>，必须不超过 30 秒；同时拒绝 <code>captured&gt;now+5s</code> 的明显未来点，得到可接受区间 <code>−5s≤now−captured≤25s</code>。无法确认误差界时，这个点就不能作为候选。这项校验也不能证明 GPS 没有被伪造。</p><p>下面是完整可运行的 Java 17 纯校验类，包含边界自检，不实现时钟同步或分布式 CAS。读取候选时还要按当前时间重新校验，不能因为 60 秒回收 TTL 仍未到期，就认为位置满足 30 秒业务新鲜度。</p></div><div class="lang-en"><p>A6 assumes a defensible relative clock-error bound of ±5 s. Conservative age is now−captured+5 s≤30 s, while captured&gt;now+5 s is rejected. Thus −5 s≤now−captured≤25 s. Exclude unbounded clocks; this is not physical proof against spoofed GPS.</p><p>This complete runnable Java 17 pure validator includes boundary checks, without clock synchronization or distributed CAS. Recompute freshness at candidate read time; the 60 s cleanup TTL does not replace the 30 s business age bound.</p></div></div>
 <pre data-language="Java 17 · runnable class" data-kind="runnable" data-source="LocationGate.java"><code>/** Java 17, dependency-free pure validation; no storage or clock synchronization. */
 public final class LocationGate {
-    public record Point(long capturedAtMs, double accuracyM, double lat, double lon) {}
+    public record Point(long capturedAtMs, double accuracyM, double lat, double lon) {
+    }
+
     public static boolean fresh(long nowMs, Point p, boolean boundedClock) {
         if (!boundedClock || p == null || nowMs &lt; 0 || p.capturedAtMs() &lt; 0
                 || !Double.isFinite(p.accuracyM()) || p.accuracyM() &lt; 0 || p.accuracyM() &gt; 50
                 || !Double.isFinite(p.lat()) || Math.abs(p.lat()) &gt; 90
-                || !Double.isFinite(p.lon()) || Math.abs(p.lon()) &gt; 180) return false;
+                || !Double.isFinite(p.lon()) || Math.abs(p.lon()) &gt; 180) {
+            return false;
+        }
+
         try {
             long delta = Math.subtractExact(nowMs, p.capturedAtMs());
             // Trusted relative clock error &lt;= 5 s. True capture-age upper bound &lt;= 30 s.
@@ -621,13 +651,16 @@ public final class LocationGate {
             return false;
         }
     }
+
     public static void main(String[] args) {
         if (!fresh(100_000, new Point(75_000, 50, 31, 121), true)
                 || fresh(100_000, new Point(74_999, 50, 31, 121), true)
                 || fresh(100_000, new Point(105_001, 5, 31, 121), true)
                 || fresh(100_000, new Point(100_000, Double.NaN, 31, 121), true)
-                || fresh(100_000, new Point(100_000, 5, 31, 121), false))
+                || fresh(100_000, new Point(100_000, 5, 31, 121), false)) {
             throw new AssertionError(&quot;freshness boundary failed&quot;);
+        }
+
         System.out.println(&quot;LocationGate: normal/stale/future/NaN/unbounded checks passed&quot;);
     }
 }</code></pre>
@@ -841,11 +874,14 @@ public final class LocationGate {
       begin transaction
         locked = SELECT order FOR UPDATE
         now = SELECT clock_timestamp()
+
         if stillPendingSameGeneration(locked, o) and exhausted(locked, now):
           UPDATE order SET state = failed, generation = generation + 1
           INSERT outbox(fixedFailureKey(locked), notificationAndCompensationIntent)
       commit
-    else enqueue(orderId = o.id, generation = o.generation) // duplicates allowed
+    else
+      enqueue(orderId = o.id, generation = o.generation) // duplicates allowed
+
   for a in SELECT offered WHERE deadline &lt;= authoritativeNow() LIMIT boundedBatch:
     decideOffer(EXPIRE, a.orderId, a.id, a.generation, SERVER)
   // Outbox relay retries fixed event keys. Courier fetches a current snapshot.

@@ -171,6 +171,7 @@
       tenant=principal.tenant, groups=scope.groups,
       pool=bundle.pool, limit_per_lane=100, deadline=deadline)
     candidate_cache.put(key, hits, bounded_ttl)
+
   # Read primary authority, not cached ACLs or a lagging replica.
   # Join published manifest ID/hash/child role + tenant/doc/pool/current_rev,
   # live membership + whole-span ACL. Parents must be manifest text entries.
@@ -178,11 +179,17 @@
   # Preserve original lane ranks; discard duplicates within each lane.
   order = rrf(eligible).take(80)
   text = ChunkStore.read_exact_ids_and_verify_hashes(order)
-  if any returned tenant/revision/hash differs: fail_closed()
+  if any returned tenant/revision/hash differs:
+    fail_closed()
+
   ranked = rerank(question, text, max_pairs=80, deadline=deadline)
-  if rerank times out: ranked = evaluated_RRF_fallback(order)
+  if rerank times out:
+    ranked = evaluated_RRF_fallback(order)
+
   pack = pack_with_parent_checks_and_full_token_count(ranked, bundle)
-  if deadline expired or pack is empty: return insufficient_evidence()
+  if deadline expired or pack is empty:
+    return insufficient_evidence()
+
   Authority.check_all_pack_dependencies(principal, bundle, pack)
   # Any failure discards pack; no generator sees unauthorized text.
   draft = Inference.generate(question, pack, tools=NONE, deadline=deadline)
@@ -347,19 +354,26 @@
   BEGIN Catalog
   LOCK doc(tenant, doc_id)                    # same lock order in every writer
   if event_key exists:
-    require stored canonical_event == source_event; return saved_job_ids
+    require stored canonical_event == source_event;
+    return saved_job_ids
+
   require source_event.cursor &gt; doc.source_cursor  # older events cannot revive
   UPDATE doc SET target_rev=event.rev, source_cursor=event.cursor
   INSERT immutable_revision AND jobs_for_live_pools AND event_receipt
   COMMIT                                     # only now send 202 + job IDs
 
 work(job_id, owner):
-  BEGIN Catalog; LOCK doc THEN job
+  BEGIN Catalog;
+  LOCK doc THEN job
   t = database_clock_after_locks()
-  if job.done: COMMIT; return job.saved_result
+  if job.done:
+    COMMIT;
+    return job.saved_result
+
   require job.ready OR job.lease_until &lt;= t
   UPDATE job SET owner=owner, epoch=epoch+1, lease_until=t+lease
   COMMIT                                     # lost ACK =&gt; reread this claim
+
   expected = deterministic_split(job.source_bytes, job.splitter)
   manifest = create_or_read_canonical_manifest(expected, job.encoder)
   # Unique manifest key chooses persistent embedding bytes; retries reuse them.
@@ -369,11 +383,14 @@ work(job_id, owner):
     if span.is_child:
       BM25.put_if_absent_or_identical(id, span.hash_and_terms)
       Dense.put_if_absent_or_identical(id, span.hash_and_vector)
+
   # Manifest.text covers children + parents; both index lanes cover child IDs.
   # Outside Catalog locks: exact IDs/hashes, correct generation, both lanes.
   receipts = verify_manifest_visibility(manifest, pool.search_reader_contract)
   # A write ACK or a few successful canaries are insufficient receipts.
-  BEGIN Catalog; LOCK doc THEN job
+
+  BEGIN Catalog;
+  LOCK doc THEN job
   t = database_clock_after_locks()
   require owner/epoch still match AND job.lease_until &gt; t
   require NOT doc.tombstone AND doc.target_rev == job.rev
@@ -590,59 +607,81 @@ work(job_id, owner):
         </svg>
         <figcaption><span class="lang-zh">证据包（Evidence Pack）最多包含 8 段，编号、来源和分隔符也计入 4,096-token 预算。扩展父块后须完整重计，因此不保证装下 8 个各含 512 token 的原文块。</span><span class="lang-en">Evidence Pack has at most eight spans; IDs, provenance and delimiters share 4,096 tokens. Recount after parent expansion; eight full 512-token spans may not fit.</span></figcaption>
       </div>
-    </figure><pre data-language="Java 17 · RRF excerpt" data-kind="teaching" data-source="RagCore.java#rrf"><code>public record Hit(String qualifiedId, int originalRank) {}
-public record Scored(String qualifiedId, double score) {}
-public static List&lt;Scored&gt; rrf(List&lt;List&lt;Hit&gt;&gt; lanes, int cap) {
-  if (cap &lt; 1 || cap &gt; 80) throw new IllegalArgumentException(&quot;cap 1..80&quot;);
-  Map&lt;String, Double&gt; score = new HashMap&lt;&gt;();
-  for (List&lt;Hit&gt; lane : lanes) {
-    Map&lt;String, Integer&gt; best = new HashMap&lt;&gt;();
-    for (Hit hit : lane) {
-      if (hit.originalRank() &lt; 1 || hit.originalRank() &gt; 100)
-        throw new IllegalArgumentException(&quot;rank 1..100&quot;);
-      best.merge(hit.qualifiedId(), hit.originalRank(), Math::min);
-    }
-    // Eligibility filtering preserves original ranks; duplicates count once/lane.
-    best.forEach((id, rank) -&gt; score.merge(id, 1.0 / (60 + rank), Double::sum));
+    </figure><pre data-language="Java 17 · RRF excerpt" data-kind="teaching" data-source="RagCore.java#rrf"><code>  public record Hit(String qualifiedId, int originalRank) {}
+  public record Scored(String qualifiedId, double score) {}
+
+  public static List&lt;Scored&gt; rrf(List&lt;List&lt;Hit&gt;&gt; lanes, int cap) {
+      if (cap &lt; 1 || cap &gt; 80) {
+          throw new IllegalArgumentException(&quot;cap 1..80&quot;);
+      }
+
+      Map&lt;String, Double&gt; score = new HashMap&lt;&gt;();
+      for (List&lt;Hit&gt; lane : lanes) {
+          Map&lt;String, Integer&gt; best = new HashMap&lt;&gt;();
+          for (Hit hit : lane) {
+              if (hit.originalRank() &lt; 1 || hit.originalRank() &gt; 100) {
+                  throw new IllegalArgumentException(&quot;rank 1..100&quot;);
+              }
+              best.merge(hit.qualifiedId(), hit.originalRank(), Math::min);
+          }
+          // Eligibility filtering preserves original ranks; duplicates count once/lane.
+          best.forEach((id, rank) -&gt; score.merge(id, 1.0 / (60 + rank), Double::sum));
+      }
+
+      return score.entrySet().stream()
+              .map(e -&gt; new Scored(e.getKey(), e.getValue()))
+              .sorted(Comparator.comparingDouble(Scored::score).reversed()
+                      .thenComparing(Scored::qualifiedId))
+              .limit(cap).toList();
+  }</code></pre><div class="bilingual"><div class="lang-zh"><p>下面摘录的是 Java17 标准库实现，完整可运行类在 examples/ch30/RagCore.java。每条输入候选（Hit）必须已经通过权限和当前版本检查，完整来源标识 qualifiedId 包含租户和版本；本函数不负责鉴权。相同分数按 ID 稳定排序，最多返回 80 项。A 在两路排第 1/10，得分约 0.03068；B 排第 5/5，得分约 0.03077，因此 B 稍靠前。</p><p>RRF 丢弃原始分数的分差，也找不回两路都漏掉的证据。有标注数据时，可以另测经过校准的加权融合。</p><p>向量过滤未必发生在 ANN 扫描之前。固定到 v0.8.0 的 pgvector 文档说明，近似扫描后才过滤，迭代扫描（iterative scans）会继续查找，直到数量足够或触及上限 [<a href="#ref-5">5</a>]。对于小租户，要测量分区、先精确过滤再检索，以及有界补充召回的效果，不能去掉租户或 ACL 条件。CrossEncoder 只处理有界短名单 [<a href="#ref-4">4</a>]；超时时只使用已评测的 RRF 回退，权限或证据不足仍须拒答。</p></div><div class="lang-en"><p>This Java17 standard-library excerpt is part of runnable examples/ch30/RagCore.java. Hits must already be authorized/current, and qualified IDs include tenant and revision; this function does not authorize. Ties sort by ID, with at most 80 results. A at ranks 1/10 scores 0.03068; B at 5/5 scores 0.03077. RRF loses score margins and cannot recover evidence both lanes missed; calibrated weighted fusion is another measured option.</p><p>ANN filtering need not precede scanning: pinned pgvector v0.8.0 documents post-scan filtering and capped iterative scans [<a href="#ref-5">5</a>]. Measure partitioning, exact filtered search and bounded refill for small tenants, retaining all access conditions. CrossEncoder operates only on a bounded shortlist [<a href="#ref-4">4</a>]. A timeout may use evaluated RRF fallback; missing authorized evidence still refuses.</p></div></div><h3><span class="lang-zh">证据打包：按完整提示输入计算 token 预算</span><span class="lang-en">Pack evidence with the complete token budget</span></h3><pre data-language="Java 17 · evidence budget excerpt" data-kind="teaching" data-source="RagCore.java#pack"><code>  public record Span(String tenant, String doc, long rev, String pool,
+                     int start, int end, String text) {}
+  public record Pack(List&lt;Span&gt; spans, String prompt, int inputTokens) {}
+
+  public interface Renderer {
+      String evidence(List&lt;Span&gt; spans); // includes IDs/locators/delimiters
+      String prompt(List&lt;Span&gt; spans); // complete roles + question + evidence
   }
-  return score.entrySet().stream()
-    .map(e -&gt; new Scored(e.getKey(), e.getValue()))
-    .sorted(Comparator.comparingDouble(Scored::score).reversed()
-      .thenComparing(Scored::qualifiedId))
-    .limit(cap).toList();
-}</code></pre><div class="bilingual"><div class="lang-zh"><p>下面摘录的是 Java17 标准库实现，完整可运行类在 examples/ch30/RagCore.java。每条输入候选（Hit）必须已经通过权限和当前版本检查，完整来源标识 qualifiedId 包含租户和版本；本函数不负责鉴权。相同分数按 ID 稳定排序，最多返回 80 项。A 在两路排第 1/10，得分约 0.03068；B 排第 5/5，得分约 0.03077，因此 B 稍靠前。</p><p>RRF 丢弃原始分数的分差，也找不回两路都漏掉的证据。有标注数据时，可以另测经过校准的加权融合。</p><p>向量过滤未必发生在 ANN 扫描之前。固定到 v0.8.0 的 pgvector 文档说明，近似扫描后才过滤，迭代扫描（iterative scans）会继续查找，直到数量足够或触及上限 [<a href="#ref-5">5</a>]。对于小租户，要测量分区、先精确过滤再检索，以及有界补充召回的效果，不能去掉租户或 ACL 条件。CrossEncoder 只处理有界短名单 [<a href="#ref-4">4</a>]；超时时只使用已评测的 RRF 回退，权限或证据不足仍须拒答。</p></div><div class="lang-en"><p>This Java17 standard-library excerpt is part of runnable examples/ch30/RagCore.java. Hits must already be authorized/current, and qualified IDs include tenant and revision; this function does not authorize. Ties sort by ID, with at most 80 results. A at ranks 1/10 scores 0.03068; B at 5/5 scores 0.03077. RRF loses score margins and cannot recover evidence both lanes missed; calibrated weighted fusion is another measured option.</p><p>ANN filtering need not precede scanning: pinned pgvector v0.8.0 documents post-scan filtering and capped iterative scans [<a href="#ref-5">5</a>]. Measure partitioning, exact filtered search and bounded refill for small tenants, retaining all access conditions. CrossEncoder operates only on a bounded shortlist [<a href="#ref-4">4</a>]. A timeout may use evaluated RRF fallback; missing authorized evidence still refuses.</p></div></div><h3><span class="lang-zh">证据打包：按完整提示输入计算 token 预算</span><span class="lang-en">Pack evidence with the complete token budget</span></h3><pre data-language="Java 17 · evidence budget excerpt" data-kind="teaching" data-source="RagCore.java#pack"><code>public record Span(String tenant, String doc, long rev, String pool,
-                   int start, int end, String text) {}
-public record Pack(List&lt;Span&gt; spans, String prompt, int inputTokens) {}
-public interface Renderer {
-  String evidence(List&lt;Span&gt; spans);           // includes IDs/locators/delimiters
-  String prompt(List&lt;Span&gt; spans);             // complete roles + question + evidence
-}
-public static Optional&lt;Pack&gt; pack(List&lt;Span&gt; ranked, Renderer render,
-    ToIntFunction&lt;String&gt; generationTokens, int contextLimit) {
-  List&lt;Span&gt; chosen = new ArrayList&lt;&gt;();
-  if (generationTokens.applyAsInt(render.prompt(List.of())) &gt; 1024)
-    return Optional.empty();                  // no silent question truncation
-  for (Span candidate : ranked) {             // already authorized exact revisions
-    if (candidate.start() &lt; 0 || candidate.end() &lt;= candidate.start())
-      throw new IllegalArgumentException(&quot;invalid span&quot;);
-    boolean overlaps = chosen.stream().anyMatch(s -&gt;
-      s.tenant().equals(candidate.tenant()) &amp;&amp; s.doc().equals(candidate.doc())
-      &amp;&amp; s.rev() == candidate.rev() &amp;&amp; s.pool().equals(candidate.pool())
-      &amp;&amp; s.start() &lt; candidate.end() &amp;&amp; candidate.start() &lt; s.end());
-    if (overlaps) continue;                    // conservative: keep higher-ranked span
-    List&lt;Span&gt; trial = new ArrayList&lt;&gt;(chosen); trial.add(candidate);
-    int evidence = generationTokens.applyAsInt(render.evidence(trial));
-    int input = generationTokens.applyAsInt(render.prompt(trial));
-    if (evidence &gt; 4096 || input &gt; 5120 || (long) input + 512 &gt; contextLimit)
-      continue;                               // try a smaller later span, no truncation
-    chosen = trial;
-    if (chosen.size() == 8) break;
-  }
-  if (chosen.isEmpty()) return Optional.empty();
-  String prompt = render.prompt(chosen);
-  return Optional.of(new Pack(List.copyOf(chosen), prompt,
-    generationTokens.applyAsInt(prompt)));
-}</code></pre><div class="bilingual"><div class="lang-zh"><p>传入的排序结果（ranked）包含已完成父块检查、用户仍有权使用的精确版本跨度，且来自同一索引池。跨度重叠时，保守地只保留排名靠前的一项，不把中间空隙合并进来；这种做法可能牺牲召回。</p><p>序列化组件 Renderer 负责生成含编号、来源和分隔符的证据文本，以及完整角色信息和 prompt。计数函数 generationTokens 必须使用部署模型的分词器及聊天模板，对完整字符串重新计数，不能直接相加逐段 token 数。本地运行只用字符计数测试数据（fixture）验证分支，不证明模型分词器的实际行为。</p><p>按排名依次尝试，最多选入 8 段。过大的段跳过，继续考虑后面较小的段；不截断句子或表格来“刚好塞满”。证据≤4,096、完整输入≤5,120、输入+512≤context，三个约束必须同时成立。装包后再复查整包权限，然后才交给推理服务。</p><p>《Lost in the Middle》发现，证据在长上下文中的位置会影响所测模型的表现 [<a href="#ref-9">9</a>]。多放材料不能替代质量评测。</p></div><div class="lang-en"><p>Ranked input contains authorized, same-pool revision spans after parent checks. Conservatively keep the higher-ranked overlapping span without merging gaps; this can lose recall. Renderer serializes IDs/provenance/delimiters and the complete role/prompt. generationTokens must use the deployed model tokenizer/chat template on complete strings, beyond summing individual counts. Local execution uses a character-count fixture to test branches, not model tokenization.</p><p>Try at most eight spans, skipping oversized ones while considering smaller later spans; do not truncate claims/tables to fill the budget. Enforce evidence ≤4,096, complete input ≤5,120 and input + 512 ≤context together. Reauthorize the whole pack before inference. Evidence position affected models tested in Lost in the Middle [<a href="#ref-9">9</a>]; additional context needs evaluation.</p></div></div></section>
+
+  public static Optional&lt;Pack&gt; pack(List&lt;Span&gt; ranked, Renderer render,
+                                   ToIntFunction&lt;String&gt; generationTokens, int contextLimit) {
+      List&lt;Span&gt; chosen = new ArrayList&lt;&gt;();
+      if (generationTokens.applyAsInt(render.prompt(List.of())) &gt; 1024) {
+          return Optional.empty(); // no silent question truncation
+      }
+
+      for (Span candidate : ranked) { // already authorized exact revisions
+          if (candidate.start() &lt; 0 || candidate.end() &lt;= candidate.start()) {
+              throw new IllegalArgumentException(&quot;invalid span&quot;);
+          }
+          boolean overlaps = chosen.stream().anyMatch(s -&gt;
+                  s.tenant().equals(candidate.tenant()) &amp;&amp; s.doc().equals(candidate.doc())
+                  &amp;&amp; s.rev() == candidate.rev() &amp;&amp; s.pool().equals(candidate.pool())
+                  &amp;&amp; s.start() &lt; candidate.end() &amp;&amp; candidate.start() &lt; s.end());
+          if (overlaps) {
+              continue; // conservative: keep higher-ranked span
+          }
+
+          List&lt;Span&gt; trial = new ArrayList&lt;&gt;(chosen);
+          trial.add(candidate);
+          int evidence = generationTokens.applyAsInt(render.evidence(trial));
+          int input = generationTokens.applyAsInt(render.prompt(trial));
+          if (evidence &gt; 4096 || input &gt; 5120 || (long) input + 512 &gt; contextLimit) {
+              continue; // try a smaller later span, no truncation
+          }
+
+          chosen = trial;
+          if (chosen.size() == 8) {
+              break;
+          }
+      }
+
+      if (chosen.isEmpty()) {
+          return Optional.empty();
+      }
+      String prompt = render.prompt(chosen);
+      return Optional.of(new Pack(List.copyOf(chosen), prompt,
+              generationTokens.applyAsInt(prompt)));
+  }</code></pre><div class="bilingual"><div class="lang-zh"><p>传入的排序结果（ranked）包含已完成父块检查、用户仍有权使用的精确版本跨度，且来自同一索引池。跨度重叠时，保守地只保留排名靠前的一项，不把中间空隙合并进来；这种做法可能牺牲召回。</p><p>序列化组件 Renderer 负责生成含编号、来源和分隔符的证据文本，以及完整角色信息和 prompt。计数函数 generationTokens 必须使用部署模型的分词器及聊天模板，对完整字符串重新计数，不能直接相加逐段 token 数。本地运行只用字符计数测试数据（fixture）验证分支，不证明模型分词器的实际行为。</p><p>按排名依次尝试，最多选入 8 段。过大的段跳过，继续考虑后面较小的段；不截断句子或表格来“刚好塞满”。证据≤4,096、完整输入≤5,120、输入+512≤context，三个约束必须同时成立。装包后再复查整包权限，然后才交给推理服务。</p><p>《Lost in the Middle》发现，证据在长上下文中的位置会影响所测模型的表现 [<a href="#ref-9">9</a>]。多放材料不能替代质量评测。</p></div><div class="lang-en"><p>Ranked input contains authorized, same-pool revision spans after parent checks. Conservatively keep the higher-ranked overlapping span without merging gaps; this can lose recall. Renderer serializes IDs/provenance/delimiters and the complete role/prompt. generationTokens must use the deployed model tokenizer/chat template on complete strings, beyond summing individual counts. Local execution uses a character-count fixture to test branches, not model tokenization.</p><p>Try at most eight spans, skipping oversized ones while considering smaller later spans; do not truncate claims/tables to fill the budget. Enforce evidence ≤4,096, complete input ≤5,120 and input + 512 ≤context together. Reauthorize the whole pack before inference. Evidence position affected models tested in Lost in the Middle [<a href="#ref-9">9</a>]; additional context needs evaluation.</p></div></div></section>
 <section><h2><span class="lang-zh">引用与发送：来源身份可校验，语义支持仍需判断</span><span class="lang-en">Citations and release: identity is not semantic proof</span></h2><div class="bilingual"><div class="lang-zh"><p>证据包就是实际进入 prompt 的集合，引用编号只在本次请求内稳定。即使召回了第 9 块，只要没有入包，就不能引用。</p><p>RAG 先按句缓冲草稿，检查能否解析、编号是否有效、来源版本和条件是否匹配，再判断证据是否支持陈述。ALCE 区分引用支持和引用质量 [<a href="#ref-7">7</a>]；模型判断仍可能错误放行。对于需要证据的句子，不能只删掉伪造脚注，却把没有依据的断言留在答案里。</p></div><div class="lang-en"><p>Evidence Pack is exactly what entered the prompt, with request-local IDs. A recalled but unpacked ninth chunk is not citable. Buffer draft sentences; check parsing, IDs and source identity/conditions before support. ALCE distinguishes citation support/quality [<a href="#ref-7">7</a>], but model judgments remain fallible. Never retain an unsupported claim after merely removing its fake footnote.</p></div></div><figure class="deck">
       <div class="slide">
         <svg viewBox="0 0 960 420" class="board" role="img" aria-labelledby="d5s1t d5s1d">
@@ -755,9 +794,13 @@ public static Optional&lt;Pack&gt; pack(List&lt;Span&gt; ranked, Renderer render
     </figure><pre data-language="Pseudocode · support and release boundary" data-kind="pseudocode" data-source="release.pseudo"><code>release_buffered_sentences(principal, bundle, pack, draft):
   for sentence in bounded_sentence_buffer(draft):
     parsed = parse_structured_claims_and_citation_ids(sentence)
-    if parse fails OR any ID not in pack.actual_ids: block_whole_sentence()
+    if parse fails OR any ID not in pack.actual_ids:
+      block_whole_sentence()
+
     for claim in parsed.claims:
-      if claim.requires_evidence AND claim.citation_ids is empty: block_sentence()
+      if claim.requires_evidence AND claim.citation_ids is empty:
+        block_sentence()
+
       cited = pack.exact_spans(claim.citation_ids)
       if a structured_domain_fact(claim):
         require source_entity == claim.entity AND source_unit == claim.unit
@@ -766,6 +809,7 @@ public static Optional&lt;Pack&gt; pack(List&lt;Span&gt; ranked, Renderer render
         verdict = support_judge(claim, cited, pinned_judge_version, deadline)
         require verdict == SUPPORTED           # UNKNOWN/timeout =&gt; block
         # A fallible statistical judgment; calibrate false acceptance with humans.
+
     # Recheck AFTER potentially slow judge work, before every network release.
     BEGIN authoritative_read                 # shared locks, canonical doc order
     lock current membership AND every pack doc/current/ACL dependency
@@ -926,10 +970,13 @@ public static Optional&lt;Pack&gt; pack(List&lt;Span&gt; ranked, Renderer render
   barrier = source.current_cursor()
   wait_until_both_lanes_visible_and_reconciled(g2, through=barrier)
   require evaluation_passes(g2) AND all_source_partitions_covered(barrier)
-  BEGIN Catalog; LOCK bundle_pointer
+
+  BEGIN Catalog;
+  LOCK bundle_pointer
   require current_bundle == g1 AND g2.complete_through &gt;= barrier
   CAS bundle_pointer FROM g1 TO g2              # all immutable fields together
   COMMIT
+
   continue_replay(g1 AND g2)                    # retain old encoder too
   # New requests pin g2; old requests keep g1. ACL/tombstone stays live globally.
 
@@ -938,12 +985,14 @@ rollback(g2, g1):
   require g1.model_available AND log_retention_covers(g1.cursor, barrier)
   replay_and_reconcile_all_changes(g1, through=barrier)  # especially deletes
   require g1.searchable_through &gt;= barrier AND g1.evaluation_passes
+
   CAS Catalog.bundle_pointer FROM g2 TO g1
   # Missing logs/encoder/coverage =&gt; do not claim rollback is safe; rebuild instead.
 
 retire(g1):
   require no_active_g1_requests AND rollback_retention_expired
-  stop_g1_replay(); purge_g1_indexes_and_unpinned_text_by_manifest()
+  stop_g1_replay();
+  purge_g1_indexes_and_unpinned_text_by_manifest()
   # Without consistent snapshots + retained logs, choose a write freeze or declare
   # a weaker reconciliation contract. An index alias cannot create a source barrier.</code></pre><div class="bilingual"><div class="lang-zh"><p>下面的伪代码接收两套完整配置，并要求数据源支持快照和保留变更日志，最终完成一次 CAS 切流，或明确失败。回放屏障要覆盖所有源分区，变更不仅包含新增和更新（upsert），也包含删除（delete）及 ACL。搜索可见性、源分区覆盖和标注评测都满足要求后，才能切换。数据源如果没有一致快照或可保留日志，就要选择冻结写入窗口，或明确采用更弱的对账保证，不能凭空假设存在水位。</p><p>切换后继续把变更送入两池，并保留旧编码器。回退前，旧池必须追到新的变更屏障，且删除对账通过；日志有缺口或旧模型已下线时，需要重建，不能只切别名就宣称已经恢复。</p><p>只有旧请求排空且回退期结束后，才能回收旧池。引用需要的版本原文还要单独遵守保留政策；权限撤销后，旧 URL 也不能成为绕过检查的入口。</p></div><div class="lang-en"><p>The inputs are complete old/new configurations and source snapshot/retained-log contracts; output is a CAS switch or explicit failure. The barrier covers every source partition and replays deletes/ACL events alongside upserts. Require search visibility, source coverage and labeled evaluation. Without consistent snapshots/log retention, freeze writes or declare weaker reconciliation.</p><p>After switching, feed both pools and retain the old encoder. Rollback requires catching the old pool up to a new barrier and reconciling deletes. Log gaps or a retired encoder require rebuilding; aliases alone do not recover correctness. Retire only after request drain and rollback expiry; exact citation text follows its own retention, always honoring revocation.</p></div></div></section>
 <section><h2><span class="lang-zh">评测与反例：找出证据在哪一层丢失</span><span class="lang-en">Evaluation and counterexamples: locate lost evidence</span></h2><div class="bilingual"><div class="lang-zh"><p>A11 固定 200 个标注问题，记录提问主体（principal）、文档、版本、跨度（doc/revision/span）及答案标签，并把调参集和独立回归集分开。按术语、改写、中英、表格、多段、冲突、无答案和撤权场景分层比较；切分方式改变后，跨度标签也要重新映射。</p><p>分别报告召回、重排和最终证据包三个阶段的 Recall@k。应找回 5 段证据而取到 4 段时，召回率为 0.8。平均倒数排名（MRR）只看首个相关项，可能掩盖另一个必要前提没有取到的问题。</p><p>答案侧分别报告正确性、上下文忠实度、编号有效性、引用支持和覆盖，以及拒答情况。RAGAS 按陈述估计上下文支持 [<a href="#ref-8">8</a>]：5 条陈述中有 4 条被判断为有支持，结果也为 0.8，但这不是检索召回率，更不能证明材料本身正确。判断器的错误放行和错误拒绝需要人工校准；权限隔离不能交给模型评分决定。</p><p>同时测量首个合格句的 p95、完整答案耗时、超时和降级比例、配对数、输入输出 token 及摄取延迟。若试验把重排候选从 80 增至 160，40 QPS 下的上限就会从 3,200 增至 6,400 对/秒；如果最终证据没有改善且超过 SLO，就应回退。本章没有对真实语料、厂商检索服务或 LLM 做压测。</p></div><div class="lang-en"><p>Freeze 200 labeled queries with principals, document/revision/spans and answers; separate tuning from held-out regression. Slice terms, paraphrases, languages, tables, multiple spans, conflicts, absent answers and revocation. Remap span labels after splitter changes. Measure Recall@k at recall, rerank and final-pack stages; four of five is 0.8. First-relevant MRR may hide another missing premise.</p><p>Report correctness, faithfulness, ID validity, citation support/coverage and refusals separately. RAGAS estimates statement support from context [<a href="#ref-8">8</a>]; four of five is also 0.8, distinct from retrieval recall or source truth. Human-calibrate judge false acceptance/rejection; models never decide access.</p><p>Measure first-approved-sentence p95, completion, timeouts/degradation, pairs, tokens and ingest lag. Raising 80→160 doubles the 40-QPS cap from 3,200→6,400 pairs/s; revert without evidence gains if the SLO fails. No live corpus, vendor retrieval or LLM benchmark is claimed.</p></div></div></section>

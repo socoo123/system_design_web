@@ -2,6 +2,7 @@
 Run: python3 examples/ch01/verify_traces.py
 Checks the displayed pseudocode matches its source and exercises branch boundaries.
 """
+
 from dataclasses import dataclass
 from html import unescape
 from pathlib import Path
@@ -12,10 +13,12 @@ page = (ROOT / 'chapters/ch01.html').read_text()
 shown = unescape(re.search(r'<pre[^>]*><code[^>]*>(.*?)</code></pre>', page, re.S)[1])
 assert shown == Path(__file__).with_name('product-read.pseudo').read_text()
 
+
 @dataclass
 class Entry:
     row: str
     valid_until: float
+
 
 @dataclass
 class Case:
@@ -42,22 +45,28 @@ class Case:
     def get(self):
         if self.usable(self.cached):
             return self.reply_before(self.cached)
+
         self.admission_calls += 1
         if self.grant != 'GRANTED':
             return 503
+
         observed_at = self.now
         self.store_calls += 1
         self.now += self.read_duration
+
         if self.result in ('ERROR', 'TIMEOUT'):
             return 503
         if self.result == 'NOT_FOUND':
             return 404
+
         entry = Entry(self.result, observed_at + 30 - .3)
         if not self.usable(entry):
             return 503
+
         self.fills += 1
         self.filled = entry
         return self.reply_before(entry)
+
 
 cases = [
     ('usable hit', Case(cached=Entry('v1', 29.7)), 200, 0),
@@ -68,19 +77,41 @@ cases = [
     ('store timeout is not not-found', Case(result='TIMEOUT'), 503, 1),
     ('explicit absent row', Case(result='NOT_FOUND'), 404, 1),
     ('stalled old result, no fill', Case(read_duration=30.04), 503, 1),
-    ('expired cached copy, no extra origin allowance', Case(now=30.04, cached=Entry('v1',29.7), grant='DENIED'),503,0),
-    ('clock bound unavailable', Case(clock_bound=False),503,1),
-    ('expiry at final sender', Case(now=29.69,cached=Entry('v1',29.7),final_send_delay=.02),'ABORT',0),
+    (
+        'expired cached copy, no extra origin allowance',
+        Case(
+            now=30.04,
+            cached=Entry('v1', 29.7),
+            grant='DENIED'
+        ),
+        503,
+        0
+    ),
+    ('clock bound unavailable', Case(clock_bound=False), 503, 1),
+    (
+        'expiry at final sender',
+        Case(
+            now=29.69,
+            cached=Entry('v1', 29.7),
+            final_send_delay=.02
+        ),
+        'ABORT',
+        0
+    ),
 ]
+
 for name, c, expected, calls in cases:
     assert c.get() == expected, name
     assert c.store_calls == calls, name
-    if expected != 200: assert c.fills == 0, name
+    if expected != 200:
+        assert c.fills == 0, name
     print('PASS', name)
+
 normal = cases[1][1]
 assert normal.filled.valid_until == 29.7  # does not become fill_time + 30
 assert not Case(now=30.04).usable(normal.filled)
 assert all(c.admission_calls == 1 for _, c, _, calls in cases if calls == 1)
+
 # Pure arithmetic: overhead/reserves and query-cost assumptions are in prose.
 assert 8_640_000 * 10 / 86_400 == 1000
 assert round(1 - 80 / 5000, 4) == .984

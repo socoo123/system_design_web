@@ -7,6 +7,7 @@ import hashlib
 import json
 import sqlite3
 
+
 class Refused(Exception):
     pass
 
@@ -103,32 +104,47 @@ def reserve(db, q, clock, fail_after_tenant=False):
     fp = encoded([q['body'], q['bundle'], q['profile'], q['kv']])
     with write_tx(db):
         now = clock()
-        old = db.execute('SELECT * FROM permit WHERE tenant=? AND rid=?',
-                         (q['tenant'], q['rid'])).fetchone()
+        old = db.execute(
+            'SELECT * FROM permit WHERE tenant=? AND rid=?',
+            (q['tenant'], q['rid'])
+        ).fetchone()
         if old:
             if old['fingerprint'] != fp:
                 raise Refused('same key, different request')
             return dict(old) | {'created': False}
+
         r = one(db, 'SELECT * FROM replica WHERE id=?', (q['replica'],))
         t = one(db, 'SELECT * FROM tenant WHERE id=?', (q['tenant'],))
         s = one(db, 'SELECT * FROM snapshot WHERE rev=?', (q['rev'],))
         rev = one(db, 'SELECT rev FROM control WHERE id=1')['rev']
         endpoints = json.loads(s['payload'])['endpoints']
         exact = [r['id'], r['epoch'], r['bundle'], r['profile']]
-        if (q['kv'] <= 0 or q['rev'] != rev or now >= s['expires']
-            or exact not in endpoints or not r['ready'] or r['draining']
-            or (r['bundle'], r['epoch'], r['profile'], r['tier']) !=
-               (q['bundle'], q['epoch'], q['profile'], t['tier'])):
+        if (
+            q['kv'] <= 0
+            or q['rev'] != rev
+            or now >= s['expires']
+            or exact not in endpoints
+            or not r['ready']
+            or r['draining']
+            or (r['bundle'], r['epoch'], r['profile'], r['tier']) != (
+                q['bundle'], q['epoch'], q['profile'], t['tier']
+            )
+        ):
             raise Refused('ineligible or stale')
+
         deadline = min(q['deadline'], s['expires'])
         if now >= deadline:
             raise Refused('deadline')
+
         take(db, 'tenant', q['tenant'], q['kv'])
         if fail_after_tenant:
             raise RuntimeError('injected before replica charge')
         take(db, 'replica', q['replica'], q['kv'])
-        values = (q['tenant'], q['rid'], fp, q['bundle'], q['replica'],
-                  q['epoch'], q['profile'], q['kv'], q['rev'], deadline)
+
+        values = (
+            q['tenant'], q['rid'], fp, q['bundle'], q['replica'],
+            q['epoch'], q['profile'], q['kv'], q['rev'], deadline
+        )
         db.execute("INSERT INTO permit VALUES(?,?,?,?,?,?,?,?,?,?,'HELD')", values)
         return dict(permit(db, q['tenant'], q['rid'])) | {'created': True}
 # END reserve
@@ -153,6 +169,7 @@ def expire(db, tenant, rid, clock):
         p = permit(db, tenant, rid)
         if p['state'] != 'HELD' or now < p['deadline']:
             return False
+
         close_credit(db, p, 'EXPIRED')
         return True
 
@@ -164,14 +181,23 @@ def begin_dispatch(db, tenant, rid, clock):
         p = permit(db, tenant, rid)
         if p['state'] != 'HELD':
             return False
+
         r = one(db, 'SELECT * FROM replica WHERE id=?', (p['replica'],))
         rev = one(db, 'SELECT rev FROM control WHERE id=1')['rev']
-        if (now >= p['deadline'] or p['rev'] != rev or not r['ready']
-            or r['draining'] or r['epoch'] != p['epoch']):
+        if (
+            now >= p['deadline']
+            or p['rev'] != rev
+            or not r['ready']
+            or r['draining']
+            or r['epoch'] != p['epoch']
+        ):
             close_credit(db, p, 'EXPIRED')
             return False
-        db.execute("UPDATE permit SET state='DISPATCHING' WHERE tenant=? AND rid=?",
-                   (tenant, rid))
+
+        db.execute(
+            "UPDATE permit SET state='DISPATCHING' WHERE tenant=? AND rid=?",
+            (tenant, rid)
+        )
         return True  # Only this successful caller may send once.
 
 
@@ -180,12 +206,20 @@ def consume(db, tenant, rid, worker, epoch, bundle, clock):
         now = clock()
         p = permit(db, tenant, rid)
         r = one(db, 'SELECT * FROM replica WHERE id=?', (worker,))
-        if (p['state'] != 'DISPATCHING' or now >= p['deadline']
+        if (
+            p['state'] != 'DISPATCHING'
+            or now >= p['deadline']
             or (worker, epoch, bundle) != (p['replica'], p['epoch'], p['bundle'])
-            or r['epoch'] != epoch or r['bundle'] != bundle or not r['ready']):
+            or r['epoch'] != epoch
+            or r['bundle'] != bundle
+            or not r['ready']
+        ):
             return False
-        db.execute("UPDATE permit SET state='RUNNING' WHERE tenant=? AND rid=?",
-                   (tenant, rid))
+
+        db.execute(
+            "UPDATE permit SET state='RUNNING' WHERE tenant=? AND rid=?",
+            (tenant, rid)
+        )
         return True  # Only this successful caller may enqueue GPU work once.
 # END launch
 
@@ -204,36 +238,52 @@ def release(db, tenant, rid, worker, epoch):
         p = permit(db, tenant, rid)
         if p['state'] != 'RETIRING' or (worker, epoch) != (p['replica'], p['epoch']):
             return False
+
         close_credit(db, p, 'RELEASED')
         return True
 
 
 # BEGIN publish
-def publish(db, key, expected_rev, weights, endpoints, expires, actor,
-            fail_before_audit=False):
+def publish(
+    db, key, expected_rev, weights, endpoints, expires, actor,
+    fail_before_audit=False
+):
     payload = encoded({'weights': weights, 'endpoints': endpoints})
     fp = encoded([expected_rev, payload, expires, actor])
+
     with write_tx(db):
         old = db.execute('SELECT * FROM publication WHERE key=?', (key,)).fetchone()
         if old:
             if old['fingerprint'] != fp:
                 raise Refused('publication key conflict')
             return old['rev']
+
         c = one(db, 'SELECT * FROM control WHERE id=1')
-        if c['rev'] != expected_rev or not weights or any(type(w) is not int or w <= 0 for w in weights.values()):
+        if (
+            c['rev'] != expected_rev
+            or not weights
+            or any(type(w) is not int or w <= 0 for w in weights.values())
+        ):
             raise Refused('revision or weights')
+
         seen = set()
         for identity, epoch, bundle, profile in endpoints:
             r = one(db, 'SELECT * FROM replica WHERE id=?', (identity,))
-            m = json.loads(one(db, 'SELECT manifest FROM bundle WHERE hash=?',
-                               (bundle,))['manifest'])
-            if (not r['ready'] or r['draining'] or bundle not in weights
+            m = json.loads(one(
+                db, 'SELECT manifest FROM bundle WHERE hash=?', (bundle,)
+            )['manifest'])
+            if (
+                not r['ready']
+                or r['draining']
+                or bundle not in weights
                 or (r['epoch'], r['bundle'], r['profile']) != (epoch, bundle, profile)
-                or (m['api'], m['state']) != (c['api'], c['state_schema'])):
+                or (m['api'], m['state']) != (c['api'], c['state_schema'])
+            ):
                 raise Refused('unready or incompatible bundle')
             seen.add(bundle)
         if seen != set(weights):
             raise Refused('missing endpoint')
+
         rev = expected_rev + 1
         db.execute('INSERT INTO snapshot VALUES(?,?,?)', (rev, payload, expires))
         db.execute('UPDATE control SET rev=? WHERE id=1 AND rev=?', (rev, expected_rev))
@@ -251,9 +301,11 @@ def begin_drain(db, worker):
         s = one(db, 'SELECT payload FROM snapshot WHERE rev=?', (rev,))
         if any(e[0] == worker for e in json.loads(s['payload'])['endpoints']):
             raise Refused('still routed')
+
         db.execute('UPDATE replica SET draining=1 WHERE id=?', (worker,))
-        held = db.execute("SELECT * FROM permit WHERE replica=? AND state='HELD'",
-                          (worker,)).fetchall()
+        held = db.execute(
+            "SELECT * FROM permit WHERE replica=? AND state='HELD'", (worker,)
+        ).fetchall()
         for p in held:
             close_credit(db, p, 'EXPIRED')
 

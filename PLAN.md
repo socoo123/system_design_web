@@ -1,240 +1,243 @@
-# 系统设计面试学习站 · 45 章中文文案整理计划
+# 系统设计面试学习站 · 示例代码排版整理计划
 
-> **唯一执行计划与进度。清空上下文后，先读 `AGENTS.md` 和本文件 §0，再读当前批次。不要根据聊天记录推测进度。**
-> 本轮以用户认可的 Ch01 为样板，只整理中文文案。默认每批 5 章、5 个编写 agent，完成后交叉复核。
-> 旧计划原样归档：[上一轮执行计划](./PLAN.archive-2026-10-25.md)、[更早的计划](./PLAN.archive-2026-10-22.md)。旧计划中的完成状态不代表本轮文案已经整理。
+> 唯一执行计划与进度。清空上下文后先读 `AGENTS.md` 和本文件 §0，再读 §2–§5；聊天记录不作为进度依据。
+> **全站示例代码排版已验收45/45：Ch39样板及第1–11批全部完成，最后第11批Ch42–Ch45已收口，全部任务锁释放。** 本轮到此停止；提交、推送或部署须另行明确授权。
+> 已完成的中文文案计划原样归档于 [PLAN.archive-2026-10-29.md](./PLAN.archive-2026-10-29.md)，此前技术计划见 2026-10-25、2026-10-22 两份归档。历史完成状态不代表本轮代码排版已完成。
 
-## 0. 当前状态、续接位置与启动方式
+## 0. 当前状态与续接位置
 
-更新时间：**2026-10-27**。
+更新时间：**2026-11-03**。
 
 | 项目 | 当前记录 |
 |---|---|
-| 本轮目标 | 把 45 章中文整理成自然、连贯、能顺着读懂的讲解，图和代码保持原样 |
-| 当前阶段 | **第9批 Ch42–Ch45 已验收4/4，全轮45/45已完成**；中文表达与术语回看完成，本次收口停止 |
-| 已完成 | **45/45：Ch01–Ch45**。仅独立复核与主代理验收通过的章节计入 |
-| 待完成 | **0/45**；全部章节完成，逐章状态见§3 |
-| 当前未完成批次 | 无。第9批四章均经轮换独立只读复核和主代理验收；Ch44唯一中文术语建议已关闭，全轮中文表达与术语回看完成 |
-| 下次从哪里开始 | **本轮中文文案已完成，无下一批。等待用户新的明确指令；不自动启动另列返修、Q/F04或提交发布** |
-| 任务锁 | 无活动写锁或只读复核任务。四位作者、四项轮换复核及Ch44实际术语修改确认均已交接，全部gpt-6.1-sol + max；主代理验收与收口记录完成 |
-| 本轮提交状态 | 第1–6批及此前授权窄修已推送（代码b2101fc，记录f1c273b）；第7–9批 Ch32–Ch45、计划与验收记录已提交本地 Git；本次未推送或部署 |
-| 历史成果 | 此前技术重构 C 已完成 42/42，并已发布；全站 Q 复核及 F04 窄屏公共导航问题仍未开展，不属于本轮文案任务 |
+| 目标 | 改善章节示例代码的缩进、换行、分段与结构可读性，保持行为与讲解含义 |
+| 当前阶段 | **第11批Ch42–Ch45已验收并收口，全站完成**；四份最终hash独立PASS已正式接收 |
+| 已验收 | **45/45：Ch01–Ch45**；旧轮中文文案45/45单独保留 |
+| 待完成 | **0/45**；本轮无下一批 |
+| 当前任务 | 本轮结束：25hash/16同源、主验证/27class原字节/语义/结构、48浏览器组合/44截图实看清理、四独立PASS及最终范围封存通过；所有作者/复核已交接 |
+| 下次从哪里开始 | **停止，不再重开排版或中文润色**；见[第11批记录](./docs/reviews/code-format-batch-11.md)。其他任务或发布等待另行明确授权 |
+| 任务锁 | **全部释放**；无作者写锁、活动只读复核或共享记录维护锁，四原子会话及临时恢复主均succeeded/idle |
+| 授权 | 用户明确执行最后第11批Ch42–Ch45，允许嵌套四linked child，全员Sol/max；不提交、推送、部署，验收交接清锁后停止 |
+| 工作区基线 | 执行前已有Ch01–Ch41、入口与历史记录改动全部保留；Ch42–45原无改动，基线已备份，见下文 |
+| 提交状态 | 本轮尚未提交、推送或部署 |
 
-**样板与证据：** [Ch01 页面](./chapters/ch01.html)、[中文润色验收记录](./docs/reviews/ch01-prose-2026-10-24.md)、[检查证据](./docs/reviews/ch01-prose-2026-10-24-checks.json)。认可版本对应代码提交 [`e4dd5ab`](https://github.com/socoo123/system_design_web/commit/e4dd5ab48838de8cfb96c866b3df392a7652a607)。后续 agent 必须实际阅读样板，不依赖此前聊天记忆。
+样板基线：`/private/var/folders/5k/y6qh6sfd2g30js0v0qrv4mfr0000gn/T/opencode/code-format-ch39-5tvy1tej`。执行前 HEAD 为 `fd61a122399c786edc8b169e8f62d5c8ec829de4`；`baseline.json` 保存 HEAD、工作区状态和 2,543 个已有文件的 SHA-256，另备份原计划、入口、Ch39 页面及四个示例目录文件。临时基线失效时，先根据记录、Git 和当前工作区恢复证据，不能直接还原用户改动。
 
-### 0.1 清空上下文后的恢复规则
+第1批基线：`/private/var/folders/5k/y6qh6sfd2g30js0v0qrv4mfr0000gn/T/opencode/code-format-batch-01-kygy0bvy`。HEAD 同上；`baseline.json` 保存执行前状态、2,545个已有文件 SHA-256、四章页面去除代码内容后的哈希；`files/` 备份本批文件、原 PLAN/AGENTS 及原有 Ch04 测试结果。
 
-1. 读 `AGENTS.md`、本节、§2 写法和 §3 当前批次；再读 Ch01 样板及当前章节。
-2. **先恢复未完成工作。** 如果已有编写、待复核或返修中的章节，先核对文件与任务锁，从该章继续；旧锁不能直接当作 agent 仍在运行，应先确认实际状态再更新。
-3. 如果没有未完成批次，按 §3 找最早尚未全部验收的批次。只有经过独立复核的章才能标为“已完成”；不能因旧计划曾验收技术内容而跳过本轮文案。
-4. 主代理每完成一章或一次交接，都更新 §3 状态、任务锁及本节的完成总数、当前批次和下一步。部分完成时逐章记，不能把整批一起提前标为完成。
-5. 单批验收后清锁，记录下一批范围，结束本轮执行。用户明确要求连续执行时才接着推进，不重复询问已授权的动作。
+第2批基线：`/private/var/folders/5k/y6qh6sfd2g30js0v0qrv4mfr0000gn/T/opencode/code-format-batch-02-ls6x2ebc`。HEAD同上；`baseline.json` 保存执行前状态、2,546个已有文件SHA-256、四页受保护部分哈希；`files/` 备份四章全部维护文件、页面与既有计划/记录。保留前批全部未提交改动。
 
-| 章节 | 负责人 / 模型 | 独占文件 | 任务状态 | 下一步 / 复核者 | 证据 |
-|---|---|---|---|---|---|
-| Ch42 | writer_ch42 / gpt-6.1-sol + max | `chapters/ch42.html` | 已完成 | writer_ch45整章独立PASS；最终2de814a1…的18个真实视口、7张画面和静态/同源/范围通过 | [第9批记录](./docs/reviews/prose-batch-09.md) |
-| Ch43 | writer_ch43 / gpt-6.1-sol + max | `chapters/ch43.html` | 已完成 | writer_ch42整章独立PASS；当前cf155392…的18个浏览器组合、7张实际画面及保护/范围检查通过 | [第9批记录](./docs/reviews/prose-batch-09.md) |
-| Ch44 | writer_ch44 / gpt-6.1-sol + max | `chapters/ch44.html` | 已完成 | writer_ch43整章及实际术语替换PASS；最终1e571702…的18个浏览器组合、9张画面和静态/范围通过 | [第9批记录](./docs/reviews/prose-batch-09.md) |
-| Ch45 | writer_ch45 / gpt-6.1-sol + max | `chapters/ch45.html` | 已完成 | writer_ch44整章独立PASS；最终d28ba03d…的18个真实视口、7张画面和静态/同源/范围通过 | [第9批记录](./docs/reviews/prose-batch-09.md) |
+第3批基线：`/private/var/folders/5k/y6qh6sfd2g30js0v0qrv4mfr0000gn/T/opencode/code-format-batch-03-44a1tuqt`。HEAD同上；`baseline.json` 保存执行前状态、2,547个已有文件SHA-256、四页代码外HTML哈希；`files/`备份四章完整示例目录、页面、PLAN/AGENTS及已有排版记录。实际主代理 `ses_e77fee873ffe66XPhI2Ohdz661` 为 `openai/gpt-6.1-sol#max`，外层仅路由，不实施/复核/写共享记录。
 
-第 1 批基线：`/var/folders/5k/y6qh6sfd2g30js0v0qrv4mfr0000gn/T/prose-batch-01-20261025-4cxieacv`，其中 `baseline.json` 保存执行前 HEAD、工作区状态和 2,525 个已有文件的哈希，并备份 Ch01–Ch06、入口与计划。工作区原有 `AGENTS.md`、`PLAN.md` 修改和未跟踪的 `PLAN.archive-2026-10-25.md` 均保留。若临时目录不可用，应按记录核对现有改动，不能直接还原工作区。
+第4批基线：`/private/var/folders/5k/y6qh6sfd2g30js0v0qrv4mfr0000gn/T/opencode/code-format-batch-04-u9yo2imh`。HEAD同上；`baseline.json`保存执行前状态、2,548个已有文件SHA-256与四页代码外HTML哈希，`files/`备份44个本批/共享记录文件。实际主代理 `ses_e77dd669dffe16mxIzJDFqhq2Y` 已由会话API确认 `openai/gpt-6.1-sol#max`；外层仅路由，不实施/复核/写共享记录。
 
-第 2 批基线：`/var/folders/5k/y6qh6sfd2g30js0v0qrv4mfr0000gn/T/prose-batch-02-20261025-jqti10l5`，`baseline.json` 保存执行前 HEAD、工作区状态和 2,527 个已有文件的哈希，并备份 Ch01、Ch07–Ch11、入口与计划。上一批尚未提交改动全部保留。
+第5批基线：`/private/var/folders/5k/y6qh6sfd2g30js0v0qrv4mfr0000gn/T/opencode/code-format-batch-05-tjqzwkmp`。HEAD同上，main ahead 1；`baseline.json`保存2,549个已有文件SHA-256、原状态及四页代码外HTML哈希，`files/`备份49个本批/共享文件。实际主代理 `ses_e75ad27d6ffenb0CLB36eT9sXK` 经API确认 `openai/gpt-6.1-sol#max`；外层仅路由。四作者linked child精确模型/max已核验，上一批会话均succeeded/idle。
 
-第 3 批基线：`/var/folders/5k/y6qh6sfd2g30js0v0qrv4mfr0000gn/T/prose-batch-03-20261025-enjcgr22`，`baseline.json` 保存执行前 HEAD、工作区状态和 5,687 个已有文件的哈希，并备份 Ch01、Ch12–Ch16、入口与计划。前两批及原有本地改动全部保留。执行与续接记录见[第 3 批记录](./docs/reviews/prose-batch-03.md)。
+第6批基线：`/private/var/folders/5k/y6qh6sfd2g30js0v0qrv4mfr0000gn/T/opencode/code-format-batch-06-_s4t20nj`。HEAD同上，main ahead 1；`baseline.json`保存2,550个Git可见已有文件SHA-256、原状态和四页代码外HTML哈希，`files/`备份59个本批/共享文件。完整文件系统另封存12,619个受保护文件/符号链接（含忽略目录，不含.git与本批允许范围）。实际主代理 `ses_e68b56218ffetCzd9eOaMoHUSy` 经API确认 `openai/gpt-6.1-sol#max`，外层Astra仅路由，不实施/复核/写共享记录。前批四会话已核对succeeded/idle，无在办旧任务。
 
-**第 2 批另列返修已关闭（2026-10-25）：** 用户明确授权直接修复 Ch10 P1 与 Ch11 P2。Ch10 已在当前 Delivery 行锁内、预留 Attempt 和调用供应商前检查未知结果策略；禁止时不新增尝试、次数或调用，结果事务持久停止并保留 uncertain，DEFERRED 也不能绕过。独立复核补出的期限说明 P2 已同步中英和 README：按结果事务判定时是否到期选择 failed/expired，确认提交后才 ACK。Ch11 仅对齐 A7 英文、末帧 SVG desc 和预算标签中的三个 partial 条件，算法和图形布局保持。两位作者交换只读复核，均使用 gpt-6.1-sol + max；52 项 Ch10 契约检查、27 项独立检查、Ch11 原 16 项 Java 检查及三边界、最终两章 36 个浏览器组合通过。返修基线为 `/var/folders/5k/y6qh6sfd2g30js0v0qrv4mfr0000gn/T/prose-batch-02-repair-20261025-l_eiw2ed`，保存 2,529 个既有文件哈希及相关备份；完整关闭轨迹、最终哈希与保留范围见[本批记录](./docs/reviews/prose-batch-02.md)。这次授权限于上述两项，下批仍遵守 §1 中文范围。Ch08 非阻断 SVG 描述 b/b0 的 P3 继续另列，不在本次范围。
+第7批基线：`/private/var/folders/5k/y6qh6sfd2g30js0v0qrv4mfr0000gn/T/opencode/code-format-batch-07-1tcxdc4h`。HEAD同上，main ahead 1；`baseline.json`保存2,551个Git可见文件SHA-256、原状态和四页代码外HTML哈希，`files/`备份59个本批/共享文件，完整文件系统另封存12,620个受保护文件/符号链接。实际主代理 `ses_e68621b2affeQy0Ke7t06k8vbm` 经API确认 `openai/gpt-6.1-sol#max`；外层Astra仅路由。第6批四会话均已核对succeeded/idle，四新linked child精确模型/max及parent已确认。
 
-**第3批 Ch16授权窄修已关闭（2026-10-26）：** 用户明确选择方案1，已按审阅候选应用两处中英图外说明，保留图、代码和预算。恢复复核者writer_ch17独立确认实际文件 `72a99be8…`，18个Chrome真实视口组合及范围检查通过。原复核者writer_ch15不在当前任务树，因此由当前独立恢复复核者确认实际应用；完整证据见[第3批记录](./docs/reviews/prose-batch-03.md)。这次英文例外仅限Ch16；Ch18后续另获明确窄修授权，见第4批收口，其余仍按§1只改中文。
+第8批基线：`/private/var/folders/5k/y6qh6sfd2g30js0v0qrv4mfr0000gn/T/opencode/code-format-batch-08-j9QepHAI`。HEAD同上，main ahead 1；`baseline.json`保存2,552个Git可见文件SHA-256、原状态和四页代码外HTML哈希，`files/`备份265个本批/相关历史证据/共享文件，完整文件系统另封存12,636个受保护文件/符号链接。实际主代理 `ses_e681ae856ffec5AeNtFF2lz6K6` 经API确认 `openai/gpt-6.1-sol#max`；外层Astra仅路由。第7批四会话已核对succeeded/idle，四新linked child精确模型/max及parent已确认。
 
-第4批基线：`/var/folders/5k/y6qh6sfd2g30js0v0qrv4mfr0000gn/T/prose-batch-04-20261026-w_fjcmi2`，保存5,689个既有文件哈希、执行前HEAD与工作区状态，并备份Ch01、Ch17–Ch21、入口与计划。此前全部本地改动保留，Ch16授权窄修在此基线之前已验收。
+第9批基线：`/private/var/folders/5k/y6qh6sfd2g30js0v0qrv4mfr0000gn/T/opencode/code-format-batch-09-KxLeoNEr`。HEAD同上，main ahead 1；`baseline.json`保存2,553个Git可见文件SHA-256、原状态和四页代码外HTML哈希，`files/`备份236个本批/相关历史证据/共享文件，完整文件系统另封存12,642个受保护文件/符号链接。实际主代理 `ses_e631ee6c9ffeGHVuhezltOLFKK` 经API确认 `openai/gpt-6.1-sol#max`；外层Astra仅路由。第8批四会话已核实succeeded/idle，四新linked child精确模型/max、目录及parent已确认。
 
-**第4批收口（2026-10-26）：** 五位作者及五项交叉只读复核全部交接，Ch17–Ch21全部验收，累计21/45。Ch21四处中文澄清已由writer_ch20确认实际文件。用户随后明确授权Ch18三对中英及一条SVG可访问desc窄修，实际`8530425b…`与已审阅候选一致，writer_ch17确认两项原有P2均已关闭；图形、可见图字、代码、算法和预算不变。除本项明确例外，其余英文及图保持基线。Ch19分钟额度折算速率的原有非阻断P3继续另列、候选未应用。最终当前页面90个浏览器组合通过；Ch18另刷新18个新哈希组合并实际查看8张变更处画面。完整授权、精确七项替换、实际独立复核及保留范围见[第4批记录](./docs/reviews/prose-batch-04.md)。活动锁已清，Ch22–Ch26未开始，本次停止。
+第10批基线：`/private/var/folders/5k/y6qh6sfd2g30js0v0qrv4mfr0000gn/T/opencode/code-format-batch-10-nuL9mTi8`。HEAD同上，main ahead 1；`baseline.json`保存2,554个Git可见文件SHA-256、原状态及四页代码外HTML，`files/`备份319个本批/相关历史证据/共享文件，完整文件系统另封存12,637个受保护文件/符号链接。实际主代理`ses_e6143b40fffeK6VlVf4PbkKYrk`经API确认`openai/gpt-6.1-sol#max`；外层Astra仅路由，不实施/复核/写共享记录。第9批四会话已核实succeeded/idle；四新linked child精确模型/max、目录及parent已确认。
 
-Ch18授权返修基线：`/var/folders/5k/y6qh6sfd2g30js0v0qrv4mfr0000gn/T/prose-ch18-repair-20261026-a0bq3qph`，保存5,691个既有文件哈希与修复前章节、计划和第4批记录；本次既有文件仅Ch18、PLAN及两份本批记录改变，其他44章与共享文件保持原有哈希。此项授权仅限Ch18七项已审阅替换，后续批次继续遵守§1。
+第11批基线：`/private/var/folders/5k/y6qh6sfd2g30js0v0qrv4mfr0000gn/T/opencode/code-format-batch-11-h21vqZmH`。HEAD同上，main ahead 1；`baseline.json`保存2,555个Git可见文件SHA-256、原状态与四页代码外HTML哈希，`files/`备份245个本批/相关历史证据/共享文件，完整文件系统另封存12,641个受保护文件/符号链接。实际主代理`ses_e612821f2ffeD918KdlwJYNWmr`因服务超时中断，Sol/max恢复主`ses_e5e79d94effeom6ICsoDKGNAGA`仅恢复原四子、接续证据；原主回归后经明确交接及恢复主idle核对接回唯一维护权，完成最终接收与收口。全部模型/max由API确认，原parent不变，无第二套作者团队、无共享记录并写；见`original-main-return-handoff.md`。
 
-第5批基线（2026-10-26）：`/var/folders/5k/y6qh6sfd2g30js0v0qrv4mfr0000gn/T/prose-batch-05-20261026-5l1ysaja`，保存12,645个既有文件哈希、执行前HEAD与工作区状态，备份Ch01、Ch22–Ch26、入口与计划。Ch01与认可提交逐字节一致；前四批及原有改动全部保留。执行与交接见[第5批记录](./docs/reviews/prose-batch-05.md)。
+### 0.1 任务锁与交接
 
-**第5批收口（2026-10-26）：** Ch22–Ch26全部验收，本批5/5，累计26/45。五位作者按3＋2分段、五项轮换只读复核与三章中文窄修实际确认均已交接，全部gpt-6.1-sol + max。Ch24一句代码类型概括P3、Ch25尝试耗尽条件P2与代码方位词P3、Ch22原有闪卡事务边界P3均已关闭；精确替换及原复核者实际新哈希确认见[第5批记录](./docs/reviews/prose-batch-05.md)和[检查JSON](./docs/reviews/prose-batch-05-checks.json)。Ch24“511 GB上界”原有中英文口径P3最初另列，后获用户授权同步修正并关闭，见下文。除这句明确授权的英文例外，其余英文、30组153帧SVG、30段代码及全部保护项与基线一致；当前页面90个浏览器组合通过，其中Ch24授权窄修后刷新18个新哈希组合，累计50张实际查看画面已清理。其他40章、图源、示例与共享代码保持原哈希，既有本地改动保留。活动锁已清；下一批第6批Ch27–Ch31未开始，本次停止。未提交、推送或部署。
-
-第6批基线（2026-10-26）：`/var/folders/5k/y6qh6sfd2g30js0v0qrv4mfr0000gn/T/prose-batch-06-20261026-5t9pcwui`，保存12,647个既有文件哈希、执行前HEAD与工作区状态，备份Ch01、Ch27–Ch31、入口与计划。Ch01与认可提交逐字节一致；前五批及原有本地改动全部保留。执行与交接见[第6批记录](./docs/reviews/prose-batch-06.md)。
-
-**第6批收口（2026-10-26）：** Ch27–Ch31全部验收，本批5/5，累计31/45。五位作者按3＋2分段、五项轮换只读复核均已交接，全部gpt-6.1-sol + max。Ch27原有D2F5容量前提P2获用户仅该对中英图外图注的明确授权，原作者精确应用，writer_ch31确认实际新哈希`b5a3c47a…`关闭；图、代码与其他英文不变。Ch30原有英文“Try at most eight spans”非阻断P3继续另列，未扩大修改。当前90个浏览器组合及静态/同源/范围检查通过，Ch27授权前后共108个组合；39张实际画面看完清理。其他40章、图源、示例及共享代码保持基线，既有本地改动保留。完整交接、问题关闭及检查见[第6批记录](./docs/reviews/prose-batch-06.md)与[检查JSON](./docs/reviews/prose-batch-06-checks.json)。活动锁已清；下一批第7批Ch32–Ch36未开始，本次停止。未提交、推送或部署。
-
-第7批基线（2026-10-27）：`/var/folders/5k/y6qh6sfd2g30js0v0qrv4mfr0000gn/T/prose-batch-07-20261027-4f4_bz6t`，保存5,693个既有文件哈希、执行前HEAD与工作区状态，备份Ch01、Ch32–Ch36、入口和计划。执行前工作区干净，Ch01与认可提交逐字节一致；第1–6批已提交成果保留。执行与交接见[第7批记录](./docs/reviews/prose-batch-07.md)。
-
-**第7批收口（2026-10-27）：** Ch32–Ch36 全部验收，本批 5/5，累计 36/45。五位作者按实际并发上限分段派发，五项轮换只读复核全部交接，均使用 gpt-6.1-sol + max。Ch34 原有跨章批准期限的适配说明 P3 经两处中文澄清关闭，writer_ch33 已确认实际新哈希 984662aa…；没有改变任一示例的凭据起点、英文、图或代码。Ch36 原有英文运行命令 python 3 的非阻断 P3 继续另列，未应用修复。五章当前哈希 90 个真实浏览器组合、19 段源码同源及结构/范围检查通过；Ch34 澄清前后累计 108 个组合，45 个已查看画面版本已清理。其他 40 章、全部图源、示例与共享代码保持基线。完整交接、问题处理与证据见[第7批记录](./docs/reviews/prose-batch-07.md)及[检查JSON](./docs/reviews/prose-batch-07-checks.json)。活动锁已清；下一批第8批 Ch37–Ch41 尚未开始，本次停止。第7批未提交、推送或部署。
-
-第8批基线（2026-10-27）：`/var/folders/5k/y6qh6sfd2g30js0v0qrv4mfr0000gn/T/prose-batch-08-20261027-7kl6dbuk`，保存5,695个既有文件哈希、执行前HEAD与工作区状态，备份Ch01、Ch37–Ch41、入口与计划。第7批本地改动全部保留；Ch01与认可提交逐字节一致。执行与交接见[第8批记录](./docs/reviews/prose-batch-08.md)。
-
-**第8批恢复核对（2026-10-27，本批仍4/5）：** 本次明确执行指令先恢复Ch41，未重开已完成的五章编写，也未启动第9批。恢复基线`/var/folders/5k/y6qh6sfd2g30js0v0qrv4mfr0000gn/T/prose-batch-08-recovery-20261027-b38cjojn`保存5,697个既有文件哈希及相关备份。五章当前哈希均匹配原验收记录，Ch01仍与认可提交一致；全站结构、本批五章审计、17段代码同源及范围检查重新通过，既有90个真实浏览器组合的来源哈希与当前文件精确匹配，本次复用且未重跑浏览器。恢复作者与独立只读复核者均已交接：中文无需追加修改，R1已关闭、仅R2仍阻断；候选只改一个SVG文字节点，未应用、未签发Ch41 PASS。用户本轮再次要求保留图与英文，因此未将通用执行指令视为SVG范围授权；已单独呈现原句、精确候选与故障影响，仍待明确回复。章节和既有本地改动未变；当前无活动写锁，累计仍40/45。未提交、推送或部署。
-
-第9批基线（2026-10-27）：`/var/folders/5k/y6qh6sfd2g30js0v0qrv4mfr0000gn/T/prose-batch-09-20261027-k3sj74u1`，保存5,697个既有文件哈希、执行前HEAD与工作区状态，备份Ch01、Ch42–Ch45、入口和计划。Ch01与认可提交逐字节一致，Ch37–Ch41均匹配第8批最终验收哈希；第7、8批及原有本地改动全部保留。执行与交接见[第9批记录](./docs/reviews/prose-batch-09.md)。
-
-**第9批与全轮收口（2026-10-27）：** Ch42–Ch45全部验收，本批4/4，累计45/45。最后仅四章，按计划以3＋1安排四位作者，再由writer_ch45→Ch42、writer_ch42→Ch43、writer_ch43→Ch44、writer_ch44→Ch45轮换只读复核，全部gpt-6.1-sol + max，均已交接。Ch44指向Ch42的一处“舱壁”统一为“隔离舱”，原作者精确应用为1e571702…，原复核者确认逆转恢复9c50…、P3关闭；未动英文、图或代码。四章最终哈希的72个真实Chrome组合、全站结构、本批审计、16段源码同源及范围检查通过；Ch44修改前后累计90个组合。30张实际查看画面的证据已记录，其中Ch44新哈希7张PNG与已查看版本逐字节一致后复用，另实看桌面和320px修改处两张；全部临时PNG已清理。150帧SVG、16段pre、756个英文块及全部保护项保持基线；仅中文语言块及Ch42中文页面title文字改变。其他41章、图源、示例、共享代码与第7、8批既有本地改动均保留。全轮中文表达与术语回看已完成，Ch01匹配认可提交，Ch02–Ch41当前哈希对应既有独立复核证据；既有另列P3、Q及F04保持原状态，未扩大为事实、图形或公共UI复验。完整交接、最终哈希与检查见[第9批记录](./docs/reviews/prose-batch-09.md)和[检查JSON](./docs/reviews/prose-batch-09-checks.json)。任务锁已清，本轮无下一批，本次停止。未提交、推送或部署。
-
-主代理独占维护本文件与共享记录。子 agent 只写分配的章；复核者只读，不直接改作者文件。
-
-**Ch41授权窄修与第8批收口（2026-10-27）：** 用户明确回复“授权 改吧 ch41”，仅授权此前呈现的d7s5页脚一句。writer_ch41精确将`cursor after broker ACK; inbox after effect COMMIT`改为`cursor after broker ACK; consumer ACK after inbox + effect COMMIT`，实际SHA-256为7a097cc6d3ebe645509882b166b948da8a5498cbd6869d311163f19c252e7835，与已审候选逐字节一致；逆转这一句恰好恢复dc438f18…。writer_ch40独立确认实际文件R1/R2全部关闭。两者均gpt-6.1-sol + max。全站结构、本批五章审计、17段代码同源及范围检查通过；Ch41新哈希18个真实Chrome组合通过，主代理另实看修改处8张桌面与320px画面。当前五章90个浏览器组合均匹配最终哈希；全部临时PNG查看后清理。修复基线`/var/folders/5k/y6qh6sfd2g30js0v0qrv4mfr0000gn/T/prose-ch41-svg-repair-20261027-jo9aaoiy`保存5,697个既有文件哈希及备份，本次仅Ch41、PLAN与第8批两份记录改变，其他44章及原有本地改动保留。第8批5/5，累计41/45，任务锁清空；下一批Ch42–Ch45未开始，本次停止。此项SVG例外仅限本句，后续继续按§1保留图、代码和英文。完整证据见[第8批记录](./docs/reviews/prose-batch-08.md)与[检查JSON](./docs/reviews/prose-batch-08-checks.json)。未提交、推送或部署。
-
-**Ch24授权窄修已关闭（2026-10-26）：** 用户引用第5批另列的511 GB口径问题后要求“你直接改了”。已精确替换该处中文和英文两句，将“上界/bounds”同步改为按平均投递次数估算；保留365天假设、全部数字、算式、图、代码和其他英文。作者ch24_budget_writer与独立只读复核者ch24_budget_review均为gpt-6.1-sol + max，已确认实际`e1140359107b…`恰好两句替换，逆转逐字节回到修前`8d2939a97ea0…`；P3关闭。全站结构检查、Ch24审计、8段代码同源、范围与diff检查通过，Ch24新哈希18个Chrome组合及修改处5张实际画面通过，临时截图已清理。基线`/var/folders/5k/y6qh6sfd2g30js0v0qrv4mfr0000gn/T/prose-ch24-repair-20261026-rzyqeyff`保存12,647个已有文件哈希与相关备份；本次仅Ch24、PLAN及第5批两份记录改变，其他44章与原有本地改动保留。完整授权、两句old/new、实际独立确认和检查见[第5批记录](./docs/reviews/prose-batch-05.md)。英文例外只限本句，下一批仍按§1执行。活动锁已清，累计26/45，Ch27–Ch31尚未开始，本次停止；未提交、推送或部署。
-
-**2026-10-27 GitHub 提交：** 用户明确授权将全部本地代码提交到 GitHub。49 个文件已随代码提交 `b2101fc` 推送至既有仓库 `main`，GitHub API 返回的远端 SHA 与本地代码提交完全一致。提交前重新通过全站结构检查、Ch02–Ch31 共 30 章审计、Ch10 的 52 项既有检查及 `git diff --check`；30 章实际 SHA-256 均匹配各批最终验收证据，Ch01 仍与认可提交一致，Ch32–Ch45 未改变。沿用匹配这些哈希的既有浏览器验收，本次未重跑浏览器矩阵。各批记录已追加提交结果，原先“未提交、推送或部署”的文字保留为批次收口时的历史状态。本次只核验 GitHub 推送，未核验 Pages 构建或线上发布；累计仍为 31/45，无活动锁，下一批 Ch32–Ch36 尚未开始。
-
-**2026-10-27 第7–9批本地 Git 提交：** 用户要求“帮我把代码提交下吧”，本次将已验收的 Ch32–Ch45、PLAN 与第7–9批六份记录，共21个文件提交到本地 `main`。14章实际 SHA-256 均匹配最终独立复核与验收证据；Ch01仍与认可提交一致，Ch02–Ch31未变，52段展示代码与维护源码同源且相对提交前HEAD不变。提交前重新通过全站结构、14章审计、相关同源检查及 `git diff --check`；沿用匹配最终哈希的既有浏览器验收，本次未重跑浏览器矩阵。此前获授权的Ch41单句SVG修复随本批一并提交，没有追加章节修改。各批“未提交”的旧记录及检查JSON保留为当时验收状态，当前提交结果以本段和各批追加记录为准。本次仅本地提交，未推送或部署；累计45/45，无活动锁、无下一批。
-
-### 0.2 用户指令与执行范围
-
-| 用户指令 | 执行动作 |
-|---|---|
-| 制定、讨论、调整计划 | 只更新计划与必要入口，不改章节、不派 agent |
-| 开始中文润色、文案下一波、重构下一波 | 按本节恢复位置和 §3 开始下一未完成批次，默认 5 章；本轮“重构”指中文文案整理 |
-| 点名修改某章或某几章 | 只处理指定范围，完成后同步逐章进度 |
-| 明确要求连续完成多批 | 按授权范围逐批实施、复核和收口，不在每批后重复索取相同确认 |
-| 提交到 GitHub、提交并部署 | 按 §6 执行授权范围，区分推送成功和上线验证 |
-
-用户新的明确指令优先于默认批次。单纯说“以后用 5 个 agent”不表示现在开始执行。
-
-## 1. 修改范围与保留内容
-
-本轮改善的是现有中文的讲解方式。保留已有技术方案、教学假设、计算结果与失败行为，不照搬 Ch01 的篇幅、四步结构或缓存案例。
-
-| 内容 | 本轮处理方式 |
-|---|---|
-| 中文标题、导读、正文、列表、表格 | 补齐主语、动作和因果，减少生硬省略与重复；数字可按中文习惯改写，实际数值、单位和口径不变 |
-| 中文图注、代码说明、折叠说明、闪卡 | 随正文一起润色，保留与图和代码的对应，同一概念使用一致叫法 |
-| 动态图、静态图、图源 | 全部原样保留，包括 SVG 内的文字、可访问描述、位置、连线、帧序和资源路径；不重画、不增删图 |
-| 页面代码与示例源码 | 全部原样保留；用中文把现有实现讲清楚，不补新代码或重构实现 |
-| 英文 | 纯中文措辞调整不重译英文；逐段确认技术含义对应，不派独立翻译波次 |
-| 页面结构与共享文件 | 保留语言块、布局、ID、链接和交互，不改 CSS/JS、导航、首页或其他章；允许在现有中文块内合理分段和调整强调 |
-
-如果发现原有技术错误，记录位置、影响和建议。需要改图、改代码或改变实质结论时，另列技术返修，不能借文案润色静默扩大范围。影响核心含义的问题未解决时，该章不能验收，其他章可继续。
-
-## 2. 中文写法：以 Ch01 为样板
-
-目标是让读者明白**谁在做什么、为什么这样做、结果如何、出故障怎么办**。写法遵循以下规则：
-
-1. **把话说完整。** 正文交代主体、动作和结果，避免整段都是白板速记。短句可用于强调，不必把所有句子都写长。
-2. **接上前因后果。** 先说明问题，再解释做法、依据和代价。自然使用“因为、所以、如果、此时”等关系，不把术语并排摆出来就算讲解。
-3. **中文能讲清的就用中文。** 使用“缓存未命中、回源限流、数据库超时”等表达；首次涉及图中的英文名称或代码标识时说明对应，后面保持稳定。保留 API、QPS、TTL、RAG 等必要缩写。
-4. **先解释业务，再对应标识。** 先说“同一笔付款尝试”“这次运行的持有者”，再对应 `attempt_id`、`owner`，不让英文变量代替业务说明。
-5. **关键条件不能丢。** 区分未知、超时、失败与不存在；保留成功响应的含义、全局与单机、原子边界、重试限制、有效期和故障前提。同时避免每一段都像警告清单。
-6. **数字按中文习惯表达。** 叙述中适合时用“864 万、200 万、5 万”；算式与精确阈值保留便于复算的形式。平均与峰值、预算与上限、单位和时间范围必须清楚。
-7. **让不同区域各尽其用。** 标题指出问题，正文讲过程与原因，表格便于比较，图注解释当前步骤，闪卡用自然问句考关键点，不到处粘贴同一段话。
-8. **读起来顺，不灌水。** 删去空泛开场和反复总结，不刻意卖萌或套口语，不把所有段落写成一种句式。不设字数、增减比例或固定改写数量。
-
-以下只是表达方向，不能当作全站搜索替换表：
-
-| 原写法 | 整理方向 |
-|---|---|
-| “每一步交付一个决定” | “每一步都要有明确的结论” |
-| “Store 权威，Cache 旁路” | “商品数据以数据库为准，缓存负责分担读取压力” |
-| “缓存宕机，gate 拒绝” | “缓存不可用，回源请求没有获准，因此直接返回 503” |
-| “旧读迟到、复制续 TTL” | 说明查询结果可能迟到，回填时重新计时会延长旧数据的寿命 |
-| “上下文定词义与事实主人” | 说明业务词在不同上下文中的含义，以及由哪个服务保存和确认这项事实 |
-
-不同类型的章节保留自己的讲解方式：方法与估算章讲思考步骤和计算依据；机制章沿请求或状态变化解释；设计题围绕现有业务场景串起参与方与数据；AI 章节区分业务动作、模型调用、工具调用与运行状态；选型和建模章把抽象词落到具体约束与例子。各章不必有相同的小节数量或段落模板。
-
-## 3. 九批执行清单与逐章进度
-
-**状态只使用：待开始 → 编写中 → 待复核 → 返修中 / 已完成。** 九批均已验收；第9批Ch42–Ch45已完成4/4，累计45/45。全轮中文表达与术语回看完成，本次停止，无下一批。逐章交接、问题与验收证据见[第9批记录](./docs/reviews/prose-batch-09.md)。
-
-| 批次 | 章节 | 本章文字整理重点 | 状态 | 证据 |
+| 任务 | 负责人 / 模型 | 独占范围 | 状态 | 下一步 |
 |---|---|---|---|---|
-| 样板 | Ch01 世界地图与 4 步法 | 完整句子、因果关系、中文术语、图注与闪卡同步 | **已完成，用户认可** | [记录](./docs/reviews/ch01-prose-2026-10-24.md) |
-| 1 | Ch02 从零扩展到百万用户 | 先讲扩容原因，再讲组件与读写条件 | 已完成 | [本批记录](./docs/reviews/prose-batch-01.md) |
-| 1 | Ch03 粗略估算 | 假设、单位、推导与结论连贯解释 | 已完成 | [本批记录](./docs/reviews/prose-batch-01.md) |
-| 1 | Ch04 限流器 | 额度共享、判定过程与失败行为 | 已完成 | [本批记录](./docs/reviews/prose-batch-01.md) |
-| 1 | Ch05 一致性哈希 | 节点定位、成员变化与数据迁移 | 已完成 | [本批记录](./docs/reviews/prose-batch-01.md) |
-| 1 | Ch06 键值存储 | 读写、复制与冲突处理的主体和前提 | 已完成 | [本批记录](./docs/reviews/prose-batch-01.md) |
-| 2 | Ch07 分布式唯一 ID | 位布局、时间和序列的作用与边界 | 已完成 | [本批记录](./docs/reviews/prose-batch-02.md) |
-| 2 | Ch08 分布式锁 | 所有权、续约、过期与旧持有者 | 已完成 | [本批记录](./docs/reviews/prose-batch-02.md) |
-| 2 | Ch09 短链服务 | 创建、跳转与撤销的请求过程 | 已完成 | [本批记录](./docs/reviews/prose-batch-02.md) |
-| 2 | Ch10 通知系统 | 任务保存、投递、重试与失败状态 | 已完成 | [本批记录](./docs/reviews/prose-batch-02.md) |
-| 2 | Ch11 新闻 Feed | 推送、拉取与热点的选择依据 | 已完成 | [本批记录](./docs/reviews/prose-batch-02.md) |
-| 3 | Ch12 聊天系统 | 消息保存、确认、重发与离线同步 | 已完成 | [本批记录](./docs/reviews/prose-batch-03.md) |
-| 3 | Ch13 搜索系统 | 索引写入、查询与版本处理 | 已完成 | [本批记录](./docs/reviews/prose-batch-03.md) |
-| 3 | Ch14 视频系统 | 上传、转码、发布与播放的衔接 | 已完成 | [本批记录](./docs/reviews/prose-batch-03.md) |
-| 3 | Ch15 网盘 | 分块上传、版本冲突与提交完成 | 已完成 | [本批记录](./docs/reviews/prose-batch-03.md) |
-| 3 | Ch16 评论系统 | 回复关系、分页、删除与计数 | 已完成 | [本批记录](./docs/reviews/prose-batch-03.md) |
-| 4 | Ch17 API 网关 | 请求经过谁、预算由谁控制 | 已完成 | [本批记录](./docs/reviews/prose-batch-04.md) |
-| 4 | Ch18 电商订单 | 下单、库存、支付与恢复的责任 | 已完成 | [本批记录](./docs/reviews/prose-batch-04.md) |
-| 4 | Ch19 邻近服务 / LBS | 候选筛选、距离与位置时效 | 已完成 | [本批记录](./docs/reviews/prose-batch-04.md) |
-| 4 | Ch20 分布式消息队列 | 日志、确认、消费进度与重复处理 | 已完成 | [本批记录](./docs/reviews/prose-batch-04.md) |
-| 4 | Ch21 酒店预订与秒杀库存 | 预占、确认、释放及并发竞争 | 已完成 | [本批记录](./docs/reviews/prose-batch-04.md) |
-| 5 | Ch22 对象存储 | 数据与元数据、版本、提交与清理 | 已完成 | [本批记录](./docs/reviews/prose-batch-05.md) |
-| 5 | Ch23 游戏排行榜 | 更新、同分排序、排名与分页 | 已完成 | [本批记录](./docs/reviews/prose-batch-05.md) |
-| 5 | Ch24 支付系统 | 付款意图、尝试、资金效果与未知结果 | 已完成 | [本批记录](./docs/reviews/prose-batch-05.md) |
-| 5 | Ch25 任务调度 | 领取、租约代次、重试与业务幂等 | 已完成 | [本批记录](./docs/reviews/prose-batch-05.md) |
-| 5 | Ch26 红包系统 | 金额和份数、领取、入账与退款 | 已完成 | [本批记录](./docs/reviews/prose-batch-05.md) |
-| 6 | Ch27 即时配送 | 匹配、预占、接受与履约变化 | 已完成 | [本批记录](./docs/reviews/prose-batch-06.md) |
-| 6 | Ch28 配置中心 | 发布、监听、版本与断线恢复 | 已完成 | [本批记录](./docs/reviews/prose-batch-06.md) |
-| 6 | Ch29 LLM 推理服务 | 排队、调度、资源分配与取消 | 已完成 | [本批记录](./docs/reviews/prose-batch-06.md) |
-| 6 | Ch30 RAG 后端 | 摄取、检索、权限、证据与生成 | 已完成 | [本批记录](./docs/reviews/prose-batch-06.md) |
-| 6 | Ch31 向量检索服务 | 候选过滤、索引发布与缺片行为 | 已完成 | [本批记录](./docs/reviews/prose-batch-06.md) |
-| 7 | Ch32 LLM API 网关 | 路由、预算、计费与流式响应 | 已完成 | [本批记录](./docs/reviews/prose-batch-07.md) |
-| 7 | Ch33 Agent 工具平台 | 参数、授权、批准、调用与业务效果 | 已完成 | [本批记录](./docs/reviews/prose-batch-07.md) |
-| 7 | Ch34 Agent 编排与运行时 | 运行身份、持有者、暂停与恢复 | 已完成 | [本批记录](./docs/reviews/prose-batch-07.md) |
-| 7 | Ch35 大模型基础架构 | 部署、资源、版本发布与故障域 | 已完成 | [本批记录](./docs/reviews/prose-batch-07.md) |
-| 7 | Ch36 CAP / PACELC / SLO | 约束成立的条件、操作取舍与目标 | 已完成 | [本批记录](./docs/reviews/prose-batch-07.md) |
-| 8 | Ch37 存储选型 | 从访问需求解释数据结构与代价 | 已完成 | [本批记录](./docs/reviews/prose-batch-08.md) |
-| 8 | Ch38 缓存与 CDN | 多级读取、回源、版本与有效期 | 已完成 | [本批记录](./docs/reviews/prose-batch-08.md) |
-| 8 | Ch39 负载均衡与无状态 | 请求分配、健康检查与实例排空 | 已完成 | [本批记录](./docs/reviews/prose-batch-08.md) |
-| 8 | Ch40 协议选型 | 连接、推送、重连、游标与背压 | 已完成 | [本批记录](./docs/reviews/prose-batch-08.md) |
-| 8 | Ch41 复制、分片、事务 | 各层解决什么问题、保证在哪里成立 | 已完成 | [本批记录](./docs/reviews/prose-batch-08.md) |
-| 9 | Ch42 理解消息、弹性与容器 | 异步、退避、背压与服务生命周期 | 已完成 | [本批记录](./docs/reviews/prose-batch-09.md) |
-| 9 | Ch43 超大规模数据 | 分治、布局、归并与分区处理 | 已完成 | [本批记录](./docs/reviews/prose-batch-09.md) |
-| 9 | Ch44 微服务与服务治理 | 服务责任、调用预算、熔断与重试 | 已完成 | [本批记录](./docs/reviews/prose-batch-09.md) |
-| 9 | Ch45 DDD 与领域建模 | 上下文、聚合、提交条件与领域事件 | 已完成 | [本批记录](./docs/reviews/prose-batch-09.md) |
+| Ch39 样板编写 | format_ch39_writer / `ses_e7ad3c1bcffej3qg3ekO4YxDz8` / gpt-6.1-sol + max | 无活动写锁 | 已交接 | 最终39项测试及3/3同源检查通过 |
+| 独立复核 | format_ch39_reviewer / `ses_e7ad0163cffeRwDkEEAKL8NM5R` / gpt-6.1-sol + max | 只读任务已结束 | PASS，已交接 | 最终两版8个class逐字节一致，语义与范围通过，无阻断项 |
+| 样板计划与记录 | 主 agent | 无活动维护锁 | 样板已收口 | 最终12个浏览器组合、8张实看画面与范围检查通过；后续见第1批记录 |
+| 第1批 Ch01 作者 A / 复核 | `ses_e78a69d3affeJXQLxKwRdYvYRu` / gpt-6.1-sol + max | 无活动写锁或复核任务 | 作者已交接；Ch02最终复核PASS并交接 | 新页面hash精确确认，首轮排版返修项已关闭；本批结束 |
+| 第1批 Ch02 作者 B / 复核 | `ses_e78a69d3affdc40ypC3wdxflBG` / gpt-6.1-sol + max | 无写锁或复核任务 | Ch02返修已交接；审Ch03 PASS已交接 | 仅2行拆4行，Java未变；本批结束 |
+| 第1批 Ch03 作者 C / 复核 | `ses_e78a69d39ffeKYaJSPvg6RYlBw` / gpt-6.1-sol + max | 无活动写锁或复核任务 | 作者已交接；审Ch04 PASS已交接 | 3文件hash、Lua346token、PythonAST及Redis7/7确认；本批结束 |
+| 第1批 Ch04 作者 D / 复核 | `ses_e78a69d3affcH0bFmFIC36eb1M` / gpt-6.1-sol + max | 无写锁或复核任务 | Ch04作者已交接；审Ch01 PASS已交接 | 最终3文件hash、674个非布局token及AST确认；本批结束 |
+| 第1批 计划与验收 | `ses_e78a7fa15ffe2gQOc85mHp2Ioo` / gpt-6.1-sol + max | 无活动维护锁 | 已验收并收口 | 最终48个浏览器组合、40张实际read后清理截图、2,534个受保护文件检查通过；下一批Ch05–Ch08 |
+| 第2批 Ch05 作者 A / 复核 | `ses_e7857dd63ffesr9t9vUqWxAVX0` / gpt-6.1-sol + max | 无写锁或活动复核 | 作者及审Ch06最终PASS已交接，succeeded/idle | D对Ch05最终5hash PASS；本批结束 |
+| 第2批 Ch06 作者 B / 复核 | `ses_e7857dd62ffdSmHhMcdm9P00Gb` / gpt-6.1-sol + max | 无写锁或活动复核 | 作者及审Ch07最终PASS已交接，succeeded/idle | A对Ch06最终5hash PASS；本批结束 |
+| 第2批 Ch07 作者 C / 复核 | `ses_e7857dd63ffd8Ydfq6eRGb453K` / gpt-6.1-sol + max | 无写锁或活动复核 | 作者及审Ch08最终PASS已交接，succeeded/idle | B对Ch07最终5hash PASS；本批结束 |
+| 第2批 Ch08 作者 D / 复核 | `ses_e7857dd62ffep96i38BlekybnR` / gpt-6.1-sol + max | 无写锁或活动复核 | 作者及审Ch05最终PASS已交接，succeeded/idle | C对Ch08最终10hash PASS（含未改release）；本批结束 |
+| 第2批 计划与验收 | `ses_e78591ea9ffe0l1cIGheDf5cR1` / gpt-6.1-sol + max | 无活动维护锁 | 全部验收并收口；25目标hash闭环、48浏览器组合、72张实看后清理截图及范围通过 | 累计9/45，下一批Ch09–Ch12，本次停止 |
+| 第3批 Ch09 作者 A / 复核 | `ses_e77fdbe6fffe32wdLkGj7vY4Qg` / gpt-6.1-sol + max | 无写锁或活动复核 | 作者及审Ch10最终PASS均已交接，succeeded/idle | D对Ch09最终6hash PASS；本批结束 |
+| 第3批 Ch10 作者 B / 复核 | `ses_e77fdbe6cffeIa6kbJddMGXpmc` / gpt-6.1-sol + max | 无写锁或活动复核 | 作者及审Ch11最终PASS均已交接，succeeded/idle | A对Ch10最终7hash PASS；本批结束 |
+| 第3批 Ch11 作者 C / 复核 | `ses_e77fdbe6effdsi8Ogg9uVZhZR0` / gpt-6.1-sol + max | 无写锁或活动复核 | 作者及审Ch12最终PASS均已交接，succeeded/idle | B对Ch11最终8hash PASS；本批结束 |
+| 第3批 Ch12 作者 D / 复核 | `ses_e77fdbe6effe6SBstQpqS44eJd` / gpt-6.1-sol + max | 无写锁或活动复核 | 作者及审Ch09最终PASS均已交接，succeeded/idle | C对Ch12最终8hash PASS；本批结束 |
+| 第3批 计划与验收 | `ses_e77fee873ffe66XPhI2Ohdz661` / gpt-6.1-sol + max | 无活动维护锁 | 全部验收并收口；29hash闭环、48浏览器组合、54张实看清理截图及2,517保护文件通过 | 累计13/45，下一批Ch13–Ch16，本次停止 |
+| 第4批 Ch13 作者 A / 复核 | `ses_e77dbb4b9ffeGBPO4ljs6RUQLj` / gpt-6.1-sol + max | 无写锁或活动复核 | 作者及审Ch14独立PASS均交接，succeeded/idle | D对Ch13最终6hash PASS；本批结束 |
+| 第4批 Ch14 作者 B / 复核 | `ses_e77dbb4b9ffc8zWgYH9fZE3YR6` / gpt-6.1-sol + max | 无写锁或活动复核 | 作者及审Ch15独立PASS均交接，succeeded/idle | A对Ch14最终7hash PASS；本批结束 |
+| 第4批 Ch15 作者 C / 复核 | `ses_e77dbb4baffe4UqF0RfZcEthMV` / gpt-6.1-sol + max | 无写锁或活动复核 | 作者及审Ch16独立PASS均交接，succeeded/idle | B对Ch15最终8hash PASS；本批结束 |
+| 第4批 Ch16 作者 D / 复核 | `ses_e77dbb4b9ffdgr0s1aIanQSISB` / gpt-6.1-sol + max | 无写锁或活动复核 | 作者及审Ch13独立PASS均交接，succeeded/idle | C对Ch16最终9hash PASS；本批结束 |
+| 第4批 计划与验收 | `ses_e77dd669dffe16mxIzJDFqhq2Y` / gpt-6.1-sol + max | 无活动维护锁 | 全部验收并收口；30hash闭环、48浏览器组合、48张实看清理截图及2,517保护文件通过 | 累计17/45，下一批Ch17–Ch20，本次停止 |
+| 第5批 Ch17 作者 A / 复核 | `ses_e75aaca36ffdC0SWD3nFYmb386` / gpt-6.1-sol + max | 无作者写锁或活动复核 | 作者及审Ch18独立PASS均已交接，succeeded/idle | D对Ch17最终7hash PASS及主代理验收通过；本批结束 |
+| 第5批 Ch18 作者 B / 复核 | `ses_e75aaca36ffeuTyMP4urepcKoi` / gpt-6.1-sol + max | 无作者写锁或活动复核 | 作者及审Ch19独立PASS均已交接，succeeded/idle | A对Ch18最终10hash PASS及主代理验收通过；本批结束 |
+| 第5批 Ch19 作者 C / 复核 | `ses_e75aaca39ffeX9C65OFwmGYvn4` / gpt-6.1-sol + max | 无作者写锁或活动复核 | 作者及审Ch20独立PASS均已交接，succeeded/idle | B对Ch19最终8hash PASS及主代理验收通过；本批结束 |
+| 第5批 Ch20 作者 D / 复核 | `ses_e75aaca34ffecQ3TXpZ3Ef1LfM` / gpt-6.1-sol + max | 无作者写锁或活动复核 | 作者及审Ch17独立PASS均已交接，succeeded/idle | C对Ch20最终10hash PASS及主代理验收通过；本批结束 |
+| 第5批 计划与验收 | `ses_e75ad27d6ffenb0CLB36eT9sXK` / gpt-6.1-sol + max | 无活动维护锁 | 已验收并收口；35hash/19原入口/33class/48组合/56实看截图及最终范围封存通过 | 累计21/45，下一批Ch21–Ch24，本次停止 |
+| 第6批 Ch21 作者 A / 复核 | `ses_e68b13532ffdi7Gm7On6XsM1aU` / gpt-6.1-sol + max | 无作者写锁或活动复核 | 作者及审Ch22独立PASS均已交接，succeeded/idle | D对Ch21最终12hash PASS及主代理验收通过；本批结束 |
+| 第6批 Ch22 作者 B / 复核 | `ses_e68b13532ffewKB1PQxCdOXvaR` / gpt-6.1-sol + max | 无作者写锁或活动复核 | 作者及审Ch23独立PASS均已交接，succeeded/idle | A对Ch22最终9hash PASS及主代理验收通过；run_java.py/sync原样 |
+| 第6批 Ch23 作者 C / 复核 | `ses_e68b13531ffe7dhbo7Cug5c1QT` / gpt-6.1-sol + max | 无作者写锁或活动复核 | 作者及审Ch24独立PASS均已交接，succeeded/idle | B对Ch23最终9hash PASS及主代理验收通过；原区域标记保持 |
+| 第6批 Ch24 作者 D / 复核 | `ses_e68b13530ffeUVISbf1q6vNxaR` / gpt-6.1-sol + max | 无作者写锁或活动复核 | 作者及审Ch21独立PASS均已交接，succeeded/idle | C对Ch24最终12hash PASS及主代理验收通过；keys.sql原样，旧文案探针失败另列 |
+| 第6批 计划与验收 | `ses_e68b56218ffetCzd9eOaMoHUSy` / gpt-6.1-sol + max | 无活动维护锁 | 已验收并收口；42hash/19原入口/16class/48组合/62实看截图/四独立PASS及最终范围封存通过 | 累计25/45，下一批Ch25–Ch28，本次停止；历史探针原失败未计PASS |
+| 第7批 Ch25 作者 A / 复核 | `ses_e685d8fa2ffe2ORWved8ftRy6O` / gpt-6.1-sol + max | 无作者写锁或活动复核 | 作者及审Ch26独立PASS均已交接，succeeded/idle | D对Ch25最终9hash PASS及主代理验收通过；本批结束 |
+| 第7批 Ch26 作者 B / 复核 | `ses_e685d8f98ffe0fwXmTCy79TAqp` / gpt-6.1-sol + max | 无作者写锁或活动复核 | 作者及审Ch27独立PASS均已交接，succeeded/idle | A对Ch26最终12hash PASS及主代理验收通过；真实RedisLua已执行 |
+| 第7批 Ch27 作者 C / 复核 | `ses_e685d8f99ffeTrt8xUbYOl8Fqs` / gpt-6.1-sol + max | 无作者写锁或活动复核 | 作者及审Ch28独立PASS均已交接，succeeded/idle | B对Ch27最终11hash PASS及主代理验收通过；keys.sql原样，可选Redis跳过单列 |
+| 第7批 Ch28 作者 D / 复核 | `ses_e685d8f9affeR0nfQKLMiTed8Y` / gpt-6.1-sol + max | 无作者写锁或活动复核 | 作者及审Ch25独立PASS均已交接，succeeded/idle | C对Ch28最终10hash PASS及主代理验收通过；api.txt原样 |
+| 第7批 计划与验收 | `ses_e68621b2affeQy0Ke7t06k8vbm` / gpt-6.1-sol + max | 无活动维护锁 | 已验收并收口；42hash/21原入口及探针命令/28class/48组合/64实看清理截图/四独立PASS及最终范围封存通过 | 累计29/45，下一批Ch29–Ch32，本次停止；Ch27可选Redis未计PASS |
+| 第8批 Ch29 作者 A / 复核 | `ses_e681740d5ffdfxIb9GwPdkG6BW` / gpt-6.1-sol + max | 无作者写锁或活动复核 | 作者及审Ch30独立PASS均已正式接收，succeeded/idle | D对Ch29最终10hash PASS及主代理验收通过；本批结束 |
+| 第8批 Ch30 作者 B / 复核 | `ses_e681740d5ffeJVZl9Gt3s2UL76` / gpt-6.1-sol + max | 无作者写锁或活动复核 | 作者及审Ch31独立PASS均已正式接收，succeeded/idle | A对Ch30最终8hash PASS；原会话超时已恢复，旧事务表述缺口另列 |
+| 第8批 Ch31 作者 C / 复核 | `ses_e681740d3ffdP9KwsWgTAT0PBc` / gpt-6.1-sol + max | 无作者写锁或活动复核 | 作者及审Ch32独立PASS均已正式接收，succeeded/idle | B对Ch31最终4hash PASS及主代理验收通过；本批结束 |
+| 第8批 Ch32 作者 D / 复核 | `ses_e681740d3ffesje77F5Csr5yHy` / gpt-6.1-sol + max | 无作者写锁或活动复核 | 作者及审Ch29独立PASS均已正式接收，succeeded/idle | C对Ch32最终5hash PASS及主代理验收通过；本批结束 |
+| 第8批 计划与验收 | `ses_e681ae856ffec5AeNtFF2lz6K6` / gpt-6.1-sol + max | 无活动维护锁 | 已验收并收口；27hash/21原入口及探针命令/31class/48组合/52实看清理截图/四独立PASS及最终范围封存通过 | 累计33/45，下一批Ch33–Ch36，本次停止；Ch30旧表述缺口另行授权返修 |
+| 第9批 Ch33 作者 A / 复核 | `ses_e631c8337ffeJD3p90Xbms7cwu` / gpt-6.1-sol + max | 无作者写锁或活动复核 | 作者及审Ch34最终7hash PASS已接收，succeeded/idle | D对Ch33最终6hash PASS及主验收通过；旧问题另列 |
+| 第9批 Ch34 作者 B / 复核 | `ses_e631c8338ffeoFHu0Vn7B5oKLl` / gpt-6.1-sol + max | 无作者写锁或活动复核 | 作者及审Ch35最终4hash PASS已接收，succeeded/idle | A对Ch34最终7hash PASS及主验收通过；英文期限旧限定缺口另列 |
+| 第9批 Ch35 作者 C / 复核 | `ses_e631c8337ffdUTJDh8hF0N3NBS` / gpt-6.1-sol + max | 无作者写锁或活动复核 | 作者及审Ch36最终5hash PASS已接收，succeeded/idle | B对Ch35最终4hash PASS及主验收通过；Ch36旧hash包装器失败另列 |
+| 第9批 Ch36 作者 D / 复核 | `ses_e631c8334ffeWS2j3lp62hhnoW` / gpt-6.1-sol + max | 无作者写锁或活动复核 | 作者及审Ch33最终6hash PASS已接收，succeeded/idle | Ch33/Ch36主验收通过，旧问题另列 |
+| 第9批 计划与验收 | `ses_e631ee6c9ffeGHVuhezltOLFKK` / gpt-6.1-sol + max | 无活动维护锁 | 已验收并收口；22hash/14原入口/1class/48组合/42实看清理截图、四独立PASS及最终范围/会话封存通过 | 累计37/45，下一批Ch37/38/40/41，本次停止；三项旧问题另列 |
+| 第10批 Ch37 作者A / 复核 | `ses_e6141c2cfffeTAHggOYKQ3Cphu` / gpt-6.1-sol + max | 无写锁或活动复核 | 作者及审Ch38最终7hash PASS均已接收，succeeded/idle | D对Ch37最终8hash PASS及主验收通过；publication原样 |
+| 第10批 Ch38 作者B / 复核 | `ses_e6141c2cbffeJswCaKIYl1xJ0n` / gpt-6.1-sol + max | 无写锁或活动复核 | 作者及审Ch40最终4hash PASS均已接收，succeeded/idle | A对Ch38最终PASS已接收 |
+| 第10批 Ch40 作者C / 复核 | `ses_e6141c2cdffe7pnts4QvDnkYes` / gpt-6.1-sol + max | 无写锁或活动复核 | 作者及审Ch41最终9hash PASS均已接收，succeeded/idle | B对Ch40最终4hash PASS及主验收通过 |
+| 第10批 Ch41 作者D / 复核 | `ses_e6141c2c9ffe93KKaJxtDedBnN` / gpt-6.1-sol + max | 无写锁或活动复核 | 作者及审Ch37最终8hash PASS均已接收，succeeded/idle | C对Ch41最终9hash PASS及主验收通过 |
+| 第10批 计划与验收 | `ses_e6143b40fffeK6VlVf4PbkKYrk` / gpt-6.1-sol + max | 无活动维护锁 | 已验收并收口；28hash/15原入口/19class/48组合/40实看清理截图、四独立PASS及最终范围/会话封存通过 | 累计41/45，下一批Ch42–45；辅助器失败/未运行旧hash包装器如实留证 |
+| 第11批 计划与验收 | 原主`ses_e612821f2ffeD918KdlwJYNWmr`；临时恢复主`ses_e5e79d94effeom6ICsoDKGNAGA`已交回 / Sol + max | 无活动维护锁 | 已验收并收口；25hash/16同源/27class/48组合/44实看清理截图及四独立PASS通过，超时恢复如实留证 | **累计45/45，停止，无下一批**；未提交推送部署 |
+| 第11批 Ch42 作者A / 复核 | `ses_e61253aa7ffcG672P6mkIF4ETr` / gpt-6.1-sol + max | 无写锁或活动复核 | 作者及审Ch43最终4hash独立PASS已接收，succeeded/idle | D对Ch42最终7hash PASS及主验收通过；本轮结束 |
+| 第11批 Ch43 作者B / 复核 | `ses_e61253aa7ffdH2vJ7lbEYi999s` / gpt-6.1-sol + max | 无写锁或活动复核 | 作者及审Ch44最终7hash独立PASS已接收，succeeded/idle | A对Ch43最终4hash PASS及主验收通过；本轮结束 |
+| 第11批 Ch44 作者C / 复核 | `ses_e61253aa7ffeCgu6elDST4ipAq` / gpt-6.1-sol + max | 无写锁或活动复核 | 作者及审Ch45最终7hash独立PASS已接收，succeeded/idle | B对Ch44最终7hash PASS及主验收通过；原区域机制保持 |
+| 第11批 Ch45 作者D / 复核 | `ses_e61253aa6ffeZzckDIX5sI66iy` / gpt-6.1-sol + max | 无写锁或活动复核 | 作者及审Ch42最终7hash独立PASS已接收，succeeded/idle | C对Ch45最终7hash PASS及主验收通过；本轮结束 |
 
-总计：Ch01样板＋8批×5章＋最后4章＝45章。当前累计45/45；第9批Ch42–Ch45已验收4/4。最后四章按3＋1完成四位作者编写与四项轮换独立复核，全部gpt-6.1-sol + max；全轮中文表达与术语回看完成，活动任务锁清空，本次停止，无下一批。恢复时以逐章状态为准，不能只看批次序号。
+主 agent 是共享记录的唯一写入者；子 agent 不写计划、入口或共享文件。没有完成交接的旧锁不能直接视作仍在运行：清空上下文后，先核对会话、实际文件和最后交接，再恢复。
 
-## 4. 五个 Agent 怎样安排
+### 0.2 每次恢复
 
-实施和独立复核统一使用 **GPT-6.1-Sol（`gpt-6.1-sol`）+ Max（`max`）**，派发时明确指定 `model: "gpt-6.1-sol"`、`reasoning_effort: "max"`。不能选择指定模型或档位时如实说明，不能静默换模型。
+1. 读取本节状态、任务锁、§3 逐章表和当前批次记录，检查 `git status` 与实际文件。
+2. 先续接编写中、待复核或返修中的章节；已通过的同批章节不重复编写。
+3. 若无未完成任务，选最早未验收批次；不要因中文文案已完成而跳过代码整理。
+4. 主 agent 在每次派发、作者交接、复核、返修和验收后更新锁与逐章状态，写明文件范围、证据和下一动作。
+5. 一批验收后，所有子任务完成交接，保存记录、清锁、写明下一批，然后结束本次任务。由用户或外部会话控制器清空上下文，再发送 §7 的同一提示词。
+6. 不声称能靠提示词自行清空上下文；未交接任务、失败检查和阻塞项必须落盘。45/45 后停止，不重新启动已完成批次。
 
-一批安排 **5 个编写 agent，每人一章**。当前工具上限为主代理＋3 个活动子 agent，因此按 **3＋2** 分段派发，完成释放并发后再派其余任务；最后一批按 3＋1。执行时以真实工具上限为准，不能把五个任务说成五个同时运行。
+## 1. 范围与行为约束
 
-作者完成后轮换只读复核，例如第 1 位审第 2 章，依次轮换，最后一位审第 1 章。不得自编自审。主代理负责统一术语、处理复核发现、维护计划和批次记录，其他 agent 不写共享文件。
+- 整理 `chapters/chNN.html` 中的展示代码及其实际维护源码；可同步整理本章直接配套的测试代码，保留测试内容、顺序和断言。
+- 有维护源码时先改源码，再按本章已有同步机制更新页面；只有内联代码的章节，精确修改对应 `<pre><code>` 内容。先盘点，不能假定所有章节都有 `sync.mjs`。
+- 保留函数、变量、常量、接口和文件命名，保留字符串与注释原文、技术含义、条件判断顺序、短路行为、状态更新顺序、锁与事务边界、异常行为及时间采样位置。
+- 允许安全添加语句块大括号、拆开同一行的多条语句、统一空格与缩进、换行、按逻辑阶段留空行。涉及作用域或语法歧义时先核对实际语义。
+- 本轮不改中英文正文、图注、闪卡、图/SVG、图源、公共 CSS/JS、页面结构与交互，不整页格式化 HTML。源码区域标记、HTML 属性和代码块数量保持。
+- 同步/验证工具默认原样使用；若工具错误地依赖旧空白或排版，记录阻塞和最小修复方案，不能删除、放宽断言来取得通过。
+- 发现原有技术问题时记录位置与影响，另列后续返修；不能借排版改算法、拆函数、改命名、补功能或改变示例抽象层级。
 
-每批流程：
+## 2. 样板与排版标准
 
-1. 核对工作区和锁，保存本批章文件及不可修改部分的基线，保护已有工作。
-2. 作者先通读整章、对应英文、图和代码，理解主线，再逐段润色，不靠搜索替换堆满术语。
-3. 正文、表格、图注、代码说明和闪卡一起自检，交给另一位作者只读复核。
-4. 复核者检查中文自然程度与语义对应；独立走一个正常路径和一个关键反例，涉及数字时复算主要算式。
-5. 主代理修正问题并按 §5 验收，逐章更新状态。仅复核通过才计入完成数。
-6. 写入批次记录、清锁、更新 §0 的续接位置，并告知下一批范围。默认完成本批即结束，不自动开下一批。
+样板为 `examples/ch39/LoadBalancing.java`、直接配套的 `LoadBalancingTest.java` 和 `chapters/ch39.html` 的 pick/admit/drain 三段代码。正式验收证据记录在 `docs/reviews/code-format-ch39.md`；后续开始前必须实际阅读样板与记录。
 
-## 5. 验收与工作量
+1. **缩进遵循语言惯例。** Java/Python 用 4 空格；SQL、Lua、伪代码沿本章合理层级统一，不能把 Python、YAML 或有语义的字符串空白当作随意可改。
+2. **一行一个独立语句。** 展开 `a(); b();`、单行条件体和 `try/finally` 等结构；`for` 头等语法结构不机械拆分。
+3. **长表达式分层。** 多个条件、长参数列表、链式调用合理换行；约 100 列为参考，字符串、URL、协议样例和不可拆标记可例外，不为达标改内容。
+4. **逻辑阶段之间留空行。** 例如获取状态、检查条件、更新状态、返回结果；同一小步骤不逐行插空行。
+5. **让边界清晰可见。** 锁释放、事务提交、异常处理、重试出口等显式展开；不移动其执行位置。
+6. **语言分别处理。** Java 的大括号示例不是 SQL/HTTP/伪代码的统一模板；公式、HTTP 载荷、输出和协议文本先确认空白是否有语义。
+7. **不追求改动量。** 已清晰的代码可核验后原样保留，逐章说明；不设最少改行数、函数长度或强制重写比例。
 
-每章必须做到：读者能连贯复述主线；术语有清楚对应；关键条件、算式和失败行为保留；中文正文、图注、闪卡与英文没有含义冲突；独立复核无未关闭的语义问题或阻碍阅读的问题。
+## 3. 批次与逐章进度
 
-每批执行与文案变化相符的检查：
+状态：**待开始 → 编写中 → 待复核 → 返修中 / 已完成**。只有独立复核及相应检查通过后才计入已验收；没有必要改动的章节也要实际检查并留证。
 
-- 运行 `node tools/check.mjs`、本批各章 `node tools/audit-chapter.mjs chNN` 和 `git diff --check`。
-- 对比基线，确认图、图源、代码与示例不变；英文、链接、ID 和中文块之外的页面结构保持。中文块内合理分段或调整强调不能破坏双语结构。
-- 用真实浏览器查看各章桌面与手机阅读，覆盖两主题和 zh/en/both，重点检查长段、表格、图注和闪卡。320 px 使用真实 viewport，确认整页不横溢，宽内容能在容器内访问。图不变时不逐帧重做图形验收。
-- 复用已有相关同源或契约检查，不为纯文案新增测试，也不重跑整套不受影响的 Java、Redis 或故障实验。引用含义未变时不重新考据全章，有疑点再核对原始来源。
+2026-10-29 只读盘点覆盖所有 45 章。下表代码块数取当前 `<pre>`；“有源/总数”表示含 `data-source` 的块数，并不保证路径已核验。每章执行时再核对映射、语言、区域标记与运行命令。
 
-每批使用一份 `docs/reviews/prose-batch-NN.md`，记下各章变化、少量措辞前后对比、独立复核问题及关闭情况、保留内容对比和实际验证。截图临时生成、看完清理，不提交大量验证图片。
+| 批次 | 章节 | 有源/总数 | 状态 | 证据 |
+|---|---|---|---|---|
+| 样板 | Ch39 | 3/3 | 已完成 | [样板记录](./docs/reviews/code-format-ch39.md) |
+| 1 | Ch01 | 0/1 | 已完成 | [第1批记录](./docs/reviews/code-format-batch-01.md) |
+| 1 | Ch02 | 1/3 | 已完成 | 同上；独立操作拆行返修已由原A确认关闭 |
+| 1 | Ch03 | 1/1 | 已完成 | 同上 |
+| 1 | Ch04 | 0/4 | 已完成 | 同上 |
+| 2 | Ch05 | 3/3 | 已完成 | [第2批记录](./docs/reviews/code-format-batch-02.md)；D最终独立PASS及主代理验收通过 |
+| 2 | Ch06 | 4/4 | 已完成 | 同上；A最终独立PASS及主代理验收通过 |
+| 2 | Ch07 | 3/3 | 已完成 | 同上；B最终独立PASS及主代理验收通过 |
+| 2 | Ch08 | 7/7 | 已完成 | 同上；C最终独立PASS及主代理验收通过，release.lua核验原样保留 |
+| 3 | Ch09 | 4/5 | 已完成 | [第3批记录](./docs/reviews/code-format-batch-03.md)；D最终6hash独立PASS及主代理验收通过，HTTP块原样 |
+| 3 | Ch10 | 5/6 | 已完成 | 同上；A最终7hash独立PASS及主代理验收通过，HTTP块原样 |
+| 3 | Ch11 | 5/5 | 已完成 | 同上；B最终8hash独立PASS及主代理验收通过，原sync区域标记保护 |
+| 3 | Ch12 | 5/5 | 已完成 | 同上；C最终8hash独立PASS及主代理验收通过，既有探针亦通过 |
+| 4 | Ch13 | 3/3 | 已完成 | [第4批记录](./docs/reviews/code-format-batch-04.md)；D最终6hash独立PASS及主验收通过，原PAGE标记保护 |
+| 4 | Ch14 | 5/5 | 已完成 | 同上；A最终7hash独立PASS及主验收通过，原分号全部保留 |
+| 4 | Ch15 | 5/5 | 已完成 | 同上；B最终8hash独立PASS及主验收通过，65＋27＋40既有检查保持 |
+| 4 | Ch16 | 5/5 | 已完成 | 同上；C最终9hash独立PASS及主验收通过，原argv/真实隔离Redis67项保持 |
+| 5 | Ch17 | 5/5 | 已完成 | [第5批记录](./docs/reviews/code-format-batch-05.md)；D最终7hash独立PASS及主代理验收通过 |
+| 5 | Ch18 | 6/6 | 已完成 | 同上；A最终10hash独立PASS及主代理验收通过 |
+| 5 | Ch19 | 5/5 | 已完成 | 同上；B最终8hash独立PASS及主代理验收通过 |
+| 5 | Ch20 | 6/6 | 已完成 | 同上；C最终10hash独立PASS及主代理验收通过，三份清楚数据/SQL保持 |
+| 6 | Ch21 | 7/7 | 已完成 | [第6批记录](./docs/reviews/code-format-batch-06.md)；D最终12hash独立PASS及主代理验收通过 |
+| 6 | Ch22 | 4/4 | 已完成 | 同上；A最终9hash独立PASS及主代理验收通过，原run_java.py/sync保持 |
+| 6 | Ch23 | 6/6 | 已完成 | 同上；B最终9hash独立PASS及主代理验收通过，原区域标记保持 |
+| 6 | Ch24 | 8/8 | 已完成 | 同上；C最终12hash独立PASS及主代理验收通过，keys.sql原样，历史文案探针失败另列 |
+| 7 | Ch25 | 6/6 | 已完成 | [第7批记录](./docs/reviews/code-format-batch-07.md)；D最终9hash独立PASS及主代理验收通过 |
+| 7 | Ch26 | 6/6 | 已完成 | 同上；A最终12hash独立PASS及主代理验收通过，真实RedisLua已执行 |
+| 7 | Ch27 | 7/7 | 已完成 | 同上；B最终11hash独立PASS及主代理验收通过，keys.sql原样，可选Redis跳过单列 |
+| 7 | Ch28 | 7/7 | 已完成 | 同上；C最终10hash独立PASS及主代理验收通过，api.txt原样 |
+| 8 | Ch29 | 7/7 | 已完成 | [第8批记录](./docs/reviews/code-format-batch-08.md)；D最终10hash独立PASS及主代理验收通过 |
+| 8 | Ch30 | 6/6 | 已完成 | 同上；A最终8hash独立PASS及主代理验收通过；原会话恢复已交接，旧事务表述缺口另列 |
+| 8 | Ch31 | 3/3 | 已完成 | 同上；B最终4hash独立PASS已正式接收，22命令全0、11class原字节及主代理验收通过；作者辅助器旧失败留证 |
+| 8 | Ch32 | 4/4 | 已完成 | 同上；C最终5hash独立PASS已正式接收，12命令全0及主代理验收通过 |
+| 9 | Ch33 | 3/3 | 已完成 | [第9批记录](./docs/reviews/code-format-batch-09.md)；D最终6hash独立PASS及主代理验收通过；旧墓碑表述缺口另列 |
+| 9 | Ch34 | 4/4 | 已完成 | 同上；A最终7hash独立PASS及主代理验收通过；英文期限旧限定缺口另列 |
+| 9 | Ch35 | 4/4 | 已完成 | 同上；B最终4hash独立PASS及主代理验收通过，原105项/既有72项与class原字节保持 |
+| 9 | Ch36 | 4/4 | 已完成 | 同上；C最终5hash独立PASS及主代理验收通过；partition原样，历史hash包装器旧失败另列 |
+| 10 | Ch37 | 3/3 | 已完成 | [第10批记录](./docs/reviews/code-format-batch-10.md)；D最终8hash独立PASS及主代理验收通过，publication原样 |
+| 10 | Ch38 | 4/4 | 已完成 | 同上；A最终7hash独立PASS及主代理验收通过 |
+| 10 | Ch40 | 3/3 | 已完成 | 同上；B最终4hash独立PASS及主代理验收通过；辅助器失败留证 |
+| 10 | Ch41 | 4/4 | 已完成 | 同上；C最终9hash独立PASS及主代理验收通过；作者辅助器失败留证 |
+| 11 | Ch42 | 5/5 | 已完成 | [第11批记录](./docs/reviews/code-format-batch-11.md)；D最终7hash独立PASS及主验收通过 |
+| 11 | Ch43 | 3/3 | 已完成 | 同上；A最终4hash独立PASS及主验收通过 |
+| 11 | Ch44 | 4/4 | 已完成 | 同上；B最终7hash独立PASS及主验收通过，原两空格标记/摘录机制保持 |
+| 11 | Ch45 | 4/4 | 已完成 | 同上；C最终7hash独立PASS及主验收通过 |
 
-全轮收尾做中文表达与术语一致性回看，确认 45/45 且逐章复核完成；此前 Q 阶段的全站事实、图形和公共 UI 问题继续单独安排。
+总计：Ch39样板＋11批×4章＝45章。**45/45全部验收，剩余0章，所有子任务已交接并清锁；本轮停止，无下一批。** 不重新启动已完成排版或中文润色，不自动提交、推送或部署。
 
-## 6. 提交与发布
+## 4. 1 个主 agent＋4 个子 agent
 
-文案批次按用户明确授权执行。提交、推送与部署另按明确授权范围执行，已授权的动作不重复询问；仅授权一批时不能顺带发布其他未完成工作。
+- 实施与独立复核沿用 **GPT-6.1-Sol（`gpt-6.1-sol`）＋Max（`max`）**。派发前查询实际模型及档位，明确指定；不可用时报告阻塞，不静默替换。后续主会话也按该模型与档位启动。
+- 主 agent 负责基线、分工、共享记录、验收汇总和收口；4 个子 agent 各负责本批一章，独占本章列明的源码、配套测试和页面代码块。
+- 作者交接后，仍由这 4 个子 agent 轮换只读复核：A 审 B、B 审 C、C 审 D、D 审 A，不自编自审、不在复核中直接改文件。返修由原作者处理，原复核者确认最终文件。
+- 按真实并发上限派发；若只能并发 3 个子任务，按 3＋1 分段，不能宣称 4 个同时运行。复用作者会话或释放已完成任务，不额外开启第二套 4 人编写团队。
+- 不足 4 章时按实际剩余数量安排，单章须有独立作者和复核者。当前 Ch39 样板仅安排一位作者和一位独立复核者。
 
-既有仓库：<https://github.com/socoo123/system_design_web>。站点：<https://socoo123.github.io/system_design_web/>，既有 Pages 从 `main` 根目录自动构建，实际发布时核对当前配置。
+## 5. 检查、证据与完成条件
 
-提交前确认本批已验收、工作区和锁一致，运行范围相符的检查；只提交对应内容、计划与必要记录。推送后独立核对 GitHub 引用。需要上线时另查 Pages 构建与线上首页/代表章节，不能把推送成功当作上线已经验证。完成后将提交、发布结果及限制记入 §0 与本批记录。
+每批先保存执行前 HEAD、状态、本批文件和受保护范围的哈希；保留此前尚未提交的批次与用户改动。先检查已有同步/测试入口，避免无意运行写入式脚本。
 
-## 7. 清空上下文后，直接发送的提示
+每章必须完成：
 
-下面这段不依赖聊天历史。每次发送都会先读文件中的真实进度，优先接续未完成工作，再找下一批：
+1. **源码与页面一致。** 执行已有同源检查；内联片段记录精确位置与前后范围。页面去除允许改动的代码内容后，与本批基线逐字节一致。
+2. **行为保持。** 独立复核 diff，确认条件、短路、锁/事务、时间采样、更新与异常顺序；按语言使用合适的 AST、token 或编译产物对比辅助。不能只删除空白比较，因为字符串空格和 Python 缩进有语义。
+3. **已有验证。** 运行与改动相关的既有编译、测试或契约检查，以及 `node tools/check.mjs`、`node tools/audit-chapter.mjs chNN`、`git diff --check`。不为低风险排版新增镜像测试，不重跑无关章节实验。
+4. **页面阅读。** 用真实浏览器看改动代码块，至少桌面与真实 320px 手机视口、两主题；核验 zh/en/both 显示。检查缩进、截断、容器内横向滚动和整页溢出；截图临时保存、实际查看后清理。
+5. **范围检查。** 核对源文件、测试、页面代码块及记录之外的文件未变；源文件中的字符串、注释和区域标记保留。已有问题及工具限制如实记载，不以未执行冒充通过。
+6. **独立复核。** 作者交接、复核结论及返修关闭必须对应最终文件哈希；未确认最终版本不能标完成。
+
+样板记录为 `docs/reviews/code-format-ch39.md`，后续每批为 `docs/reviews/code-format-batch-NN.md`。记录包括：范围、基线、作者和复核会话/模型、最终哈希、少量前后对照、实际命令与结果、页面证据、遗留事项、下一步。无需为每次排版生成庞大测试档案。
+
+## 6. 收口与发布
+
+逐章更新状态和计数；一批全部完成后，清锁、写明下一批，给用户简短报告并结束本次任务。中途阻塞则记录精确恢复动作，不伪造整批完成。
+
+提交、推送与部署按用户另行明确授权执行。既有仓库为 <https://github.com/socoo123/system_design_web>，Pages 自动构建配置需在发布时核实；不能把推送成功当作上线已验证。
+
+## 7. 清空上下文后重复使用的提示词
+
+每次完成并交接一批后，由用户或外部会话控制器清空上下文/开启新主会话，再发送下面同一段。一次“任务”默认就是一批最多 4 章，不是每改完一个文件就清空。
 
 ```text
-读取 AGENTS.md 和 PLAN.md，先按 PLAN.md §0 核对已完成章节、当前批次、任务锁和续接位置，再按 §3 开始本轮中文文案整理的下一未完成批次；如有未完成工作，先从记录的位置继续。以文件中指定的 Ch01 认可版本为样板，默认每批 5 章，安排 5 个编写 agent、每人一章，按实际并发上限分段派发，完成后交叉复核。全部使用 gpt-6.1-sol + max。只改中文文案，保留图、代码、技术含义和现有英文。完成本批后更新逐章状态、完成总数、任务锁与下一批位置，向我报告，不自动开始下一批。
-```
+继续执行全站示例代码排版整理。先读取 AGENTS.md 和 PLAN.md，按 §0 核对实际工作区、逐章进度、任务锁和续接位置，再读 §2–§5 及当前批次记录。先恢复未完成批次；若没有，再从 §3 选择最早尚未验收的一批，最多 4 章。45/45 后直接报告完成并停止。
 
-最后一批不足五章时只做剩余章。用户点名章节、数量、是否连续推进或是否提交时，以其明确指令为准。
+采用 1 个主 agent＋4 个子 agent，均使用 gpt-6.1-sol + max；模型或档位不可用时报告阻塞。主 agent 维护计划和共享记录，4 个子 agent 各负责一章，按真实并发上限分段派发；作者完成后轮换只读复核，不自编自审。
+
+实际阅读 Ch39 样板及验收记录，按样板整理代码缩进、换行、语句块和逻辑分段。先改维护源码，再同步页面摘录；保留代码行为、命名、字符串、注释、条件顺序、锁与事务边界。遵守 PLAN.md 的范围，不扩大为正文、图或公共页面代码改造。
+
+完成本批相关编译/既有测试、同源检查、结构检查、桌面与手机代码块查看和独立复核。每次交接及时把真实状态写入 PLAN.md；验收后记录最终文件哈希、证据、完成总数和下一批位置，确认全部子任务交接并清锁。
+
+本次只执行这一批，完成后报告并停止，等待我清空上下文再发送同一提示词；不在当前上下文直接启动下一批，不自动提交、推送或部署。遇到阻塞先把恢复位置落盘，不把未通过章节标成完成。
+```

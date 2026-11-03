@@ -164,29 +164,39 @@ authenticate_game_server_and_scoring_authority(command)
 id = (game, season, player, match_id, kind, revision)
 intent = canonical(authority_seq, absolute_score, achieved_second, comparator)
 membership = validate_bounds_and_immutable_season_membership(command)
+
 BEGIN
-gate = SELECT * FROM seasons WHERE (game,season)=scope FOR SHARE
-claimed = INSERT INTO receipts(id,intent) VALUES (:id,:intent)
+gate = SELECT * FROM seasons WHERE (game, season) = scope FOR SHARE
+claimed = INSERT INTO receipts(id, intent) VALUES (:id, :intent)
           ON CONFLICT DO NOTHING RETURNING id
 if not claimed:
-    old = SELECT * FROM receipts WHERE id=:id  # next statement sees winner
+    old = SELECT * FROM receipts WHERE id = :id  # next statement sees winner
     require old.intent == intent else ROLLBACK and CONFLICT
-    COMMIT; return old.original_receipt
+    COMMIT;
+    return old.original_receipt
+
 if gate.state != OPEN:
-    save_receipt(id, REJECTED_CLOSED); COMMIT; return REJECTED_CLOSED
-INSERT INTO scores(scope,player,version,score,achieved_second)
-    VALUES (:scope,:player,0,0,0)
+    save_receipt(id, REJECTED_CLOSED);
+    COMMIT;
+    return REJECTED_CLOSED
+
+INSERT INTO scores(scope, player, version, score, achieved_second)
+    VALUES (:scope, :player, 0, 0, 0)
     ON CONFLICT DO NOTHING
-row = SELECT version FROM scores WHERE (scope,player)=key FOR UPDATE
+row = SELECT version FROM scores WHERE (scope, player) = key FOR UPDATE
 if authority_seq &lt;= row.version:
-    save_receipt(id, REJECTED_STALE); COMMIT; return REJECTED_STALE
+    save_receipt(id, REJECTED_STALE);
+    COMMIT;
+    return REJECTED_STALE
+
 t = achieved_second  # authoritative snapshot field; never infer from receiver history
 C = absolute_score * 3000001 + (3000000 - t)
-UPDATE scores SET score=:absolute_score, achieved_second=:t,
-                  version=:authority_seq WHERE (scope,player)=key
+UPDATE scores SET score = :absolute_score, achieved_second = :t,
+                  version = :authority_seq WHERE (scope, player) = key
 for board in [global_board(scope), fixed_region_board(membership)]:
-    INSERT INTO outbox(id,board,player,version,C) VALUES (...)
+    INSERT INTO outbox(id, board, player, version, C) VALUES (...)
     # UNIQUE(id,board); each destination has its own delivery acknowledgement.
+
 save_receipt(id, COMMITTED(authority_seq, absolute_score, t))
 COMMIT  # acknowledge only after configured local + synchronous-standby flush
 return original_receipt
@@ -195,22 +205,30 @@ return original_receipt
 local function integer(s, lo, hi)
   local n = tonumber(s)
   if not n or n &lt; lo or n &gt; hi or n ~= math.floor(n)
-      or string.format(&#x27;%.0f&#x27;, n) ~= s then error(&#x27;invalid integer&#x27;) end
+      or string.format(&#x27;%.0f&#x27;, n) ~= s then
+    error(&#x27;invalid integer&#x27;)
+  end
   return n
 end
+
 local ztype, htype = redis.call(&#x27;TYPE&#x27;, KEYS[1]).ok, redis.call(&#x27;TYPE&#x27;, KEYS[2]).ok
 if (ztype ~= &#x27;none&#x27; and ztype ~= &#x27;zset&#x27;) or htype ~= &#x27;hash&#x27; then
   return redis.error_reply(&#x27;bad key type&#x27;)
 end
+
 local scope, epoch, member = ARGV[1], ARGV[2], ARGV[3]
 local v, c = integer(ARGV[4], 1, 1000000000), integer(ARGV[5], 0, 3000004000000)
-if #member ~= 12 or not string.match(member, &#x27;^%d+$&#x27;) then error(&#x27;member&#x27;) end
+if #member ~= 12 or not string.match(member, &#x27;^%d+$&#x27;) then
+  error(&#x27;member&#x27;)
+end
+
 local mode = redis.call(&#x27;HGET&#x27;, KEYS[2], &#x27;__mode&#x27;)
 if redis.call(&#x27;HGET&#x27;, KEYS[2], &#x27;__scope&#x27;) ~= scope
     or redis.call(&#x27;HGET&#x27;, KEYS[2], &#x27;__epoch&#x27;) ~= epoch
     or (mode ~= &#x27;LOADING&#x27; and mode ~= &#x27;SERVING&#x27;) then
   return redis.error_reply(&#x27;fenced epoch&#x27;)
 end
+
 local old = redis.call(&#x27;HGET&#x27;, KEYS[2], &#x27;p:&#x27; .. member)
 if old then
   local ov, oc = string.match(old, &#x27;^(%d+):(%d+)$&#x27;)
@@ -218,12 +236,19 @@ if old then
   if tonumber(redis.call(&#x27;ZSCORE&#x27;, KEYS[1], member)) ~= oc then
     return redis.error_reply(&#x27;projection mismatch: rebuild required&#x27;)
   end
-  if v &lt; ov then return &#x27;STALE&#x27; end
-  if v == ov and c ~= oc then return redis.error_reply(&#x27;version conflict&#x27;) end
-  if v == ov then return &#x27;REPLAY&#x27; end
+  if v &lt; ov then
+    return &#x27;STALE&#x27;
+  end
+  if v == ov and c ~= oc then
+    return redis.error_reply(&#x27;version conflict&#x27;)
+  end
+  if v == ov then
+    return &#x27;REPLAY&#x27;
+  end
 elseif redis.call(&#x27;ZSCORE&#x27;, KEYS[1], member) then
   return redis.error_reply(&#x27;missing version: rebuild required&#x27;)
 end
+
 redis.call(&#x27;ZADD&#x27;, KEYS[1], ARGV[5], member) -- absolute value; lower C is valid
 redis.call(&#x27;HSET&#x27;, KEYS[2], &#x27;p:&#x27; .. member, ARGV[4] .. &#x27;:&#x27; .. ARGV[5])
 return &#x27;APPLIED&#x27;
@@ -336,13 +361,16 @@ return &#x27;APPLIED&#x27;
         if (member == null || !member.matches(&quot;[0-9]{12}&quot;)
                 || score &lt; 0 || score &gt; 1_000_000
                 || second &lt; 0 || second &gt; 2_592_000
-                || version &lt; 1 || version &gt; 1_000_000_000L)
+                || version &lt; 1 || version &gt; 1_000_000_000L) {
             throw new IllegalArgumentException(&quot;out of contract&quot;);
+        }
     }
+
     public long composite() {
         return score * 3_000_001L + (3_000_000L - second);
     }
 }
+
 public static final Comparator&lt;Entry&gt; ORDER = Comparator
         .comparingLong(Entry::composite).reversed()
         .thenComparing(Entry::member, Comparator.reverseOrder());</code></pre><div class="bilingual"><div class="lang-zh"><p><strong>达成秒由来源的完整快照给出，接收端将它与分数、版本一起覆盖。</strong>来源按规范计分顺序处理更新：连续同分时保留原秒；基础分改变后又回到旧值时，由新修订给出新的达成秒。第一次合法的 0 分也要携带真实秒，不能继承占位行的 0；旧身份重试仍返回原值。</p><p>例如 v1=(100,10)、v2=(200,20)、v3 处罚=(100,30)。无论按 1→2→3 还是 1→3→2 投递，最终都应得到 v3 的 (100,30)。如果接收端看到当前恰好也是 100 分，就自行保留旧秒，第二种顺序会错误地得到 (100,10)。</p><p>对应到 Redis 命令：前 100 名使用 <code>ZRANGE key 0 99 REV WITHSCORES</code>；个人降序序号使用 <code>ZREVRANK key member</code>，再加 1 转成展示名次；<code>ZRANK</code> 没有 REV 参数。<a href="#ref-2">[2]</a><a href="#ref-3">[3]</a><a href="#ref-4">[4]</a> 只有业务规定只保留最高分、绝不降分时，才适合使用 GT。CH 只改变返回计数，普通 ZADD 更新既有成员时返回 0，不代表写入失败。<a href="#ref-1">[1]</a></p></div><div class="lang-en"><p><strong>The authoritative snapshot supplies achievement time, replaced together with score/version.</strong> In canonical scoring order the source preserves time across consecutive unchanged scores; after the score changes, returning to an old value uses the new revision’s authoritative time. A first zero score also supplies its real time rather than inheriting the placeholder’s zero. For v1=(100,10), v2=(200,20), v3 penalty=(100,30), both 1→2→3 and 1→3→2 must end at v3=(100,30), never (100,10) inferred from receiver history.</p><p>Top100 uses ZRANGE key 0 99 REV WITHSCORES. Personal ordinal position is ZREVRANK plus one; ZRANK has no REV parameter. <a href="#ref-2">[2]</a><a href="#ref-3">[3]</a><a href="#ref-4">[4]</a> GT fits an increasing high-score-only rule. CH changes the return count; ordinary ZADD returning zero for an existing member is not a failure. <a href="#ref-1">[1]</a></p></div></div><table><thead><tr><th><span class="lang-zh">基础分为 100、100、90</span><span class="lang-en">Base scores 100,100,90</span></th><th><span class="lang-zh">输出</span><span class="lang-en">Output</span></th><th><span class="lang-zh">需要统计什么</span><span class="lang-en">Required statistic</span></th></tr></thead><tbody><tr><td>Ordinal</td><td>1,2,3</td><td><span class="lang-zh">按完整顺序排列；这是本章采用的规则</span><span class="lang-en">Total order; the chosen rule</span></td></tr><tr><td>Competition</td><td>1,1,3</td><td><span class="lang-zh">基础分严格更高的玩家人数，加 1</span><span class="lang-en">Number of players with higher base score +1</span></td></tr><tr><td>Dense</td><td>1,1,2</td><td><span class="lang-zh">严格更高的不同基础分有多少种，再加 1</span><span class="lang-en">Number of distinct higher base scores +1</span></td></tr></tbody></table><div class="bilingual"><div class="lang-zh"><p>复合分 C 已经把达成时间纳入排序，直接取得的序号不能当作 competition 或 dense 名次。数据量较小时，SQL 也可以用匹配的有序索引和 LIMIT 读取榜首；难点在于频繁改分时，还要统计任意玩家前面有多少人。<a href="#ref-14">[14]</a> ZADD、ZREVRANK 的 O(log N)，以及取出 K 人的 O(log N+K)，描述的是算法复杂度，实际吞吐仍需测量。<a href="#ref-12">[12]</a></p></div><div class="lang-en"><p>Composite C already splits ties; its rank is neither competition nor dense rank. A small SQL board may use an ordered index plus LIMIT; arbitrary preceding-player counts under frequent updates are harder. <a href="#ref-14">[14]</a> O(log N) writes/ranks and O(log N+K) ranges are algorithmic costs, not throughput guarantees. <a href="#ref-12">[12]</a></p></div></div></section>
@@ -462,42 +490,59 @@ local ztype, htype = redis.call(&#x27;TYPE&#x27;, KEYS[1]).ok, redis.call(&#x27;
 if (ztype ~= &#x27;none&#x27; and ztype ~= &#x27;zset&#x27;) or htype ~= &#x27;hash&#x27; then
   return redis.error_reply(&#x27;bad key type&#x27;)
 end
+
 local mode = redis.call(&#x27;HGET&#x27;, KEYS[2], &#x27;__mode&#x27;)
 if redis.call(&#x27;HGET&#x27;, KEYS[2], &#x27;__scope&#x27;) ~= ARGV[1]
     or redis.call(&#x27;HGET&#x27;, KEYS[2], &#x27;__epoch&#x27;) ~= ARGV[2]
     or (mode ~= &#x27;SERVING&#x27; and mode ~= &#x27;FROZEN&#x27;) then
   return redis.error_reply(&#x27;epoch not readable&#x27;)
 end
+
 local member, minimum = ARGV[3], tonumber(ARGV[4])
 if #member ~= 12 or not string.match(member, &#x27;^%d+$&#x27;) or not minimum
     or minimum &lt; 0 or minimum &gt; 1000000000 or minimum ~= math.floor(minimum) then
   return redis.error_reply(&#x27;invalid read&#x27;)
 end
+
 local state = redis.call(&#x27;HGET&#x27;, KEYS[2], &#x27;p:&#x27; .. member)
 local r = redis.call(&#x27;ZREVRANK&#x27;, KEYS[1], member)
 if not state and not r then
   return {minimum &gt; 0 and &#x27;PENDING&#x27; or &#x27;UNRANKED&#x27;, ARGV[2]}
 end
-if not state or not r then return redis.error_reply(&#x27;projection incomplete&#x27;) end
+if not state or not r then
+  return redis.error_reply(&#x27;projection incomplete&#x27;)
+end
+
 local v, c = string.match(state, &#x27;^(%d+):(%d+)$&#x27;)
 v, c = tonumber(v), tonumber(c)
 if not v or not c or tonumber(redis.call(&#x27;ZSCORE&#x27;, KEYS[1], member)) ~= c then
   return redis.error_reply(&#x27;projection mismatch&#x27;)
 end
-if v &lt; minimum then return {&#x27;PENDING&#x27;, ARGV[2], v} end
-local rows = redis.call(&#x27;ZRANGE&#x27;, KEYS[1], math.max(0, r-5), r+5, &#x27;REV&#x27;, &#x27;WITHSCORES&#x27;)
-return {&#x27;OK&#x27;, ARGV[2], v, r+1, rows}</code></pre><div class="bilingual"><div class="lang-zh"><p>调用方固定榜范围 scope、存储代次 epoch、玩家标识 member，并传入要求看到的最小已提交版本。脚本返回 OK(epoch,projected_v,ordinal,rows)、PENDING 或 UNRANKED；发生错误时，应返回错误，不能伪装成空榜。</p><p>主节点健康，且模式为 SERVING 或 FROZEN 时，脚本把 <code>ZREVRANK</code> 和含端点的 <code>max(0,r−5)..r+5</code> 放在同一次观察中，最多返回 11 人。LOADING 模式不可读。投影尚未达到最小已提交版本时返回 PENDING；该玩家的分数与版本记录都不存在，且未要求已提交版本时，才返回 UNRANKED。即使自己的版本没变，其他玩家改分也能改变自己的名次，所以分成两次网络读取后再检查自己的版本，仍然无法保证内部一致。<a href="#ref-3">[3]</a><a href="#ref-4">[4]</a><a href="#ref-5">[5]</a></p><p>峰值约 1,388.9 次/秒的头部读取，由一个集中程序每 2 秒刷新后，每张榜只需每秒读取源榜 0.5 次。如果每台 API 实例都自行刷新，源读次数还要乘以实例数。投影的 2 秒目标再叠加刷新等待，展示延迟可能接近 4 秒；投影 p99 目标不能当成端到端延迟的硬上限。</p><p>头部快照应携带捕获时间、scope、epoch、排序版本 order，以及投影水位或滞后信息。30 秒限制的是完整快照从成功捕获起的年龄，命中缓存不能重新计时，也不能由此推断源事实最多只滞后 30 秒。故障时，只能返回仍在这个窗口内的完整旧头部快照；个人查询的源投影不可读时，返回 503 或“更新中”。选好玩家后，按 ID 批量查询 Profile 资料；超时使用占位内容，保留已经选定的顺序。</p></div><div class="lang-en"><p>Pin scope/epoch/member and a minimum committed version. Return OK(epoch,projected_v,ordinal,rows), PENDING, or UNRANKED; errors never pretend to be an empty board. On a healthy primary in SERVING/FROZEN mode, ZREVRANK and inclusive max(0,r−5)..r+5 form one observation of at most 11 people. LOADING is unreadable. Other players can move without changing my version, so two network reads plus a version recheck remain insufficient. <a href="#ref-3">[3]</a><a href="#ref-4">[4]</a><a href="#ref-5">[5]</a></p><p>About 1,388.9/s shared head reads become 0.5 source reads/s per board with one central two-second refresher. Per-instance refresh multiplies by instance count. Projection plus refresh may approach four seconds; the projection p99 target is no end-to-end bound. Carry capture time, scope/epoch/order, and projection frontier/lag. Thirty seconds bounds age since successful capture; cache hits never renew it, and it does not bound source-fact lag. During failure only a complete head within that window may be served. Personal-source failure returns 503/updating. Batch profiles by ID with placeholders, preserving order.</p></div></div><h3><span class="lang-zh">活动榜单的游标为什么仍会重复或遗漏</span><span class="lang-en">A live cursor cannot promise gap-free browsing</span></h3><div class="bilingual"><div class="lang-zh"><p>在持续更新的活动榜单上按 offset 翻页，玩家越过分页边界后，后续页面就可能重复或遗漏。以完整元组 <code>(C,member)</code> 做 keyset，可以明确定位边界，但同一玩家在两次请求之间改分，仍可能跨过这条边界，因而也不能承诺全量浏览不重不漏。<strong>存储代次 epoch 只标识布局，处于 SERVING 的同一代次内，数据仍在变化。</strong></p><p>因此，本章的精确浏览接口使用不可变 snapshot_id：服务端保留一份完整排序结果，游标绑定榜范围 scope、snapshot_id、比较器版本和 offset。HTTP 层先验签、防篡改并检查访问权限，再调用下面的纯函数。快照到期时返回 410，让用户重新开始浏览，不能悄悄切到最新榜。游标签名和快照仓库都是必要依赖，本例没有实现。</p></div><div class="lang-en"><p>Live offset pages can repeat or omit players when updates cross the boundary. Keyset (C,member) identifies a complete boundary but a moving player can still cross it between calls. <strong>A storage epoch identifies layout; data in a SERVING epoch keeps changing.</strong></p><p>Exact browsing uses an immutable snapshot_id with a retained ordered result. Bind scope, snapshot ID, comparator, and offset in a signed cursor; the HTTP adapter verifies signature and access before this pure function. Expiry returns 410 and starts a new browse, never silently switches datasets. Cursor signing and snapshot storage are required adapters, unimplemented here.</p></div></div><pre data-language="Java 17 · immutable snapshot excerpt" data-kind="teaching" data-source="Leaderboard.java#page"><code>public record Cursor(String scope, String snapshot, String order, int offset) {}
+if v &lt; minimum then
+  return {&#x27;PENDING&#x27;, ARGV[2], v}
+end
+
+local rows = redis.call(&#x27;ZRANGE&#x27;, KEYS[1], math.max(0, r - 5), r + 5, &#x27;REV&#x27;, &#x27;WITHSCORES&#x27;)
+return {&#x27;OK&#x27;, ARGV[2], v, r + 1, rows}</code></pre><div class="bilingual"><div class="lang-zh"><p>调用方固定榜范围 scope、存储代次 epoch、玩家标识 member，并传入要求看到的最小已提交版本。脚本返回 OK(epoch,projected_v,ordinal,rows)、PENDING 或 UNRANKED；发生错误时，应返回错误，不能伪装成空榜。</p><p>主节点健康，且模式为 SERVING 或 FROZEN 时，脚本把 <code>ZREVRANK</code> 和含端点的 <code>max(0,r−5)..r+5</code> 放在同一次观察中，最多返回 11 人。LOADING 模式不可读。投影尚未达到最小已提交版本时返回 PENDING；该玩家的分数与版本记录都不存在，且未要求已提交版本时，才返回 UNRANKED。即使自己的版本没变，其他玩家改分也能改变自己的名次，所以分成两次网络读取后再检查自己的版本，仍然无法保证内部一致。<a href="#ref-3">[3]</a><a href="#ref-4">[4]</a><a href="#ref-5">[5]</a></p><p>峰值约 1,388.9 次/秒的头部读取，由一个集中程序每 2 秒刷新后，每张榜只需每秒读取源榜 0.5 次。如果每台 API 实例都自行刷新，源读次数还要乘以实例数。投影的 2 秒目标再叠加刷新等待，展示延迟可能接近 4 秒；投影 p99 目标不能当成端到端延迟的硬上限。</p><p>头部快照应携带捕获时间、scope、epoch、排序版本 order，以及投影水位或滞后信息。30 秒限制的是完整快照从成功捕获起的年龄，命中缓存不能重新计时，也不能由此推断源事实最多只滞后 30 秒。故障时，只能返回仍在这个窗口内的完整旧头部快照；个人查询的源投影不可读时，返回 503 或“更新中”。选好玩家后，按 ID 批量查询 Profile 资料；超时使用占位内容，保留已经选定的顺序。</p></div><div class="lang-en"><p>Pin scope/epoch/member and a minimum committed version. Return OK(epoch,projected_v,ordinal,rows), PENDING, or UNRANKED; errors never pretend to be an empty board. On a healthy primary in SERVING/FROZEN mode, ZREVRANK and inclusive max(0,r−5)..r+5 form one observation of at most 11 people. LOADING is unreadable. Other players can move without changing my version, so two network reads plus a version recheck remain insufficient. <a href="#ref-3">[3]</a><a href="#ref-4">[4]</a><a href="#ref-5">[5]</a></p><p>About 1,388.9/s shared head reads become 0.5 source reads/s per board with one central two-second refresher. Per-instance refresh multiplies by instance count. Projection plus refresh may approach four seconds; the projection p99 target is no end-to-end bound. Carry capture time, scope/epoch/order, and projection frontier/lag. Thirty seconds bounds age since successful capture; cache hits never renew it, and it does not bound source-fact lag. During failure only a complete head within that window may be served. Personal-source failure returns 503/updating. Batch profiles by ID with placeholders, preserving order.</p></div></div><h3><span class="lang-zh">活动榜单的游标为什么仍会重复或遗漏</span><span class="lang-en">A live cursor cannot promise gap-free browsing</span></h3><div class="bilingual"><div class="lang-zh"><p>在持续更新的活动榜单上按 offset 翻页，玩家越过分页边界后，后续页面就可能重复或遗漏。以完整元组 <code>(C,member)</code> 做 keyset，可以明确定位边界，但同一玩家在两次请求之间改分，仍可能跨过这条边界，因而也不能承诺全量浏览不重不漏。<strong>存储代次 epoch 只标识布局，处于 SERVING 的同一代次内，数据仍在变化。</strong></p><p>因此，本章的精确浏览接口使用不可变 snapshot_id：服务端保留一份完整排序结果，游标绑定榜范围 scope、snapshot_id、比较器版本和 offset。HTTP 层先验签、防篡改并检查访问权限，再调用下面的纯函数。快照到期时返回 410，让用户重新开始浏览，不能悄悄切到最新榜。游标签名和快照仓库都是必要依赖，本例没有实现。</p></div><div class="lang-en"><p>Live offset pages can repeat or omit players when updates cross the boundary. Keyset (C,member) identifies a complete boundary but a moving player can still cross it between calls. <strong>A storage epoch identifies layout; data in a SERVING epoch keeps changing.</strong></p><p>Exact browsing uses an immutable snapshot_id with a retained ordered result. Bind scope, snapshot ID, comparator, and offset in a signed cursor; the HTTP adapter verifies signature and access before this pure function. Expiry returns 410 and starts a new browse, never silently switches datasets. Cursor signing and snapshot storage are required adapters, unimplemented here.</p></div></div><pre data-language="Java 17 · immutable snapshot excerpt" data-kind="teaching" data-source="Leaderboard.java#page"><code>public record Cursor(String scope, String snapshot, String order, int offset) {}
 public record Page(List&lt;Entry&gt; rows, Cursor next) {}
 
 public static Page page(Snapshot s, Cursor c, int limit, long now) {
-    if (now &gt;= s.retainUntil()) throw new IllegalStateException(&quot;410 expired&quot;);
-    if (limit &lt; 1 || limit &gt; 100) throw new IllegalArgumentException(&quot;limit&quot;);
+    if (now &gt;= s.retainUntil()) {
+        throw new IllegalStateException(&quot;410 expired&quot;);
+    }
+    if (limit &lt; 1 || limit &gt; 100) {
+        throw new IllegalArgumentException(&quot;limit&quot;);
+    }
+
     int start = c == null ? 0 : c.offset();
     if (c != null &amp;&amp; (!s.scope().equals(c.scope())
-            || !s.id().equals(c.snapshot()) || !s.order().equals(c.order())))
+            || !s.id().equals(c.snapshot()) || !s.order().equals(c.order()))) {
         throw new IllegalArgumentException(&quot;cursor binding&quot;);
-    if (start &lt; 0 || start &gt; s.rows().size())
+    }
+    if (start &lt; 0 || start &gt; s.rows().size()) {
         throw new IllegalArgumentException(&quot;offset&quot;);
+    }
+
     int end = start + Math.min(limit, s.rows().size() - start);
     Cursor next = end == s.rows().size() ? null
             : new Cursor(s.scope(), s.id(), s.order(), end);
@@ -629,25 +674,37 @@ public static Page page(Snapshot s, Cursor c, int limit, long now) {
         <figcaption><span class="lang-zh">B 桶超时后，错误沿 B → 聚合器 → Board API 返回；精确查询只能失败或等待。若有满足时间约定的旧完整头部快照，可以带捕获时间返回。只归并 A 桶就声称得到全球前 100 名，可能连冠军都漏掉。</span><span class="lang-en">The failure travels B → aggregator → Board API. Exact results fail or wait when a shard is missing. A previous complete head may be returned with its timestamp; merging only A and calling it global top100 can omit the winner.</span></figcaption>
       </div>
     </figure><div class="bilingual"><div class="lang-zh"><p>A9 假设单个热键的预算是每秒 10,000 次更新。基准全球榜约 2,893.5 次/秒，还不足以迫使它分桶。流量增加 10 倍后为 28,935 次/秒，ceil(28,935/10,000)=3，因此需要 3 桶。若区服流量又极端集中到同一个热区服，全球榜和该区服榜共需 6 桶；图中的 A、B 只是路径示意。数据库、转发程序和网络都要按新规模测量，这个除法本身不能证明端到端容量达标。</p><p><strong>全球前 K 名的精确性证明，只适用于同一不可变集合。</strong>不在本桶前 K 的玩家，至少已有 K 名本桶玩家领先，因此不可能进入全球前 K。每桶最多提供 K 人，聚合器按相同的完整顺序合并，全部桶都成功才返回结果。描述数据集的清单 manifest 必须绑定 snapshot_id、榜范围 scope、比较器、路由版本和完整桶集合；仅仅使用相同的可变 epoch 字符串还不够。</p></div><div class="lang-en"><p>Assume a teaching 10k updates/s/key budget. Baseline global 2,893.5/s does not require buckets. At 10×, ceil(28,935/10,000)=3; global plus one maximally hot region needs six total. A/B are illustrative. Re-test DB, relay, and network; this division proves no end-to-end capacity.</p><p><strong>The topK proof concerns one immutable set.</strong> Outside local topK means at least K local players precede the candidate, so it cannot be global topK. Merge at most K per bucket with the same total order and require all buckets. A manifest binds snapshot ID, scope, comparator, routing version, and the entire bucket set. A shared mutable epoch string is insufficient.</p></div></div><pre data-language="Java 17 · exact topK under frozen manifest" data-kind="teaching" data-source="Leaderboard.java#merge"><code>public static List&lt;Entry&gt; topK(Manifest m, List&lt;Head&gt; heads, int k) {
-    if (k &lt; 1 || k &gt; 100) throw new IllegalArgumentException(&quot;k&quot;);
+    if (k &lt; 1 || k &gt; 100) {
+        throw new IllegalArgumentException(&quot;k&quot;);
+    }
+
     Set&lt;String&gt; seenBuckets = new HashSet&lt;&gt;(), seenPlayers = new HashSet&lt;&gt;();
     List&lt;Entry&gt; candidates = new ArrayList&lt;&gt;();
     for (Head h : heads) {
-        if (!m.buckets().contains(h.bucket()) || !seenBuckets.add(h.bucket())
-                || !m.scope().equals(h.scope()) || !m.snapshot().equals(h.snapshot())
-                || !m.routing().equals(h.routing()) || !m.order().equals(h.order())
-                || !h.complete() || h.requested() != k || h.rows().size() &gt; k)
+        if (!m.buckets().contains(h.bucket())
+                || !seenBuckets.add(h.bucket())
+                || !m.scope().equals(h.scope())
+                || !m.snapshot().equals(h.snapshot())
+                || !m.routing().equals(h.routing())
+                || !m.order().equals(h.order())
+                || !h.complete() || h.requested() != k || h.rows().size() &gt; k) {
             throw new IllegalStateException(&quot;incomplete or mixed snapshot&quot;);
+        }
+
         Entry previous = null;
         for (Entry e : h.rows()) {
             if (!seenPlayers.add(e.member())
-                    || (previous != null &amp;&amp; ORDER.compare(previous, e) &gt; 0))
+                    || (previous != null &amp;&amp; ORDER.compare(previous, e) &gt; 0)) {
                 throw new IllegalStateException(&quot;duplicate player or unsorted head&quot;);
-            candidates.add(e); previous = e;
+            }
+
+            candidates.add(e);
+            previous = e;
         }
     }
-    if (!seenBuckets.equals(m.buckets()))
+    if (!seenBuckets.equals(m.buckets())) {
         throw new IllegalStateException(&quot;missing bucket&quot;);
+    }
     return candidates.stream().sorted(ORDER).limit(k).toList();
 }</code></pre><div class="bilingual"><div class="lang-zh"><p>代码会拒绝缺桶、混用快照、路由或比较器不匹配、重复玩家、未排序列表，以及不完整回包。存储适配器必须实际读取该冻结数据集的前 min(K,N) 条，并据实标记完整；Java 检查无法证明一个失实的 complete 字段。K=100 时，两桶最多产生 200 名候选，三桶最多 300 名。本例为了便于理解，直接排序，成本为 O(bK log(bK))；生产实现可以改用堆归并。</p><p>再看混合时刻的反例：A=10、B=20 时，先读到 A=10；随后 A 降到 5，B 再降到 0，此时读到 B=0。归并会选出 A10，但三个真实时点的冠军依次是 B20、B20、A5，A10 从未是任何一个时点的榜首。因此，只有共同的不可变数据集才能标记为 exact；活动榜的跨桶读取应标记为 live/mixed-time。</p></div><div class="lang-en"><p>The code rejects missing buckets, mixed snapshots, route/comparator mismatches, duplicate players, unsorted heads, and partial replies. Storage must actually fetch the frozen first min(K,N) rows and attest completeness; Java cannot validate a dishonest complete field. Two K=100 buckets yield at most 200 candidates, three 300. This simple implementation sorts in O(bK log(bK)); production may heap-merge.</p><p>Mixed-time counterexample: read A=10 while B=20. A falls to5, then B to0; read B=0. Merge returns A10, while the actual winners were B20, B20, and A5. The result was never one instant’s top1. Reserve exact for a common immutable dataset; label live bucket reads mixed-time.</p></div></div><h3><span class="lang-zh">个人全球名次和附近玩家，为什么比前 K 名更难查</span><span class="lang-en">Global personal positions and neighbors cost more</span></h3><div class="bilingual"><div class="lang-zh"><p>全球序号等于 1，加上各桶中“严格更高 C 的人数”，再加“同 C 且 member 排在前面的人数”。<code>ZCOUNT (C +inf</code> 只处理第一项，同秒时的 ID 排序还要另外计数。<a href="#ref-11">[11]</a> 一种做法是每桶另建一个索引，把完整顺序编码成固定宽度 token，所有成员的 score 都设为 0，再按字典序做范围计数。代价是增加内存，并要求每次改分时原子更新这份索引；主 ZSET 中混有不同的 score，不能直接对它使用 BYLEX。<a href="#ref-17">[17]</a></p><p>查询全球附近玩家时，要让每桶围绕完整 token 各取最近的前 5 人和后 5 人，再归并，并与同一快照下的序号对应。只读自己所在桶的本地 r±5，会漏掉夹在中间的其他桶玩家。缺少任一桶，精确个人查询就要失败或等待；旧完整头部快照仍遵守 30 秒约定。</p><p>按分数段分片时，可以利用更高分段的人数计数，但玩家跨段迁移要防止重复计数或短暂消失，最高分段也容易成为热点。本章没有额外实现这类索引和迁移协议。</p></div><div class="lang-en"><p>Global ordinal position is one plus each bucket’s strictly-higher-C count and equal-C members ahead by the ID tie. ZCOUNT (C +inf covers only the former. <a href="#ref-11">[11]</a> An extra all-score-zero fixed-width total-order token index supports lex counts but costs memory and atomic update work. Do not apply BYLEX to mixed scores in the main ZSET. <a href="#ref-17">[17]</a></p><p>Global neighbors need each bucket’s nearest five on either side of the complete token, merged with a position from the same snapshot. Local r±5 misses interleaved buckets. A missing bucket fails/waits exact personal reads; an old complete head follows the 30 s contract. Score-range shards can add higher-range counts, but migration needs duplicate/disappearance protection and the leading range can overheat. Those indexes and migrations are outside this example.</p></div></div></section>
 <section><h2><span class="lang-zh">5 · Redis 故障后，怎样重建并安全切换</span><span class="lang-en">5 · Failure recovery, epochs, and safe cutover</span></h2><div class="bilingual"><div class="lang-zh"><p><strong>Redis 能够恢复，不代表副本一定保住了所有已经确认消费的投影。</strong>故障提升可能丢失已 ACK 的投影尾部，外部记录 checkpoint=42，并不能证明新主节点拥有 v42。此时，头部快照只能在约定时间内继续使用，个人查询返回 503；不能把峰值约 1,736.1 次/秒的读请求全部转向权威数据库，临时用 COUNT 统计名次。</p></div><div class="lang-en"><p><strong>Recoverable Redis does not mean a replica retained every acknowledged projection.</strong> Promotion may lose an applied suffix; external checkpoint=42 does not prove the new primary has v42. Bound stale heads, return 503 for personal reads, and avoid redirecting all 1,736.1/s peak reads into authoritative rank counts.</p></div></div><figure class="deck">

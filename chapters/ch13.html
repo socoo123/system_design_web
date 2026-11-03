@@ -275,43 +275,71 @@
         </svg>
         <figcaption><span class="lang-zh">A 超时后，故障先返回 Coordinator，由它在原来的 200 ms 总期限内改试同片副本；B 的请求继续处理。如果任何必要的逻辑分片仍无完整结果，就按本章的完整结果约定拒绝这一页，不能把缺片当成该片零命中。</span><span class="lang-en">The timeout first returns to Coordinator, which tries a same-partition replica within the original 200 ms deadline. B continues. If any logical partition remains absent, reject the page under the complete-results contract rather than pretending it had zero hits.</span></figcaption>
       </div>
-    </figure><div class="bilingual"><div class="lang-zh"><p>系统按文档 ID 分片（hash(doc_id)），让一篇文档及其词项落在同一片。普通查询没有指定 doc_id，因此要搜索所有可能命中的分片。每个逻辑分片只选一份副本执行，同片的三份数据不算三个独立语料库。图中画两片，容量仍按四片计算；查询阶段返回候选，取回阶段只获取最终入选文档。[6]</p><p><strong>为什么各片只返回 top-20 就够？</strong>假设全局前二十中有一条不在所属分片的前二十，那么同片至少已有二十条排在它前面，它就不可能进入全局前二十，形成矛盾。这个结论要求各片使用同一视图、过滤条件和总序，且文档不在片间重复。先取 top-20 再做权威过滤，则不保证最后仍能返回二十条。四片每轮最多返回 80 个候选元组，按每个 32 B 计算，是 2,560 B≈2.56 KB，正文另行取回。下面是 Java 17 教学节选，只负责结果合并；RPC、BM25、PIT 和分布式一致性由其他部分提供。可查阅<a href="../examples/ch13/SearchMerge.java">完整可运行源码</a>及<a href="../examples/ch13/README.md">编译/运行命令</a>。</p></div><div class="lang-en"><p>hash(doc_id) places a document and its terms on one shard. Without a doc ID, queries search every potentially matching shard. Select one serving copy per logical shard; three replicas are not three corpora. The diagram draws two shards, but capacity uses four. Query returns candidates; fetch retrieves winners. [6]</p><p><strong>Why is local top-20 enough?</strong> If a global top-20 hit were outside its local top-20, at least twenty same-shard hits would precede it, a contradiction. This assumes the same view, filters and total order with disjoint document ownership; top-20 before an authority filter need not fill twenty results afterward. One four-shard round returns at most 80 tuples, 32 B each=2,560 B≈2.56 KB, excluding bodies. The Java 17 teaching excerpt below performs pure merging; it implements neither RPC, BM25, PIT nor distributed consistency. See the <a href="../examples/ch13/SearchMerge.java">complete runnable source</a> and <a href="../examples/ch13/README.md">compile/run commands</a>.</p></div></div><pre data-language="Java 17 · teaching excerpt" data-kind="teaching" data-source="SearchMerge.java"><code>  public record Hit(String id, double score, long tie) {}
-  public record Reply(String shard, boolean ok, List&lt;Hit&gt; hits) {}
-  public record Merged(List&lt;Hit&gt; hits, Set&lt;String&gt; missing) {
-    public boolean complete() { return missing.isEmpty(); }
-  }
-  private static final Comparator&lt;Hit&gt; ORDER = Comparator
-      .comparingDouble(Hit::score).reversed().thenComparingLong(Hit::tie);
-
-  // Adapter supplies exact local top-k under the same view, filter and order.
-  public static Merged merge(Set&lt;String&gt; expected, List&lt;Reply&gt; replies,
-                             int k, boolean allowPartial) {
-    if (k &lt; 1 || expected.isEmpty()) throw new IllegalArgumentException("bounds");
-    var seen = new HashSet&lt;String&gt;(); var ids = new HashSet&lt;String&gt;();
-    var ties = new HashSet&lt;Long&gt;(); var good = new HashSet&lt;String&gt;();
-    var candidates = new ArrayList&lt;Hit&gt;();
-    for (Reply r : replies) {
-      if (!expected.contains(r.shard()) || !seen.add(r.shard()))
-        throw new IllegalArgumentException("unexpected/duplicate logical shard");
-      if (!r.ok()) continue;                // timed-out hits cannot count
-      if (r.hits().size() &gt; k) throw new IllegalArgumentException("local limit");
-      for (int i = 0; i &lt; r.hits().size(); i++) {
-        Hit h = r.hits().get(i);
-        if (!Double.isFinite(h.score()) || !ids.add(h.id()) || !ties.add(h.tie()))
-          throw new IllegalArgumentException("invalid/duplicate candidate");
-        if (i &gt; 0 &amp;&amp; ORDER.compare(r.hits().get(i - 1), h) &gt; 0)
-          throw new IllegalArgumentException("unsorted local result");
-        candidates.add(h);
-      }
-      good.add(r.shard());
+    </figure><div class="bilingual"><div class="lang-zh"><p>系统按文档 ID 分片（hash(doc_id)），让一篇文档及其词项落在同一片。普通查询没有指定 doc_id，因此要搜索所有可能命中的分片。每个逻辑分片只选一份副本执行，同片的三份数据不算三个独立语料库。图中画两片，容量仍按四片计算；查询阶段返回候选，取回阶段只获取最终入选文档。[6]</p><p><strong>为什么各片只返回 top-20 就够？</strong>假设全局前二十中有一条不在所属分片的前二十，那么同片至少已有二十条排在它前面，它就不可能进入全局前二十，形成矛盾。这个结论要求各片使用同一视图、过滤条件和总序，且文档不在片间重复。先取 top-20 再做权威过滤，则不保证最后仍能返回二十条。四片每轮最多返回 80 个候选元组，按每个 32 B 计算，是 2,560 B≈2.56 KB，正文另行取回。下面是 Java 17 教学节选，只负责结果合并；RPC、BM25、PIT 和分布式一致性由其他部分提供。可查阅<a href="../examples/ch13/SearchMerge.java">完整可运行源码</a>及<a href="../examples/ch13/README.md">编译/运行命令</a>。</p></div><div class="lang-en"><p>hash(doc_id) places a document and its terms on one shard. Without a doc ID, queries search every potentially matching shard. Select one serving copy per logical shard; three replicas are not three corpora. The diagram draws two shards, but capacity uses four. Query returns candidates; fetch retrieves winners. [6]</p><p><strong>Why is local top-20 enough?</strong> If a global top-20 hit were outside its local top-20, at least twenty same-shard hits would precede it, a contradiction. This assumes the same view, filters and total order with disjoint document ownership; top-20 before an authority filter need not fill twenty results afterward. One four-shard round returns at most 80 tuples, 32 B each=2,560 B≈2.56 KB, excluding bodies. The Java 17 teaching excerpt below performs pure merging; it implements neither RPC, BM25, PIT nor distributed consistency. See the <a href="../examples/ch13/SearchMerge.java">complete runnable source</a> and <a href="../examples/ch13/README.md">compile/run commands</a>.</p></div></div><pre data-language="Java 17 · teaching excerpt" data-kind="teaching" data-source="SearchMerge.java"><code>    public record Hit(String id, double score, long tie) {
     }
-    var missing = new HashSet&lt;&gt;(expected); missing.removeAll(good);
-    if (!allowPartial &amp;&amp; !missing.isEmpty())
-      throw new IllegalStateException("incomplete: " + missing);
-    candidates.sort(ORDER);
-    return new Merged(List.copyOf(candidates.subList(0, Math.min(k, candidates.size()))),
-                      Set.copyOf(missing));
-  }</code></pre><div class="bilingual"><div class="lang-zh"><p>示例用 <code>Reply.ok</code> 表示该逻辑分片按时返回了完整的查询候选；合并后，只要任一必需文档取回失败，外层仍要丢弃整页结果和游标。适配器负责提供按同一总序排列的局部 top-k；PIT 会话中的同分排序键 tie 对应唯一的 <code>_shard_doc</code>。完整模式拒绝缺片；演示参数 <code>allowPartial=true</code> 只允许返回标明缺片列表 missing 的近似首屏，不能将它写入完整结果缓存，也不能签发续页游标。生产实现可以用 k 路堆合并；这里最多只有 80 个候选，直接排序更容易看清保证。</p><p>一次请求共用 200 ms 总期限，覆盖排队、查询、正文取回、校验和次数受限的副本重试。A 故障时只重试 A，B 无需重做；如果查询计算本身过于昂贵，换副本可能只是额外增加一份负载。假设每片按时响应的概率均为 99%，且相互独立，四片全到齐的概率为 0.99⁴≈96.06%；这个例子只用于说明尾延迟会被放大。缺片、超时或正文取回错误，默认都让整页返回 503；真正的零命中必须由全部必要分片确认。因此要检查 <code>timed_out</code> 和失败分片，不能只看 HTTP 200。[6]</p></div><div class="lang-en"><p><code>Reply.ok</code> covers timely, complete query candidates for that logical shard. Any required fetch failure after merging still discards the whole page/cursor in the outer response path. Adapters supply local top-k under the common order; a PIT session uses unique <code>_shard_doc</code> ties. Complete mode rejects missing shards. Demonstration option <code>allowPartial=true</code> returns an explicitly marked approximate first page with missing IDs, never a complete-cache entry or continuation cursor. A production k-way heap is possible; sorting at most 80 tuples keeps the guarantee visible here.</p><p>One 200 ms deadline covers queues, query, fetch, checks and a bounded replica retry. Retry A only while B continues; intrinsically expensive computation may just run twice. Assuming independent 99% timely responses per shard gives 0.99⁴≈96.06% for all four, illustrating tail amplification only. Missing shards, timeouts or fetch errors default to whole-page 503, not zero hits; a complete zero-hit result needs every required shard. Check <code>timed_out</code> and failed shards rather than HTTP 200 alone. [6]</p></div></div></section>
+
+    public record Reply(String shard, boolean ok, List&lt;Hit&gt; hits) {
+    }
+
+    public record Merged(List&lt;Hit&gt; hits, Set&lt;String&gt; missing) {
+        public boolean complete() {
+            return missing.isEmpty();
+        }
+    }
+
+    private static final Comparator&lt;Hit&gt; ORDER = Comparator
+            .comparingDouble(Hit::score)
+            .reversed()
+            .thenComparingLong(Hit::tie);
+
+    // Adapter supplies exact local top-k under the same view, filter and order.
+    public static Merged merge(Set&lt;String&gt; expected, List&lt;Reply&gt; replies,
+                               int k, boolean allowPartial) {
+        if (k &lt; 1 || expected.isEmpty()) {
+            throw new IllegalArgumentException("bounds");
+        }
+
+        var seen = new HashSet&lt;String&gt;();
+        var ids = new HashSet&lt;String&gt;();
+        var ties = new HashSet&lt;Long&gt;();
+        var good = new HashSet&lt;String&gt;();
+        var candidates = new ArrayList&lt;Hit&gt;();
+
+        for (Reply r : replies) {
+            if (!expected.contains(r.shard()) || !seen.add(r.shard())) {
+                throw new IllegalArgumentException("unexpected/duplicate logical shard");
+            }
+            if (!r.ok()) {
+                continue;                // timed-out hits cannot count
+            }
+            if (r.hits().size() &gt; k) {
+                throw new IllegalArgumentException("local limit");
+            }
+
+            for (int i = 0; i &lt; r.hits().size(); i++) {
+                Hit h = r.hits().get(i);
+                if (!Double.isFinite(h.score()) || !ids.add(h.id()) || !ties.add(h.tie())) {
+                    throw new IllegalArgumentException("invalid/duplicate candidate");
+                }
+                if (i &gt; 0 &amp;&amp; ORDER.compare(r.hits().get(i - 1), h) &gt; 0) {
+                    throw new IllegalArgumentException("unsorted local result");
+                }
+                candidates.add(h);
+            }
+            good.add(r.shard());
+        }
+
+        var missing = new HashSet&lt;&gt;(expected);
+        missing.removeAll(good);
+        if (!allowPartial &amp;&amp; !missing.isEmpty()) {
+            throw new IllegalStateException("incomplete: " + missing);
+        }
+
+        candidates.sort(ORDER);
+        return new Merged(
+                List.copyOf(candidates.subList(0, Math.min(k, candidates.size()))),
+                Set.copyOf(missing));
+    }</code></pre><div class="bilingual"><div class="lang-zh"><p>示例用 <code>Reply.ok</code> 表示该逻辑分片按时返回了完整的查询候选；合并后，只要任一必需文档取回失败，外层仍要丢弃整页结果和游标。适配器负责提供按同一总序排列的局部 top-k；PIT 会话中的同分排序键 tie 对应唯一的 <code>_shard_doc</code>。完整模式拒绝缺片；演示参数 <code>allowPartial=true</code> 只允许返回标明缺片列表 missing 的近似首屏，不能将它写入完整结果缓存，也不能签发续页游标。生产实现可以用 k 路堆合并；这里最多只有 80 个候选，直接排序更容易看清保证。</p><p>一次请求共用 200 ms 总期限，覆盖排队、查询、正文取回、校验和次数受限的副本重试。A 故障时只重试 A，B 无需重做；如果查询计算本身过于昂贵，换副本可能只是额外增加一份负载。假设每片按时响应的概率均为 99%，且相互独立，四片全到齐的概率为 0.99⁴≈96.06%；这个例子只用于说明尾延迟会被放大。缺片、超时或正文取回错误，默认都让整页返回 503；真正的零命中必须由全部必要分片确认。因此要检查 <code>timed_out</code> 和失败分片，不能只看 HTTP 200。[6]</p></div><div class="lang-en"><p><code>Reply.ok</code> covers timely, complete query candidates for that logical shard. Any required fetch failure after merging still discards the whole page/cursor in the outer response path. Adapters supply local top-k under the common order; a PIT session uses unique <code>_shard_doc</code> ties. Complete mode rejects missing shards. Demonstration option <code>allowPartial=true</code> returns an explicitly marked approximate first page with missing IDs, never a complete-cache entry or continuation cursor. A production k-way heap is possible; sorting at most 80 tuples keeps the guarantee visible here.</p><p>One 200 ms deadline covers queues, query, fetch, checks and a bounded replica retry. Retry A only while B continues; intrinsically expensive computation may just run twice. Assuming independent 99% timely responses per shard gives 0.99⁴≈96.06% for all four, illustrating tail amplification only. Missing shards, timeouts or fetch errors default to whole-page 503, not zero hits; a complete zero-hit result needs every required shard. Check <code>timed_out</code> and failed shards rather than HTTP 200 alone. [6]</p></div></div></section>
 
 
 <section><h2><span class="lang-zh">更新链：在同一次索引操作中比较版本并替换文档</span><span class="lang-en">Ingestion: version comparison and replacement share one index operation</span></h2>
@@ -385,36 +413,43 @@
       </div>
     </figure><div class="bilingual"><div class="lang-zh"><p>业务库在同一事务中提交文档或删除状态、单调递增的版本，以及可重放事件，CDC 随后消费已提交日志；业务接口的 201 只确认这次业务提交。事件携带不复用的文档 ID（doc_id）、业务版本（version）、操作类型和<strong>完整文档快照</strong>。同一 (doc_id,version) 必须对应唯一的规范化摘要；消费端不能把乱序增量补丁直接应用到索引。版本由源库行版本或 CAS 可靠递增，不使用墙钟时间戳代替。</p><p><strong>删除也通过带版本的 INDEX 写入。</strong>请求固定指向一个具体索引世代，以 <code>version_type=external</code> 在同一次索引操作中比较版本并完整替换该 ID；只有更大版本才能写入。[7] 删除 v13 时写入 <code>{deleted:true, source_digest:…}</code>，不保留旧正文；所有查询都强制加入 <code>deleted=false</code>。这条逻辑记录会保留删除版本，而物理 DELETE 的版本元数据会被 <code>index.gc_deletes</code> 清理，无法阻止任意迟到的重放。[9] 保留逻辑删除状态，也不代表旧段或快照中的正文已经立即从物理介质擦除。</p></div><div class="lang-en"><p>The business database co-commits document/deletion state, a monotonic version and a replayable event. CDC consumes committed records; 201 acknowledges only the business commit. Events carry a non-reused doc ID, version, operation and <strong>full document snapshot</strong>. Each (doc_id,version) has one canonical digest; unordered delta patches are unsafe. Source-row versions/CAS provide increments, not wall-clock timestamps.</p><p><strong>Index a versioned deletion record too.</strong> Target a concrete generation and use <code>version_type=external</code> for the atomic version comparison plus full replacement of that ID; only a greater version wins. [7] Deletion v13 stores <code>{deleted:true, source_digest:…}</code> without old content; every query forces <code>deleted=false</code>. This retained logical document keeps its version, whereas physical DELETE metadata is cleaned according to <code>index.gc_deletes</code> and cannot block arbitrarily late replay. [9] This does not immediately erase historical bytes in old segments or snapshots.</p></div></div><pre data-language="Pseudocode · versioned index apply + checkpoint" data-kind="pseudocode" data-source="ingest.pseudo"><code># Pseudocode: full immutable source events; concrete index generation g.
 apply(event, g):
-  require event.version &gt; 0 and canonical_digest(event) == event.digest
-  body = {source_digest: event.digest, deleted: event.op == DELETE}
-  if not body.deleted: body.fields = analyze(event.full_document, g.analyzer)
-  # DELETE is also an INDEX of this same ID, with no old content retained.
-  result = ES.index(g.index, event.doc_id, body,
-                    version=event.version, version_type="external")
-  if result.transport_unknown or result.retryable_error:
-    return RETRY_SAME_EVENT                 # applied state may already exist
-  if result.status == 409:
-    current = ES.get(g.index, event.doc_id, realtime=true)
-    if current.unavailable: return RETRY_SAME_EVENT
-    if not current.found or current.version &lt; event.version:
-      return STOP_PARTITION_AND_ALERT       # violated retained-state contract
-    if current.version == event.version and current.source_digest != event.digest:
-      return STOP_PARTITION_AND_ALERT       # one version, two different events
-    return ACKABLE                         # identical replay or superseded
-  if not result.success:
-    return STOP_PARTITION_AND_ALERT         # mapping/auth errors are not ACKs
-  return ACKABLE
+    require event.version &gt; 0 and canonical_digest(event) == event.digest
+    body = {source_digest: event.digest, deleted: event.op == DELETE}
+    if not body.deleted:
+        body.fields = analyze(event.full_document, g.analyzer)
+
+    # DELETE is also an INDEX of this same ID, with no old content retained.
+    result = ES.index(g.index, event.doc_id, body,
+                      version=event.version, version_type="external")
+    if result.transport_unknown or result.retryable_error:
+        return RETRY_SAME_EVENT                 # applied state may already exist
+
+    if result.status == 409:
+        current = ES.get(g.index, event.doc_id, realtime=true)
+        if current.unavailable:
+            return RETRY_SAME_EVENT
+        if not current.found or current.version &lt; event.version:
+            return STOP_PARTITION_AND_ALERT       # violated retained-state contract
+        if current.version == event.version and current.source_digest != event.digest:
+            return STOP_PARTITION_AND_ALERT       # one version, two different events
+        return ACKABLE                         # identical replay or superseded
+
+    if not result.success:
+        return STOP_PARTITION_AND_ALERT         # mapping/auth errors are not ACKs
+    return ACKABLE
 
 consume_source_partition(events, g):
-  for event in events:                      # per-partition sequential example
-    while true:
-      decision = apply(event, g)
-      if decision == ACKABLE: break
-      if decision == STOP_PARTITION_AND_ALERT: halt_without_committing()
-      bounded_backoff()                     # retry the same event, not the next
-    commit_source_offset(event.offset)      # after confirmed durable apply only
-  # Lost checkpoint =&gt; safe replay. Never skip a failed offset.
-  # Do not physically delete tombstones; rebuild g with retained versions too.</code></pre><div class="bilingual"><div class="lang-zh"><p>这里的原子保证由 ES 对单个 ID 的 external 版本写入提供，不能靠 worker 本地锁，也不能先读版本再无条件写入。遇到 409 后，worker 用 realtime GET 读取当前记录：版本更大，说明本事件已被更新版本覆盖；版本相等且摘要一致，才确认是同一事件的重放；版本相等但载荷不同，则停止源分区并告警。读不到应保留的记录、读到更小版本，也说明前提被破坏，需要停分区；读取结果不明确时则重试，不跳过事件。[7][10] 网络超时只表示写入结果未知，因此仍重试同一事件。永久映射错误或鉴权错误不能当作成功确认。示例按源分区顺序提交消费检查点（checkpoint）；并发处理时，也只能推进到已经确认成功的连续前缀。</p><p>CDC 传递、索引应用和 refresh 的正常目标各为 1 秒，索引约 3 秒可见；再加首屏最多 30 秒的绝对年龄，就得到约 33 秒的<strong>健康新鲜度预算</strong>。积压或时钟偏差未知时，这个上界不成立。refresh 打开新的搜索读取视图，与业务提交、索引写入确认是不同步骤；逐条强制刷新也不能解决消费积压。[5] 应监控最老事件年龄、可搜索水位、重试和死信。每秒 200 次变更积压十分钟，会产生 120,000 个事件；恢复后每秒处理 600 个，扣除每秒 200 个新事件，净追赶速率为 400 个/秒，理想情况下需要 300 秒追平。</p><p>如果删除或撤权必须以权威状态为准，缓存命中和旧 PIT 的结果也要在返回前读取权威状态；无法完成校验时拒绝请求。这个约定只反映校验时已经提交的禁止状态，不能撤回在途响应。版本墓碑防止索引被旧事件恢复，权威校验防止旧视图展示已禁止内容，两者各有作用。如果要求删除提交后，连已经获准但尚未发出的响应也停止，还需要额外协调许可与发送，并明确已经在途的响应边界。</p></div><div class="lang-en"><p>The atomic boundary is ES external-version indexing for one ID, not a local worker lock or a read followed by an unconditional write. After 409, realtime GET distinguishes a higher superseding version from equal-version replay; equal version with a different digest stops the source partition and alerts. An inconclusive read retries without skipping. [7][10] A network timeout means unknown outcome: retry the same event. Permanent mapping/auth failures are not ACKs. This sequential source-partition example commits each checkpoint after confirmed apply; parallel processing may commit only the contiguous successful prefix.</p><p>Healthy targets of one second each for CDC, apply and refresh yield about three seconds, plus thirty seconds of absolute first-page age for a <strong>healthy budget</strong> of roughly 33 seconds. It is no guarantee during backlog or unknown clock skew. Refresh opens the search reader; it differs from business commit and index-write acknowledgement. Refreshing every write does not cure backlog. [5] Monitor oldest-event age, searchable watermarks, retries and dead letters. At 200 changes/s a ten-minute pause builds 120,000 events; recovery at 600/s minus 200/s arrivals drains at 400/s, ideally taking 300 seconds.</p><p>Deletion/access checks cover cached and old-PIT hits and fail closed when unavailable. The promise reflects prohibited state committed before the check; it cannot recall an in-flight response. Version tombstones prevent index resurrection, while authority checks prevent stale-view display. A stronger rule stopping already-admitted but unsent responses after deletion needs additional coordination and an explicit in-flight boundary.</p></div></div><details><summary><span class="lang-zh">重建索引时怎样保留删除版本，何时才可能回收墓碑</span><span class="lang-en">Rebuild and tombstone reclamation boundaries</span></summary><div class="bilingual"><div class="lang-zh"><p>重建时先记录一致快照对应的日志水位，将仍存活的文档和保留的删除版本一起载入新世代，再重放该水位之后的变更。追平日志并校验后，才发布新的配置指针。旧世代的在途请求和 PIT 仍按各自期限结束；新请求使用新的具体索引和缓存命名空间。只扫描存活记录会丢失墓碑；扫描后不追日志，则会遗漏扫描期间发生的删除。</p><p>本例不物理回收墓碑，也不复用文档 ID。如果要回收，必须证明所有日志重放、最老快照、重试和离线任务都已越过删除版本；或者让另一份持久版本账本在索引写入的原子路径上拒绝旧版本。仅规定“保留几分钟”，不能完成这个证明。整个索引丢失时，需要从源快照和日志重建；本例没有实验验证副本切主与全盘故障的行为。</p></div><div class="lang-en"><p>Record a consistent snapshot watermark, load live documents and retained deletion versions into the new generation, replay later events, catch up and validate, then publish the configuration pointer. In-flight old-generation requests/PITs keep their own lifetimes; new requests use a new concrete index and cache namespace. Scanning only live rows loses tombstones; scanning without log replay loses concurrent deletions.</p><p>This example never physically reclaims tombstones or reuses IDs. Reclamation requires proof that all log replays, oldest snapshots, retries and offline work have crossed the deletion version, or another durable version ledger enforcing rejection in the atomic index path. A short arbitrary retention period proves none of this. Total index loss requires reconstruction from source snapshots/logs; replica failover and disk-loss behavior were not experimentally verified.</p></div></div></details></section>
+    for event in events:                      # per-partition sequential example
+        while true:
+            decision = apply(event, g)
+            if decision == ACKABLE:
+                break
+            if decision == STOP_PARTITION_AND_ALERT:
+                halt_without_committing()
+            bounded_backoff()                     # retry the same event, not the next
+        commit_source_offset(event.offset)      # after confirmed durable apply only
+    # Lost checkpoint =&gt; safe replay. Never skip a failed offset.
+    # Do not physically delete tombstones; rebuild g with retained versions too.</code></pre><div class="bilingual"><div class="lang-zh"><p>这里的原子保证由 ES 对单个 ID 的 external 版本写入提供，不能靠 worker 本地锁，也不能先读版本再无条件写入。遇到 409 后，worker 用 realtime GET 读取当前记录：版本更大，说明本事件已被更新版本覆盖；版本相等且摘要一致，才确认是同一事件的重放；版本相等但载荷不同，则停止源分区并告警。读不到应保留的记录、读到更小版本，也说明前提被破坏，需要停分区；读取结果不明确时则重试，不跳过事件。[7][10] 网络超时只表示写入结果未知，因此仍重试同一事件。永久映射错误或鉴权错误不能当作成功确认。示例按源分区顺序提交消费检查点（checkpoint）；并发处理时，也只能推进到已经确认成功的连续前缀。</p><p>CDC 传递、索引应用和 refresh 的正常目标各为 1 秒，索引约 3 秒可见；再加首屏最多 30 秒的绝对年龄，就得到约 33 秒的<strong>健康新鲜度预算</strong>。积压或时钟偏差未知时，这个上界不成立。refresh 打开新的搜索读取视图，与业务提交、索引写入确认是不同步骤；逐条强制刷新也不能解决消费积压。[5] 应监控最老事件年龄、可搜索水位、重试和死信。每秒 200 次变更积压十分钟，会产生 120,000 个事件；恢复后每秒处理 600 个，扣除每秒 200 个新事件，净追赶速率为 400 个/秒，理想情况下需要 300 秒追平。</p><p>如果删除或撤权必须以权威状态为准，缓存命中和旧 PIT 的结果也要在返回前读取权威状态；无法完成校验时拒绝请求。这个约定只反映校验时已经提交的禁止状态，不能撤回在途响应。版本墓碑防止索引被旧事件恢复，权威校验防止旧视图展示已禁止内容，两者各有作用。如果要求删除提交后，连已经获准但尚未发出的响应也停止，还需要额外协调许可与发送，并明确已经在途的响应边界。</p></div><div class="lang-en"><p>The atomic boundary is ES external-version indexing for one ID, not a local worker lock or a read followed by an unconditional write. After 409, realtime GET distinguishes a higher superseding version from equal-version replay; equal version with a different digest stops the source partition and alerts. An inconclusive read retries without skipping. [7][10] A network timeout means unknown outcome: retry the same event. Permanent mapping/auth failures are not ACKs. This sequential source-partition example commits each checkpoint after confirmed apply; parallel processing may commit only the contiguous successful prefix.</p><p>Healthy targets of one second each for CDC, apply and refresh yield about three seconds, plus thirty seconds of absolute first-page age for a <strong>healthy budget</strong> of roughly 33 seconds. It is no guarantee during backlog or unknown clock skew. Refresh opens the search reader; it differs from business commit and index-write acknowledgement. Refreshing every write does not cure backlog. [5] Monitor oldest-event age, searchable watermarks, retries and dead letters. At 200 changes/s a ten-minute pause builds 120,000 events; recovery at 600/s minus 200/s arrivals drains at 400/s, ideally taking 300 seconds.</p><p>Deletion/access checks cover cached and old-PIT hits and fail closed when unavailable. The promise reflects prohibited state committed before the check; it cannot recall an in-flight response. Version tombstones prevent index resurrection, while authority checks prevent stale-view display. A stronger rule stopping already-admitted but unsent responses after deletion needs additional coordination and an explicit in-flight boundary.</p></div></div><details><summary><span class="lang-zh">重建索引时怎样保留删除版本，何时才可能回收墓碑</span><span class="lang-en">Rebuild and tombstone reclamation boundaries</span></summary><div class="bilingual"><div class="lang-zh"><p>重建时先记录一致快照对应的日志水位，将仍存活的文档和保留的删除版本一起载入新世代，再重放该水位之后的变更。追平日志并校验后，才发布新的配置指针。旧世代的在途请求和 PIT 仍按各自期限结束；新请求使用新的具体索引和缓存命名空间。只扫描存活记录会丢失墓碑；扫描后不追日志，则会遗漏扫描期间发生的删除。</p><p>本例不物理回收墓碑，也不复用文档 ID。如果要回收，必须证明所有日志重放、最老快照、重试和离线任务都已越过删除版本；或者让另一份持久版本账本在索引写入的原子路径上拒绝旧版本。仅规定“保留几分钟”，不能完成这个证明。整个索引丢失时，需要从源快照和日志重建；本例没有实验验证副本切主与全盘故障的行为。</p></div><div class="lang-en"><p>Record a consistent snapshot watermark, load live documents and retained deletion versions into the new generation, replay later events, catch up and validate, then publish the configuration pointer. In-flight old-generation requests/PITs keep their own lifetimes; new requests use a new concrete index and cache namespace. Scanning only live rows loses tombstones; scanning without log replay loses concurrent deletions.</p><p>This example never physically reclaims tombstones or reuses IDs. Reclamation requires proof that all log replays, oldest snapshots, retries and offline work have crossed the deletion version, or another durable version ledger enforcing rejection in the atomic index path. A short arbitrary retention period proves none of this. Total index loss requires reconstruction from source snapshots/logs; replica failover and disk-loss behavior were not experimentally verified.</p></div></div></details></section>
 
 
 <section><h2><span class="lang-zh">PIT 分页：游标记录最后扫描的位置</span><span class="lang-en">PIT pagination: the cursor records the last scanned position</span></h2>
@@ -486,40 +521,49 @@ consume_source_partition(events, g):
       </div>
     </figure><div class="bilingual"><div class="lang-zh"><p>当 <code>from=10,000,size=20</code> 时，四片最多保留 4×10,020=40,080 个候选；按每个 32 B 计算，是 1,282,560 B≈1.28 MB。一轮游标查询最多保留 80 个候选，约 2.56 KB，两者相差 501 倍；这不是倒排列表扫描量的对比。该请求超过 Elastic 默认的 10,000 结果窗口，应拒绝它，或改用 PIT+search_after；扩大窗口并不能消除查询成本。[4]</p><p>PIT 固定搜索读取视图，排序规则 <code>_score desc,_shard_doc asc</code> 则在该 PIT 内提供确定的总序。翻页期间保持查询、过滤和排序不变，每次沿用最新 PIT ID 以及锚点的全部 sort 值。[4][11] 游标由服务端认证保护，还要绑定访问主体、租户、权限范围版本、页大小和期限；查询或权限上下文改变时，必须重新开始。打开 PIT 和每轮搜索都拒绝缺片，即使 HTTP 状态是 200，也要检查超时与失败分片。PIT 丢失或过期时，本章产品接口返回 410，不能偷偷切到新视图。</p></div><div class="lang-en"><p>With <code>from=10,000,size=20</code>, four shards retain up to 4×10,020=40,080 candidates. At 32 B each that is 1,282,560 B≈1.28 MB. Versus one cursor round of 80/2.56 KB, retained candidates grow 501×; this is not a posting-scan estimate. The request exceeds Elastic’s default 10,000 result window, so reject or switch to PIT+search_after. Raising the window does not remove the cost. [4]</p><p>PIT pins the reader; <code>_score desc,_shard_doc asc</code> supplies a total order inside it. Keep query/filters/sort fixed and carry the latest PIT ID plus all sort values. [4][11] A server-authenticated token also binds subject, tenant, authorization-scope version, page size and expiry; changed query/access context restarts the session. Reject missing shards both when opening PIT and on each search, checking timeout/failure even on HTTP 200. A missing/expired PIT maps to this product’s 410 restart contract, never a silent new view.</p></div></div><pre data-language="Pseudocode · PIT scan cursor + authority filter" data-kind="pseudocode" data-source="page.pseudo"><code># Pseudocode: one 200 ms request deadline; no shared cache for PIT sessions.
 page(request, auth):
-  deadline = monotonic_now() + 200ms
-  require 1 &lt;= request.limit &lt;= 20           # malformed =&gt; 400
-  ctx = canonical(request.query, request.filters + deleted_false, FIXED_SORT,
-                  request.limit, auth.tenant, auth.subject, auth.scope_version)
-  if request.cursor:
-    c = authenticated_open(request.cursor)   # forged =&gt; 400; expired =&gt; 410
-    require c.context_hash == hash(ctx)      # changed context =&gt; 400 restart
-    pit, after = c.latest_pit_id, c.last_scanned_sort
-  else:
-    pit = open_complete_pit(ctx, keep_alive=60s, deadline=deadline)
-    after = NONE                            # open must reject missing shards
-  out, scanned, exhausted = [], 0, false
-  while len(out) &lt; request.limit and scanned &lt; 100 and not exhausted:
-    n = min(request.limit - len(out), 100 - scanned)
-    pit_expiry = now() + 60s                 # conservative renewal start
-    r = search(pit, ctx, after, size=n, keep_alive=60s, deadline=deadline,
-               allow_partial_search_results=false)
-    if r.pit_missing: fail(410, "restart")  # never silently open a new PIT
-    if r.failed or r.timed_out or not r.all_required_shards:
-      fail(503, "incomplete")                # discard buffered hits and cursor
-    pit = r.latest_pit_id
-    for hit in r.hits:                       # ordered, fetched from the PIT
-      after = hit.all_sort_values           # advance even when access is denied
-      scanned += 1
-      decision = authority_check(hit.doc_id, auth, deadline)
-      if decision.unavailable: fail(503, "authority unavailable")
-      if decision.allowed_and_live: out.append(hit)
-    exhausted = len(r.hits) &lt; n
-  if deadline_expired(deadline): fail(503, "deadline")
-  cursor = NONE if exhausted else authenticated_seal(
-      hash(ctx), pit, after, expires_at=pit_expiry)
-  if exhausted: close_pit_best_effort(pit)
-  return {hits: out, cursor: cursor, complete: true,
-          truncated: scanned == 100 and len(out) &lt; request.limit and not exhausted}</code></pre><div class="bilingual"><div class="lang-zh"><p><strong>候选全部被过滤，扫描进度仍要向前。</strong>如果前二十个旧候选已经全部删除，用“最后返回的文档”作锚点就会停在原地。因此每扫描一个候选，先更新扫描位置 <code>after</code>，再做权威校验；需要补取时，仍受原来的 200 ms 期限和每页最多扫描 100 个候选的限制，后者是教学设定。如果只是扫描数量预算耗尽，可以返回短页甚至空页，同时带上 <code>truncated=true</code> 和已经前移的游标。这里的 <code>complete=true</code> 只表示必要分片齐全；<code>truncated</code> 表示扫描预算用尽，不代表已经穷尽所有合规命中，也不属于缺片导致的 partial。只有实际扫描到快照末尾，才不再返回游标；最后一页刚好填满时，下一次请求返回空的末页也合法。</p><p>图中的 80 个候选是<strong>一轮</strong>查询的上界，补取会增加轮次和总工作量；<code>search_after</code> 并不保证只扫描二十个倒排项。权威校验（authority_check）读取当前删除和权限状态，校验超时就丢弃已经缓冲的结果，不返回成功游标；正文取回意外失败，也让整页失败。这段伪代码依赖适配器提供 PIT、预算、完整性检查与权威读取，并不是可以直接运行的搜索服务。</p><p>60 秒是本章选择的空闲续期时间；令牌期限从最后一轮查询开始时保守计算，服务端如果提前丢失 PIT，仍可能更早要求重新搜索。应限制并发 PIT 数量和总寿命，读完主动关闭。保留旧段、跟踪删除状态都会占用磁盘、文件句柄和堆内存；固定排序视图不会冻结用户权限。[11]</p></div><div class="lang-en"><p><strong>Even a fully filtered page must advance.</strong> If the first twenty old hits are now deleted, using the last returned document leaves the cursor stuck. Advance <code>after</code> on every examined candidate before authority checks; refill within the original 200 ms deadline and at most 100 scanned hits/page, a teaching cap. Budget exhaustion may return a short or empty page with <code>truncated=true</code> and an advanced cursor. Here <code>complete=true</code> means shard completeness, while <code>truncated</code> means scan-budget exhaustion, without claiming all eligible hits were exhausted. It is not a missing-shard partial result. Only snapshot exhaustion removes the cursor; a full last page may legitimately be followed by an empty terminal request.</p><p>The diagram’s 80-candidate bound is <strong>per query round</strong>; refills add rounds and work, and <code>search_after</code> does not guarantee twenty posting scans. authority_check reads authoritative deletion/access state. Its timeout discards buffered hits and withholds a successful cursor; unexpected fetch failures fail the whole page too. Adapters implement PIT, budgets, completeness and authority reads. This pseudocode is not a directly runnable search service.</p><p>Sixty seconds is our idle-renewal policy. Compute token expiry conservatively from the final search round’s start; actual PIT loss may require earlier restart. Bound concurrency/total lifetime and close finished PITs. Old segments and deletion tracking consume disk, handles and heap. Stable order never freezes permissions. [11]</p></div></div></section>
+    deadline = monotonic_now() + 200ms
+    require 1 &lt;= request.limit &lt;= 20           # malformed =&gt; 400
+    ctx = canonical(request.query, request.filters + deleted_false, FIXED_SORT,
+                    request.limit, auth.tenant, auth.subject, auth.scope_version)
+
+    if request.cursor:
+        c = authenticated_open(request.cursor)   # forged =&gt; 400; expired =&gt; 410
+        require c.context_hash == hash(ctx)      # changed context =&gt; 400 restart
+        pit, after = c.latest_pit_id, c.last_scanned_sort
+    else:
+        pit = open_complete_pit(ctx, keep_alive=60s, deadline=deadline)
+        after = NONE                            # open must reject missing shards
+
+    out, scanned, exhausted = [], 0, false
+    while len(out) &lt; request.limit and scanned &lt; 100 and not exhausted:
+        n = min(request.limit - len(out), 100 - scanned)
+        pit_expiry = now() + 60s                 # conservative renewal start
+        r = search(pit, ctx, after, size=n, keep_alive=60s, deadline=deadline,
+                   allow_partial_search_results=false)
+        if r.pit_missing:
+            fail(410, "restart")  # never silently open a new PIT
+        if r.failed or r.timed_out or not r.all_required_shards:
+            fail(503, "incomplete")                # discard buffered hits and cursor
+
+        pit = r.latest_pit_id
+        for hit in r.hits:                       # ordered, fetched from the PIT
+            after = hit.all_sort_values           # advance even when access is denied
+            scanned += 1
+            decision = authority_check(hit.doc_id, auth, deadline)
+            if decision.unavailable:
+                fail(503, "authority unavailable")
+            if decision.allowed_and_live:
+                out.append(hit)
+        exhausted = len(r.hits) &lt; n
+
+    if deadline_expired(deadline):
+        fail(503, "deadline")
+    cursor = NONE if exhausted else authenticated_seal(
+        hash(ctx), pit, after, expires_at=pit_expiry)
+    if exhausted:
+        close_pit_best_effort(pit)
+    return {hits: out, cursor: cursor, complete: true,
+            truncated: scanned == 100 and len(out) &lt; request.limit and not exhausted}</code></pre><div class="bilingual"><div class="lang-zh"><p><strong>候选全部被过滤，扫描进度仍要向前。</strong>如果前二十个旧候选已经全部删除，用“最后返回的文档”作锚点就会停在原地。因此每扫描一个候选，先更新扫描位置 <code>after</code>，再做权威校验；需要补取时，仍受原来的 200 ms 期限和每页最多扫描 100 个候选的限制，后者是教学设定。如果只是扫描数量预算耗尽，可以返回短页甚至空页，同时带上 <code>truncated=true</code> 和已经前移的游标。这里的 <code>complete=true</code> 只表示必要分片齐全；<code>truncated</code> 表示扫描预算用尽，不代表已经穷尽所有合规命中，也不属于缺片导致的 partial。只有实际扫描到快照末尾，才不再返回游标；最后一页刚好填满时，下一次请求返回空的末页也合法。</p><p>图中的 80 个候选是<strong>一轮</strong>查询的上界，补取会增加轮次和总工作量；<code>search_after</code> 并不保证只扫描二十个倒排项。权威校验（authority_check）读取当前删除和权限状态，校验超时就丢弃已经缓冲的结果，不返回成功游标；正文取回意外失败，也让整页失败。这段伪代码依赖适配器提供 PIT、预算、完整性检查与权威读取，并不是可以直接运行的搜索服务。</p><p>60 秒是本章选择的空闲续期时间；令牌期限从最后一轮查询开始时保守计算，服务端如果提前丢失 PIT，仍可能更早要求重新搜索。应限制并发 PIT 数量和总寿命，读完主动关闭。保留旧段、跟踪删除状态都会占用磁盘、文件句柄和堆内存；固定排序视图不会冻结用户权限。[11]</p></div><div class="lang-en"><p><strong>Even a fully filtered page must advance.</strong> If the first twenty old hits are now deleted, using the last returned document leaves the cursor stuck. Advance <code>after</code> on every examined candidate before authority checks; refill within the original 200 ms deadline and at most 100 scanned hits/page, a teaching cap. Budget exhaustion may return a short or empty page with <code>truncated=true</code> and an advanced cursor. Here <code>complete=true</code> means shard completeness, while <code>truncated</code> means scan-budget exhaustion, without claiming all eligible hits were exhausted. It is not a missing-shard partial result. Only snapshot exhaustion removes the cursor; a full last page may legitimately be followed by an empty terminal request.</p><p>The diagram’s 80-candidate bound is <strong>per query round</strong>; refills add rounds and work, and <code>search_after</code> does not guarantee twenty posting scans. authority_check reads authoritative deletion/access state. Its timeout discards buffered hits and withholds a successful cursor; unexpected fetch failures fail the whole page too. Adapters implement PIT, budgets, completeness and authority reads. This pseudocode is not a directly runnable search service.</p><p>Sixty seconds is our idle-renewal policy. Compute token expiry conservatively from the final search round’s start; actual PIT loss may require earlier restart. Bound concurrency/total lifetime and close finished PITs. Old segments and deletion tracking consume disk, handles and heap. Stable order never freezes permissions. [11]</p></div></div></section>
 
 
 <section><h2><span class="lang-zh">自动补全：单独规划容量，客户端丢弃过时响应</span><span class="lang-en">Autocomplete: separate capacity and reject stale client replies</span></h2>

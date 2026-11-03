@@ -3,13 +3,17 @@ decideOffer(op, orderId, attemptId, generation, authenticatedCourier):
     o = SELECT order FOR UPDATE
     a = SELECT attempt WHERE id = attemptId
     require a binds (orderId, generation) else CONFLICT
-    if op in {ACCEPT, REJECT}: require a.courier == authenticatedCourier else FORBIDDEN
+    if op in {ACCEPT, REJECT}:
+      require a.courier == authenticatedCourier else FORBIDDEN
     if op == ACCEPT and a.acceptReceipt exists:
-      commit; return a.acceptReceipt, currentSnapshot(o) // historical, no reactivation
+      commit;
+      return a.acceptReceipt, currentSnapshot(o) // historical, no reactivation
+
     require o.currentAttempt == a.id and o.generation == generation else STALE
     require o.state == offered and a.result == offered else STALE
     c = SELECT courier_capacity WHERE id = a.courier FOR UPDATE
     now = SELECT clock_timestamp()
+
     if op == ACCEPT:
       require now < a.deadline else CONFLICT
       receipt = fixedAcceptReceipt(a)
@@ -26,5 +30,6 @@ decideOffer(op, orderId, attemptId, generation, authenticatedCourier):
       INSERT outbox(keyFor(orderId, generation + 1, next), nextWorkOrFailure)
       // Persist courier cooldown with the retry work; retries do not reset budgets.
       receipt = fixedDecisionReceipt(a, op)
-  commit; return receipt, currentSnapshot(o)
+  commit;
+  return receipt, currentSnapshot(o)
   // Only this offered branch expires. Assigned/picked_up keep their slot.
