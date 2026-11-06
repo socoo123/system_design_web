@@ -6,7 +6,67 @@ import sql from 'highlight.js/lib/languages/sql';
 import lua from 'highlight.js/lib/languages/lua';
 import json from 'highlight.js/lib/languages/json';
 
-for (const [name, grammar] of Object.entries({java, python, sql, lua, json})) {
+// Upstream grammars color declarations only. Teaching code reads better when call sites,
+// type names and constants are colored too; reserved words keep their original scopes.
+function withCallSites(grammar, {types = false, returnTypes = false} = {}) {
+  return function (hljs) {
+    const language = grammar(hljs);
+    const reserved = new Set();
+    for (const [group, words] of Object.entries(language.keywords || {})) {
+      if (group.startsWith('$')) continue;
+      for (const word of Array.isArray(words) ? words : String(words).split(/\s+/)) {
+        if (word.trim()) reserved.add(word.trim());
+      }
+    }
+    function skipReserved(match, response) {
+      if (reserved.has(match[0])) response.ignoreMatch();
+    }
+    const typeModes = types ? [
+      {scope: 'symbol', match: /\b[A-Z][A-Z0-9_]+\b/, 'on:begin': skipReserved},
+      {scope: 'title.class', match: /\b[A-Z]\w*\b/, 'on:begin': skipReserved}
+    ] : [];
+    const callMode = {scope: 'title.function', match: /\b[A-Za-z_]\w*(?=\s*\()/, 'on:begin': skipReserved};
+    const seen = new Set();
+    (function addToParams(modes) {
+      for (const mode of modes || []) {
+        if (!mode || typeof mode !== 'object' || seen.has(mode)) continue;
+        seen.add(mode);
+        if (mode.className === 'params' || mode.scope === 'params') {
+          mode.contains = [...(mode.contains || []), ...typeModes];
+        }
+        addToParams(mode.contains);
+        addToParams(mode.variants);
+      }
+    })(language.contains);
+    // Java method declarations swallow the return type, so color `Type name(` before that mode runs.
+    const returnTypeModes = returnTypes ? [
+      {scope: 'title.class', match: /\b[A-Z]\w*(?=(?:<[^()]*>)?(?:\[\])*\s+[A-Za-z_]\w*\s*\()/}
+    ] : [];
+    language.contains = [...returnTypeModes, ...language.contains, callMode, ...typeModes];
+    return language;
+  };
+}
+
+// The upstream SQL type list is ANSI-only; chapters use PostgreSQL column types.
+function withPostgresTypes(grammar) {
+  return function (hljs) {
+    const language = grammar(hljs);
+    language.keywords.type = [
+      ...language.keywords.type,
+      'text', 'timestamptz', 'uuid', 'bytea', 'json', 'jsonb', 'serial', 'bigserial', 'inet', 'bool'
+    ];
+    return language;
+  };
+}
+
+const grammars = {
+  java: withCallSites(java, {types: true, returnTypes: true}),
+  python: withCallSites(python, {types: true}),
+  sql: withPostgresTypes(sql),
+  lua: withCallSites(lua),
+  json
+};
+for (const [name, grammar] of Object.entries(grammars)) {
   hljs.registerLanguage(name, grammar);
 }
 

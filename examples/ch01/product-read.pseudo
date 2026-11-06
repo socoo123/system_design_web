@@ -1,6 +1,6 @@
-GET product(id):                          # teaching pseudocode, not Java
+GET product(id):                           # teaching pseudocode, not Java
     require validId(id)                    # otherwise 400
-    entry = cache.getWithin(id, 5ms)        # timeout/open circuit => MISS
+    entry = cache.getWithin(id, 5ms)       # timeout/open circuit => MISS
     if usable(entry):
         return replyBefore(200, entry.row, entry.valid_until)
 
@@ -20,5 +20,5 @@ GET product(id):                          # teaching pseudocode, not Java
     if not usable(entry):
         return 503                         # late result: no fill and no 200
 
-    cache.tryFillAsync(id, entry)           # best effort; preserve deadline
+    cache.tryFillAsync(id, entry)          # best effort; preserve deadline
     return replyBefore(200, entry.row, entry.valid_until)

@@ -6,7 +6,16 @@
 
 ## 0. 当前状态与续接位置
 
-更新时间：**2026-11-03**。
+更新时间：**2026-11-07**。
+
+### 新任务：全站阅读 UI 重构（2026-11-07）
+
+- 用户明确授权重做 UI：配色自选、完善代码高亮、改善正文分块，动态图解与新 UI 一致；**内容不变**。单代理实施，未派子 agent，未独立复核，未提交推送；视觉效果待用户确认。
+- 改动：`assets/css/style.css` 重写（浅色"暖纸＋靛蓝"、深色"午夜蓝"，主题键 `parchment`/`dracula` 不变，修正原先无效的 `rgba(var(--x), a)` 写法）；`assets/js/nav.js` 增加代码行号栏（在 `<pre>` 之外，复制文本不变）、语言色点、复制图标/已复制状态、动图提示类名、顶栏阅读进度条；`tools/code-highlight.mjs` 为 Java/Python/Lua 补调用处、类型、常量着色及 PostgreSQL 类型，并用 `node tools/build-code-highlight.mjs` 重建 `assets/js/code-highlight.js`。
+- 未改：45 章 HTML、正文、代码文本、SVG 几何与语义 class、`slides.js`/`lang.js`/`progress.js`/`boot.js`、`index.html`、许可证。
+- 验证：`node tools/check.mjs`、`git diff --check` 通过；真实 Chrome 覆盖 46 页×（1440 浅色 zh、320 深色 both），206 块代码 `textContent` 与源 HTML 逐字一致、行号与行高对齐、无整页横向溢出、无外部请求与页面错误；真实剪贴板复制与拒绝回退通过；`file://` 打开正常。截图仅在 `/tmp/sd-ui` 临时查看，不入库。
+- 追加修复（用户点名）：Ch01 唯一伪代码块的行尾 `#` 注释原在第 42/44 列参差，现统一到第 43 列；只改 `examples/ch01/product-read.pseudo` 与 `chapters/ch01.html` 对应三行注释前的空格。`python3 examples/ch01/verify_traces.py` 页面/源码同源及全部用例 PASS，代码块外 HTML 与改前逐字节相同。
+- 发布：用户明确要求「提交并部署」，授权将上述 UI 重构、Ch01 对齐和本记录提交并推送至 `origin/main`（Pages 来源 `main:/`）。
 
 ### 新任务：全站编辑器风格语法配色（2026-11-03）
 
