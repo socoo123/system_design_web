@@ -15,7 +15,7 @@
 - 未改：45 章 HTML、正文、代码文本、SVG 几何与语义 class、`slides.js`/`lang.js`/`progress.js`/`boot.js`、`index.html`、许可证。
 - 验证：`node tools/check.mjs`、`git diff --check` 通过；真实 Chrome 覆盖 46 页×（1440 浅色 zh、320 深色 both），206 块代码 `textContent` 与源 HTML 逐字一致、行号与行高对齐、无整页横向溢出、无外部请求与页面错误；真实剪贴板复制与拒绝回退通过；`file://` 打开正常。截图仅在 `/tmp/sd-ui` 临时查看，不入库。
 - 追加修复（用户点名）：Ch01 唯一伪代码块的行尾 `#` 注释原在第 42/44 列参差，现统一到第 43 列；只改 `examples/ch01/product-read.pseudo` 与 `chapters/ch01.html` 对应三行注释前的空格。`python3 examples/ch01/verify_traces.py` 页面/源码同源及全部用例 PASS，代码块外 HTML 与改前逐字节相同。
-- 发布：用户明确要求「提交并部署」，授权将上述 UI 重构、Ch01 对齐和本记录提交并推送至 `origin/main`（Pages 来源 `main:/`）。
+- 发布：用户明确要求「提交并部署」，授权将上述 UI 重构、Ch01 对齐和本记录提交并推送至 `origin/main`（Pages 来源 `main:/`）。**已发布并核验**：`git fetch` 后无远端独有提交，提交 `4682a33` 推送成功，`ls-remote` 确认；Pages 运行 `42261904368`（build＋deploy）success，构建状态 built `4682a33`；线上 `style.css`、`nav.js`、`code-highlight.js`、`ch01.html` 的 SHA-256 与本地一致，真实 Chrome 打开线上 Ch01 显示新 UI、高亮与行号，无页面错误。
 
 ### 新任务：全站编辑器风格语法配色（2026-11-03）
 
