@@ -11,7 +11,7 @@
 ### 新任务：UI 二次美化与改名（2026-11-07）
 
 - 用户明确要求：站名去掉"面试"、换酷炫名字；改橙/粉系配色；加强代码高亮；优化交互与排版。单代理实施，未派子 agent。
-- 发布授权：用户随后明确要求「帮我提交到远端github上面」，授权将本次改名、配色、高亮、交互及本记录提交并推送至 `origin/main`（Pages 来源 `main:/`）。推送前 `git fetch` 无远端独有提交，`node tools/check.mjs`、`git diff --check` 通过。
+- 发布授权：用户随后明确要求「帮我提交到远端github上面」，授权将本次改名、配色、高亮、交互及本记录提交并推送至 `origin/main`（Pages 来源 `main:/`）。推送前 `git fetch` 无远端独有提交，`node tools/check.mjs`、`git diff --check` 通过。**已发布并核验**：提交 `ea8b035`（52 文件）推送成功，`ls-remote` 确认；Pages 运行 `42348270291` success，构建状态 built `ea8b035`；线上 `index.html`、`style.css`、`nav.js`、`slides.js`、`code-highlight.js`、`ch01.html`、`ch45.html` 的 SHA-256 与本地一致，首页标题为「系统设计蓝图 · System Blueprint」。
 - 改名：46 页顶栏品牌改为「系统设计**蓝图** / System **Blueprint**」（logo 改 CSS 绘制节点图标），首页 `<title>` 同步；主题按钮"护眼/Paper"改"浅色/Light"，键仍为 `parchment`/`dracula`。正文、章节 `<title>`、模块名里的"面试"字样未动；`src-tauri`（指向 legacy）未动。
 - 配色：`style.css` 重写为浅色"暖白＋珊瑚粉"、深色"紫黑＋霓虹粉"，主渐变橙→粉→紫；首页 6 个模块各一档日落色；动图节点改靛蓝描边，灰/绿/橙/红语义不变。
 - 代码：两主题下代码块均为深色编辑器窗口（窗口圆点、语言胶囊、悬停行高亮＋行号点亮）；`tools/code-highlight.mjs` 新增成员访问、赋值目标、运算符、带单位数字（伪代码）、Lua 常量、伪代码 `is`，以及跳过字符串/注释的三色彩虹括号；已重建 `assets/js/code-highlight.js`。
