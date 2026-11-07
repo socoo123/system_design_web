@@ -123,6 +123,9 @@
       loop.setAttribute("aria-pressed", loopEnabled ? "true" : "false");
       loop.hidden = Boolean(reduced && reduced.matches);
       count.textContent = (i + 1) + " / " + slides.length;
+      // CSS fills the current step dot over exactly one autoplay interval.
+      fig.classList.toggle("is-playing", running);
+      fig.style.setProperty("--step-ms", Math.round(interval / speedSteps[speedIndex]) + "ms");
       Array.prototype.forEach.call(dots.children, function (dot, n) {
         dot.classList.toggle("is-on", n === i);
         dot.setAttribute("aria-label", word.step + (n + 1));

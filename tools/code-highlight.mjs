@@ -6,9 +6,22 @@ import sql from 'highlight.js/lib/languages/sql';
 import lua from 'highlight.js/lib/languages/lua';
 import json from 'highlight.js/lib/languages/json';
 
+// Member access, assignment targets and operators carry much of the meaning in teaching code.
+// Lookbehind is avoided so older Safari can still parse the bundle.
+function lexicalModes(skipReserved, {assignments = true} = {}) {
+  const modes = [
+    {match: [/\./, /[A-Za-z_]\w*\b(?!\s*\()/], scope: {2: 'property'}},
+    {scope: 'operator', match: /=>|->|::|==|!=|<=|>=|&&|\|\||[-+*/%]=|\+\+|[=+\-*/%<>!?&|^~]/}
+  ];
+  if (assignments) {
+    modes.unshift({scope: 'variable', match: /\b[A-Za-z_]\w*(?=\s*=(?!=))/, 'on:begin': skipReserved});
+  }
+  return modes;
+}
+
 // Upstream grammars color declarations only. Teaching code reads better when call sites,
 // type names and constants are colored too; reserved words keep their original scopes.
-function withCallSites(grammar, {types = false, returnTypes = false} = {}) {
+function withCallSites(grammar, {types = false, returnTypes = false, constants = false} = {}) {
   return function (hljs) {
     const language = grammar(hljs);
     const reserved = new Set();
@@ -21,10 +34,11 @@ function withCallSites(grammar, {types = false, returnTypes = false} = {}) {
     function skipReserved(match, response) {
       if (reserved.has(match[0])) response.ignoreMatch();
     }
+    const constantMode = {scope: 'symbol', match: /\b[A-Z][A-Z0-9_]+\b/, 'on:begin': skipReserved};
     const typeModes = types ? [
-      {scope: 'symbol', match: /\b[A-Z][A-Z0-9_]+\b/, 'on:begin': skipReserved},
+      constantMode,
       {scope: 'title.class', match: /\b[A-Z]\w*\b/, 'on:begin': skipReserved}
-    ] : [];
+    ] : (constants ? [constantMode] : []);
     const callMode = {scope: 'title.function', match: /\b[A-Za-z_]\w*(?=\s*\()/, 'on:begin': skipReserved};
     const seen = new Set();
     (function addToParams(modes) {
@@ -42,7 +56,9 @@ function withCallSites(grammar, {types = false, returnTypes = false} = {}) {
     const returnTypeModes = returnTypes ? [
       {scope: 'title.class', match: /\b[A-Z]\w*(?=(?:<[^()]*>)?(?:\[\])*\s+[A-Za-z_]\w*\s*\()/}
     ] : [];
-    language.contains = [...returnTypeModes, ...language.contains, callMode, ...typeModes];
+    language.contains = [
+      ...returnTypeModes, ...language.contains, callMode, ...typeModes, ...lexicalModes(skipReserved)
+    ];
     return language;
   };
 }
@@ -55,6 +71,8 @@ function withPostgresTypes(grammar) {
       ...language.keywords.type,
       'text', 'timestamptz', 'uuid', 'bytea', 'json', 'jsonb', 'serial', 'bigserial', 'inet', 'bool'
     ];
+    // SQL `=` compares, so only member access and operators are added.
+    language.contains = [...language.contains, ...lexicalModes(null, {assignments: false})];
     return language;
   };
 }
@@ -63,7 +81,7 @@ const grammars = {
   java: withCallSites(java, {types: true, returnTypes: true}),
   python: withCallSites(python, {types: true}),
   sql: withPostgresTypes(sql),
-  lua: withCallSites(lua),
+  lua: withCallSites(lua, {constants: true}),
   json
 };
 for (const [name, grammar] of Object.entries(grammars)) {
@@ -74,7 +92,7 @@ for (const [name, grammar] of Object.entries(grammars)) {
 // This is lexical coloring, not a claim that teaching pseudocode is executable.
 hljs.registerLanguage('pseudocode', function (hljs) {
   const keyword = [
-    'if else elif then end for each in not and or while do return yield break continue',
+    'if else elif then end for each in is not and or while do return yield break continue',
     'try catch except finally raise throw await async with as def class new assert',
     'begin commit rollback transaction lock unlock require reject ensure repeat until',
     'IF ELSE THEN END FOR IN NOT AND OR RETURN BEGIN COMMIT ROLLBACK',
@@ -97,9 +115,11 @@ hljs.registerLanguage('pseudocode', function (hljs) {
       hljs.C_BLOCK_COMMENT_MODE,
       hljs.APOS_STRING_MODE,
       hljs.QUOTE_STRING_MODE,
-      hljs.C_NUMBER_MODE,
+      // Budgets such as 5ms, 30s or 64MB read as one quantity.
+      {scope: 'number', match: /\b\d+(?:[._]\d+)*(?:,\d{3}(?!\d))*(?:ms|us|µs|ns|min|s|h|d|[KMGTP]i?B|[KMB]|x)?(?!\w)/},
       {scope: 'symbol', match: /\b[A-Z][A-Z0-9_]*\b/, 'on:begin': skipReserved},
-      {scope: 'title.function', match: /\b[A-Za-z_]\w*(?=\s*\()/, 'on:begin': skipReserved}
+      {scope: 'title.function', match: /\b[A-Za-z_]\w*(?=\s*\()/, 'on:begin': skipReserved},
+      ...lexicalModes(skipReserved)
     ]
   };
 });
@@ -130,13 +150,32 @@ export function languageFor(label, classes) {
   return 'pseudocode';
 }
 
+// Rainbow bracket pairs, skipping strings and comments. Only wraps characters, so textContent is unchanged.
+const QUIET_SCOPE = /(?:^|\s)hljs-(?:string|comment|regexp|doctag)(?:\s|$)/;
+export function colorBrackets(html) {
+  const quiet = [];
+  let depth = 0;
+  return html.replace(/<span class="([^"]*)">|<\/span>|[^<]+/g, function (token, scope) {
+    if (scope !== undefined) { quiet.push(QUIET_SCOPE.test(scope) || quiet[quiet.length - 1] === true); return token; }
+    if (token === '</span>') { quiet.pop(); return token; }
+    if (quiet[quiet.length - 1]) return token;
+    return token.replace(/[()[\]{}]/g, function (bracket) {
+      const opening = '([{'.indexOf(bracket) !== -1;
+      if (!opening) depth = Math.max(0, depth - 1);
+      const out = '<span class="hljs-bracket hljs-bracket-' + (depth % 3) + '">' + bracket + '</span>';
+      if (opening) depth++;
+      return out;
+    });
+  });
+}
+
 export function highlightCodeBlocks(root) {
   root.querySelectorAll('article.chapter pre code').forEach(function (code) {
     if (code.classList.contains('hljs')) return;
     const pre = code.parentElement;
     const label = pre.getAttribute('data-language') || code.getAttribute('data-language') || '';
     const language = languageFor(label, code.className + ' ' + pre.className);
-    code.innerHTML = hljs.highlight(code.textContent, {language, ignoreIllegals: true}).value;
+    code.innerHTML = colorBrackets(hljs.highlight(code.textContent, {language, ignoreIllegals: true}).value);
     code.classList.add('hljs');
     code.dataset.highlightLanguage = language;
   });

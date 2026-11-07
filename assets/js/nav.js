@@ -3,6 +3,8 @@
   "use strict";
   var codeHighlightSrc = new URL("code-highlight.js", document.currentScript.src).href;
   var toc, tocLinks = [], headings = [], desktop;
+  var reduced = window.matchMedia("(prefers-reduced-motion: reduce)");
+  var hover = window.matchMedia("(hover: hover) and (pointer: fine)");
   function english() { return document.documentElement.getAttribute("data-locale") === "en"; }
   function bilingual(zh, en) { return '<span class="lang-zh">' + zh + '</span><span class="lang-en">' + en + '</span>'; }
   function applyTheme(theme) {
@@ -22,6 +24,8 @@
     if (toc) toc.querySelector("nav").setAttribute("aria-label", english() ? "On this page" : "本章目录");
     document.querySelectorAll(".table-scroll").forEach(function (node) { node.setAttribute("aria-label", english() ? "Table; scroll horizontally if needed" : "表格，可左右滚动"); });
     document.querySelectorAll(".code-block pre").forEach(function (node) { node.setAttribute("aria-label", english() ? "Code example; scroll horizontally if needed" : "代码示例，可左右滚动"); });
+    var top = document.querySelector(".to-top");
+    if (top) top.setAttribute("aria-label", english() ? "Back to top" : "回到顶部");
   }
   function buildToc(art) {
     headings = Array.prototype.slice.call(art.querySelectorAll("h2"));
@@ -182,12 +186,16 @@
       lines.className = "code-lines";
       lines.setAttribute("aria-hidden", "true");
       var count = pre.textContent.replace(/\n$/, "").split("\n").length;
-      var numbers = [];
-      for (var n = 1; n <= count; n++) numbers.push(n);
-      lines.textContent = numbers.join("\n");
+      for (var n = 1; n <= count; n++) {
+        if (n > 1) lines.appendChild(document.createTextNode("\n"));
+        var number = document.createElement("span");
+        number.textContent = String(n);
+        lines.appendChild(number);
+      }
       body.appendChild(lines);
       body.appendChild(pre);
       wrap.appendChild(body);
+      if (hover.matches) followLine(body, pre, lines, count);
       var hint = document.createElement("p");
       hint.className = "scroll-hint";
       hint.innerHTML = bilingual("↔ 左右滑动查看完整代码", "↔ Scroll to see the full example");
@@ -205,6 +213,126 @@
       document.head.appendChild(syntax);
     }
   }
+  // Hover band behind the hovered line; it sits under <pre>, so selection and copying are untouched.
+  function followLine(body, pre, lines, count) {
+    var band = document.createElement("div");
+    band.className = "code-hl";
+    band.setAttribute("aria-hidden", "true");
+    body.insertBefore(band, body.firstChild);
+    var active = -1;
+    function mark(index) {
+      if (index === active) return;
+      if (active >= 0 && lines.children[active]) lines.children[active].classList.remove("is-on");
+      active = index;
+      if (active >= 0 && lines.children[active]) lines.children[active].classList.add("is-on");
+      band.classList.toggle("is-on", active >= 0);
+    }
+    body.addEventListener("mousemove", function (event) {
+      var style = getComputedStyle(pre);
+      var lineHeight = parseFloat(style.lineHeight);
+      var top = pre.offsetTop + parseFloat(style.paddingTop);
+      var index = Math.floor((event.clientY - body.getBoundingClientRect().top - top) / lineHeight);
+      if (!(lineHeight > 0) || index < 0 || index >= count) { mark(-1); return; }
+      band.style.height = lineHeight + "px";
+      band.style.transform = "translateY(" + (top + index * lineHeight) + "px)";
+      mark(index);
+    });
+    body.addEventListener("mouseleave", function () { mark(-1); });
+  }
+  function headerNumber(art) {
+    var match = /^ch(\d{2})$/.exec(art.dataset.ch || "");
+    var header = art.querySelector(":scope > header");
+    if (match && header) header.setAttribute("data-no", match[1]);
+  }
+  // Prev / next links; titles are borrowed from the home page cards when it can be fetched.
+  function addPager(art) {
+    var match = /^ch(\d{2})$/.exec(art.dataset.ch || "");
+    var brand = document.querySelector(".brand");
+    if (!match || !brand) return;
+    var current = Number(match[1]);
+    var pager = document.createElement("nav");
+    pager.className = "pager";
+    pager.setAttribute("aria-label", english() ? "Chapter navigation" : "章节导航");
+    var slots = [];
+    [[current - 1, "pager-prev", "上一章", "Previous"], [current + 1, "pager-next", "下一章", "Next"]].forEach(function (item) {
+      var no = item[0];
+      var id = "ch" + (no < 10 ? "0" : "") + no;
+      var link = document.createElement("a");
+      link.className = item[1];
+      var known = no >= 1 && no <= 45;
+      link.href = known ? id + ".html" : brand.getAttribute("href");
+      var title = document.createElement("span");
+      title.className = "pager-title";
+      if (known) title.textContent = "Ch" + id.slice(2);
+      else title.innerHTML = bilingual("课程地图", "Course map");
+      link.innerHTML = '<span class="pager-dir">' + (known ? bilingual(item[2], item[3]) : bilingual("返回", "Back")) + "</span>";
+      link.appendChild(title);
+      pager.appendChild(link);
+      if (known) slots.push({ id: id, title: title });
+    });
+    art.appendChild(pager);
+    if (!window.fetch || !window.DOMParser) return;
+    fetch(brand.href).then(function (response) {
+      if (!response.ok) throw new Error("index unavailable");
+      return response.text();
+    }).then(function (html) {
+      var home = new DOMParser().parseFromString(html, "text/html");
+      slots.forEach(function (slot) {
+        var source = home.querySelector('.card[data-ch="' + slot.id + '"] .ch-title');
+        if (!source) return;
+        slot.title.textContent = "Ch" + slot.id.slice(2) + " · ";
+        Array.prototype.forEach.call(source.childNodes, function (node) { slot.title.appendChild(document.importNode(node, true)); });
+      });
+    }).catch(function () { /* file:// pages keep the chapter numbers. */ });
+  }
+  function revealBlocks(nodes) {
+    if (reduced.matches || !("IntersectionObserver" in window)) return;
+    var observer = new IntersectionObserver(function (entries) {
+      entries.forEach(function (entry) {
+        if (!entry.isIntersecting) return;
+        entry.target.classList.add("is-in");
+        observer.unobserve(entry.target);
+      });
+    }, { rootMargin: "0px 0px -6% 0px" });
+    Array.prototype.forEach.call(nodes, function (node) {
+      if (node.getBoundingClientRect().top < window.innerHeight) return;
+      node.classList.add("reveal");
+      observer.observe(node);
+    });
+  }
+  // Cards and flashcards light up under the pointer.
+  function spotlight() {
+    if (!hover.matches) return;
+    document.addEventListener("pointermove", function (event) {
+      var card = event.target.closest && event.target.closest(".card, .flip");
+      if (!card) return;
+      var rect = card.getBoundingClientRect();
+      card.style.setProperty("--mx", (event.clientX - rect.left) + "px");
+      card.style.setProperty("--my", (event.clientY - rect.top) + "px");
+    }, { passive: true });
+  }
+  function burst(target) {
+    if (reduced.matches) return;
+    var rect = target.getBoundingClientRect();
+    var box = document.createElement("div");
+    box.className = "burst";
+    box.style.left = (rect.left + rect.width / 2) + "px";
+    box.style.top = (rect.top + rect.height / 2) + "px";
+    var colors = ["#ff9a52", "#ff5f9e", "#b38cff", "#ffd36e", "#4fdcc4"];
+    for (var k = 0; k < 18; k++) {
+      var bit = document.createElement("i");
+      var angle = (k / 18) * Math.PI * 2 + Math.random() * .4;
+      var distance = 60 + Math.random() * 70;
+      bit.style.setProperty("--dx", Math.round(Math.cos(angle) * distance) + "px");
+      bit.style.setProperty("--dy", Math.round(Math.sin(angle) * distance - 20) + "px");
+      bit.style.setProperty("--rot", Math.round(Math.random() * 540 - 270) + "deg");
+      bit.style.background = colors[k % colors.length];
+      if (k % 3 === 0) bit.style.borderRadius = "50%";
+      box.appendChild(bit);
+    }
+    document.body.appendChild(box);
+    window.setTimeout(function () { box.remove(); }, 1000);
+  }
   function trackReading(bar) {
     var track = document.createElement("div");
     track.className = "read-progress";
@@ -212,13 +340,22 @@
     var fill = document.createElement("span");
     track.appendChild(fill);
     // Prepend: the mobile top bar places its two toggles with :last-child selectors.
-    bar.insertBefore(track, bar.firstChild);
+    if (bar) bar.insertBefore(track, bar.firstChild);
+    var top = document.createElement("button");
+    top.type = "button";
+    top.className = "to-top";
+    top.innerHTML = '<svg viewBox="0 0 42 42" aria-hidden="true"><defs><linearGradient id="sd-ring" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ff9a52"/><stop offset=".5" stop-color="#ff5f9e"/><stop offset="1" stop-color="#b38cff"/></linearGradient></defs><circle class="ring-bg" cx="21" cy="21" r="19"/><circle class="ring" cx="21" cy="21" r="19" pathLength="100" stroke-dasharray="100" stroke-dashoffset="100"/></svg>';
+    top.addEventListener("click", function () { window.scrollTo({ top: 0, behavior: reduced.matches ? "auto" : "smooth" }); });
+    document.body.appendChild(top);
+    var ring = top.querySelector(".ring");
     var scheduled = false;
     function paint() {
       scheduled = false;
       var room = document.documentElement.scrollHeight - window.innerHeight;
       var ratio = room > 0 ? Math.min(1, Math.max(0, window.scrollY / room)) : 0;
       fill.style.transform = "scaleX(" + ratio.toFixed(4) + ")";
+      ring.setAttribute("stroke-dashoffset", (100 - ratio * 100).toFixed(2));
+      top.classList.toggle("is-on", window.scrollY > 640);
     }
     function schedule() {
       if (!scheduled) { scheduled = true; window.requestAnimationFrame(paint); }
@@ -239,6 +376,7 @@
     else window.addEventListener("resize", sizeBar);
     var art = document.querySelector("article.chapter");
     if (art) {
+      headerNumber(art);
       buildToc(art);
       makeScrollableTables(art);
       makeCodeBlocks(art);
@@ -248,13 +386,25 @@
         label.innerHTML = '<span class="deck-label">' + bilingual("动态图解", "STEP-BY-STEP DIAGRAM") + '</span><span class="deck-hint">' + bilingual("← → 切换步骤 · 图内可横向滚动", "← → Step through · scroll inside the diagram") + '</span>';
         deck.insertBefore(label, deck.firstChild);
       });
-      if (bar) trackReading(bar);
+      addPager(art);
+      revealBlocks(art.querySelectorAll(":scope > section, :scope > .pager"));
+    } else {
+      revealBlocks(document.querySelectorAll(".home .module"));
     }
+    trackReading(bar);
+    spotlight();
     document.querySelectorAll(".flip").forEach(function (card) {
       card.setAttribute("aria-expanded", "false");
       card.addEventListener("click", function () {
+        card.classList.add("was-turned");
         card.classList.toggle("is-flipped");
         card.setAttribute("aria-expanded", card.classList.contains("is-flipped") ? "true" : "false");
+      });
+    });
+    // progress.js owns the completion state; celebrate after it has repainted the button.
+    document.querySelectorAll(".read-toggle").forEach(function (button) {
+      button.addEventListener("click", function () {
+        window.requestAnimationFrame(function () { if (button.classList.contains("is-on")) burst(button); });
       });
     });
     updateLabels();
