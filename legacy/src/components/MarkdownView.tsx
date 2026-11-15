@@ -50,7 +50,14 @@ function MarkdownInner({ source }: { source: string }) {
     <ReactMarkdown
       remarkPlugins={[remarkGfm]}
       rehypePlugins={[[rehypeHighlight, { detect: true, ignoreMissing: true }]]}
-      components={{ pre: Pre }}
+      components={{
+        pre: Pre,
+        table: ({ node: _node, ...props }) => (
+          <div className="overflow-x-auto">
+            <table {...props} />
+          </div>
+        ),
+      }}
     >
       {source}
     </ReactMarkdown>

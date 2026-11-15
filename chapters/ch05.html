@@ -699,7 +699,7 @@ serve(range, request):
 <details><summary><span class="lang-zh">连续逻辑桶、网络负载均衡和固定槽位，各有什么约束</span><span class="lang-en">By constraint: Jump for sequential buckets, Maglev for network LB, slots for fixed granularity</span></summary>    <div class="bilingual">
       <div class="lang-zh"><p>本章选择环加虚拟节点，是因为节点有稳定名称、可以任意增减，同时需要明确区间和容量权重。Jump Hash 的输入是键和桶数，输出为 0…N−1；论文给出了很小的额外内存开销和期望 O(log N) 时间，前提是逻辑桶编号连续。[5] 因此，它适合在末尾追加桶；要任意删除中间的逻辑桶，则需要额外的映射层。物理机器故障后，仍可以由副本接管原逻辑桶，所以连续编号的约束并不意味着物理节点不能故障。</p>
         <p>Maglev 面向软件网络负载均衡，使用预先计算的表快速选择后端。2016 年论文 §5.3 给出的默认表大小为 65,537。[8] 查表很快，成员变化时仍要构建、分发表，并处理连接跟踪；其归属变化性质也需要单独分析，不能直接套用本章保留固定节点位置的环的区间证明。网络负载均衡的细节见 Ch39。这里先区分两类需求：一类要为每个网络包快速选择后端，另一类要规划数据区间怎样迁移。</p>
-        <p>固定槽位表把“键→槽位”和“槽位→机器”分开。迁移一批槽位时，键所属的槽位无须重算，但槽位数量限制了分配粒度，槽位也可能过热，表本身仍需版本和迁移协议。无论选择哪种放置函数，可用性、读写一致性和热点保护都要另行设计。面试时先给出满足当前约束的方案，再说明什么条件下会换用其他方案，才能让选择有据可查。</p></div>
+        <p>固定槽位表把“键→槽位”和“槽位→机器”分开。迁移一批槽位时，键所属的槽位无须重算，但槽位数量限制了分配粒度，槽位也可能过热，表本身仍需版本和迁移协议。无论选择哪种放置函数，可用性、读写一致性和热点保护都要另行设计。讨论设计时先给出满足当前约束的方案，再说明什么条件下会换用其他方案，才能让选择有据可查。</p></div>
       <div class="lang-en"><p>This chapter chooses ring+vnodes for named, arbitrarily removable machines, explicit ranges and weighting. Jump Hash maps key and bucket count to 0…N−1 with minimal extra memory and expected O(log N) time, but requires sequential bucket IDs. [5] Appending buckets fits; removing an arbitrary logical middle bucket needs indirection. Physical failure can still be handled by replicas taking over the same logical bucket.</p>
         <p>Maglev targets software network load balancing with a precomputed backend lookup table; its 2016 paper §5.3 uses 65,537 as the default table size. [8] Fast lookup still requires rebuilding, distribution and connection tracking. Its disruption properties should not be replaced with this ring’s exact interval argument. Ch39 covers packet-level balancing; here distinguish it from data-range migration.</p>
         <p>Fixed slots separate key→slot from slot→machine. Moving slots preserves key-to-slot hashing, but granularity, hotspots, versions and migration remain. No placement function alone supplies availability, read/write consistency or hotspot protection. Select one design for the current constraints and state the conditions for alternatives.</p></div>
@@ -716,7 +716,7 @@ serve(range, request):
   </section>
 
   <section>
-    <h2><span class="lang-zh">面试追问：怎样验证归属变化确实有限</span><span class="lang-en">Follow-ups: verify that changes are local</span></h2>
+    <h2><span class="lang-zh">延伸讨论：怎样验证归属变化确实有限</span><span class="lang-en">Further discussion: verify that changes are local</span></h2>
     <div class="bilingual">
       <div class="lang-zh"><p>“怎样测试成员变化的影响？”先检查边界和环回：在 A2 的旧环中，哈希值 10、11、25、40、41、75、76、99 应依次归 S0、S1、S1、S1、S2、S2、S0、S0。再加入 S3@25，枚举全部 100 个位置，确认只有 11–25 改变归属。这能检验单调性；仅看各机器的键数是否接近，只能检查分布，发现不了多余的迁移。</p>
         <p>“机器重启会怎样？”稳定身份和节点位置清单不变时，更新网络地址不应改变归属。如果以新身份加入，就要按一次删除和新增评估迁移量。“客户端版本不同呢？”跨语言测试应确认：相同的键字节和同一份清单，得到相同的哈希值、节点位置和负责机器。交接后，服务端必须拒绝或重定向旧版本请求，仅比较配置文件大小无法证明这些行为正确。</p>
