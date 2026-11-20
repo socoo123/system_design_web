@@ -300,11 +300,11 @@
       observer.observe(node);
     });
   }
-  // Cards and flashcards light up under the pointer.
+  // Flashcards light up under the pointer.
   function spotlight() {
     if (!hover.matches) return;
     document.addEventListener("pointermove", function (event) {
-      var card = event.target.closest && event.target.closest(".card, .flip");
+      var card = event.target.closest && event.target.closest(".flip");
       if (!card) return;
       var rect = card.getBoundingClientRect();
       card.style.setProperty("--mx", (event.clientX - rect.left) + "px");
@@ -388,11 +388,9 @@
       });
       addPager(art);
       revealBlocks(art.querySelectorAll(":scope > section, :scope > .pager"));
-    } else {
-      revealBlocks(document.querySelectorAll(".home .module"));
+      spotlight();
     }
     trackReading(bar);
-    spotlight();
     document.querySelectorAll(".flip").forEach(function (card) {
       card.setAttribute("aria-expanded", "false");
       card.addEventListener("click", function () {
